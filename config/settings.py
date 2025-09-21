@@ -1,0 +1,26 @@
+import os
+from typing import Dict, Any
+from dotenv import load_dotenv
+
+load_dotenv()
+class Settings:
+    def __init__(self):
+        self.project_id = os.getenv("PROJECT_ID")
+        self.location = os.getenv("LOCATION")
+        self.processor_id = os.getenv("PROCESSOR_ID")
+        self.credentials_path = os.getenv("CREDENTIALS_PATH")
+        self.max_file_size = int(os.getenv("MAX_FILE_SIZE"))  # 40MB
+        self.upload_dir = os.getenv("UPLOAD_DIR")
+        self.host = os.getenv("HOST", "0.0.0.0")
+        self.port = int(os.getenv("PORT", "8000"))
+        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        
+        # Validate credentials file
+        if not os.path.exists(self.credentials_path):
+            raise FileNotFoundError(f"Credentials file not found: {self.credentials_path}")
+
+# Create singleton config
+CONFIG: Dict[str, Any] = Settings().__dict__
+
+# Ensure upload directory exists
+os.makedirs(CONFIG["upload_dir"], exist_ok=True)

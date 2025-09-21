@@ -1,0 +1,221 @@
+generator client {
+  provider = "prisma-client-py"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String      @id @default(uuid())
+  firstName     String?
+  lastName      String?
+  phoneNumber   String?
+  email         String?     @unique
+  password      String?
+  role          String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  emailVerified DateTime?
+  image         String?
+  position      String[] 
+
+  department    String[]    // 👈 now it's an array of strings
+  hrId          String?
+  salary        String?
+  accounts      Account[]
+  sessions      Session[]
+  employee      Employee?   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  employeeId    String?     @unique
+
+  // Jobs posted by this user (Recruiter)
+  jobs          Job[]       @relation("RecruiterJobs")
+
+  // Applications submitted by this user (Candidate)
+  applications  Application[] 
+}
+model Department {
+  id      String   @id @default(uuid())
+  name    String
+
+  hrId     String
+userId      String
+  ingoing   Json[]
+  outgoing  Json[]
+  promotion String?
+  transfer  String?
+  createdAt                         DateTime @default(now())
+  updatedAt                         DateTime @updatedAt
+}
+model Account {
+  id                 String   @id @default(uuid())
+  userId             String
+  user               User     @relation(fields: [userId], references: [id])
+  type               String
+  provider           String
+  providerAccountId  String
+  refresh_token      String?
+  access_token       String?
+  expires_at         Int?
+  refresh_expires_at Int?
+  token_type         String?
+  scope              String?
+  id_token           String?
+  session_state      String?
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+  @@unique([identifier, token])
+}
+
+model Company {
+  id           String   @id @default(uuid())
+  companyDetail Json
+  hrId          String[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Employee {
+  id            String         @id @default(uuid())
+  employeeId    String         @unique
+  firstName     String
+  lastName      String
+
+
+  address       String?
+  dateOfBirth   DateTime?
+  hireDate      DateTime?
+
+ manager        String?
+
+ 
+  bio           String?
+  avatar        String?
+  skills        Json?
+  education     Json?
+  experience    Json?
+  resume        String?
+  user          User?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+}
+
+model IndividualEmployeeReport {
+  id                                Int      @id @default(autoincrement())
+  createdAt                         DateTime @default(now())
+  updatedAt                         DateTime @updatedAt
+  userId                            String
+  executiveSummary                  String
+  hrId                              String?
+  departement                       String?
+  geniusFactorScore                 Int
+  geniusFactorProfileJson            Json
+  currentRoleAlignmentAnalysisJson   Json
+  internalCareerOpportunitiesJson    Json
+  retentionAndMobilityStrategiesJson Json
+  developmentActionPlanJson          Json
+  personalizedResourcesJson          Json
+  dataSourcesAndMethodologyJson      Json
+  risk_analysis                      Json
+}
+
+model Job {
+  id             String      @id @default(uuid())
+  title          String
+  description    String
+  location       String?
+  salary         Int?
+  type           JobType     @default(FULL_TIME)
+  status         JobStatus   @default(OPEN)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  // Relation to Recruiter (User)
+  recruiter      User        @relation("RecruiterJobs", fields: [recruiterId], references: [id])
+  recruiterId    String
+
+  // Applications for this job
+  applications   Application[]
+}
+
+model Application {
+  id          String   @id @default(uuid())
+  coverLetter String?
+  resumeUrl   String?
+  createdAt   DateTime @default(now())
+
+  // Relation to Job
+  job       Job    @relation(fields: [jobId], references: [id])
+  jobId     String
+
+  // Relation to Candidate (User)
+  candidate User   @relation(fields: [candidateId], references: [id])
+  candidateId String
+}
+
+model AiCareerRecommendation {
+  id             String      @id @default(uuid())
+  employeeId   String
+  careerRecommendation  String
+}
+
+
+enum JobType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  INTERNSHIP
+  FREELANCE
+}
+
+enum JobStatus {
+  OPEN
+  CLOSED
+  DRAFT
+}
+
+enum UserRole {
+  CANDIDATE
+  RECRUITER
+  ADMIN
+}
+
+
+model Notification{
+    id             String      @id @default(uuid())
+    message        String
+    hrId           String
+    employeeName   String
+    employeeEmail  String
+    employeeId     String
+    status         String
+   createdAt                         DateTime @default(now())
+  updatedAt                         DateTime @updatedAt
+}
+
+
+model ChatConversation {
+  id           String   @id @default(cuid())
+  hr_id        String
+  department   String
+  messages     Json     // Store entire conversation as JSON array
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([hr_id, department])
+  @@map("chat_conversations")
+}
