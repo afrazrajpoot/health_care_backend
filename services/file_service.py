@@ -7,6 +7,7 @@ from fastapi import UploadFile
 import logging
 
 from config.settings import CONFIG
+from services.document_converter import DocumentConverter
 
 logger = logging.getLogger("document_ai")
 
@@ -18,6 +19,13 @@ class FileService:
         """Validate uploaded file"""
         if not file:
             raise ValueError("No file uploaded")
+        
+        # Check file extension
+        if file.filename:
+            file_ext = Path(file.filename).suffix.lower()
+            if not DocumentConverter.is_supported_format(file.filename):
+                supported_formats = DocumentConverter.get_supported_formats()
+                raise ValueError(f"Unsupported file format: {file_ext}. Supported formats: {', '.join(sorted(supported_formats))}")
         
         # Read file content
         content = file.file.read()

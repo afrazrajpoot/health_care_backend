@@ -1,18 +1,18 @@
 from fastapi import APIRouter, File, UploadFile, HTTPException, Depends
-from typing import Dict, Any
+from typing import Dict, Any, List
 from datetime import datetime
+from pathlib import Path
 
 from models.schemas import ExtractionResult
 from services.document_ai_service import get_document_ai_processor
 from services.file_service import FileService
+from services.document_converter import DocumentConverter
 from config.settings import CONFIG
 from utils.logger import logger
 
-# New imports for LangChain and OpenAI
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
+# New imports for comprehensive analysis
+from services.report_analyzer import ReportAnalyzer
+from services.database_service import get_database_service
 
 router = APIRouter()
 
@@ -42,33 +42,106 @@ async def extract_document(
         
         # Save to temporary file
         temp_path = file_service.save_temp_file(content, document.filename)
+        converted_path = None
+        was_converted = False
         
         try:
+            # Check if file needs conversion
+            if DocumentConverter.needs_conversion(temp_path):
+                logger.info(f"🔄 File requires conversion: {Path(temp_path).suffix}")
+                converted_path, was_converted = DocumentConverter.convert_document(temp_path, target_format="pdf")
+                processing_path = converted_path
+                logger.info(f"✅ File converted successfully: {processing_path}")
+            else:
+                processing_path = temp_path
+                logger.info(f"✅ File format supported directly: {Path(temp_path).suffix}")
+            
             # Process document with Document AI
-            result = processor.process_document(temp_path)
+            result = processor.process_document(processing_path)
             
             # Add file info
             result.fileInfo = file_service.get_file_info(document, content)
             
-            # New: Summarize the extracted text using LangChain and GPT-4o
+            # Comprehensive analysis with GPT-4o and document type detection
             if result.text:
-                logger.info("📝 Starting summarization with GPT-4o...")
-                summary = summarize_text(result.text)
-                result.summary = summary  # Assuming ExtractionResult has a 'summary' field added (see note below)
-                logger.info(f"✅ Summary generated (length: {len(summary)} characters)")
+                logger.info("🤖 Starting comprehensive document analysis...")
+                try:
+                    analyzer = ReportAnalyzer()
+                    
+                    # Quick document type detection for early logging
+                    detected_type = analyzer.detect_document_type_preview(result.text)
+                    logger.info(f"🔍 Detected document type: {detected_type}")
+                    
+                    comprehensive_analysis = analyzer.analyze_document(result.text)
+                    result.comprehensive_analysis = comprehensive_analysis
+                    
+                    # Enhanced summary with document type context
+                    if comprehensive_analysis and comprehensive_analysis.summary:
+                        # Create detailed summary including document type
+                        summary_parts = comprehensive_analysis.summary
+                        result.summary = " | ".join(summary_parts)
+                        
+                        logger.info(f"📋 Document Analysis Summary:")
+                        logger.info(f"   📄 Type: {detected_type}")
+                        logger.info(f"   👤 Patient: {comprehensive_analysis.report_json.patient_name or 'Unknown'}")
+                        logger.info(f"   📑 Title: {comprehensive_analysis.report_json.report_title or 'Untitled'}")
+                        logger.info(f"   📝 Summary: {len(summary_parts)} key points extracted")
+                        
+                        if comprehensive_analysis.work_status_alert:
+                            logger.info(f"   🚨 Alerts: {len(comprehensive_analysis.work_status_alert)} generated")
+                    else:
+                        result.summary = f"Document Type: {detected_type} - Analysis completed successfully"
+                    
+                    logger.info("✅ Comprehensive analysis completed")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Comprehensive analysis failed: {str(e)}")
+                    # Fallback to basic summary with document type
+                    analyzer = ReportAnalyzer()
+                    try:
+                        detected_type = analyzer.detect_document_type_preview(result.text)
+                        result.summary = f"Document Type: {detected_type} - Processing completed with limited analysis due to: {str(e)}"
+                        logger.info(f"🔄 Fallback: Document type detected as {detected_type}")
+                    except:
+                        result.summary = f"Document processed successfully but analysis encountered errors: {str(e)}"
+                    result.comprehensive_analysis = None
             else:
-                result.summary = ""
-                logger.info("⚠️ No text extracted, skipping summarization")
+                logger.warning("⚠️ No text extracted from document")
+                result.summary = "Document processed but no readable text content was extracted"
+                result.comprehensive_analysis = None
             
             processing_time = (datetime.now() - start_time).total_seconds() * 1000
             logger.info(f"⏱️ Total processing time: {processing_time:.0f}ms")
+            
+            # Save to database
+            try:
+                db_service = await get_database_service()
+                document_id = await db_service.save_document_analysis(
+                    extraction_result=result,
+                    file_name=document.filename or "unknown",
+                    file_size=len(content),
+                    mime_type=document.content_type or "application/octet-stream",
+                    processing_time_ms=int(processing_time)
+                )
+                
+                # Add document ID to response
+                result.document_id = document_id
+                logger.info(f"💾 Document saved to database with ID: {document_id}")
+                
+            except Exception as db_error:
+                logger.error(f"⚠️ Failed to save to database: {str(db_error)}")
+                # Continue processing - don't fail the request due to DB issues
+                result.database_error = str(db_error)
+            
             logger.info("✅ === PROCESSING COMPLETED ===\n")
             
             return result
             
         finally:
-            # Clean up temporary file
+            # Clean up temporary files
             file_service.cleanup_temp_file(temp_path)
+            if was_converted and converted_path:
+                DocumentConverter.cleanup_converted_file(converted_path, was_converted)
     
     except ValueError as ve:
         logger.error(f"❌ Validation error: {str(ve)}")
@@ -78,34 +151,3 @@ async def extract_document(
     except Exception as e:
         logger.error(f"❌ Error in document extraction: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
-
-# New function for summarization using LangChain and GPT-4o
-def summarize_text(text: str) -> str:
-    """
-    Use LangChain with GPT-4o to generate an understandable summary of the extracted text.
-    """
-    # Initialize the LLM (GPT-4o)
-    llm = ChatOpenAI(
-        model="gpt-4o",
-        api_key=CONFIG["openai_api_key"],  # Assume this is added to your CONFIG or set as env var: os.getenv("OPENAI_API_KEY")
-        temperature=0.2  # Lower temperature for more factual summaries
-    )
-    
-    # Define a prompt template for summarization
-    prompt = PromptTemplate.from_template(
-        "Summarize the following extracted document text in a clear, concise, and understandable way. "
-        "Focus on the main points, key information, and overall meaning:\n\n{extracted_text}"
-    )
-    
-    # Create a simple chain: prompt | LLM | output parser
-    chain = (
-        {"extracted_text": RunnablePassthrough()}  # Pass the text through
-        | prompt
-        | llm
-        | StrOutputParser()  # Parse the output as a string
-    )
-    
-    # Invoke the chain with the extracted text
-    summary = chain.invoke(text)
-    
-    return summary

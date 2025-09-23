@@ -1,6 +1,7 @@
-generator client {
-  provider = "prisma-client-py"
-}
+// generator db {
+//   provider = "prisma-client-py"
+//   interface = "asyncio"
+// }
 
 datasource db {
   provider = "postgresql"
@@ -19,35 +20,14 @@ model User {
   updatedAt     DateTime    @updatedAt
   emailVerified DateTime?
   image         String?
-  position      String[] 
 
-  department    String[]    // 👈 now it's an array of strings
-  hrId          String?
-  salary        String?
+ 
   accounts      Account[]
   sessions      Session[]
-  employee      Employee?   @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  employeeId    String?     @unique
 
-  // Jobs posted by this user (Recruiter)
-  jobs          Job[]       @relation("RecruiterJobs")
 
-  // Applications submitted by this user (Candidate)
-  applications  Application[] 
-}
-model Department {
-  id      String   @id @default(uuid())
-  name    String
+}          
 
-  hrId     String
-userId      String
-  ingoing   Json[]
-  outgoing  Json[]
-  promotion String?
-  transfer  String?
-  createdAt                         DateTime @default(now())
-  updatedAt                         DateTime @updatedAt
-}
 model Account {
   id                 String   @id @default(uuid())
   userId             String
@@ -81,141 +61,76 @@ model VerificationToken {
   @@unique([identifier, token])
 }
 
-model Company {
-  id           String   @id @default(uuid())
-  companyDetail Json
-  hrId          String[]
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+
+
+// Document Analysis Models
+model Document {
+  id                  String    @id @default(uuid())
+  
+  // File Information
+  originalName        String
+  fileSize            Int
+  mimeType            String
+  
+  // Extracted Content
+  extractedText       String    @db.Text  // Full document text
+  pages               Int       @default(0)
+  confidence          Float     @default(0.0)
+  
+  // Document AI Results
+  entities            Json[]    // Extracted entities
+  tables              Json[]    // Extracted tables
+  formFields          Json[]    // Extracted form fields
+  
+  // Patient Information
+  patientName         String?
+  patientEmail        String?
+  claimNumber         String?
+  reportTitle         String?
+  reportDate          DateTime?
+  status              String    @default("normal") // urgent, normal, low
+  
+  // Analysis Results
+  summary             String[]  // AI-generated summary points
+  originalReport      String    @db.Text  // Complete original report text
+  
+  // Processing Metadata
+  processingTimeMs    Int       @default(0)
+  analysisSuccess     Boolean   @default(true)
+  errorMessage        String?
+  
+  // Timestamps
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  
+  // Relations
+  alerts              Alert[]
+  
+  @@map("documents")
 }
 
-model Employee {
-  id            String         @id @default(uuid())
-  employeeId    String         @unique
-  firstName     String
-  lastName      String
-
-
-  address       String?
-  dateOfBirth   DateTime?
-  hireDate      DateTime?
-
- manager        String?
-
- 
-  bio           String?
-  avatar        String?
-  skills        Json?
-  education     Json?
-  experience    Json?
-  resume        String?
-  user          User?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-}
-
-model IndividualEmployeeReport {
-  id                                Int      @id @default(autoincrement())
-  createdAt                         DateTime @default(now())
-  updatedAt                         DateTime @updatedAt
-  userId                            String
-  executiveSummary                  String
-  hrId                              String?
-  departement                       String?
-  geniusFactorScore                 Int
-  geniusFactorProfileJson            Json
-  currentRoleAlignmentAnalysisJson   Json
-  internalCareerOpportunitiesJson    Json
-  retentionAndMobilityStrategiesJson Json
-  developmentActionPlanJson          Json
-  personalizedResourcesJson          Json
-  dataSourcesAndMethodologyJson      Json
-  risk_analysis                      Json
-}
-
-model Job {
-  id             String      @id @default(uuid())
-  title          String
-  description    String
-  location       String?
-  salary         Int?
-  type           JobType     @default(FULL_TIME)
-  status         JobStatus   @default(OPEN)
-  createdAt      DateTime    @default(now())
-  updatedAt      DateTime    @updatedAt
-
-  // Relation to Recruiter (User)
-  recruiter      User        @relation("RecruiterJobs", fields: [recruiterId], references: [id])
-  recruiterId    String
-
-  // Applications for this job
-  applications   Application[]
-}
-
-model Application {
-  id          String   @id @default(uuid())
-  coverLetter String?
-  resumeUrl   String?
-  createdAt   DateTime @default(now())
-
-  // Relation to Job
-  job       Job    @relation(fields: [jobId], references: [id])
-  jobId     String
-
-  // Relation to Candidate (User)
-  candidate User   @relation(fields: [candidateId], references: [id])
-  candidateId String
-}
-
-model AiCareerRecommendation {
-  id             String      @id @default(uuid())
-  employeeId   String
-  careerRecommendation  String
-}
-
-
-enum JobType {
-  FULL_TIME
-  PART_TIME
-  CONTRACT
-  INTERNSHIP
-  FREELANCE
-}
-
-enum JobStatus {
-  OPEN
-  CLOSED
-  DRAFT
-}
-
-enum UserRole {
-  CANDIDATE
-  RECRUITER
-  ADMIN
-}
-
-
-model Notification{
-    id             String      @id @default(uuid())
-    message        String
-    hrId           String
-    employeeName   String
-    employeeEmail  String
-    employeeId     String
-    status         String
-   createdAt                         DateTime @default(now())
-  updatedAt                         DateTime @updatedAt
-}
-
-
-model ChatConversation {
-  id           String   @id @default(cuid())
-  hr_id        String
-  department   String
-  messages     Json     // Store entire conversation as JSON array
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  @@unique([hr_id, department])
-  @@map("chat_conversations")
+model Alert {
+  id          String    @id @default(uuid())
+  
+  // Alert Information
+  alertType   String    // "Work Status Review", "Medical Urgency", "Follow-Up Required"
+  title       String
+  date        String
+  status      String    // "urgent", "low priority", "normal"
+  description String?   // Optional additional context
+  
+  // Relations
+  documentId  String
+  document    Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  
+  // Metadata
+  isResolved  Boolean   @default(false)
+  resolvedAt  DateTime?
+  resolvedBy  String?   // User ID who resolved the alert
+  
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  @@map("alerts")
 }

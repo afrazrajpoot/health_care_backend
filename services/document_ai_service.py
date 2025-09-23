@@ -68,13 +68,18 @@ class DocumentAIProcessor:
             ".tif": "image/tiff",
             ".bmp": "image/bmp",
             ".webp": "image/webp",
-            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            # Note: DOCX files should be converted to PDF before reaching this point
         }
         
         file_ext = Path(file_path).suffix.lower()
-        return mime_mapping.get(file_ext, "application/octet-stream")
+        mime_type = mime_mapping.get(file_ext, "application/octet-stream")
+        
+        # Log warning if DOCX reaches this point (should have been converted)
+        if file_ext in ['.docx', '.pptx', '.xlsx']:
+            logger.warning(f"⚠️ Office document format reached Document AI service: {file_ext}")
+            logger.warning("This file should have been converted to PDF first!")
+        
+        return mime_type
     
     def extract_text_from_layout(self, text_anchor, full_text: str) -> str:
         """Extract text from layout text anchor"""
