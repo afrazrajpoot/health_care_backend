@@ -1,3 +1,5 @@
+
+
 from fastapi import APIRouter, File, UploadFile, HTTPException, Depends
 from typing import Dict, Any, List
 from datetime import datetime
@@ -15,7 +17,6 @@ from services.report_analyzer import ReportAnalyzer
 from services.database_service import get_database_service
 
 router = APIRouter()
-
 @router.post("/extract-document", response_model=ExtractionResult)
 async def extract_document(
     document: UploadFile = File(...),
@@ -28,6 +29,8 @@ async def extract_document(
     """
     start_time = datetime.now()
     file_service = FileService()
+    gcs_url = None
+    blob_path = None
     
     try:
         logger.info("\n🔄 === NEW DOCUMENT PROCESSING REQUEST ===")
@@ -40,7 +43,12 @@ async def extract_document(
         logger.info(f"📏 File size: {len(content)} bytes ({len(content)/(1024*1024):.2f} MB)")
         logger.info(f"📋 MIME type: {document.content_type}")
         
-        # Save to temporary file
+        # Save to Google Cloud Storage first
+        logger.info("☁️ Uploading file to Google Cloud Storage...")
+        gcs_url, blob_path = file_service.save_to_gcs(content, document.filename)
+        logger.info(f"✅ File uploaded to GCS: {gcs_url}")
+        
+        # Save to temporary local file for processing
         temp_path = file_service.save_temp_file(content, document.filename)
         converted_path = None
         was_converted = False
@@ -59,10 +67,11 @@ async def extract_document(
             # Process document with Document AI
             result = processor.process_document(processing_path)
             
-            # Add file info
-            result.fileInfo = file_service.get_file_info(document, content)
+            # Add file info with GCS URL
+            result.fileInfo = file_service.get_file_info(document, content, gcs_url)
             
             # Comprehensive analysis with GPT-4o and document type detection
+            last_changes = None
             if result.text:
                 logger.info("🤖 Starting comprehensive document analysis...")
                 try:
@@ -74,6 +83,21 @@ async def extract_document(
                     
                     comprehensive_analysis = analyzer.analyze_document(result.text)
                     result.comprehensive_analysis = comprehensive_analysis
+                    
+                    # Fetch previous summary if patient exists
+                    patient_name = comprehensive_analysis.report_json.patient_name
+                    if patient_name:
+                        db_service = await get_database_service()
+                        previous_document = await db_service.get_last_document_for_patient(patient_name)
+                        if previous_document:
+                            previous_summary = previous_document.get('summary', [])
+                            last_changes = analyzer.compare_summaries(previous_summary, comprehensive_analysis.summary)
+                            logger.info(f"🔄 Generated last changes based on previous summary")
+                        else:
+                            last_changes = "this patient is new"
+                            logger.info(f"✅ This is a new patient: {patient_name}")
+                    else:
+                        logger.warning("⚠️ No patient name extracted for last changes comparison")
                     
                     # Enhanced summary with document type context
                     if comprehensive_analysis and comprehensive_analysis.summary:
@@ -121,7 +145,9 @@ async def extract_document(
                     file_name=document.filename or "unknown",
                     file_size=len(content),
                     mime_type=document.content_type or "application/octet-stream",
-                    processing_time_ms=int(processing_time)
+                    processing_time_ms=int(processing_time),
+                    gcs_file_link=gcs_url,
+                    last_changes=last_changes
                 )
                 
                 # Add document ID to response
@@ -145,9 +171,17 @@ async def extract_document(
     
     except ValueError as ve:
         logger.error(f"❌ Validation error: {str(ve)}")
+        # Clean up GCS file if upload was successful but processing failed
+        if blob_path:
+            file_service.delete_from_gcs(blob_path)
         raise HTTPException(status_code=400, detail=str(ve))
     except HTTPException:
+        if blob_path:
+            file_service.delete_from_gcs(blob_path)
         raise
     except Exception as e:
         logger.error(f"❌ Error in document extraction: {str(e)}")
+        # Clean up GCS file if upload was successful but processing failed
+        if blob_path:
+            file_service.delete_from_gcs(blob_path)
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")

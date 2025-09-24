@@ -33,7 +33,7 @@ class ExtractionResult(BaseModel):
     error: Optional[str] = None
     fileInfo: Optional[Any] = None
     summary: str = ""  # Legacy field for backward compatibility
-    
+    gcs_file_link:str = ""
     # New comprehensive analysis fields
     comprehensive_analysis: Optional[ComprehensiveAnalysis] = None
     

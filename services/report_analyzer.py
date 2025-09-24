@@ -1,3 +1,6 @@
+
+
+
 import json
 import logging
 from datetime import datetime
@@ -318,9 +321,9 @@ Begin analysis now:
             report_title = analysis.report_json.report_title or f"{detected_type} (Untitled)"
             status = analysis.report_json.status
             
-            logger.info(f"� Document Type: {detected_type}")
-            logger.info(f"�👤 Patient: {patient_name}")
-            logger.info(f"� Report Title: {report_title}")
+            logger.info(f"📄 Document Type: {detected_type}")
+            logger.info(f"👤 Patient: {patient_name}")
+            logger.info(f"📑 Report Title: {report_title}")
             logger.info(f"⚡ Status: {status}")
             logger.info(f"📝 Summary Points: {len(analysis.summary)}")
             
@@ -341,6 +344,59 @@ Begin analysis now:
         except Exception as e:
             logger.error(f"❌ Unexpected error in document analysis: {str(e)}")
             raise ValueError(f"Analysis failed due to: {str(e)}")
+    
+    def compare_summaries(self, previous_summary: List[str], current_summary: List[str]) -> str:
+        """
+        Use AI to compare previous and current summaries and generate last changes description.
+        
+        Args:
+            previous_summary: List of strings from previous document summary
+            current_summary: List of strings from current document summary
+            
+        Returns:
+            String describing the key changes
+        """
+        try:
+            logger.info("🔄 Starting AI summary comparison...")
+            
+            template = """
+You are a medical report comparison expert. Compare these two summaries for the same patient:
+
+PREVIOUS SUMMARY:
+{previous_summary}
+
+CURRENT SUMMARY:
+{current_summary}
+
+TASK:
+- Identify key changes, improvements, deteriorations, new findings, or resolved issues
+- Focus on medical status, work restrictions, treatments, diagnoses, and urgency levels
+- Be concise: 3-5 bullet points describing main differences
+- Start with "Key Changes:" 
+- Use professional medical terminology
+
+Output a single string with the comparison.
+"""
+            
+            prompt = PromptTemplate(
+                input_variables=["previous_summary", "current_summary"],
+                template=template
+            )
+            
+            formatted_prompt = prompt.format(
+                previous_summary="\n".join(previous_summary),
+                current_summary="\n".join(current_summary)
+            )
+            
+            response = self.llm.invoke(formatted_prompt)
+            changes = response.content.strip()
+            
+            logger.info(f"✅ Generated changes description ({len(changes)} characters)")
+            return changes
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to compare summaries: {str(e)}")
+            return f"Unable to generate changes due to error: {str(e)}"
     
     def handle_analysis_error(self, error: Exception, document_text: str = "") -> ErrorResponse:
         """

@@ -1,8 +1,6 @@
-// generator db {
-//   provider = "prisma-client-py"
-//   interface = "asyncio"
-// }
-
+generator client {
+  provider = "prisma-client-py"
+}
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
@@ -105,6 +103,9 @@ model Document {
   
   // Relations
   alerts              Alert[]
+
+  gcsFileLink   String?  // New field for GCS file link
+  lastchanges String?
   
   @@map("documents")
 }
