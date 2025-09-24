@@ -347,57 +347,69 @@ Begin analysis now:
     
     def compare_summaries(self, previous_summary: List[str], current_summary: List[str]) -> str:
         """
-        Use AI to compare previous and current summaries and generate last changes description.
+        Compare previous and current medical summaries and return exactly 5 concise points 
+        with arrow indicators describing the key changes.
         
         Args:
             previous_summary: List of strings from previous document summary
             current_summary: List of strings from current document summary
             
         Returns:
-            String describing the key changes
+            A string with exactly 5 bullet points (each with arrow indication).
         """
         try:
-            logger.info("🔄 Starting AI summary comparison...")
-            
+            logger.info("🔄 Starting AI summary comparison with 5 concise points...")
+
             template = """
-You are a medical report comparison expert. Compare these two summaries for the same patient:
+    You are a medical report comparison specialist.
 
-PREVIOUS SUMMARY:
-{previous_summary}
+    Compare the following two summaries for the same patient:
 
-CURRENT SUMMARY:
-{current_summary}
+    🩺 PREVIOUS SUMMARY:
+    {previous_summary}
 
-TASK:
-- Identify key changes, improvements, deteriorations, new findings, or resolved issues
-- Focus on medical status, work restrictions, treatments, diagnoses, and urgency levels
-- Be concise: 3-5 bullet points describing main differences
-- Start with "Key Changes:" 
-- Use professional medical terminology
+    📋 CURRENT SUMMARY:
+    {current_summary}
 
-Output a single string with the comparison.
-"""
-            
+    TASK:
+    - Identify and summarize the key differences in **exactly 5 bullet points**.
+    - Each point must begin with one of these arrow indicators:
+    - ⬆️ Improvement
+    - ⬇️ Deterioration
+    - ➝ Change/Update
+    - ✅ Resolved
+    - ⚠️ New finding
+    - Do NOT add recommendations, analysis, or extra explanations — just the 5 comparison points.
+
+    Format strictly like this:
+
+    - ⬆️ [short point]
+    - ⬇️ [short point]
+    - ➝ [short point]
+    - ✅ [short point]
+    - ⚠️ [short point]
+    """
+
             prompt = PromptTemplate(
                 input_variables=["previous_summary", "current_summary"],
                 template=template
             )
-            
+
             formatted_prompt = prompt.format(
                 previous_summary="\n".join(previous_summary),
                 current_summary="\n".join(current_summary)
             )
-            
+
             response = self.llm.invoke(formatted_prompt)
             changes = response.content.strip()
-            
-            logger.info(f"✅ Generated changes description ({len(changes)} characters)")
+
+            logger.info(f"✅ Generated concise 5-point comparison ({len(changes)} characters)")
             return changes
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to compare summaries: {str(e)}")
             return f"Unable to generate changes due to error: {str(e)}"
-    
+
     def handle_analysis_error(self, error: Exception, document_text: str = "") -> ErrorResponse:
         """
         Create structured error response for analysis failures
