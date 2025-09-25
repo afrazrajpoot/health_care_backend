@@ -61,5 +61,10 @@ tzdata==2025.2
 urllib3==2.5.0
 uvicorn==0.36.0
 zstandard==0.25.0
-
+redis
+rq
+gevent
+Celery
 google-cloud-storage
+python-jose
+jose

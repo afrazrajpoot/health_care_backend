@@ -15,14 +15,13 @@ class FileService:
     """Service for handling file operations with Google Cloud Storage"""
 
     def __init__(self):
-        self.bucket_name = CONFIG.get("gcs_bucket_name", "hiregenix")  # Default to hiregenix
+        self.bucket_name = CONFIG.get("gcs_bucket_name", "hiregenix")
         if not self.bucket_name:
             raise ValueError("GCS bucket name not configured")
         
         try:
             self.storage_client = storage.Client()
             self.bucket = self.storage_client.bucket(self.bucket_name)
-            # Verify bucket exists and is accessible
             if not self.bucket.exists():
                 logger.warning(f"Bucket {self.bucket_name} does not exist, attempting to create")
                 self.bucket = self.storage_client.create_bucket(self.bucket_name)
@@ -33,22 +32,31 @@ class FileService:
             logger.error(f"❌ Error initializing GCS client: {str(e)}")
             raise
 
+    def download_from_gcs(self, blob_path: str) -> bytes:
+        """Download file content from Google Cloud Storage"""
+        try:
+            blob = self.bucket.blob(blob_path)
+            content = blob.download_as_bytes()
+            logger.info(f"✅ Downloaded file from GCS: {blob_path} ({len(content)} bytes)")
+            return content
+        except Exception as e:
+            logger.error(f"❌ Error downloading from GCS: {str(e)}")
+            raise
+
     @staticmethod
     def validate_file(file: UploadFile, max_size: int) -> bytes:
         """Validate uploaded file"""
         if not file:
             raise ValueError("No file uploaded")
         
-        # Check file extension
         if file.filename:
             file_ext = Path(file.filename).suffix.lower()
             if not DocumentConverter.is_supported_format(file.filename):
                 supported_formats = DocumentConverter.get_supported_formats()
                 raise ValueError(f"Unsupported file format: {file_ext}. Supported formats: {', '.join(sorted(supported_formats))}")
         
-        # Read file content
         content = file.file.read()
-        file.file.seek(0)  # Reset file pointer
+        file.file.seek(0)
         
         if len(content) > max_size:
             raise ValueError(f"File too large. Maximum size is {max_size / (1024*1024)}MB")
@@ -58,7 +66,6 @@ class FileService:
     def save_to_gcs(self, content: bytes, filename: str, folder: str = "uploads") -> Tuple[str, str]:
         """Upload file content to Google Cloud Storage and return the signed URL and blob path"""
         try:
-            # Generate a unique filename with timestamp to avoid conflicts
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             original_name = Path(filename).stem
             extension = Path(filename).suffix
@@ -66,17 +73,15 @@ class FileService:
             
             destination_blob_name = f"{folder}/{unique_filename}"
             
-            # Create a blob and upload the content
             blob = self.bucket.blob(destination_blob_name)
             blob.upload_from_string(content, content_type='application/octet-stream')
             
             logger.info(f"✅ Uploaded file to GCS: {destination_blob_name}")
             
-            # Generate signed URL (expires in 7 days)
             signed_url = blob.generate_signed_url(
                 version="v4",
                 expiration=timedelta(days=7),
-                method="GET"  # Allow GET (read) access
+                method="GET"
             )
             
             logger.info(f"📎 Signed GCS URL: {signed_url}")
@@ -90,13 +95,11 @@ class FileService:
     def save_temp_file(self, content: bytes, filename: str) -> str:
         """Save file content to temporary local file for processing"""
         try:
-            # Create a temporary file
             temp_dir = tempfile.gettempdir()
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             temp_filename = f"doc_ai_{timestamp}_{filename}"
             temp_path = os.path.join(temp_dir, temp_filename)
             
-            # Write content to temporary file
             with open(temp_path, 'wb') as temp_file:
                 temp_file.write(content)
             

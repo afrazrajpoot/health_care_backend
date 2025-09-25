@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel,Field
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -23,21 +23,18 @@ class ComprehensiveAnalysis(BaseModel):
     work_status_alert: List[WorkStatusAlert] = []
 
 class ExtractionResult(BaseModel):
-    text: str
-    pages: int
-    entities: List[Dict[str, Any]]
-    tables: List[Dict[str, Any]]
-    formFields: List[Dict[str, Any]]
-    confidence: float
-    success: bool
+    text: str = ""
+    pages: int = 0
+    entities: List[Dict[str, Any]] = Field(default_factory=list)
+    tables: List[Dict[str, Any]] = Field(default_factory=list)
+    formFields: List[Dict[str, Any]] = Field(default_factory=list)
+    confidence: float = 0.0
+    success: bool = False
     error: Optional[str] = None
     fileInfo: Optional[Any] = None
-    summary: str = ""  # Legacy field for backward compatibility
-    gcs_file_link:str = ""
-    # New comprehensive analysis fields
+    summary: str = ""
+    gcs_file_link: str = ""
     comprehensive_analysis: Optional[ComprehensiveAnalysis] = None
-    
-    # Database fields
     document_id: Optional[str] = None
     database_error: Optional[str] = None
 
@@ -55,3 +52,11 @@ class FileInfo(BaseModel):
     originalName: str = ""
     size: int = 0
     mimeType: str = ""
+
+
+class TaskResponse(BaseModel):
+    task_id: str
+    filename: str
+    status: str
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None

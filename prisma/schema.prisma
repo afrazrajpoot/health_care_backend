@@ -135,3 +135,16 @@ model Alert {
   
   @@map("alerts")
 }
+
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  email      String?
+  action     String
+  ipAddress  String?
+  userAgent  String?
+  path       String?
+  method     String?
+  timestamp  DateTime @default(now())
+}
