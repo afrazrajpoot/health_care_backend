@@ -1,35 +1,31 @@
 generator client {
   provider = "prisma-client-py"
 }
+
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
 model User {
-  id            String      @id @default(uuid())
+  id            String    @id @default(uuid())
   firstName     String?
   lastName      String?
   phoneNumber   String?
-  email         String?     @unique
+  email         String?   @unique
   password      String?
   role          String?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
   emailVerified DateTime?
   image         String?
-
- 
   accounts      Account[]
   sessions      Session[]
-
-
-}          
+}
 
 model Account {
-  id                 String   @id @default(uuid())
+  id                 String  @id @default(uuid())
   userId             String
-  user               User     @relation(fields: [userId], references: [id])
   type               String
   provider           String
   providerAccountId  String
@@ -41,6 +37,8 @@ model Account {
   scope              String?
   id_token           String?
   session_state      String?
+  user               User    @relation(fields: [userId], references: [id])
+
   @@unique([provider, providerAccountId])
 }
 
@@ -56,95 +54,70 @@ model VerificationToken {
   identifier String
   token      String   @unique
   expires    DateTime
+
   @@unique([identifier, token])
 }
 
-
-
-// Document Analysis Models
 model Document {
-  id                  String    @id @default(uuid())
-  
-  // File Information
-  originalName        String
-  fileSize            Int
-  mimeType            String
-  
-  // Extracted Content
-  extractedText       String    @db.Text  // Full document text
-  pages               Int       @default(0)
-  confidence          Float     @default(0.0)
-  
-  // Document AI Results
-  entities            Json[]    // Extracted entities
-  tables              Json[]    // Extracted tables
-  formFields          Json[]    // Extracted form fields
-  
-  // Patient Information
-  patientName         String?
-  patientEmail        String?
-  claimNumber         String?
-  reportTitle         String?
-  reportDate          DateTime?
-  status              String    @default("normal") // urgent, normal, low
-  
-  // Analysis Results
-  summary             String[]  // AI-generated summary points
-  originalReport      String    @db.Text  // Complete original report text
-  
-  // Processing Metadata
-  processingTimeMs    Int       @default(0)
-  analysisSuccess     Boolean   @default(true)
-  errorMessage        String?
-  
-  // Timestamps
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
-  
-  // Relations
-  alerts              Alert[]
+  id               String    @id @default(uuid())
+  originalName     String
+  fileSize         Int
+  mimeType         String
+  extractedText    String
+  pages            Int       @default(0)
+  confidence       Float     @default(0.0)
+  entities         Json[]
+  tables           Json[]
+  formFields       Json[]
+  patientName      String?
+  patientEmail     String?
+  claimNumber      String?
+  reportTitle      String?
+  reportDate       DateTime?
+  status           String    @default("normal")
+  summary          String[]
+  originalReport   String
+  processingTimeMs Int       @default(0)
+  analysisSuccess  Boolean   @default(true)
+  errorMessage     String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  gcsFileLink      String?
+  lastchanges      String?
+  actions          Json?
+  complianceNudges Json?
+  referrals        Json?
+  alerts           Alert[]
 
-  gcsFileLink   String?  // New field for GCS file link
-  lastchanges String?
-  
   @@map("documents")
 }
 
 model Alert {
   id          String    @id @default(uuid())
-  
-  // Alert Information
-  alertType   String    // "Work Status Review", "Medical Urgency", "Follow-Up Required"
+  alertType   String
   title       String
   date        String
-  status      String    // "urgent", "low priority", "normal"
-  description String?   // Optional additional context
-  
-  // Relations
+  status      String
+  description String?
   documentId  String
-  document    Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  
-  // Metadata
   isResolved  Boolean   @default(false)
   resolvedAt  DateTime?
-  resolvedBy  String?   // User ID who resolved the alert
-  
-  // Timestamps
+  resolvedBy  String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
-  
+  document    Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
   @@map("alerts")
 }
 
-
 model AuditLog {
-  id         String   @id @default(uuid())
-  userId     String?
-  email      String?
-  action     String
-  ipAddress  String?
-  userAgent  String?
-  path       String?
-  method     String?
-  timestamp  DateTime @default(now())
+  id        String   @id @default(uuid())
+  userId    String?
+  email     String?
+  action    String
+  ipAddress String?
+  userAgent String?
+  path      String?
+  method    String?
+  timestamp DateTime @default(now())
 }
