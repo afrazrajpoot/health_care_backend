@@ -59,56 +59,71 @@ model VerificationToken {
 }
 
 model Document {
-  id               String    @id @default(uuid())
-  originalName     String
-  fileSize         Int
-  mimeType         String
-  extractedText    String
-  pages            Int       @default(0)
-  confidence       Float     @default(0.0)
-  entities         Json[]
-  tables           Json[]
-  formFields       Json[]
-  patientName      String?
-  patientEmail     String?
-  claimNumber      String?
-  reportTitle      String?
-  reportDate       DateTime?
-  status           String    @default("normal")
-  summary          String[]
-  originalReport   String
-  processingTimeMs Int       @default(0)
-  analysisSuccess  Boolean   @default(true)
-  errorMessage     String?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-  gcsFileLink      String?
-  lastchanges      String?
-  actions          Json?
-  complianceNudges Json?
-  referrals        Json?
-  alerts           Alert[]
+  id              String             @id @default(cuid())
+  dob             DateTime
+  doi             DateTime
+  patientName     String
+  status          String
+  claimNumber     String            
+  gcsFileLink     String
 
-  @@map("documents")
+
+  // Relations
+  summarySnapshot SummarySnapshot?
+  whatsNew        WhatsNewSinceLastVisit?
+  adl             ADL?
+  documentSummary DocumentSummary?
+
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
 }
 
-model Alert {
-  id          String    @id @default(uuid())
-  alertType   String
-  title       String
-  date        String
-  status      String
-  description String?
-  documentId  String
-  isResolved  Boolean   @default(false)
-  resolvedAt  DateTime?
-  resolvedBy  String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  document    Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+model SummarySnapshot {
+  id           String    @id @default(cuid())
+  dx           String
+  keyConcern   String
+  nextStep     String
 
-  @@map("alerts")
+  // Relation back to Document
+  document     Document  @relation(fields: [documentId], references: [id])
+  documentId   String    @unique
 }
+
+model WhatsNewSinceLastVisit {
+  id           String    @id @default(cuid())
+  diagnostic   String
+  qme          String
+  urDecision   String
+  legal        String
+
+  // Relation back to Document
+  document     Document  @relation(fields: [documentId], references: [id])
+  documentId   String    @unique
+}
+
+model ADL {
+  id                 String    @id @default(cuid())
+  adlsAffected       String
+  workRestrictions   String
+
+  // Relation back to Document
+  document           Document  @relation(fields: [documentId], references: [id])
+  documentId         String    @unique
+}
+
+model DocumentSummary {
+  id        String    @id @default(cuid())
+  type      String
+  date      DateTime
+  summary   String
+
+  // Relation back to Document
+  document  Document  @relation(fields: [documentId], references: [id])
+  documentId String   @unique
+}
+
+
+
 
 model AuditLog {
   id        String   @id @default(uuid())
