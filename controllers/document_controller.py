@@ -1,3 +1,6 @@
+
+
+
 from fastapi import APIRouter, File, UploadFile, HTTPException, Request
 from typing import Dict, List, Any
 from datetime import datetime
@@ -19,27 +22,22 @@ from config.celery_config import app as celery_app
 
 router = APIRouter()
 
-# Webhook endpoint to save document analysis to database
 @router.post("/webhook/save-document")
 async def save_document_webhook(request: Request):
-    """
-    Webhook endpoint to save document analysis to the database
-    """
     try:
         data = await request.json()
         logger.info(f"📥 Webhook received for document save: {data.get('document_id', 'unknown')}")
 
-        # Validate required fields
         if not data.get("result") or not data.get("filename") or not data.get("gcs_url"):
             raise HTTPException(status_code=400, detail="Missing required fields in webhook payload")
 
         result_data = data["result"]
-        
-        # Extract structured data from document
         analyzer = ReportAnalyzer()
         document_analysis = analyzer.extract_document_data(result_data.get("text", ""))
         
-        # Parse dates
+        # Generate AI brief summary
+        brief_summary = analyzer.generate_brief_summary(result_data.get("text", ""))
+        
         try:
             dob = datetime.strptime(document_analysis.dob, "%Y-%m-%d")
         except:
@@ -50,10 +48,8 @@ async def save_document_webhook(request: Request):
         except:
             doi = datetime.now()
         
-        # Get previous document for comparison using patient name and claim number
+        # Mock database service - replace with your actual implementation
         db_service = await get_database_service()
-        
-        # Check if this exact file was already processed (prevent duplicates)
         file_exists = await db_service.document_exists(
             data["filename"], 
             data.get("file_size", 0)
@@ -63,40 +59,41 @@ async def save_document_webhook(request: Request):
             logger.warning(f"⚠️ Document already exists: {data['filename']}")
             return {"status": "skipped", "reason": "Document already processed"}
         
-        # Find previous document for this patient and claim
-        previous_document = await db_service.get_last_document_for_patient(
-            document_analysis.patient_name,
-            document_analysis.claim_number
+        # Retrieve previous documents
+        db_response = await db_service.get_all_unverified_documents(
+            document_analysis.patient_name
         )
         
-        # Compare with previous document to determine what's new
-        whats_new_data = analyzer.compare_with_previous_document(
+        # Extract documents list from database response
+        previous_documents = db_response.get('documents', []) if db_response else []
+        print(previous_documents,'previous documents')
+        # Compare with previous documents using LLM
+        whats_new_data = analyzer.compare_with_previous_documents(
             document_analysis, 
-            previous_document
+            previous_documents
         )
+        print(whats_new_data,'what new data')
         
-        # Prepare data for database - using point form (2-3 words)
         summary_snapshot = {
-            "dx": document_analysis.diagnosis,  # 2-3 words
-            "keyConcern": document_analysis.key_concern,  # 2-3 words
-            "nextStep": document_analysis.next_step  # 2-3 words
+            "dx": document_analysis.diagnosis,
+            "keyConcern": document_analysis.key_concern,
+            "nextStep": document_analysis.next_step
         }
         
         adl_data = {
-            "adlsAffected": document_analysis.adls_affected,  # 2-3 words
-            "workRestrictions": document_analysis.work_restrictions  # 2-3 words
+            "adlsAffected": document_analysis.adls_affected,
+            "workRestrictions": document_analysis.work_restrictions
         }
         
-        # Convert summary points to string
         summary_text = " | ".join(document_analysis.summary_points) if document_analysis.summary_points else "No summary"
         
         document_summary = {
             "type": document_analysis.document_type,
-            "date": datetime.now(),
+            "createdAt": datetime.now(),
             "summary": summary_text
         }
         
-        # Create ExtractionResult from result_data
+        # Mock ExtractionResult - replace with your actual implementation
         extraction_result = ExtractionResult(
             text=result_data.get("text", ""),
             pages=result_data.get("pages", 0),
@@ -112,7 +109,6 @@ async def save_document_webhook(request: Request):
             document_id=result_data.get("document_id", f"webhook_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         )
         
-        # Save to database
         document_id = await db_service.save_document_analysis(
             extraction_result=extraction_result,
             file_name=data["filename"],
@@ -125,6 +121,7 @@ async def save_document_webhook(request: Request):
             dob=dob,
             doi=doi,
             status=document_analysis.status,
+            brief_summary=brief_summary,  # Pass the AI-generated brief summary
             summary_snapshot=summary_snapshot,
             whats_new=whats_new_data,
             adl_data=adl_data,
@@ -135,7 +132,7 @@ async def save_document_webhook(request: Request):
         return {"status": "success", "document_id": document_id}
 
     except Exception as e:
-        logger.error(f"❌ Webhook save failed: {str(e)}")
+        logger.error(f"❌ Webhook save failed: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
 
 # Celery task for processing a single document
@@ -386,3 +383,156 @@ async def extract_documents(
             except:
                 logger.warning(f"⚠️ Failed to delete GCS file: {path}")
         raise HTTPException(status_code=500, detail=f"Queuing failed: {str(e)}")
+
+from typing import Optional
+
+@router.get('/document')
+async def get_document(
+    patient_name: str,
+    dob: str,
+    doi: str,
+    claim_number: Optional[str] = None
+):
+    """
+    Get last two documents for a patient
+    Returns multiple documents in structured format
+    """
+    try:
+        logger.info(f"📄 Fetching last 2 documents for patient: {patient_name}")
+        
+        # Parse date strings
+        try:
+            dob_date = datetime.strptime(dob, "%Y-%m-%d")
+            doi_date = datetime.strptime(doi, "%Y-%m-%d")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {str(e)}")
+        
+        db_service = await get_database_service()
+        
+        # Get documents (always returns multi-document structure)
+        document_data = await db_service.get_document_by_patient_details(
+            patient_name=patient_name,
+            # dob=dob_date,
+            # doi=doi_date,
+            # claim_number=claim_number
+        )
+        
+        if not document_data:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No documents found for patient: {patient_name}"
+            )
+        
+        # Format the response
+        response = await format_document_response(document_data)
+        
+        logger.info(f"✅ Returned {response['total_documents']} documents for: {patient_name}")
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error fetching document: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+async def format_document_response(document_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Format the document data response - handles multiple documents"""
+    
+    # Check if this is a multi-document response
+    if "documents" in document_data and "total_documents" in document_data:
+        return await format_multiple_documents_response(document_data)
+    else:
+        # If it's a single document (old format), wrap it in multi-document structure
+        return await format_single_document_as_multiple(document_data)
+
+async def format_single_document_as_multiple(document: Dict[str, Any]) -> Dict[str, Any]:
+    """Format a single document as a multi-document response"""
+    formatted_doc = await format_single_document(document)
+    formatted_doc["document_index"] = 1
+    formatted_doc["is_latest"] = True
+    
+    return {
+        "patient_name": document.get("patientName"),
+        "total_documents": 1,
+        "documents": [formatted_doc],
+        "is_multiple_documents": False
+    }
+
+async def format_multiple_documents_response(response_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Format response for multiple documents"""
+    formatted_documents = []
+    
+    for doc in response_data["documents"]:
+        formatted_doc = await format_single_document(doc)
+        formatted_doc["document_index"] = doc.get("document_index")
+        formatted_doc["is_latest"] = doc.get("is_latest", False)
+        formatted_documents.append(formatted_doc)
+    
+    return {
+        "patient_name": response_data["patient_name"],
+        "total_documents": response_data["total_documents"],
+        "documents": formatted_documents,
+        "is_multiple_documents": True
+    }
+
+async def format_single_document(document: Dict[str, Any]) -> Dict[str, Any]:
+    """Format a single document"""
+    # Base document info
+    response = {
+        "document_id": document.get("id"),
+        "patient_name": document.get("patientName"),
+        "dob": document.get("dob").isoformat() if document.get("dob") else None,
+        "doi": document.get("doi").isoformat() if document.get("doi") else None,
+        "claim_number": document.get("claimNumber"),
+        "status": document.get("status"),
+        "brief_summary": document.get("briefSummary"),
+        "gcs_file_link": document.get("gcsFileLink"),
+        "created_at": document.get("createdAt").isoformat() if document.get("createdAt") else None,
+        "updated_at": document.get("updatedAt").isoformat() if document.get("updatedAt") else None,
+    }
+    
+    # Add summary snapshot data
+    summary_snapshot = document.get("summarySnapshot")
+    if summary_snapshot:
+        response["summary_snapshot"] = {
+            "diagnosis": summary_snapshot.get("dx"),
+            "key_concern": summary_snapshot.get("keyConcern"),
+            "next_step": summary_snapshot.get("nextStep")
+        }
+    else:
+        response["summary_snapshot"] = None
+    
+    # Add what's new data
+    whats_new = document.get("whatsNew")
+    if whats_new:
+        response["whats_new"] = {
+            "diagnostic": whats_new.get("diagnostic"),
+            "qme": whats_new.get("qme"),
+            "ur_decision": whats_new.get("urDecision"),
+            "legal": whats_new.get("legal")
+        }
+    else:
+        response["whats_new"] = None
+    
+    # Add ADL data
+    adl_data = document.get("adl")
+    if adl_data:
+        response["adl"] = {
+            "adls_affected": adl_data.get("adlsAffected"),
+            "work_restrictions": adl_data.get("workRestrictions")
+        }
+    else:
+        response["adl"] = None
+    
+    # Add document summary
+    doc_summary = document.get("documentSummary")
+    if doc_summary:
+        response["document_summary"] = {
+            "type": doc_summary.get("type"),
+            "date": doc_summary.get("date").isoformat() if doc_summary.get("date") else None,
+            "summary": doc_summary.get("summary")
+        }
+    else:
+        response["document_summary"] = None
+    
+    return response

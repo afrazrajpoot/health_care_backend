@@ -66,11 +66,11 @@ model Document {
   status          String
   claimNumber     String            
   gcsFileLink     String
-
+  briefSummary    String?
+  whatsNew        Json?
 
   // Relations
   summarySnapshot SummarySnapshot?
-  whatsNew        WhatsNewSinceLastVisit?
   adl             ADL?
   documentSummary DocumentSummary?
 
@@ -83,18 +83,6 @@ model SummarySnapshot {
   dx           String
   keyConcern   String
   nextStep     String
-
-  // Relation back to Document
-  document     Document  @relation(fields: [documentId], references: [id])
-  documentId   String    @unique
-}
-
-model WhatsNewSinceLastVisit {
-  id           String    @id @default(cuid())
-  diagnostic   String
-  qme          String
-  urDecision   String
-  legal        String
 
   // Relation back to Document
   document     Document  @relation(fields: [documentId], references: [id])
@@ -121,9 +109,6 @@ model DocumentSummary {
   document  Document  @relation(fields: [documentId], references: [id])
   documentId String   @unique
 }
-
-
-
 
 model AuditLog {
   id        String   @id @default(uuid())

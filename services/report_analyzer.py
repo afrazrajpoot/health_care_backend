@@ -6,11 +6,13 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import re
 import logging
+import json
+
 from config.settings import CONFIG
 
 logger = logging.getLogger("document_ai")
 
-# Pydantic models for structured extraction
+# Pydantic models
 class DocumentAnalysis(BaseModel):
     """Structured analysis of medical document matching database schema"""
     patient_name: str = Field(..., description="Full name of the patient")
@@ -18,19 +20,17 @@ class DocumentAnalysis(BaseModel):
     dob: str = Field(..., description="Date of birth in YYYY-MM-DD format")
     doi: str = Field(..., description="Date of injury in YYYY-MM-DD format")
     status: str = Field(..., description="Current status: normal, urgent, critical, etc.")
-    
-    # Summary Snapshot fields - POINT FORM (2-3 words)
     diagnosis: str = Field(..., description="Primary diagnosis in 2-3 words")
     key_concern: str = Field(..., description="Main clinical concern in 2-3 words")
     next_step: str = Field(..., description="Recommended next steps in 2-3 words")
-    
-    # ADL fields - POINT FORM (2-3 words)
     adls_affected: str = Field(..., description="Activities affected in 2-3 words")
     work_restrictions: str = Field(..., description="Work restrictions in 2-3 words")
-    
-    # Document Summary
     document_type: str = Field(..., description="Type of document")
-    summary_points: List[str] = Field(..., description="3-5 key points in 2-3 words each")
+    summary_points: List[str] = Field(..., description="3-5 key points, each 2-3 words")
+
+class BriefSummary(BaseModel):
+    """Structured brief summary of the report"""
+    brief_summary: str = Field(..., description="A concise 1-2 sentence summary of the entire report")
 
 class ReportAnalyzer:
     """Service for extracting structured data from medical documents"""
@@ -39,10 +39,12 @@ class ReportAnalyzer:
         self.llm = ChatOpenAI(
             model="gpt-4o",
             api_key=CONFIG.get("openai_api_key"),
-            temperature=0.1,
+            temperature=0.0,  # Lower temp for consistency
             timeout=120
         )
         self.parser = JsonOutputParser(pydantic_object=DocumentAnalysis)
+        self.whats_new_parser = JsonOutputParser()  # Raw JSON parser for dynamic flat dict output
+        self.brief_summary_parser = JsonOutputParser(pydantic_object=BriefSummary)
 
     def create_extraction_prompt(self) -> PromptTemplate:
         template = """
@@ -60,90 +62,174 @@ class ReportAnalyzer:
         - Date of birth (DOB) in YYYY-MM-DD format
         - Date of injury (DOI) in YYYY-MM-DD format  
         - Current status (normal, urgent, critical)
-        - Primary diagnosis (2-3 words only)
-        - Key clinical concerns (2-3 words only)
-        - Recommended next steps (2-3 words only)
-        - Activities of daily living affected (2-3 words only)
-        - Work restrictions (2-3 words only)
+        - Primary diagnosis 
+        - Key clinical concerns 
+        - Recommended next steps 
+        - Activities of daily living affected
+        - Work restrictions 
         - Document type
-        - 3-5 key summary points (each point 2-3 words only)
+        - 3-5 key summary points 
         
         CRITICAL INSTRUCTIONS:
-        - For diagnosis, key_concern, next_step, adls_affected, work_restrictions - USE ONLY 2-3 WORDS MAX.
+        - For diagnosis, key_concern, next_step, adls_affected, work_restrictions, use 2-3 words max.
         - For summary_points, provide 3-5 bullet points, each 2-3 words.
-        - If claim number is not explicitly found in the document, use "Not specified"
-        - Do NOT invent or generate claim numbers. Only use what's actually in the document.
-        - Look for claim number patterns: WC-2024-001, CL-12345, Case No. 123, Claim # ABC123
-        
-        If any information is not found in the document, use "Not specified".
+        - If claim number is not explicitly found, use "Not specified".
+        - Do NOT invent claim numbers. Use patterns: WC-2024-001, CL-12345, Case No. 123, Claim # ABC123.
+        - If information is missing, use "Not specified".
         
         {format_instructions}
         
         Return ONLY valid JSON. No additional text.
         """
-        
         return PromptTemplate(
             template=template,
             input_variables=["document_text", "current_date"],
             partial_variables={"format_instructions": self.parser.get_format_instructions()},
         )
 
+    def create_brief_summary_prompt(self) -> PromptTemplate:
+        template = """
+        You are a medical document summarization expert. Generate a brief summary of the following medical document.
+        
+        DOCUMENT TEXT:
+        {document_text}
+        
+        CURRENT DATE: {current_date}
+        
+        CRITICAL INSTRUCTIONS:
+        - Create a concise 1-2 sentence summary capturing the essence of the report.
+        - Focus on key findings, diagnosis, and recommendations.
+        - Keep it professional and objective.
+        - If information is missing, use "Not specified".
+        
+        {format_instructions}
+        
+        Return ONLY valid JSON. No additional text.
+        """
+        return PromptTemplate(
+            template=template,
+            input_variables=["document_text", "current_date"],
+            partial_variables={"format_instructions": self.brief_summary_parser.get_format_instructions()},
+        )
+
+    def create_whats_new_prompt(self) -> PromptTemplate:
+        template = """
+        You are a medical document comparison expert. Analyze the patient's medical history and current document to identify what's new in their treatment journey.
+        
+        PATIENT'S MEDICAL HISTORY (most recent first):
+        {previous_analyses}
+        
+        CURRENT DOCUMENT ANALYSIS:
+        {current_analysis}
+        
+        CURRENT DATE: {current_date}
+        
+        CRITICAL INSTRUCTIONS:
+        - Track ONLY ACTUAL CHANGES from previous documents to current document
+        - Use arrow notation "→" ONLY when there is a REAL CHANGE in diagnosis, treatment, or findings
+        - If something is EXACTLY THE SAME as previous, DO NOT include it in "What's New"
+        - If this is the FIRST document (no previous), just show the pure findings WITHOUT arrows
+        - Only show CONTINUING items if they are actively mentioned as ongoing in the current document
+        - Categorize changes into these specific categories when relevant:
+        * diagnostic: Test results, imaging reports, diagnosis changes, medical findings
+        * qme: Qualified Medical Evaluator reports, independent medical exams
+        * raf: Risk Adjustment Factor reports, claim adjustments
+        * ur_decision: Utilization Review decisions, work restrictions, treatment approvals
+        * legal: Legal developments, attorney letters, claim updates
+        
+        - For EACH category, provide a concise description (3-5 words) with date in MM/DD format
+        - Include SPECIFIC FINDINGS like diagnosis, test results, restrictions
+        - ONLY include categories with ACTUAL NEW INFORMATION or REAL CHANGES
+        - Use format: "Previous → Current (MM/DD)" for REAL changes, "Description (MM/DD)" for first-time items
+        - DO NOT use arrows for items that are exactly the same as before
+        
+        IMPORTANT: Only show what is TRULY new or changed. Skip anything that is identical to previous documents.
+        
+        EXAMPLES FOR FIRST DOCUMENT:
+        - First MRI report: {{"diagnostic": "MRI lumbar strain (10/02)"}}
+        - First QME report: {{"qme": "QME evaluation (10/02)"}}
+        - First legal document: {{"legal": "Claim QM12345 (10/02)"}}
+        
+        EXAMPLES FOR REAL CHANGES:
+        - Diagnosis changed from lumbar strain to disc bulge: {{"diagnostic": "lumbar strain → disc bulge (10/02)"}}
+        - New work restrictions added: {{"ur_decision": "no heavy lifting (10/02)"}}
+        - New attorney letter received: {{"legal": "Attorney letter (10/02)"}}
+        
+        EXAMPLES OF WHAT TO AVOID:
+        - ❌ DON'T: "QME evaluation (10/02) → (10/02)" (no real change)
+        - ❌ DON'T: "physical therapy (10/02) → (10/02)" (no real change)
+        - ❌ DON'T: "Claim QM12345 (10/02) → (10/02)" (no real change)
+        
+        {format_instructions}
+        
+        Return ONLY valid JSON. No additional text.
+        """
+        return PromptTemplate(
+            template=template,
+            input_variables=["previous_analyses", "current_analysis", "current_date"],
+            partial_variables={"format_instructions": self.whats_new_parser.get_format_instructions()},
+        )
+
     def extract_claim_number_from_text(self, document_text: str) -> Optional[str]:
-        """
-        Helper function to extract claim number using regex patterns
-        This provides a fallback if the LLM misses it
-        """
         try:
-            # Common claim number patterns
             patterns = [
                 r'WC[-\s]*(\d+[-]\d+)',  # WC-2024-001
                 r'CL[-\s]*(\d+[-]?\d*)',  # CL-12345, CL-2024-001
-                r'Claim[#\s]*([A-Z0-9-]+)',  # Claim #ABC123, Claim WC-001
-                r'Case[#\s\w]*([A-Z0-9-]+)',  # Case No. 123, Case Number WC-001
+                r'Claim[#\s]*([A-Z0-9-]+)',  # Claim #ABC123
+                r'Case[#\s\w]*([A-Z0-9-]+)',  # Case No. 123
                 r'Claim\s*Number[:\s]*([A-Z0-9-]+)',  # Claim Number: WC-2024-001
             ]
-            
             for pattern in patterns:
                 matches = re.findall(pattern, document_text, re.IGNORECASE)
                 if matches:
                     claim_number = matches[0].strip()
                     logger.info(f"🔍 Found claim number via regex: {claim_number}")
                     return claim_number
-            
             return None
         except Exception as e:
             logger.error(f"❌ Error extracting claim number via regex: {str(e)}")
             return None
 
     def extract_document_data(self, document_text: str) -> DocumentAnalysis:
-        """Extract structured data from document text"""
         try:
             prompt = self.create_extraction_prompt()
             chain = prompt | self.llm | self.parser
-            
             current_date = datetime.now().strftime("%Y-%m-%d")
             result = chain.invoke({
                 "document_text": document_text[:15000],
                 "current_date": current_date
             })
-            
-            # If LLM returned "Not specified" for claim number, try regex extraction
-            if result.get('claim_number') in ['Not specified', 'not specified', 'Not Specified', None, '']:
+            if result.get('claim_number') in ['Not specified', 'not specified', None, '']:
                 regex_claim = self.extract_claim_number_from_text(document_text)
                 if regex_claim:
                     result['claim_number'] = regex_claim
                     logger.info(f"🔄 Updated claim number via regex: {regex_claim}")
-            
             logger.info(f"✅ Extracted data: Patient={result['patient_name']}, Claim={result['claim_number']}")
             return DocumentAnalysis(**result)
-            
         except Exception as e:
             logger.error(f"❌ Document analysis failed: {str(e)}")
-            # Return fallback analysis
             return self.create_fallback_analysis()
 
+    def generate_brief_summary(self, document_text: str) -> str:
+        """
+        Generate a brief AI-powered summary of the document.
+        """
+        try:
+            prompt = self.create_brief_summary_prompt()
+            chain = prompt | self.llm | self.brief_summary_parser
+            current_date = datetime.now().strftime("%Y-%m-%d")
+            result = chain.invoke({
+                "document_text": document_text[:15000],
+                "current_date": current_date
+            })
+            brief_summary = result.get('brief_summary', 'Not specified')
+            logger.info(f"✅ Generated brief summary: {brief_summary}")
+            return brief_summary
+        except Exception as e:
+            logger.error(f"❌ Brief summary generation failed: {str(e)}")
+            return "Brief summary unavailable"
+
     def create_fallback_analysis(self) -> DocumentAnalysis:
-        """Create a fallback analysis when extraction fails"""
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         return DocumentAnalysis(
             patient_name="Not specified",
@@ -159,104 +245,194 @@ class ReportAnalyzer:
             document_type="Medical Document",
             summary_points=["Processing completed", "Analysis unavailable"]
         )
-
-    def compare_with_previous_document(
+    
+    def compare_with_previous_documents(
         self, 
         current_analysis: DocumentAnalysis, 
-        previous_document: Dict[str, Any]
+        previous_documents: List[Dict[str, Any]]  
     ) -> Dict[str, str]:
         """
-        Compare current document with previous one to determine what's new
-        Returns structured data for the WhatsNew table
+        Use LLM to compare previous documents with current analysis and generate 'What's New'.
+        PRESERVES all previous whats_new data and adds new changes.
         """
+        mm_dd = datetime.now().strftime("%m/%d")
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        
+        logger.info(f"DEBUG: previous_documents = {previous_documents}")
+        logger.info(f"DEBUG: Has previous? {bool(previous_documents)}")
+        
+        # Collect ALL previous whats_new data from all documents
+        all_previous_whats_new = {}
+        if previous_documents:
+            # Sort by creation date, oldest first to see progression
+            sorted_prev = sorted(
+                previous_documents, 
+                key=lambda d: d.get('createdAt') or d.get('created_at') or datetime.min
+            )
+            
+            # Accumulate all previous whats_new entries
+            for doc in sorted_prev:
+                whats_new = doc.get('whatsNew') or doc.get('whats_new') or {}
+                for category, value in whats_new.items():
+                    if value and isinstance(value, str) and value.strip():  # Only add non-empty string values
+                        all_previous_whats_new[category] = value
+        
+        logger.info(f"DEBUG: Accumulated previous whats_new: {all_previous_whats_new}")
+        
+        # Prepare previous analyses as a formatted string INCLUDING all accumulated whats_new data
+        if not previous_documents:
+            previous_analyses = "No previous documents available. This is the first report for the patient."
+        else:
+            previous_analyses = "ACCUMULATED HISTORY FROM PREVIOUS DOCUMENTS:\n"
+            for category, value in all_previous_whats_new.items():
+                previous_analyses += f"- {category}: {value}\n"
+            
+            # Also include the most recent document details for context
+            most_recent = sorted(
+                previous_documents, 
+                key=lambda d: d.get('createdAt') or d.get('created_at') or datetime.min,
+                reverse=True
+            )[0]
+            previous_analyses += f"\nMOST RECENT DOCUMENT SUMMARY:\n"
+            previous_analyses += f"- Diagnosis: {most_recent.get('diagnosis', 'N/A')}\n"
+            previous_analyses += f"- Document Type: {most_recent.get('document_type', 'N/A')}\n"
+            previous_analyses += f"- Key Concerns: {most_recent.get('key_concern', 'N/A')}\n"
+            previous_analyses += f"- Work Restrictions: {most_recent.get('work_restrictions', 'N/A')}\n"
+        
+        # Current analysis as detailed formatted string
+        current_analysis_str = f"""
+        CURRENT DOCUMENT ANALYSIS (Date: {current_date}):
+        - Document Type: {current_analysis.document_type}
+        - Diagnosis: {current_analysis.diagnosis}
+        - Key Concerns: {current_analysis.key_concern}
+        - Work Restrictions: {current_analysis.work_restrictions}
+        - Next Steps: {current_analysis.next_step}
+        - Claim Number: {current_analysis.claim_number}
+        - Status: {current_analysis.status}
+        - ADLs Affected: {current_analysis.adls_affected}
+        - Summary Points: {', '.join(current_analysis.summary_points)}
+        """
+        
         try:
-            whats_new = {
-                "diagnostic": "No changes",
-                "qme": "No changes", 
-                "urDecision": "No changes",
-                "legal": "No changes"
-            }
+            prompt = self.create_whats_new_prompt()
+            chain = prompt | self.llm | self.whats_new_parser
+            result = chain.invoke({
+                "previous_analyses": previous_analyses,
+                "current_analysis": current_analysis_str,
+                "current_date": current_date
+            })
             
-            if not previous_document:
-                whats_new = {
-                    "diagnostic": "Initial assessment",
-                    "qme": "First evaluation",
-                    "urDecision": "Case opened",
-                    "legal": "New case"
-                }
-                logger.info("🆕 First document for this patient/claim")
-                return whats_new
+            # FIX: Ensure result is a dictionary and handle the case where AI returns invalid data
+            if not isinstance(result, dict):
+                logger.error(f"❌ AI returned non-dict result: {result}")
+                result = {}
             
-            # If current claim number is "Not specified", we can't reliably compare
-            if current_analysis.claim_number == "Not specified":
-                logger.warning("⚠️ Cannot compare - claim number not specified")
-                return {
-                    "diagnostic": "Claim unspecified",
-                    "qme": "Claim unspecified",
-                    "urDecision": "Claim unspecified",
-                    "legal": "Claim unspecified"
-                }
+            # Merge previous whats_new with new changes - PRESERVE ALL HISTORY
+            merged_result = all_previous_whats_new.copy()  # Start with all previous data
             
-            # Get previous summary snapshot
-            prev_summary = previous_document.get('summarySnapshot')
-            prev_diagnosis = prev_summary.get('dx', '') if prev_summary else ''
-            prev_concern = prev_summary.get('keyConcern', '') if prev_summary else ''
-            prev_next_step = prev_summary.get('nextStep', '') if prev_summary else ''
+            # Add new changes from current analysis
+            for category, value in result.items():
+                if value and isinstance(value, str) and value.strip():
+                    # Update with latest value (this will overwrite previous with updated info)
+                    merged_result[category] = value
             
-            # Compare diagnostic information (2-3 words)
-            if current_analysis.diagnosis != prev_diagnosis and current_analysis.diagnosis != "Not specified":
-                whats_new["diagnostic"] = f"DX: {current_analysis.diagnosis}"[:30]
-                logger.info(f"🔄 Diagnosis changed: {prev_diagnosis} -> {current_analysis.diagnosis}")
+            logger.info(f"✅ MERGED 'What's New' (preserving history): {merged_result}")
             
-            # Compare QME/medical evaluation (2-3 words)
-            if current_analysis.key_concern != prev_concern and current_analysis.key_concern != "Not specified":
-                whats_new["qme"] = f"Concern: {current_analysis.key_concern}"[:30]
-                logger.info(f"🔄 Key concern changed: {prev_concern} -> {current_analysis.key_concern}")
-            
-            # Compare ADL/work restrictions (2-3 words)
-            prev_adl = previous_document.get('adl')
-            prev_restrictions = prev_adl.get('workRestrictions', '') if prev_adl else ''
-            
-            if current_analysis.work_restrictions != prev_restrictions and current_analysis.work_restrictions != "Not specified":
-                whats_new["urDecision"] = f"Work: {current_analysis.work_restrictions}"[:30]
-                logger.info(f"🔄 Work restrictions changed: {prev_restrictions} -> {current_analysis.work_restrictions}")
-            
-            # Legal changes (2-3 words)
-            if current_analysis.status != previous_document.get('status'):
-                whats_new["legal"] = f"Status: {current_analysis.status}"[:20]
-                logger.info(f"🔄 Status changed: {previous_document.get('status')} -> {current_analysis.status}")
-            
-            logger.info("🔄 Document comparison completed")
-            return whats_new
+            # CRITICAL FIX: If no previous documents and AI returns empty, create initial whats_new
+            if not previous_documents and not merged_result:
+                merged_result = self._create_initial_whats_new(current_analysis, mm_dd)
+                
+            return merged_result
             
         except Exception as e:
-            logger.error(f"❌ Document comparison failed: {str(e)}")
-            return {
-                "diagnostic": "Compare error",
-                "qme": "Compare error",
-                "urDecision": "Compare error", 
-                "legal": "Compare error"
-            }
+            logger.error(f"❌ AI comparison failed: {str(e)}")
+            # FIX: Return proper initial whats_new if no previous, otherwise return accumulated data
+            if not previous_documents:
+                return self._create_initial_whats_new(current_analysis, mm_dd)
+            else:
+                return all_previous_whats_new
 
-    def detect_document_type_preview(self, document_text: str) -> str:
-        """Quick document type detection"""
-        text_lower = document_text.lower()
-        if any(term in text_lower for term in ['mri', 'ct scan', 'x-ray', 'ultrasound', 'mammography', 'radiolog']):
-            return "Medical Imaging Report"
-        if any(term in text_lower for term in ['lab result', 'pathology', 'blood test', 'urinalysis', 'biopsy']):
-            return "Laboratory/Pathology Report"
-        if any(term in text_lower for term in ['progress report', 'pr-2', 'follow-up', 'treatment progress']):
-            return "Progress Report"
-        if any(term in text_lower for term in ['independent medical examination', 'ime', 'medical evaluation']):
-            return "Independent Medical Examination"
-        if any(term in text_lower for term in ['request for authorization', 'rfa', 'pre-authorization', 'treatment request']):
-            return "Request for Authorization (RFA)"
-        if any(term in text_lower for term in ['denied', 'denial', 'not authorized', 'coverage denied']):
-            return "Denial/Coverage Decision"
-        if any(term in text_lower for term in ['ttd', 'temporary total disability', 'work restriction', 'return to work']):
-            return "Work Status Document"
-        if any(term in text_lower for term in ['legal opinion', 'attorney', 'litigation', 'deposition']):
-            return "Legal Document"
-        if any(term in text_lower for term in ['patient', 'diagnosis', 'treatment', 'medical', 'physician']):
-            return "Medical Report"
-        return "Unknown Document Type"
+    def _create_initial_whats_new(self, current_analysis: DocumentAnalysis, mm_dd: str) -> Dict[str, str]:
+        """Create initial whats_new data for first document"""
+        initial_whats_new = {}
+        
+        # Based on document type, create appropriate initial entries
+        doc_type_lower = current_analysis.document_type.lower()
+        
+        if 'mri' in doc_type_lower or 'imaging' in doc_type_lower or 'scan' in doc_type_lower:
+            initial_whats_new['diagnostic'] = f"{current_analysis.diagnosis} ({mm_dd})"
+        elif 'qme' in doc_type_lower or 'evaluator' in doc_type_lower:
+            initial_whats_new['qme'] = f"QME evaluation ({mm_dd})"
+        elif 'legal' in doc_type_lower or 'attorney' in doc_type_lower or 'claim' in doc_type_lower:
+            initial_whats_new['legal'] = f"Claim {current_analysis.claim_number} ({mm_dd})"
+        else:
+            # Default fallback for any document type
+            initial_whats_new['diagnostic'] = f"{current_analysis.diagnosis} ({mm_dd})"
+        
+        # Add work restrictions if specified
+        if current_analysis.work_restrictions and current_analysis.work_restrictions.lower() not in ['not specified', 'none', '']:
+            initial_whats_new['ur_decision'] = f"{current_analysis.work_restrictions} ({mm_dd})"
+        
+        logger.info(f"✅ Created initial whats_new: {initial_whats_new}")
+        return initial_whats_new
+
+    def process_document(
+        self, 
+        document_text: str, 
+        previous_documents: List[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Main method to process a document and return all structured data.
+        """
+        if previous_documents is None:
+            previous_documents = []
+        
+        # Extract structured data
+        analysis = self.extract_document_data(document_text)
+        
+        # Generate brief summary
+        brief_summary = self.generate_brief_summary(document_text)
+        
+        # Generate whats_new with history preservation
+        whats_new = self.compare_with_previous_documents(analysis, previous_documents)
+        
+        # FIX: Ensure whats_new is never empty - create minimal default if needed
+        if not whats_new:
+            mm_dd = datetime.now().strftime("%m/%d")
+            whats_new = self._create_initial_whats_new(analysis, mm_dd)
+        
+        # Prepare ADL section
+        adl_data = {
+            "adls_affected": analysis.adls_affected,
+            "work_restrictions": analysis.work_restrictions
+        }
+        
+        # Prepare document summary
+        doc_summary = {
+            "type": analysis.document_type,
+            "date": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "summary": " | ".join(analysis.summary_points)
+        }
+        
+        # Prepare summary snapshot
+        summary_snapshot = {
+            "diagnosis": analysis.diagnosis,
+            "key_concern": analysis.key_concern,
+            "next_step": analysis.next_step
+        }
+        
+        return {
+            "patient_name": analysis.patient_name,
+            "claim_number": analysis.claim_number,
+            "dob": analysis.dob,
+            "doi": analysis.doi,
+            "status": analysis.status,
+            "brief_summary": brief_summary,
+            "summary_snapshot": summary_snapshot,
+            "whats_new": whats_new,
+            "adl": adl_data,
+            "document_summary": doc_summary,
+            "document_type": analysis.document_type,
+            "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        }
