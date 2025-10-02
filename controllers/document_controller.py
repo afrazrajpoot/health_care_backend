@@ -385,7 +385,6 @@ async def extract_documents(
         raise HTTPException(status_code=500, detail=f"Queuing failed: {str(e)}")
 
 from typing import Optional
-
 @router.get('/document')
 async def get_document(
     patient_name: str,
@@ -394,11 +393,11 @@ async def get_document(
     claim_number: Optional[str] = None
 ):
     """
-    Get last two documents for a patient
-    Returns multiple documents in structured format
+    Get aggregated document for a patient
+    Returns a single aggregated document from all patient documents
     """
     try:
-        logger.info(f"📄 Fetching last 2 documents for patient: {patient_name}")
+        logger.info(f"📄 Fetching aggregated document for patient: {patient_name}")
         
         # Parse date strings
         try:
@@ -409,7 +408,7 @@ async def get_document(
         
         db_service = await get_database_service()
         
-        # Get documents (always returns multi-document structure)
+        # Get all documents (aggregated structure)
         document_data = await db_service.get_document_by_patient_details(
             patient_name=patient_name,
             # dob=dob_date,
@@ -417,16 +416,16 @@ async def get_document(
             # claim_number=claim_number
         )
         
-        if not document_data:
+        if not document_data or document_data["total_documents"] == 0:
             raise HTTPException(
                 status_code=404, 
                 detail=f"No documents found for patient: {patient_name}"
             )
         
-        # Format the response
-        response = await format_document_response(document_data)
+        # Format the aggregated response
+        response = await format_aggregated_document_response(document_data)
         
-        logger.info(f"✅ Returned {response['total_documents']} documents for: {patient_name}")
+        logger.info(f"✅ Returned aggregated document for: {patient_name}")
         return response
         
     except HTTPException:
@@ -435,104 +434,173 @@ async def get_document(
         logger.error(f"❌ Error fetching document: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-async def format_document_response(document_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Format the document data response - handles multiple documents"""
+async def format_aggregated_document_response(all_documents_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Format the aggregated document response from all documents"""
+    documents = all_documents_data["documents"]
     
-    # Check if this is a multi-document response
-    if "documents" in document_data and "total_documents" in document_data:
-        return await format_multiple_documents_response(document_data)
+    if not documents:
+        return {
+            "patient_name": all_documents_data["patient_name"],
+            "total_documents": 0,
+            "documents": [],
+            "is_multiple_documents": False
+        }
+    
+    # Use the latest document for base info
+    latest_doc = documents[0]
+    base_response = await format_single_document_base(latest_doc)
+    
+    # Find latest medical document (has summarySnapshot with dx, keyConcern, nextStep)
+    latest_medical_doc = None
+    for doc in documents:
+        summary_snapshot = doc.get("summarySnapshot")
+        if summary_snapshot and summary_snapshot.get("dx") and summary_snapshot.get("keyConcern") and summary_snapshot.get("nextStep"):
+            latest_medical_doc = doc
+            break  # Since ordered desc, first match is latest
+    
+    # summary_snapshot and adl from latest medical
+    if latest_medical_doc:
+        summary_snapshot = await format_summary_snapshot(latest_medical_doc)
+        adl = await format_adl(latest_medical_doc)
     else:
-        # If it's a single document (old format), wrap it in multi-document structure
-        return await format_single_document_as_multiple(document_data)
-
-async def format_single_document_as_multiple(document: Dict[str, Any]) -> Dict[str, Any]:
-    """Format a single document as a multi-document response"""
-    formatted_doc = await format_single_document(document)
-    formatted_doc["document_index"] = 1
-    formatted_doc["is_latest"] = True
+        summary_snapshot = None
+        adl = None
     
+    # whats_new from latest document
+    whats_new = latest_doc.get("whatsNew", {})
+    
+    # document_summary: group by type
+    grouped_summaries = {}
+    grouped_brief_summaries = {}
+    for doc in documents:
+        # Group brief_summary by type
+        doc_summary = doc.get("documentSummary")
+        doc_type = doc_summary.get("type", "unknown") if doc_summary else "unknown"
+        
+        brief_summary = doc.get("briefSummary")
+        if brief_summary:
+            if doc_type not in grouped_brief_summaries:
+                grouped_brief_summaries[doc_type] = []
+            grouped_brief_summaries[doc_type].append(brief_summary)
+        
+        # Group document_summary
+        if doc_summary:
+            if doc_type not in grouped_summaries:
+                grouped_summaries[doc_type] = []
+            summary_entry = {
+                "date": doc_summary.get("date").isoformat() if doc_summary.get("date") else None,
+                "summary": doc_summary.get("summary")
+            }
+            grouped_summaries[doc_type].append(summary_entry)
+    
+    base_response.update({
+        "summary_snapshot": summary_snapshot,
+        "whats_new": whats_new,
+        "adl": adl,
+        "document_summary": grouped_summaries,
+        "brief_summary": grouped_brief_summaries,
+        "document_index": 1,
+        "is_latest": True
+    })
+    
+    # Wrap in single document structure
     return {
-        "patient_name": document.get("patientName"),
-        "total_documents": 1,
-        "documents": [formatted_doc],
+        "patient_name": all_documents_data["patient_name"],
+        "total_documents": all_documents_data["total_documents"],
+        "documents": [base_response],
         "is_multiple_documents": False
     }
 
-async def format_multiple_documents_response(response_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Format response for multiple documents"""
-    formatted_documents = []
-    
-    for doc in response_data["documents"]:
-        formatted_doc = await format_single_document(doc)
-        formatted_doc["document_index"] = doc.get("document_index")
-        formatted_doc["is_latest"] = doc.get("is_latest", False)
-        formatted_documents.append(formatted_doc)
-    
+async def format_single_document_base(document: Dict[str, Any]) -> Dict[str, Any]:
+    """Format base info for a single document"""
     return {
-        "patient_name": response_data["patient_name"],
-        "total_documents": response_data["total_documents"],
-        "documents": formatted_documents,
-        "is_multiple_documents": True
-    }
-
-async def format_single_document(document: Dict[str, Any]) -> Dict[str, Any]:
-    """Format a single document"""
-    # Base document info
-    response = {
         "document_id": document.get("id"),
         "patient_name": document.get("patientName"),
         "dob": document.get("dob").isoformat() if document.get("dob") else None,
         "doi": document.get("doi").isoformat() if document.get("doi") else None,
         "claim_number": document.get("claimNumber"),
         "status": document.get("status"),
-        "brief_summary": document.get("briefSummary"),
         "gcs_file_link": document.get("gcsFileLink"),
         "created_at": document.get("createdAt").isoformat() if document.get("createdAt") else None,
         "updated_at": document.get("updatedAt").isoformat() if document.get("updatedAt") else None,
     }
-    
-    # Add summary snapshot data
+
+async def format_summary_snapshot(document: Dict[str, Any]) -> Dict[str, Any]:
+    """Format summary snapshot"""
     summary_snapshot = document.get("summarySnapshot")
     if summary_snapshot:
-        response["summary_snapshot"] = {
+        return {
             "diagnosis": summary_snapshot.get("dx"),
             "key_concern": summary_snapshot.get("keyConcern"),
             "next_step": summary_snapshot.get("nextStep")
         }
-    else:
-        response["summary_snapshot"] = None
-    
-    # Add what's new data
-    whats_new = document.get("whatsNew")
-    if whats_new:
-        response["whats_new"] = {
-            "diagnostic": whats_new.get("diagnostic"),
-            "qme": whats_new.get("qme"),
-            "ur_decision": whats_new.get("urDecision"),
-            "legal": whats_new.get("legal")
-        }
-    else:
-        response["whats_new"] = None
-    
-    # Add ADL data
+    return None
+
+async def format_adl(document: Dict[str, Any]) -> Dict[str, Any]:
+    """Format ADL data"""
     adl_data = document.get("adl")
     if adl_data:
-        response["adl"] = {
+        return {
             "adls_affected": adl_data.get("adlsAffected"),
             "work_restrictions": adl_data.get("workRestrictions")
         }
-    else:
-        response["adl"] = None
-    
-    # Add document summary
-    doc_summary = document.get("documentSummary")
-    if doc_summary:
-        response["document_summary"] = {
-            "type": doc_summary.get("type"),
-            "date": doc_summary.get("date").isoformat() if doc_summary.get("date") else None,
-            "summary": doc_summary.get("summary")
+    return None
+
+async def get_document_by_patient_details(
+    self, 
+    patient_name: str,
+    dob: Optional[datetime] = None,
+    doi: Optional[datetime] = None,
+    claim_number: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Retrieve all documents for patient
+    Returns structured response with all documents for aggregation
+    """
+    try:
+        where_clause = {"patientName": patient_name}
+        if claim_number:
+            where_clause["claimNumber"] = claim_number
+        if dob:
+            where_clause["dob"] = dob
+        if doi:
+            where_clause["doi"] = doi
+        
+        logger.info(f"🔍 Getting all documents for patient: {patient_name}")
+        
+        # Get all documents for this patient, ordered by createdAt desc
+        documents = await self.prisma.document.find_many(
+            where=where_clause,
+            include={
+                "summarySnapshot": True,
+                "adl": True,
+                "documentSummary": True
+                # NO "whatsNew" - scalar Json
+            },
+            order={"createdAt": "desc"}
+            # No take limit, fetch all
+        )
+        
+        logger.info(f"📋 Found {len(documents)} documents for {patient_name}")
+        
+        # Return the all-documents structure for aggregation
+        response = {
+            "patient_name": patient_name,
+            "total_documents": len(documents),
+            "documents": []
         }
-    else:
-        response["document_summary"] = None
-    
-    return response
+        
+        for i, doc in enumerate(documents):
+            doc_data = doc.dict()
+            response["documents"].append(doc_data)
+            logger.info(f"📄 Added document {i+1}: ID {doc.id}")
+        
+        return response
+                        
+    except Exception as e:
+        logger.error(f"❌ Error retrieving documents for {patient_name}: {str(e)}")
+        return {
+            "patient_name": patient_name,
+            "total_documents": 0,
+            "documents": []
+        }

@@ -135,7 +135,7 @@ class ReportAnalyzer:
         * qme: Qualified Medical Evaluator reports, independent medical exams
         * raf: Risk Adjustment Factor reports, claim adjustments
         * ur_decision: Utilization Review decisions, work restrictions, treatment approvals
-        * legal: Legal developments, attorney letters, claim updates
+        * legal: Legal developments, attorney letters, claim updates, whether approved or denied along with reason.
         
         - For EACH category, provide a concise description (3-5 words) with date in MM/DD format
         - Include SPECIFIC FINDINGS like diagnosis, test results, restrictions
@@ -376,63 +376,32 @@ class ReportAnalyzer:
         logger.info(f"✅ Created initial whats_new: {initial_whats_new}")
         return initial_whats_new
 
-    def process_document(
-        self, 
-        document_text: str, 
-        previous_documents: List[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+    def format_whats_new_as_highlights(self, whats_new_dict: Dict[str, str], current_date: str) -> List[str]:
         """
-        Main method to process a document and return all structured data.
+        Formats the merged 'whats_new' dict into bullet-point highlights.
+        Preserves arrows for changes; uses plain descriptions for new items.
+        Maps internal keys to sample categories (e.g., 'diagnostic' → 'New diagnostics').
         """
-        if previous_documents is None:
-            previous_documents = []
-        
-        # Extract structured data
-        analysis = self.extract_document_data(document_text)
-        
-        # Generate brief summary
-        brief_summary = self.generate_brief_summary(document_text)
-        
-        # Generate whats_new with history preservation
-        whats_new = self.compare_with_previous_documents(analysis, previous_documents)
-        
-        # FIX: Ensure whats_new is never empty - create minimal default if needed
-        if not whats_new:
-            mm_dd = datetime.now().strftime("%m/%d")
-            whats_new = self._create_initial_whats_new(analysis, mm_dd)
-        
-        # Prepare ADL section
-        adl_data = {
-            "adls_affected": analysis.adls_affected,
-            "work_restrictions": analysis.work_restrictions
+        mm_dd = datetime.strptime(current_date, "%Y-%m-%d").strftime("%m/%d")
+        category_mapping = {
+            "diagnostic": "New diagnostics",
+            "qme": "New consults",
+            "raf": "New authorizations/denials",
+            "ur_decision": "New authorizations/denials",
+            "legal": "Other"
         }
         
-        # Prepare document summary
-        doc_summary = {
-            "type": analysis.document_type,
-            "date": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "summary": " | ".join(analysis.summary_points)
-        }
+        highlights = []
+        for internal_key, value in whats_new_dict.items():
+            if not value.strip():
+                continue
+            user_friendly_key = category_mapping.get(internal_key, "Other")
+            # Ensure date is appended if missing
+            if not re.search(r'\(\d{2}/\d{2}\)', value):
+                value += f" ({mm_dd})"
+            highlights.append(f"• **{user_friendly_key}**: {value}")
         
-        # Prepare summary snapshot
-        summary_snapshot = {
-            "diagnosis": analysis.diagnosis,
-            "key_concern": analysis.key_concern,
-            "next_step": analysis.next_step
-        }
+        if not highlights:
+            highlights = ["• No new changes since last visit."]
         
-        return {
-            "patient_name": analysis.patient_name,
-            "claim_number": analysis.claim_number,
-            "dob": analysis.dob,
-            "doi": analysis.doi,
-            "status": analysis.status,
-            "brief_summary": brief_summary,
-            "summary_snapshot": summary_snapshot,
-            "whats_new": whats_new,
-            "adl": adl_data,
-            "document_summary": doc_summary,
-            "document_type": analysis.document_type,
-            "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "updated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        }
+        return highlights

@@ -130,7 +130,7 @@ class DatabaseService:
                     # NO "whatsNew" - scalar Json
                 },
                 order={"createdAt": "desc"},
-                take=2
+                # take=2
             )
             
             logger.info(f"📋 Found {len(documents)} documents for {patient_name}")
