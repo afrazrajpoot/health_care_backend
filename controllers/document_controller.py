@@ -450,21 +450,11 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
     latest_doc = documents[0]
     base_response = await format_single_document_base(latest_doc)
     
-    # Find latest medical document (has summarySnapshot with dx, keyConcern, nextStep)
-    latest_medical_doc = None
-    for doc in documents:
-        summary_snapshot = doc.get("summarySnapshot")
-        if summary_snapshot and summary_snapshot.get("dx") and summary_snapshot.get("keyConcern") and summary_snapshot.get("nextStep"):
-            latest_medical_doc = doc
-            break  # Since ordered desc, first match is latest
+    # Collect all full summarySnapshot objects in an array (latest first)
+    summary_snapshots = [doc.get("summarySnapshot") for doc in documents]
     
-    # summary_snapshot and adl from latest medical
-    if latest_medical_doc:
-        summary_snapshot = await format_summary_snapshot(latest_medical_doc)
-        adl = await format_adl(latest_medical_doc)
-    else:
-        summary_snapshot = None
-        adl = None
+    # adl from latest document
+    adl = await format_adl(latest_doc)
     
     # whats_new from latest document
     whats_new = latest_doc.get("whatsNew", {})
@@ -494,7 +484,7 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
             grouped_summaries[doc_type].append(summary_entry)
     
     base_response.update({
-        "summary_snapshot": summary_snapshot,
+        "summary_snapshots": summary_snapshots,
         "whats_new": whats_new,
         "adl": adl,
         "document_summary": grouped_summaries,
@@ -508,7 +498,7 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
         "patient_name": all_documents_data["patient_name"],
         "total_documents": all_documents_data["total_documents"],
         "documents": [base_response],
-        "is_multiple_documents": False
+        "is_multiple_documents": len(documents) > 1
     }
 
 async def format_single_document_base(document: Dict[str, Any]) -> Dict[str, Any]:
@@ -525,17 +515,6 @@ async def format_single_document_base(document: Dict[str, Any]) -> Dict[str, Any
         "updated_at": document.get("updatedAt").isoformat() if document.get("updatedAt") else None,
     }
 
-async def format_summary_snapshot(document: Dict[str, Any]) -> Dict[str, Any]:
-    """Format summary snapshot"""
-    summary_snapshot = document.get("summarySnapshot")
-    if summary_snapshot:
-        return {
-            "diagnosis": summary_snapshot.get("dx"),
-            "key_concern": summary_snapshot.get("keyConcern"),
-            "next_step": summary_snapshot.get("nextStep")
-        }
-    return None
-
 async def format_adl(document: Dict[str, Any]) -> Dict[str, Any]:
     """Format ADL data"""
     adl_data = document.get("adl")
@@ -545,62 +524,3 @@ async def format_adl(document: Dict[str, Any]) -> Dict[str, Any]:
             "work_restrictions": adl_data.get("workRestrictions")
         }
     return None
-
-async def get_document_by_patient_details(
-    self, 
-    patient_name: str,
-    dob: Optional[datetime] = None,
-    doi: Optional[datetime] = None,
-    claim_number: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Retrieve all documents for patient
-    Returns structured response with all documents for aggregation
-    """
-    try:
-        where_clause = {"patientName": patient_name}
-        if claim_number:
-            where_clause["claimNumber"] = claim_number
-        if dob:
-            where_clause["dob"] = dob
-        if doi:
-            where_clause["doi"] = doi
-        
-        logger.info(f"🔍 Getting all documents for patient: {patient_name}")
-        
-        # Get all documents for this patient, ordered by createdAt desc
-        documents = await self.prisma.document.find_many(
-            where=where_clause,
-            include={
-                "summarySnapshot": True,
-                "adl": True,
-                "documentSummary": True
-                # NO "whatsNew" - scalar Json
-            },
-            order={"createdAt": "desc"}
-            # No take limit, fetch all
-        )
-        
-        logger.info(f"📋 Found {len(documents)} documents for {patient_name}")
-        
-        # Return the all-documents structure for aggregation
-        response = {
-            "patient_name": patient_name,
-            "total_documents": len(documents),
-            "documents": []
-        }
-        
-        for i, doc in enumerate(documents):
-            doc_data = doc.dict()
-            response["documents"].append(doc_data)
-            logger.info(f"📄 Added document {i+1}: ID {doc.id}")
-        
-        return response
-                        
-    except Exception as e:
-        logger.error(f"❌ Error retrieving documents for {patient_name}: {str(e)}")
-        return {
-            "patient_name": patient_name,
-            "total_documents": 0,
-            "documents": []
-        }

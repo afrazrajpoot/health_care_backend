@@ -20,7 +20,7 @@ class DocumentAnalysis(BaseModel):
     dob: str = Field(..., description="Date of birth in YYYY-MM-DD format")
     doi: str = Field(..., description="Date of injury in YYYY-MM-DD format")
     status: str = Field(..., description="Current status: normal, urgent, critical, etc.")
-    diagnosis: str = Field(..., description="Primary diagnosis in 2-3 words")
+    diagnosis: str = Field(..., description="Primary diagnosis and key findings (comma-separated if multiple, 5-10 words total)")
     key_concern: str = Field(..., description="Main clinical concern in 2-3 words")
     next_step: str = Field(..., description="Recommended next steps in 2-3 words")
     adls_affected: str = Field(..., description="Activities affected in 2-3 words")
@@ -55,14 +55,14 @@ class ReportAnalyzer:
         
         CURRENT DATE: {current_date}
         
-        EXTRACT THE FOLLOWING INFORMATION IN POINT FORM (2-3 WORDS MAX PER FIELD):
+        EXTRACT THE FOLLOWING INFORMATION IN POINT FORM :
         
         - Patient name (full name)
         - Claim number or case ID (look for patterns like WC-, CL-, Case No., Claim #, etc. If not found, use "Not specified")
         - Date of birth (DOB) in YYYY-MM-DD format
         - Date of injury (DOI) in YYYY-MM-DD format  
         - Current status (normal, urgent, critical)
-        - Primary diagnosis 
+        - Primary diagnosis and 2-3 key findings (comma-separated if multiple)
         - Key clinical concerns 
         - Recommended next steps 
         - Activities of daily living affected
@@ -71,7 +71,8 @@ class ReportAnalyzer:
         - 3-5 key summary points 
         
         CRITICAL INSTRUCTIONS:
-        - For diagnosis, key_concern, next_step, adls_affected, work_restrictions, use 2-3 words max.
+        - For diagnosis, include primary diagnosis plus 2-3 key findings (e.g., "Normal MRI, no mass lesion, clear sinuses"), comma-separated, up to 10 words total.
+        - For key_concern, next_step, adls_affected, work_restrictions: Keep to 2-3 words each.
         - For summary_points, provide 3-5 bullet points, each 2-3 words.
         - If claim number is not explicitly found, use "Not specified".
         - Do NOT invent claim numbers. Use patterns: WC-2024-001, CL-12345, Case No. 123, Claim # ABC123.
@@ -114,7 +115,7 @@ class ReportAnalyzer:
 
     def create_whats_new_prompt(self) -> PromptTemplate:
         template = """
-        You are a medical document comparison expert. Analyze the patient's medical history and current document to identify what's new in their treatment journey.
+        You are a medical document comparison expert. Compile the patient's complete medical history and current document into a historical progression format.
         
         PATIENT'S MEDICAL HISTORY (most recent first):
         {previous_analyses}
@@ -125,40 +126,43 @@ class ReportAnalyzer:
         CURRENT DATE: {current_date}
         
         CRITICAL INSTRUCTIONS:
-        - Track ONLY ACTUAL CHANGES from previous documents to current document
-        - Use arrow notation "→" ONLY when there is a REAL CHANGE in diagnosis, treatment, or findings
-        - If something is EXACTLY THE SAME as previous, DO NOT include it in "What's New"
-        - If this is the FIRST document (no previous), just show the pure findings WITHOUT arrows
-        - Only show CONTINUING items if they are actively mentioned as ongoing in the current document
-        - Categorize changes into these specific categories when relevant:
-        * diagnostic: Test results, imaging reports, diagnosis changes, medical findings
+        - Compile ALL data from previous documents and current document into a single historical chain
+        - Use arrow notation "→" to indicate progression or continuation across all documents
+        - Include EVERY diagnosis, treatment, finding, etc., without skipping any data
+        - If patient has multiple diagnoses, include ALL of them in the chain
+        - For first document (no previous), show all pure findings WITHOUT arrows
+        - Show ALL continuing items as they appear in sequence
+        - Categorize ALL items into these specific categories:
+        * diagnostic: Diagnosis changes, medical findings
         * qme: Qualified Medical Evaluator reports, independent medical exams
         * raf: Risk Adjustment Factor reports, claim adjustments
         * ur_decision: Utilization Review decisions, work restrictions, treatment approvals
         * legal: Legal developments, attorney letters, claim updates, whether approved or denied along with reason.
         
         - For EACH category, provide a concise description (3-5 words) with date in MM/DD format
-        - Include SPECIFIC FINDINGS like diagnosis, test results, restrictions
-        - ONLY include categories with ACTUAL NEW INFORMATION or REAL CHANGES
-        - Use format: "Previous → Current (MM/DD)" for REAL changes, "Description (MM/DD)" for first-time items
-        - DO NOT use arrows for items that are exactly the same as before
+        - Include SPECIFIC FINDINGS like all diagnoses, test results, restrictions - list multiples separated by commas
+        - Include ALL categories with data from any document
+        - Only include categories that have actual data. Do not include entries with 'None' or empty.
+        - Use format: "Previous Item → Current Item (MM/DD)" for progression across documents, "Item (MM/DD)" for first-time or standalone items
+        - Build a full history chain showing evolution over time
+        - For diagnostic category, use the full diagnosis string from current_analysis.diagnosis (which includes comma-separated key findings).
         
-        IMPORTANT: Only show what is TRULY new or changed. Skip anything that is identical to previous documents.
+        IMPORTANT: Include ALL historical data in the chain. Do not skip or omit any information. Focus on historical progression format.
         
         EXAMPLES FOR FIRST DOCUMENT:
-        - First MRI report: {{"diagnostic": "MRI lumbar strain (10/02)"}}
-        - First QME report: {{"qme": "QME evaluation (10/02)"}}
-        - First legal document: {{"legal": "Claim QM12345 (10/02)"}}
+        - First MRI report: {{"diagnostic": "Normal MRI, no mass lesion, clear sinuses (10/02)"}}
+        - First QME report: {{"qme": "QME evaluation, restrictions (10/02)"}}
+        - First legal document: {{"legal": "Claim QM12345 approved (10/02)"}}
         
-        EXAMPLES FOR REAL CHANGES:
-        - Diagnosis changed from lumbar strain to disc bulge: {{"diagnostic": "lumbar strain → disc bulge (10/02)"}}
-        - New work restrictions added: {{"ur_decision": "no heavy lifting (10/02)"}}
-        - New attorney letter received: {{"legal": "Attorney letter (10/02)"}}
+        EXAMPLES FOR HISTORICAL CHAIN:
+        - Diagnosis progression: {{"diagnostic": "lumbar strain (09/01) → lumbar strain, disc bulge, no compression (10/02)"}}
+        - Multiple work restrictions: {{"ur_decision": "light duty (09/01) → no heavy lifting, no bending (10/02)"}}
+        - Legal updates: {{"legal": "Claim QM12345 filed (09/01) → Claim QM12345 approved (10/02)"}}
         
-        EXAMPLES OF WHAT TO AVOID:
-        - ❌ DON'T: "QME evaluation (10/02) → (10/02)" (no real change)
-        - ❌ DON'T: "physical therapy (10/02) → (10/02)" (no real change)
-        - ❌ DON'T: "Claim QM12345 (10/02) → (10/02)" (no real change)
+        EXAMPLES OF WHAT TO INCLUDE:
+        - ✅ DO: Chain all diagnoses even if continuing: "strain → strain, bulge, no compression (10/02)"
+        - ✅ DO: List multiples: "PT, meds, restrictions (10/02)"
+        - ✅ DO: Show all history: "denied (09/01) → approved (10/02)"
         
         {format_instructions}
         
@@ -169,7 +173,6 @@ class ReportAnalyzer:
             input_variables=["previous_analyses", "current_analysis", "current_date"],
             partial_variables={"format_instructions": self.whats_new_parser.get_format_instructions()},
         )
-
     def extract_claim_number_from_text(self, document_text: str) -> Optional[str]:
         try:
             patterns = [
@@ -204,7 +207,7 @@ class ReportAnalyzer:
                 if regex_claim:
                     result['claim_number'] = regex_claim
                     logger.info(f"🔄 Updated claim number via regex: {regex_claim}")
-            logger.info(f"✅ Extracted data: Patient={result['patient_name']}, Claim={result['claim_number']}")
+            logger.info(f"✅ Extracted data: Patient={result['patient_name']}, Claim={result['claim_number']}, Diagnosis={result['diagnosis']}")
             return DocumentAnalysis(**result)
         except Exception as e:
             logger.error(f"❌ Document analysis failed: {str(e)}")
@@ -274,7 +277,7 @@ class ReportAnalyzer:
             for doc in sorted_prev:
                 whats_new = doc.get('whatsNew') or doc.get('whats_new') or {}
                 for category, value in whats_new.items():
-                    if value and isinstance(value, str) and value.strip():  # Only add non-empty string values
+                    if value and isinstance(value, str) and value.strip() and value.lower() != 'none':  # Only add non-empty string values, skip 'none'
                         all_previous_whats_new[category] = value
         
         logger.info(f"DEBUG: Accumulated previous whats_new: {all_previous_whats_new}")
@@ -332,7 +335,7 @@ class ReportAnalyzer:
             
             # Add new changes from current analysis
             for category, value in result.items():
-                if value and isinstance(value, str) and value.strip():
+                if value and isinstance(value, str) and value.strip() and value.lower() != 'none':
                     # Update with latest value (this will overwrite previous with updated info)
                     merged_result[category] = value
             
@@ -360,13 +363,16 @@ class ReportAnalyzer:
         doc_type_lower = current_analysis.document_type.lower()
         
         if 'mri' in doc_type_lower or 'imaging' in doc_type_lower or 'scan' in doc_type_lower:
-            initial_whats_new['diagnostic'] = f"{current_analysis.diagnosis} ({mm_dd})"
+            if current_analysis.diagnosis and current_analysis.diagnosis.lower() not in ['not specified', 'none']:
+                initial_whats_new['diagnostic'] = f"{current_analysis.diagnosis} ({mm_dd})"
         elif 'qme' in doc_type_lower or 'evaluator' in doc_type_lower:
             initial_whats_new['qme'] = f"QME evaluation ({mm_dd})"
         elif 'legal' in doc_type_lower or 'attorney' in doc_type_lower or 'claim' in doc_type_lower:
-            initial_whats_new['legal'] = f"Claim {current_analysis.claim_number} ({mm_dd})"
-        else:
-            # Default fallback for any document type
+            if current_analysis.claim_number and current_analysis.claim_number.lower() != 'not specified':
+                initial_whats_new['legal'] = f"Claim {current_analysis.claim_number} ({mm_dd})"
+        
+        # Default fallback for any document type if no specific match
+        if not initial_whats_new and current_analysis.diagnosis and current_analysis.diagnosis.lower() not in ['not specified', 'none']:
             initial_whats_new['diagnostic'] = f"{current_analysis.diagnosis} ({mm_dd})"
         
         # Add work restrictions if specified
