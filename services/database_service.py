@@ -103,14 +103,15 @@ class DatabaseService:
         patient_name: str,
         dob: Optional[datetime] = None,
         doi: Optional[datetime] = None,
-        claim_number: Optional[str] = None
+        claim_number: Optional[str] = None,
+        physicianId: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Retrieve last two documents for patient
         Returns structured response with multiple documents
         """
         try:
-            where_clause = {"patientName": patient_name}
+            where_clause = {"patientName": patient_name, "physicianId": physicianId}
             if claim_number:
                 where_clause["claimNumber"] = claim_number
             if dob:
@@ -215,6 +216,7 @@ class DatabaseService:
     async def get_all_unverified_documents(
         self, 
         patient_name: str, 
+        physicianId: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Retrieve all unverified documents for patient where status is NOT 'verified'
@@ -227,6 +229,7 @@ class DatabaseService:
             documents = await self.prisma.document.find_many(
                 where={
                     "patientName": patient_name,
+                    "physicianId": physicianId,
                     "status": {
                         "not": "verified"   # 👈 This is the key change
                     }
@@ -315,7 +318,8 @@ class DatabaseService:
         summary_snapshot: Dict[str, str],
         whats_new: Dict[str, str],
         adl_data: Dict[str, str],
-        document_summary: Dict[str, Any]
+        document_summary: Dict[str, Any],
+        physician_id: Optional[str] = None
     ) -> str:
         """
         Save document analysis results to database.
@@ -341,6 +345,7 @@ class DatabaseService:
                     "gcsFileLink": gcs_file_link,
                     "briefSummary": brief_summary,
                     "whatsNew": whats_new_json,  # JSON string for scalar Json field
+                    "physicianId": physician_id,
                     # Optional: Add these if you extend schema
                     # "originalName": file_name,
                     # "fileSize": file_size,

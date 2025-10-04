@@ -1,7 +1,4 @@
-
-
-
-from fastapi import APIRouter, File, UploadFile, HTTPException, Request
+from fastapi import APIRouter, File, UploadFile, HTTPException, Request, Query
 from typing import Dict, List, Any
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +32,22 @@ async def save_document_webhook(request: Request):
         analyzer = ReportAnalyzer()
         document_analysis = analyzer.extract_document_data(result_data.get("text", ""))
         
+        # Check for required fields before proceeding
+        required_fields = {
+            "patient_name": document_analysis.patient_name,
+            "dob": document_analysis.dob,
+            "doi": document_analysis.doi
+        }
+        missing_fields = [k for k, v in required_fields.items() if not v]
+        if missing_fields:
+            warning_msg = f"Document ignored: this document is invalid for file {data['filename']}"
+            logger.warning(f"⚠️ {warning_msg}")
+            return {
+                "status": "ignored",
+                "reason": "Invalid document",
+                "filename": data["filename"]
+            }
+        
         # Generate AI brief summary
         brief_summary = analyzer.generate_brief_summary(result_data.get("text", ""))
         
@@ -61,7 +74,8 @@ async def save_document_webhook(request: Request):
         
         # Retrieve previous documents
         db_response = await db_service.get_all_unverified_documents(
-            document_analysis.patient_name
+            document_analysis.patient_name,
+            physicianId=data.get("physician_id", None)
         )
         
         # Extract documents list from database response
@@ -73,6 +87,16 @@ async def save_document_webhook(request: Request):
             previous_documents
         )
         print(whats_new_data,'what new data')
+        
+        # Check if whats_new_data is valid; if not, ignore the document
+        if whats_new_data is None or not isinstance(whats_new_data, dict):
+            warning_msg = f"Document ignored: this document is invalid for file {data['filename']}"
+            logger.warning(f"⚠️ {warning_msg}")
+            return {
+                "status": "ignored",
+                "reason": "Invalid document",
+                "filename": data["filename"]
+            }
         
         summary_snapshot = {
             "dx": document_analysis.diagnosis,
@@ -125,7 +149,8 @@ async def save_document_webhook(request: Request):
             summary_snapshot=summary_snapshot,
             whats_new=whats_new_data,
             adl_data=adl_data,
-            document_summary=document_summary
+            document_summary=document_summary,
+            physician_id=data.get("physician_id")  # Pass physician_id if provided in webhook payload
         )
 
         logger.info(f"💾 Document saved via webhook with ID: {document_id}")
@@ -137,7 +162,7 @@ async def save_document_webhook(request: Request):
 
 # Celery task for processing a single document
 @celery_app.task(bind=True, name='process_document_task', max_retries=3, retry_backoff=True)
-def process_document_task(self, gcs_url: str, original_filename: str, mime_type: str, file_size: int, blob_path: str):
+def process_document_task(self, gcs_url: str, original_filename: str, mime_type: str, file_size: int, blob_path: str, physician_id: str = None):
     """
     Celery task to process a single document and trigger webhook for database save.
     """
@@ -169,6 +194,8 @@ def process_document_task(self, gcs_url: str, original_filename: str, mime_type:
         logger.info(f"📋 MIME type: {mime_type}")
         logger.info(f"☁️ GCS URL: {gcs_url}")
         logger.info(f"📍 Blob path: {blob_path}")
+        if physician_id:
+            logger.info(f"👨‍⚕️ Physician ID: {physician_id}")
         
         # Download from GCS to temp for processing
         try:
@@ -259,7 +286,8 @@ def process_document_task(self, gcs_url: str, original_filename: str, mime_type:
             "mime_type": mime_type or "application/octet-stream",
             "processing_time_ms": int(processing_time),
             "gcs_url": gcs_url,
-            "document_id": result.document_id
+            "document_id": result.document_id,
+            "physician_id": physician_id  # Pass physician_id to webhook
         }
         
         # Call webhook to save to database synchronously
@@ -269,8 +297,13 @@ def process_document_task(self, gcs_url: str, original_filename: str, mime_type:
             response = requests.post(webhook_url, json=webhook_payload, timeout=30)
             if response.status_code == 200:
                 response_data = response.json()
-                result.document_id = response_data.get("document_id", result.document_id)
-                logger.info(f"✅ Webhook called successfully, document ID: {result.document_id}")
+                if response_data.get("status") == "ignored":
+                    logger.warning(f"⚠️ Document ignored: {response_data.get('reason', '')} for {original_filename}")
+                    result.document_id = f"ignored_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    result.database_error = response_data.get('reason', 'Ignored due to missing info')
+                else:
+                    result.document_id = response_data.get("document_id", result.document_id)
+                    logger.info(f"✅ Webhook called successfully, document ID: {result.document_id}")
             else:
                 logger.error(f"❌ Webhook call failed with status {response.status_code}: {response.text}")
                 result.database_error = f"Webhook call failed with status {response.status_code}: {response.text}"
@@ -288,7 +321,8 @@ def process_document_task(self, gcs_url: str, original_filename: str, mime_type:
             "processing_time_ms": int(processing_time),
             "filename": original_filename,
             "gcs_url": gcs_url,
-            "document_id": result.document_id
+            "document_id": result.document_id,
+            "physician_id": physician_id
         }
     
     except Exception as e:
@@ -314,7 +348,8 @@ def process_document_task(self, gcs_url: str, original_filename: str, mime_type:
 
 @router.post("/extract-documents", response_model=Dict[str, List[str]])
 async def extract_documents(
-    documents: List[UploadFile] = File(...)
+    documents: List[UploadFile] = File(...),
+    physicianId: str = Query(None, description="Optional physician ID for associating documents")
 ):
     """
     Upload multiple documents and queue them for asynchronous processing with Celery.
@@ -329,6 +364,8 @@ async def extract_documents(
     
     try:
         logger.info(f"\n🔄 === NEW MULTI-DOCUMENT PROCESSING REQUEST ({len(documents)} files) ===\n")
+        if physicianId:
+            logger.info(f"👨‍⚕️ Physician ID provided: {physicianId}")
         
         for document in documents:
             content = await document.read()
@@ -346,14 +383,15 @@ async def extract_documents(
             logger.info(f"📎 Signed GCS URL: {gcs_url}")
             uploaded_files.append(blob_path)
             
-            # Enqueue Celery task
+            # Enqueue Celery task with physician_id
             logger.debug(f"DEBUG: Queuing task for {document.filename}")
             task = process_document_task.delay(
                 gcs_url=gcs_url,
                 original_filename=document.filename,
                 mime_type=document.content_type,
                 file_size=len(content),
-                blob_path=blob_path
+                blob_path=blob_path,
+                physician_id=physicianId  # Pass the physicianId to the task
             )
             task_ids.append(task.id)
             logger.info(f"🚀 Task queued: {task.id}")
@@ -383,13 +421,13 @@ async def extract_documents(
             except:
                 logger.warning(f"⚠️ Failed to delete GCS file: {path}")
         raise HTTPException(status_code=500, detail=f"Queuing failed: {str(e)}")
-
 from typing import Optional
 @router.get('/document')
 async def get_document(
     patient_name: str,
     dob: str,
     doi: str,
+    physicianId:str,
     claim_number: Optional[str] = None
 ):
     """
@@ -411,6 +449,7 @@ async def get_document(
         # Get all documents (aggregated structure)
         document_data = await db_service.get_document_by_patient_details(
             patient_name=patient_name,
+            physicianId=physicianId,
             # dob=dob_date,
             # doi=doi_date,
             # claim_number=claim_number
