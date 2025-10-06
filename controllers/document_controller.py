@@ -422,12 +422,14 @@ async def extract_documents(
                 logger.warning(f"⚠️ Failed to delete GCS file: {path}")
         raise HTTPException(status_code=500, detail=f"Queuing failed: {str(e)}")
 from typing import Optional
+
+
 @router.get('/document')
 async def get_document(
     patient_name: str,
     dob: str,
     doi: str,
-    physicianId:str,
+    physicianId: Optional[str] = None,
     claim_number: Optional[str] = None
 ):
     """
@@ -563,3 +565,27 @@ async def format_adl(document: Dict[str, Any]) -> Dict[str, Any]:
             "work_restrictions": adl_data.get("workRestrictions")
         }
     return None
+
+@router.post("/proxy-decrypt")
+async def proxy_decrypt(request: Request):
+    """
+    Proxy endpoint to decrypt patient token and return data.
+    This can be called from Next.js to avoid CORS issues.
+    """
+    db_service = await get_database_service()
+    try:
+        # Parse JSON body from request
+        body = await request.json()
+        token = body.get("token")
+        if not token:
+            raise HTTPException(status_code=400, detail="Missing 'token' in request body")
+        
+        patient_data = db_service.decrypt_patient_token(token)
+        return {"success": True, "data": patient_data}
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid token")
+    except Exception as e:
+        logger.error(f"❌ Decryption error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Decryption failed")

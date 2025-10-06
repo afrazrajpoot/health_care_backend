@@ -7,18 +7,43 @@ from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 from prisma import Prisma
 from models.schemas import ExtractionResult
+from cryptography.fernet import Fernet
+from cryptography.exceptions import InvalidKey
+import base64
 
 load_dotenv()
 logger = logging.getLogger("document_ai")
 
 class DatabaseService:
     """Service for database operations using your schema structure"""
-    
+   
     def __init__(self):
         self.prisma = Prisma()
-        
+        self._init_encryption()
         if not os.getenv("DATABASE_URL"):
             raise ValueError("DATABASE_URL environment variable not set")
+    
+    def _init_encryption(self):
+        """Initialize encryption suite with validation and optional key generation."""
+        encryption_key_str = os.getenv('ENCRYPTION_KEY')
+        if not encryption_key_str:
+            logger.warning("⚠️ ENCRYPTION_KEY not set. Generating a new one for development (insecure for production).")
+            new_key = Fernet.generate_key().decode()  # Use module-level Fernet
+            logger.info(f"Generated key: {new_key}")
+            logger.info("💡 Set this as ENCRYPTION_KEY in your .env file for production.")
+            self.encryption_key = new_key.encode()
+        else:
+            try:
+                self.encryption_key = encryption_key_str.encode('utf-8')
+                self.cipher_suite = Fernet(self.encryption_key)
+                # Quick validation: Try to create a dummy token
+                dummy_token = self.cipher_suite.encrypt(b"test")
+                self.cipher_suite.decrypt(dummy_token)  # Should succeed
+                logger.info("🔐 Encryption key validated successfully.")
+            except (ValueError, InvalidKey) as e:
+                logger.error(f"❌ Invalid ENCRYPTION_KEY: {str(e)}")
+                logger.info("💡 Generate a new one: from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+                raise ValueError(f"Invalid ENCRYPTION_KEY: {str(e)}. Please set a valid 32-byte base64 key.")
     
     async def connect(self):
         """Connect to the database"""
@@ -101,9 +126,6 @@ class DatabaseService:
     async def get_document_by_patient_details(
         self, 
         patient_name: str,
-        dob: Optional[datetime] = None,
-        doi: Optional[datetime] = None,
-        claim_number: Optional[str] = None,
         physicianId: Optional[str] = None
     ) -> Dict[str, Any]:
         """
@@ -111,13 +133,10 @@ class DatabaseService:
         Returns structured response with multiple documents
         """
         try:
-            where_clause = {"patientName": patient_name, "physicianId": physicianId}
-            if claim_number:
-                where_clause["claimNumber"] = claim_number
-            if dob:
-                where_clause["dob"] = dob
-            if doi:
-                where_clause["doi"] = doi
+            where_clause = {"patientName": patient_name}
+            
+            if physicianId:
+                where_clause["physicianId"] = physicianId
             
             logger.info(f"🔍 Getting last 2 documents for patient: {patient_name}")
             
@@ -131,7 +150,6 @@ class DatabaseService:
                     # NO "whatsNew" - scalar Json
                 },
                 order={"createdAt": "desc"},
-                # take=2
             )
             
             logger.info(f"📋 Found {len(documents)} documents for {patient_name}")
@@ -151,7 +169,7 @@ class DatabaseService:
                 logger.info(f"📄 Added document {i+1}: ID {doc.id}")
             
             return response
-                    
+                            
         except Exception as e:
             logger.error(f"❌ Error retrieving documents for {patient_name}: {str(e)}")
             return {
@@ -159,60 +177,7 @@ class DatabaseService:
                 "total_documents": 0,
                 "documents": []
             }
-
-    async def get_all_unverified_documents(
-        self, 
-        patient_name: str, 
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Retrieve all unverified documents for patient where status is NOT 'verified'
-        Returns structured response with multiple documents
-        """
-        try:
-            logger.info(f"🔍 Getting unverified documents for patient: {patient_name}")
-            
-            # Get all documents where status is NOT verified
-            documents = await self.prisma.document.find_many(
-                where={
-                    "patientName": patient_name,
-                    "status": {
-                        "not": "verified"   # 👈 This is the key change
-                    }
-                },
-                include={
-                    "summarySnapshot": True,
-                    "adl": True,
-                    "documentSummary": True
-                    # NO "whatsNew" - scalar Json
-                },
-                order={"createdAt": "desc"}  # ✅ FIXED: Consistent with other methods
-            )
-            
-            if not documents:
-                logger.warning(f"❌ No non-verified documents found for patient: {patient_name}")
-                return None
-            
-            logger.info(f"📋 Found {len(documents)} documents for {patient_name}")
-            
-            # Always return the multi-document structure
-            response = {
-                "patient_name": patient_name,
-                "total_documents": len(documents),
-                "documents": []
-            }
-            
-            for i, doc in enumerate(documents):
-                doc_data = doc.dict()
-                doc_data["document_index"] = i + 1
-                doc_data["is_latest"] = i == 0
-                response["documents"].append(doc_data)
-                logger.info(f"📄 Added document {i+1}: ID {doc.id}")
-            
-            return response
-                    
-        except Exception as e:
-            logger.error(f"❌ Error retrieving documents for {patient_name}: {str(e)}")
-            raise
+    
     async def get_all_unverified_documents(
         self, 
         patient_name: str, 
@@ -225,24 +190,23 @@ class DatabaseService:
         try:
             logger.info(f"🔍 Getting unverified documents for patient: {patient_name}")
             
+            where_clause = {
+                "patientName": patient_name,
+                "status": {"not": "verified"}
+            }
+            if physicianId:
+                where_clause["physicianId"] = physicianId
+            
             # Get all documents where status is NOT verified
             documents = await self.prisma.document.find_many(
-                where={
-                    "patientName": patient_name,
-                    "physicianId": physicianId,
-                    "status": {
-                        "not": "verified"   # 👈 This is the key change
-                    }
-                },
+                where=where_clause,
                 include={
                     "summarySnapshot": True,
                     "adl": True,
                     "documentSummary": True
                     # NO "whatsNew" - scalar Json
                 },
-                order={
-                    "createdAt": "desc"
-                }
+                order={"createdAt": "desc"}
             )
             
             if not documents:
@@ -324,9 +288,19 @@ class DatabaseService:
         """
         Save document analysis results to database.
         whatsNew set as JSON string for compatibility.
+        Encrypts patient details in URL token.
         """
         try:
             logger.info(f"💾 Saving document analysis for {patient_name} (Claim: {claim_number})")
+            
+            # ✅ NEW: Check if document already exists (using filename in gcsFileLink)
+            if await self.document_exists(file_name, file_size):
+                existing_doc = await self.prisma.document.find_first(
+                    where={"gcsFileLink": {"contains": file_name}},
+                    order={"createdAt": "desc"}
+                )
+                logger.warning(f"⚠️ Document already exists: {file_name} (ID: {existing_doc.id if existing_doc else 'N/A'}). Skipping save.")
+                return existing_doc.id if existing_doc else "unknown"  # Return existing ID or handle as needed
             
             # Ensure document_summary has 'date' key
             if "createdAt" in document_summary and "date" not in document_summary:
@@ -334,6 +308,17 @@ class DatabaseService:
             
             # Handle whatsNew as JSON string for Prisma Json field
             whats_new_json = json.dumps(whats_new) if whats_new else None
+            
+            # Encrypt patient details into a URL-safe token
+            patient_data = {
+                "patientName": patient_name,
+                "dob": dob.isoformat(),  # Serialize datetime to string
+                "doi": doi.isoformat()
+            }
+            patient_json = json.dumps(patient_data)
+            encrypted_token = self.cipher_suite.encrypt(patient_json.encode())
+            # Base64 URL-safe encode for URL (Fernet is already base64, but ensure URL-safe)
+            url_safe_token = base64.urlsafe_b64encode(encrypted_token).decode('utf-8').rstrip('=')
             
             document = await self.prisma.document.create(
                 data={
@@ -346,7 +331,7 @@ class DatabaseService:
                     "briefSummary": brief_summary,
                     "whatsNew": whats_new_json,  # JSON string for scalar Json field
                     "physicianId": physician_id,
-                    "patientQuizPage":f"http://localhost:3000/patient-quiz?patientName={patient_name}&dob={dob}&doi={doi}",
+                    "patientQuizPage": f"http://localhost:3000/patient-quiz?token={url_safe_token}",
                     # Optional: Add these if you extend schema
                     # "originalName": file_name,
                     # "fileSize": file_size,
@@ -382,12 +367,33 @@ class DatabaseService:
             
             logger.info(f"✅ Document saved with ID: {document.id}")
             logger.info(f"📊 WhatsNew JSON: {whats_new_json[:100]}..." if whats_new_json else "📊 WhatsNew: None")
+            logger.info(f"🔐 Encrypted token: {url_safe_token[:20]}...")
             return document.id
             
         except Exception as e:
             logger.error(f"❌ Error saving document analysis: {str(e)}")
             raise
 
+    def decrypt_patient_token(self, token: str) -> Dict[str, Any]:
+
+        """
+        Decrypts the token and returns patient data.
+        Use this in the FastAPI route.
+        """
+        print(token,'token')
+        try:
+            # Pad the token if needed for base64 (since we rstrip'd '=')
+            padded_token = token + '=' * (4 - len(token) % 4)
+            encrypted_bytes = base64.urlsafe_b64decode(padded_token)
+            decrypted_json = self.cipher_suite.decrypt(encrypted_bytes).decode('utf-8')
+            patient_data = json.loads(decrypted_json)
+            # Convert strings back to datetime objects
+            patient_data["dob"] = datetime.fromisoformat(patient_data["dob"])
+            patient_data["doi"] = datetime.fromisoformat(patient_data["doi"])
+            return patient_data
+        except Exception as e:
+            logger.error(f"❌ Decryption failed: {str(e)}")
+            raise ValueError("Invalid or expired token")
 # Singleton instance
 _db_service = None
 
