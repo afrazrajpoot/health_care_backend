@@ -346,6 +346,7 @@ class DatabaseService:
                     "briefSummary": brief_summary,
                     "whatsNew": whats_new_json,  # JSON string for scalar Json field
                     "physicianId": physician_id,
+                    "patientQuizPage":f"http://localhost:3000/patient-quiz?patientName={patient_name}&dob={dob}&doi={doi}",
                     # Optional: Add these if you extend schema
                     # "originalName": file_name,
                     # "fileSize": file_size,
