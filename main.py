@@ -1,27 +1,29 @@
+# main.py
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import os
-
+from prisma import Prisma
 from controllers.document_controller import router as document_router
 from config.settings import CONFIG
 from utils.logger import setup_logging
 
-from prisma import Prisma  # 👈 Import Prisma client
+# 👇 Import socket manager
+# from socket_manager import sio
+from utils.socket_manager import sio
+import socketio
 
-# Setup logging
 setup_logging()
 
-# FastAPI app
 app = FastAPI(
     title="Document AI Extraction API",
-    description="Extract text, entities, tables, and form fields from documents using Google Document AI",
+    description="Extract text, entities, tables, and form fields from documents",
     version="1.0.0"
 )
 
-# Prisma client
+# Prisma
 db = Prisma()
 
-# CORS middleware
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,42 +35,30 @@ app.add_middleware(
 # Routers
 app.include_router(document_router, prefix="/api", tags=["document"])
 
-# Health check endpoint
+# Health check
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "timestamp": "2025-09-20T10:00:00Z",
-        "processor": CONFIG["processor_id"]
-    }
+    return {"status": "healthy", "processor": CONFIG["processor_id"]}
 
-# 🔥 Connect Prisma when app starts
+# Connect DB
 @app.on_event("startup")
 async def startup():
     await db.connect()
-    print("✅ Connected to PostgreSQL with Prisma")
+    print("✅ Connected to PostgreSQL")
 
 @app.on_event("shutdown")
 async def shutdown():
     await db.disconnect()
-    print("🔌 Disconnected from database")
+    print("🔌 Disconnected from DB")
 
-
-# 📊 Audit middleware - save user visits/actions
+# Middleware (Audit log)
 @app.middleware("http")
 async def audit_middleware(request: Request, call_next):
-    # 👇 Get user info directly from headers
-    user_id = request.headers.get("x-user-id")
-    user_email = request.headers.get("x-user-email")
-    user_name = request.headers.get("x-user-name")
-
-    # 📝 Save audit log
     try:
         await db.auditlog.create(
             data={
-                "userId": user_id,
-                "email": user_email,
+                "userId": request.headers.get("x-user-id"),
+                "email": request.headers.get("x-user-email"),
                 "action": "Uploaded document",
                 "ipAddress": request.client.host,
                 "userAgent": request.headers.get("user-agent"),
@@ -79,13 +69,20 @@ async def audit_middleware(request: Request, call_next):
     except Exception as e:
         print("⚠️ Failed to save audit log:", e)
 
-    response = await call_next(request)
-    return response
+    return await call_next(request)
 
-
-# 📁 Ensure upload directory exists
+# 📁 Ensure upload directory
 os.makedirs(CONFIG["upload_dir"], exist_ok=True)
+
+# 🚀 Mount Socket.IO ASGI app on top of FastAPI
+# socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
+# main.py
+socket_app = socketio.ASGIApp(
+    sio,
+    other_asgi_app=app  # ✅ keep only this
+)
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(socket_app, host="0.0.0.0", port=8000)
