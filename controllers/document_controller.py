@@ -95,13 +95,13 @@ async def save_document_webhook(request: Request):
         
         # Extract documents list from database response
         previous_documents = db_response.get('documents', []) if db_response else []
-        print(previous_documents,'previous documents')
+        # print(previous_documents,'previous documents')
         # Compare with previous documents using LLM
         whats_new_data = analyzer.compare_with_previous_documents(
             document_analysis, 
             previous_documents
         )
-        print(whats_new_data,'what new data')
+        # print(whats_new_data,'what new data')
         
         # Check if whats_new_data is valid; if not, ignore the document
         if whats_new_data is None or not isinstance(whats_new_data, dict):
@@ -292,7 +292,6 @@ async def extract_documents(
         raise HTTPException(status_code=500, detail=f"Queuing failed: {str(e)}")
 from typing import Optional
 
-
 @router.get('/document')
 async def get_document(
     patient_name: str,
@@ -321,11 +320,14 @@ async def get_document(
         document_data = await db_service.get_document_by_patient_details(
             patient_name=patient_name,
             physicianId=physicianId,
-            # dob=dob_date,
-            # doi=doi_date,
-            # claim_number=claim_number
+            dob=dob_date,
+            doi=doi_date,
+            claim_number=claim_number
         )
         
+        # Get patient quiz data
+        quiz_data = await db_service.get_patient_quiz(patient_name, dob, doi)
+       
         if not document_data or document_data["total_documents"] == 0:
             raise HTTPException(
                 status_code=404, 
@@ -333,7 +335,7 @@ async def get_document(
             )
         
         # Format the aggregated response
-        response = await format_aggregated_document_response(document_data)
+        response = await format_aggregated_document_response(document_data, quiz_data)
         
         logger.info(f"✅ Returned aggregated document for: {patient_name}")
         return response
@@ -344,7 +346,7 @@ async def get_document(
         logger.error(f"❌ Error fetching document: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-async def format_aggregated_document_response(all_documents_data: Dict[str, Any]) -> Dict[str, Any]:
+async def format_aggregated_document_response(all_documents_data: Dict[str, Any], quiz_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Format the aggregated document response from all documents"""
     documents = all_documents_data["documents"]
     
@@ -353,6 +355,7 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
             "patient_name": all_documents_data["patient_name"],
             "total_documents": 0,
             "documents": [],
+            "patient_quiz": quiz_data,
             "is_multiple_documents": False
         }
     
@@ -408,6 +411,7 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
         "patient_name": all_documents_data["patient_name"],
         "total_documents": all_documents_data["total_documents"],
         "documents": [base_response],
+        "patient_quiz": quiz_data,
         "is_multiple_documents": len(documents) > 1
     }
 
@@ -457,4 +461,4 @@ async def proxy_decrypt(request: Request):
         raise HTTPException(status_code=400, detail="Invalid token")
     except Exception as e:
         logger.error(f"❌ Decryption error: {str(e)}")
-        raise HTTPException(status_code=500, detail="Decryption failed")
+        raise HTTPException(status_code=500, detail="Decryption failed")   

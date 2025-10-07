@@ -10,7 +10,7 @@ from models.schemas import ExtractionResult
 from cryptography.fernet import Fernet
 from cryptography.exceptions import InvalidKey
 import base64
-
+from datetime import datetime, timedelta
 load_dotenv()
 logger = logging.getLogger("document_ai")
 
@@ -126,7 +126,10 @@ class DatabaseService:
     async def get_document_by_patient_details(
         self, 
         patient_name: str,
-        physicianId: Optional[str] = None
+        physicianId: Optional[str] = None,
+        dob: Optional[datetime] = None,
+        doi: Optional[datetime] = None,
+        claim_number: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Retrieve last two documents for patient
@@ -137,6 +140,21 @@ class DatabaseService:
             
             if physicianId:
                 where_clause["physicianId"] = physicianId
+            
+            if dob:
+                # Match date ignoring time: gte midnight, lt next midnight
+                dob_start = dob.replace(hour=0, minute=0, second=0, microsecond=0)
+                dob_end = dob_start + timedelta(days=1)
+                where_clause["dob"] = {"gte": dob_start, "lt": dob_end}
+            
+            if doi:
+                # Match date ignoring time: gte midnight, lt next midnight
+                doi_start = doi.replace(hour=0, minute=0, second=0, microsecond=0)
+                doi_end = doi_start + timedelta(days=1)
+                where_clause["doi"] = {"gte": doi_start, "lt": doi_end}
+            
+            if claim_number:
+                where_clause["claimNumber"] = claim_number
             
             logger.info(f"🔍 Getting last 2 documents for patient: {patient_name}")
             
@@ -150,6 +168,7 @@ class DatabaseService:
                     # NO "whatsNew" - scalar Json
                 },
                 order={"createdAt": "desc"},
+                take=2  # Limit to last two
             )
             
             logger.info(f"📋 Found {len(documents)} documents for {patient_name}")
@@ -177,7 +196,7 @@ class DatabaseService:
                 "total_documents": 0,
                 "documents": []
             }
-    
+   
     async def get_all_unverified_documents(
         self, 
         patient_name: str, 
@@ -395,6 +414,41 @@ class DatabaseService:
             logger.error(f"❌ Decryption failed: {str(e)}")
             raise ValueError("Invalid or expired token")
 # Singleton instance
+
+    async def get_patient_quiz(self, patient_name: str, dob: str, doi: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a PatientQuiz by matching patientName and DATE (ignoring time)"""
+        print(patient_name, dob, doi, 'patient_name,dob,doi')
+        try:
+            # Parse the date strings into datetime objects (assuming dob and doi are 'YYYY-MM-DD')
+            dob_start = datetime.strptime(dob, "%Y-%m-%d")
+            dob_end = dob_start + timedelta(days=1)
+
+            doi_start = datetime.strptime(doi, "%Y-%m-%d")
+            doi_end = doi_start + timedelta(days=1)
+
+            quiz = await self.prisma.patientquiz.find_first(
+                where={
+                    "patientName": patient_name,
+                    "dob": {
+                        "gte": dob_start.isoformat(),
+                        "lt": dob_end.isoformat(),
+                    },
+                    "doi": {
+                        "gte": doi_start.isoformat(),
+                        "lt": doi_end.isoformat(),
+                    },
+                }
+            )
+
+            print(quiz, 'quiz')
+            if quiz:
+                logger.info(f"✅ Found PatientQuiz for patient: {patient_name}")
+            else:
+                logger.info(f"ℹ️ No PatientQuiz found for patient: {patient_name}")
+            return quiz.dict() if quiz else None
+        except Exception as e:
+            logger.error(f"❌ Error retrieving PatientQuiz: {str(e)}")
+            return None
 _db_service = None
 
 async def get_database_service() -> DatabaseService:
