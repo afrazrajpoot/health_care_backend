@@ -296,13 +296,16 @@ class DatabaseService:
         claim_number: str,
         dob: datetime,
         doi: datetime,
+        rd: datetime,
         status: str,
         brief_summary: str,
         summary_snapshot: Dict[str, str],
         whats_new: Dict[str, str],
         adl_data: Dict[str, str],
         document_summary: Dict[str, Any],
-        physician_id: Optional[str] = None
+        physician_id: Optional[str] = None,
+        blob_path: Optional[str] = None
+        
     ) -> str:
         """
         Save document analysis results to database.
@@ -351,6 +354,8 @@ class DatabaseService:
                     "whatsNew": whats_new_json,  # JSON string for scalar Json field
                     "physicianId": physician_id,
                     "patientQuizPage": f"http://localhost:3000/intake-form?token={url_safe_token}",
+                    "createdAt":rd if rd else datetime.now(),
+                    "blobPath": blob_path,
                     # Optional: Add these if you extend schema
                     # "originalName": file_name,
                     # "fileSize": file_size,

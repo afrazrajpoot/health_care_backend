@@ -130,3 +130,4 @@ class ExtractionResult(BaseModel):
     document_id: str = ""
     error: Optional[str] = None
     database_error: Optional[str] = None
+    

@@ -69,7 +69,7 @@ claimNumber     String
 gcsFileLink     String
 briefSummary    String?
 whatsNew        Json?
-
+blobPath        String?
 patientQuizPage String?
 // Relations
 summarySnapshot SummarySnapshot?

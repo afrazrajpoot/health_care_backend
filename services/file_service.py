@@ -63,7 +63,7 @@ class FileService:
         
         return content
     
-    def save_to_gcs(self, content: bytes, filename: str, folder: str = "uploads") -> Tuple[str, str]:
+    def save_to_gcs(self, content: bytes, filename: str, content_type: str = 'application/octet-stream', folder: str = "uploads") -> Tuple[str, str]:
         """Upload file content to Google Cloud Storage and return the signed URL and blob path"""
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -74,14 +74,17 @@ class FileService:
             destination_blob_name = f"{folder}/{unique_filename}"
             
             blob = self.bucket.blob(destination_blob_name)
-            blob.upload_from_string(content, content_type='application/octet-stream')
+            blob.upload_from_string(content, content_type=content_type)
             
-            logger.info(f"✅ Uploaded file to GCS: {destination_blob_name}")
+            logger.info(f"✅ Uploaded file to GCS: {destination_blob_name} (Content-Type: {content_type})")
             
+            # Generate signed URL for preview/download (browsers will preview if content-type supports it, e.g., PDF, images)
             signed_url = blob.generate_signed_url(
                 version="v4",
                 expiration=timedelta(days=7),
-                method="GET"
+                method="GET",
+                # Optional: Force inline disposition for better preview support
+                response_disposition="inline"
             )
             
             logger.info(f"📎 Signed GCS URL: {signed_url}")

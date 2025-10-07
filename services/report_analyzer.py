@@ -20,6 +20,7 @@ class DocumentAnalysis(BaseModel):
     dob: str = Field(..., description="Date of birth in YYYY-MM-DD format")
     doi: str = Field(..., description="Date of injury in YYYY-MM-DD format")
     status: str = Field(..., description="Current status: normal, urgent, critical, etc.")
+    rd: str = Field(..., description="Report date in YYYY-MM-DD format")
     diagnosis: str = Field(..., description="Primary diagnosis and key findings (comma-separated if multiple, 5-10 words total)")
     key_concern: str = Field(..., description="Main clinical concern in 2-3 words")
     next_step: str = Field(..., description="Recommended next steps in 2-3 words")
@@ -69,6 +70,7 @@ class ReportAnalyzer:
         - Work restrictions 
         - Document type
         - 3-5 key summary points 
+        -Report date (RD) in YYYY-MM-DD format
         
         CRITICAL INSTRUCTIONS:
         - For diagnosis, include primary diagnosis plus 2-3 key findings (e.g., "Normal MRI, no mass lesion, clear sinuses"), comma-separated, up to 10 words total.
@@ -195,6 +197,7 @@ class ReportAnalyzer:
 
     def extract_document_data(self, document_text: str) -> DocumentAnalysis:
         try:
+          
             prompt = self.create_extraction_prompt()
             chain = prompt | self.llm | self.parser
             current_date = datetime.now().strftime("%Y-%m-%d")

@@ -12,7 +12,8 @@ from services.report_analyzer import ReportAnalyzer
 from services.database_service import get_database_service
 from utils.celery_task import process_document_task
 from utils.socket_manager import sio  # ✅ Import sio for emitting events
-
+from pathlib import Path  # ✅ Keep this for file operations (e.g., .suffix)
+from fastapi import Path as FastAPIPath  # ✅ Alias FastAPI's Path to avoid conflict
 router = APIRouter()
 
 @router.post("/webhook/save-document")
@@ -58,6 +59,7 @@ async def save_document_webhook(request: Request):
         
         try:
             dob = datetime.strptime(document_analysis.dob, "%Y-%m-%d")
+            rd=datetime.strptime(document_analysis.rd, "%Y-%m-%d")
         except:
             dob = datetime.now()
             
@@ -164,6 +166,7 @@ async def save_document_webhook(request: Request):
             file_size=data.get("file_size", 0),
             mime_type=data.get("mime_type", "application/octet-stream"),
             processing_time_ms=data.get("processing_time_ms", 0),
+            blob_path=data.get("blob_path", ""),
             gcs_file_link=data["gcs_url"],
             patient_name=document_analysis.patient_name,
             claim_number=document_analysis.claim_number,
@@ -175,6 +178,7 @@ async def save_document_webhook(request: Request):
             whats_new=whats_new_data,
             adl_data=adl_data,
             document_summary=document_summary,
+            rd=rd,
             physician_id=data.get("physician_id")  # Pass physician_id if provided in webhook payload
         )
 
@@ -255,10 +259,11 @@ async def extract_documents(
             logger.debug(f"DEBUG: Queuing task for {document.filename}")
             task = process_document_task.delay(
                 gcs_url=gcs_url,
+                blob_path=blob_path,
                 original_filename=document.filename,
                 mime_type=document.content_type,
                 file_size=len(content),
-                blob_path=blob_path,
+             
                 physician_id=physicianId , # Pass the physicianId to the task
                 user_id=userId  # Pass the userId to the task (if needed
             )
@@ -290,6 +295,7 @@ async def extract_documents(
             except:
                 logger.warning(f"⚠️ Failed to delete GCS file: {path}")
         raise HTTPException(status_code=500, detail=f"Queuing failed: {str(e)}")
+
 from typing import Optional
 
 @router.get('/document')
@@ -425,6 +431,7 @@ async def format_single_document_base(document: Dict[str, Any]) -> Dict[str, Any
         "claim_number": document.get("claimNumber"),
         "status": document.get("status"),
         "gcs_file_link": document.get("gcsFileLink"),
+        "blob_path": document.get("blobPath"),  # ✅ Ensure blob_path is included (adjust key if DB uses snake_case like "blob_path")
         "created_at": document.get("createdAt").isoformat() if document.get("createdAt") else None,
         "updated_at": document.get("updatedAt").isoformat() if document.get("updatedAt") else None,
     }
@@ -438,7 +445,6 @@ async def format_adl(document: Dict[str, Any]) -> Dict[str, Any]:
             "work_restrictions": adl_data.get("workRestrictions")
         }
     return None
-
 @router.post("/proxy-decrypt")
 async def proxy_decrypt(request: Request):
     """
@@ -462,3 +468,52 @@ async def proxy_decrypt(request: Request):
     except Exception as e:
         logger.error(f"❌ Decryption error: {str(e)}")
         raise HTTPException(status_code=500, detail="Decryption failed")   
+    
+
+from fastapi.responses import Response
+from services.document_converter import DocumentConverter
+import urllib.parse
+ # ✅ pathlib.Path here too
+@router.get("/preview/{blob_path:path}")
+async def preview_file(blob_path: str = FastAPIPath(..., description="GCS blob path, e.g., uploads/filename.ext")):  # ✅ Use aliased FastAPIPath
+    """
+    Preview any file from GCS inline in the browser.
+    Converts non-renderable files (e.g., DOCX, TXT) to PDF for universal preview.
+    """
+    if not blob_path.startswith('uploads/'):  # Basic security: only allow uploads folder
+        raise HTTPException(status_code=403, detail="Invalid path")
+    
+    file_service = FileService()
+    converter = DocumentConverter()
+    
+    try:
+        content = file_service.download_from_gcs(blob_path)
+        mime_type = file_service.get_mime_type(blob_path) if hasattr(file_service, 'get_mime_type') else 'application/octet-stream'
+        extension = Path(blob_path).suffix.lower()  # ✅ This uses pathlib.Path correctly
+        
+        # Supported for direct inline preview
+        directly_previewable = {
+            '.pdf': 'application/pdf',
+            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
+            '.txt': 'text/plain',  # Text renders in browser
+            # Add more: '.bmp': 'image/bmp', etc.
+        }
+        
+        preview_mime = directly_previewable.get(extension)
+        if preview_mime:
+            # Serve directly with inline disposition
+            headers = {"Content-Disposition": f"inline; filename*=UTF-8''{urllib.parse.quote(Path(blob_path).name)}"}  # ✅ pathlib.Path here too
+            return Response(content, media_type=preview_mime, headers=headers)
+        
+        # Convert to PDF for everything else (e.g., DOCX, XLSX)
+        logger.info(f"🔄 Converting {blob_path} to PDF for preview...")
+        pdf_content = converter.convert_to_pdf(content, blob_path)  # Assumes DocumentConverter has this method; adjust if named differently
+        
+        headers = {"Content-Disposition": "inline; filename*=UTF-8''preview.pdf"}
+        return Response(pdf_content, media_type='application/pdf', headers=headers)
+    
+    except Exception as e:
+        logger.error(f"❌ Preview error for {blob_path}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Preview failed")

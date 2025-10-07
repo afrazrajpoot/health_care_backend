@@ -14,7 +14,7 @@ from services.report_analyzer import ReportAnalyzer
 
 # Celery task for processing a single document
 @celery_app.task(bind=True, name='process_document_task', max_retries=3, retry_backoff=True)
-def process_document_task(self, gcs_url: str, original_filename: str, mime_type: str, file_size: int, blob_path: str, physician_id: str = None, user_id: str = None):
+def process_document_task(self, gcs_url: str, original_filename: str, mime_type: str, file_size: int, blob_path: str, physician_id: str = None, user_id: str = None ):
     """
     Celery task to process a single document and trigger webhook for database save.
     """
@@ -138,6 +138,7 @@ def process_document_task(self, gcs_url: str, original_filename: str, mime_type:
             "mime_type": mime_type or "application/octet-stream",
             "processing_time_ms": int(processing_time),
             "gcs_url": gcs_url,
+            "blob_path": blob_path,
             "document_id": result.document_id,
             "physician_id": physician_id , # Pass physician_id to webhook
             "user_id": user_id  # Pass user_id to webhook (if needed)
