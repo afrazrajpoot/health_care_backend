@@ -47,6 +47,29 @@ class ReportAnalyzer:
         self.whats_new_parser = JsonOutputParser()  # Raw JSON parser for dynamic flat dict output
         self.brief_summary_parser = JsonOutputParser(pydantic_object=BriefSummary)
 
+    def detect_document_type_preview(self, text: str) -> str:
+        """
+        Quick preview-based document type detection using keywords.
+        Falls back to 'unknown' if no match.
+        """
+        try:
+            text_lower = text.lower()
+            if any(word in text_lower for word in ["mri", "ct scan", "x-ray", "imaging", "scan"]):
+                return "imaging_report"
+            elif any(word in text_lower for word in ["qme", "qualified medical evaluator", "independent medical exam"]):
+                return "qme_report"
+            elif any(word in text_lower for word in ["claim", "attorney", "legal", "denied", "approved"]):
+                return "legal_document"
+            elif any(word in text_lower for word in ["utilization review", "ur decision", "work restrictions"]):
+                return "ur_decision"
+            elif any(word in text_lower for word in ["patient", "diagnosis", "dob", "doi"]):
+                return "medical_report"
+            else:
+                return "unknown"
+        except Exception as e:
+            logger.warning(f"⚠️ Document type detection failed: {str(e)}")
+            return "unknown"
+
     def create_extraction_prompt(self) -> PromptTemplate:
         template = """
         You are a medical document analysis expert. Extract structured information from the following medical document.

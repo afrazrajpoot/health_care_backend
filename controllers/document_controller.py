@@ -1,4 +1,4 @@
-# controllers/document_controller.py (updated: added socket emit in webhook success)
+# controllers/document_controller.py (updated: refined invalid message for clarity)
 from fastapi import APIRouter, File, UploadFile, HTTPException, Request, Query
 from typing import Dict, List, Any
 from datetime import datetime
@@ -10,10 +10,13 @@ from config.settings import CONFIG
 from utils.logger import logger
 from services.report_analyzer import ReportAnalyzer
 from services.database_service import get_database_service
-from utils.celery_task import process_document_task
-from utils.socket_manager import sio  # ✅ Import sio for emitting events
-from pathlib import Path  # ✅ Keep this for file operations (e.g., .suffix)
-from fastapi import Path as FastAPIPath  # ✅ Alias FastAPI's Path to avoid conflict
+from utils.celery_task import finalize_document_task
+from utils.socket_manager import sio
+from pathlib import Path
+from fastapi import Path as FastAPIPath
+from services.document_ai_service import get_document_ai_processor
+from services.document_converter import DocumentConverter
+
 router = APIRouter()
 
 @router.post("/webhook/save-document")
@@ -29,28 +32,30 @@ async def save_document_webhook(request: Request):
         analyzer = ReportAnalyzer()
         document_analysis = analyzer.extract_document_data(result_data.get("text", ""))
         
-        # Check for required fields before proceeding
+        # Enhanced check for required fields: treat "Not specified" as missing
         required_fields = {
             "patient_name": document_analysis.patient_name,
             "dob": document_analysis.dob,
             "doi": document_analysis.doi
         }
-        missing_fields = [k for k, v in required_fields.items() if not v]
+        missing_fields = [k for k, v in required_fields.items() if not v or str(v).lower() == "not specified"]
         if missing_fields:
-            warning_msg = f"Document ignored: this document is invalid for file {data['filename']}"
+            missing_details = ", ".join(missing_fields)
+            user_friendly_msg = f"Invalid document: This file lacks proper patient details ({missing_details}). Please upload a complete medical report with patient name, DOB, and DOI."
+            warning_msg = f"Document ignored: {user_friendly_msg} for file {data['filename']}"
             logger.warning(f"⚠️ {warning_msg}")
-            # Optional: Emit ignored event
+            # Emit ignored event with user-friendly reason
             await sio.emit('task_complete', {
                 'document_id': data.get('document_id', 'unknown'),
                 'filename': data["filename"],
                 'status': 'ignored',
-                'reason': 'Invalid document',
+                'reason': user_friendly_msg,
                 'gcs_url': data["gcs_url"],
                 'physician_id': data.get("physician_id")
             })
             return {
                 "status": "ignored",
-                "reason": "Invalid document",
+                "reason": user_friendly_msg,
                 "filename": data["filename"]
             }
         
@@ -83,8 +88,6 @@ async def save_document_webhook(request: Request):
                 'filename': data["filename"],
                 'status': 'skipped',
                 'reason': 'Document already processed',
-                # 'gcs_url': data["gcs_url"],
-                # 'physician_id': data.get("physician_id")
                 "user_id": data.get("user_id")  # Pass user_id if available
             })
             return {"status": "skipped", "reason": "Document already processed"}
@@ -105,25 +108,10 @@ async def save_document_webhook(request: Request):
         )
         # print(whats_new_data,'what new data')
         
-        # Check if whats_new_data is valid; if not, ignore the document
+        # Ensure whats_new_data is always a dict (empty if invalid) to avoid DB required field error
         if whats_new_data is None or not isinstance(whats_new_data, dict):
-            warning_msg = f"Document ignored: this document is invalid for file {data['filename']}"
-            logger.warning(f"⚠️ {warning_msg}")
-            # Optional: Emit invalid whats_new event
-            await sio.emit('task_complete', {
-                'document_id': data.get('document_id', 'unknown'),
-                'filename': data["filename"],
-                'status': 'ignored',
-                'reason': 'Invalid whats_new data',
-                # 'gcs_url': data["gcs_url"],
-                # 'physician_id': data.get("physician_id"),
-                "user_id": data.get("user_id")  # Pass user_id if available
-            })
-            return {
-                "status": "ignored",
-                "reason": "Invalid document",
-                "filename": data["filename"]
-            }
+            logger.warning(f"⚠️ Invalid whats_new data for {data['filename']}; using empty dict")
+            whats_new_data = {}
         
         summary_snapshot = {
             "dx": document_analysis.diagnosis,
@@ -175,7 +163,7 @@ async def save_document_webhook(request: Request):
             status=document_analysis.status,
             brief_summary=brief_summary,  # Pass the AI-generated brief summary
             summary_snapshot=summary_snapshot,
-            whats_new=whats_new_data,
+            whats_new=whats_new_data,  # Now always a dict
             adl_data=adl_data,
             document_summary=document_summary,
             rd=rd,
@@ -217,22 +205,22 @@ async def save_document_webhook(request: Request):
             pass  # Ignore emit failure during webhook error
         raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
 
-@router.post("/extract-documents", response_model=Dict[str, List[str]])
+@router.post("/extract-documents", response_model=Dict[str, Any])
 async def extract_documents(
     documents: List[UploadFile] = File(...),
     physicianId: str = Query(None, description="Optional physician ID for associating documents"),
     userId: str = Query(None, description="Optional user ID for associating documents")
 ):
     """
-    Upload multiple documents and queue them for asynchronous processing with Celery.
-    Returns task IDs for tracking results.
+    Upload multiple documents: parse/validate synchronously, upload to GCS if valid, then queue for finalization.
     """
     if not documents:
         raise HTTPException(status_code=400, detail="No documents provided")
     
     file_service = FileService()
     task_ids = []
-    uploaded_files = []
+    ignored_filenames = []
+    uploaded_files = []  # Track for cleanup on global errors
     
     try:
         logger.info(f"\n🔄 === NEW MULTI-DOCUMENT PROCESSING REQUEST ({len(documents)} files) ===\n")
@@ -240,62 +228,204 @@ async def extract_documents(
             logger.info(f"👨‍⚕️ Physician ID provided: {physicianId}")
         
         for document in documents:
+            document_start_time = datetime.now()
             content = await document.read()
-            file_service.validate_file(document, CONFIG["max_file_size"])
             
-            logger.info(f"📁 Processing file: {document.filename}")
-            logger.info(f"📏 File size: {len(content)} bytes ({len(content)/(1024*1024):.2f} MB)")
-            logger.info(f"📋 MIME type: {document.content_type}")
-            
-            # Save to Google Cloud Storage
-            logger.info("☁️ Uploading file to Google Cloud Storage...")
-            gcs_url, blob_path = file_service.save_to_gcs(content, document.filename)
-            logger.info(f"✅ Uploaded file to GCS: {gcs_url}")
-            logger.info(f"📍 Blob path: {blob_path}")
-            logger.info(f"📎 Signed GCS URL: {gcs_url}")
-            uploaded_files.append(blob_path)
-            
-            # Enqueue Celery task with physician_id
-            logger.debug(f"DEBUG: Queuing task for {document.filename}")
-            task = process_document_task.delay(
-                gcs_url=gcs_url,
-                blob_path=blob_path,
-                original_filename=document.filename,
-                mime_type=document.content_type,
-                file_size=len(content),
-             
-                physician_id=physicianId , # Pass the physicianId to the task
-                user_id=userId  # Pass the userId to the task (if needed
-            )
-            task_ids.append(task.id)
-            logger.info(f"🚀 Task queued: {task.id}")
-            logger.debug(f"DEBUG: Task queued successfully: {task.id}")
-        
-        logger.info("✅ === ALL FILES QUEUED FOR PROCESSING ===\n")
-        
-        return {"task_ids": task_ids}
-    
-    except ValueError as ve:
-        logger.error(f"❌ Validation error: {str(ve)}")
-        logger.debug(f"DEBUG: Validation error traceback: {traceback.format_exc()}")
-        for path in uploaded_files:
             try:
-                file_service.delete_from_gcs(path)
-                logger.info(f"🗑️ Deleted file from GCS due to error: {path}")
-            except:
-                logger.warning(f"⚠️ Failed to delete GCS file: {path}")
-        raise HTTPException(status_code=400, detail=str(ve))
-    except Exception as e:
-        logger.error(f"❌ Error in multi-document queuing: {str(e)}")
-        logger.debug(f"DEBUG: Queuing error traceback: {traceback.format_exc()}")
-        for path in uploaded_files:
-            try:
-                file_service.delete_from_gcs(path)
-                logger.info(f"🗑️ Deleted file from GCS due to error: {path}")
-            except:
-                logger.warning(f"⚠️ Failed to delete GCS file: {path}")
-        raise HTTPException(status_code=500, detail=f"Queuing failed: {str(e)}")
+                file_service.validate_file(document, CONFIG["max_file_size"])
+                logger.info(f"📁 Starting processing for file: {document.filename}")
+                logger.info(f"📏 File size: {len(content)} bytes ({len(content)/(1024*1024):.2f} MB)")
+                logger.info(f"📋 MIME type: {document.content_type}")
+                
+                # Save to temp for processing
+                temp_path = file_service.save_temp_file(content, document.filename)
+                was_converted = False
+                converted_path = None
+                processing_path = temp_path
+                
+                # Conversion
+                try:
+                    if DocumentConverter.needs_conversion(temp_path):
+                        logger.info(f"🔄 Converting file: {Path(temp_path).suffix}")
+                        converted_path, was_converted = DocumentConverter.convert_document(temp_path, target_format="pdf")
+                        processing_path = converted_path
+                        logger.info(f"✅ Converted to: {processing_path}")
+                    else:
+                        logger.info(f"✅ Direct support for: {Path(temp_path).suffix}")
+                except Exception as convert_exc:
+                    logger.error(f"❌ Conversion failed for {document.filename}: {str(convert_exc)}")
+                    raise ValueError(f"File conversion failed: {str(convert_exc)}")
+                
+                # Document AI Processing
+                processor = get_document_ai_processor()
+                document_result = processor.process_document(processing_path)
+                
+                # Build ExtractionResult
+                result = ExtractionResult(
+                    text=document_result.text,
+                    pages=document_result.pages,
+                    entities=document_result.entities,
+                    tables=document_result.tables,
+                    formFields=document_result.formFields,
+                    confidence=document_result.confidence,
+                    success=document_result.success,
+                    gcs_file_link="",  # Set after upload
+                    fileInfo={
+                        "originalName": document.filename,
+                        "size": len(content),
+                        "mimeType": document.content_type or "application/octet-stream",
+                        "gcsUrl": ""
+                    },
+                    summary="",  # Set after validation
+                    comprehensive_analysis=None,
+                    document_id=f"endpoint_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                )
+                
+                processing_time = (datetime.now() - document_start_time).total_seconds() * 1000
+                logger.info(f"⏱️ Document AI time for {document.filename}: {processing_time:.0f}ms")
 
+                # Validation
+                if not result.text:
+                    raise ValueError("No text extracted from document")
+
+                logger.info(f"📝 Validating patient details for {document.filename}...")
+                analyzer = ReportAnalyzer()
+                
+                # Skip or stub document type detection to avoid AttributeError
+                try:
+                    detected_type = analyzer.detect_document_type_preview(result.text)
+                    logger.info(f"🔍 Detected type: {detected_type}")
+                except AttributeError:
+                    logger.warning("⚠️ Document type detection unavailable—skipping")
+                    detected_type = "unknown"
+                result.summary = f"Document Type: {detected_type} - Validated successfully"
+                
+                document_analysis = analyzer.extract_document_data(result.text)
+                # Enhanced check for required fields: treat "Not specified" as missing
+                required_fields = {
+                    "patient_name": document_analysis.patient_name,
+                    "dob": document_analysis.dob,
+                    "doi": document_analysis.doi
+                }
+                missing_fields = [k for k, v in required_fields.items() if not v or str(v).lower() == "not specified"]
+                if missing_fields:
+                    missing_details = ", ".join(missing_fields)
+                    user_friendly_msg = f"Invalid document: This file lacks proper patient details ({missing_details}). Please upload a complete medical report with patient name, DOB, and DOI."
+                    error_msg = f"Invalid document: {user_friendly_msg} for {document.filename}"
+                    logger.warning(f"⚠️ {error_msg}")
+                    ignored_filenames.append({
+                        "filename": document.filename,
+                        "reason": user_friendly_msg
+                    })
+                    # Emit ignored
+                    emit_data = {
+                        'document_id': 'ignored_validation',
+                        'filename': document.filename,
+                        'status': 'ignored',
+                        'reason': user_friendly_msg,
+                        'user_id': userId
+                    }
+                    if userId:
+                        await sio.emit('task_complete', emit_data, room=f"user_{userId}")
+                    else:
+                        await sio.emit('task_complete', emit_data)
+                    continue  # Skip to next file
+
+                logger.info(f"✅ Validation passed for {document.filename}")
+                
+                # Upload to GCS (only if valid)
+                try:
+                    logger.info("☁️ Uploading to GCS...")
+                    gcs_url, blob_path = file_service.save_to_gcs(content, document.filename)
+                    logger.info(f"✅ GCS upload: {gcs_url} | Blob: {blob_path}")
+                    uploaded_files.append(blob_path)
+                    
+                    # Update result
+                    result.gcs_file_link = gcs_url
+                    result.fileInfo["gcsUrl"] = gcs_url
+                except Exception as gcs_exc:
+                    logger.error(f"❌ GCS upload failed for {document.filename}: {str(gcs_exc)}")
+                    raise ValueError(f"GCS upload failed: {str(gcs_exc)}")
+                
+                # Prepare and queue task
+                webhook_payload = {
+                    "result": result.dict(),
+                    "filename": document.filename,
+                    "file_size": len(content),
+                    "mime_type": document.content_type or "application/octet-stream",
+                    "processing_time_ms": int(processing_time),
+                    "gcs_url": gcs_url,
+                    "blob_path": blob_path,
+                    "document_id": result.document_id,
+                    "physician_id": physicianId,
+                    "user_id": userId
+                }
+                logger.info(f"📤 Queuing payload for {document.filename} (size: {len(str(webhook_payload))} chars)")
+                
+                task = finalize_document_task.delay(webhook_payload)
+                task_ids.append(task.id)
+                logger.info(f"🚀 Task queued for {document.filename}: {task.id}")
+                
+            except ValueError as ve:
+                logger.error(f"❌ Validation error for {document.filename}: {str(ve)}")
+                ignored_filenames.append({
+                    "filename": document.filename,
+                    "reason": str(ve)
+                })
+                # Emit error
+                emit_data = {
+                    'filename': document.filename,
+                    'error': str(ve),
+                    'user_id': userId
+                }
+                if userId:
+                    await sio.emit('task_error', emit_data, room=f"user_{userId}")
+                else:
+                    await sio.emit('task_error', emit_data)
+            except Exception as proc_exc:
+                logger.error(f"❌ Unexpected processing error for {document.filename}: {str(proc_exc)}")
+                logger.debug(f"Traceback: {traceback.format_exc()}")
+                ignored_filenames.append({
+                    "filename": document.filename,
+                    "reason": f"Processing failed: {str(proc_exc)}"
+                })
+                # Emit error
+                emit_data = {
+                    'filename': document.filename,
+                    'error': str(proc_exc),
+                    'user_id': userId
+                }
+                if userId:
+                    await sio.emit('task_error', emit_data, room=f"user_{userId}")
+                else:
+                    await sio.emit('task_error', emit_data)
+            finally:
+                # Always cleanup temp files
+                file_service.cleanup_temp_file(temp_path)
+                if was_converted and converted_path:
+                    DocumentConverter.cleanup_converted_file(converted_path, was_converted)
+        
+        total_ignored = len(ignored_filenames)
+        logger.info(f"✅ Processing complete: {len(task_ids)} queued, {total_ignored} ignored")
+        logger.info("✅ === END MULTI-DOCUMENT REQUEST ===\n")
+        
+        return {
+            "task_ids": task_ids,
+            "ignored": ignored_filenames,
+            "ignored_count": total_ignored
+        }
+    
+    except Exception as global_exc:
+        logger.error(f"❌ Global error in extract-documents: {str(global_exc)}")
+        logger.debug(f"Traceback: {traceback.format_exc()}")
+        # Cleanup any uploaded files
+        for path in uploaded_files:
+            try:
+                file_service.delete_from_gcs(path)
+                logger.info(f"🗑️ Cleanup GCS: {path}")
+            except:
+                logger.warning(f"⚠️ Cleanup failed: {path}")
+        raise HTTPException(status_code=500, detail=f"Global processing failed: {str(global_exc)}")
 from typing import Optional
 
 @router.get('/document')
