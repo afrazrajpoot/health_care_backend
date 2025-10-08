@@ -36,7 +36,7 @@ async def save_document_webhook(request: Request):
         required_fields = {
             "patient_name": document_analysis.patient_name,
             "dob": document_analysis.dob,
-            "doi": document_analysis.doi
+            # "doi": document_analysis.doi
         }
         missing_fields = [k for k, v in required_fields.items() if not v or str(v).lower() == "not specified"]
         if missing_fields:
@@ -305,7 +305,7 @@ async def extract_documents(
                 required_fields = {
                     "patient_name": document_analysis.patient_name,
                     "dob": document_analysis.dob,
-                    "doi": document_analysis.doi
+                    # "doi": document_analysis.doi
                 }
                 missing_fields = [k for k, v in required_fields.items() if not v or str(v).lower() == "not specified"]
                 if missing_fields:
