@@ -137,26 +137,23 @@ class ReportAnalyzer:
             input_variables=["document_text", "current_date"],
             partial_variables={"format_instructions": self.brief_summary_parser.get_format_instructions()},
         )
-
     def create_whats_new_prompt(self) -> PromptTemplate:
         template = """
         You are a medical document comparison expert. Compile the patient's complete medical history and current document into a historical progression format.
         
-        PATIENT'S MEDICAL HISTORY (most recent first):
+        PATIENT'S MEDICAL HISTORY (most recent first, ordered by createdAt descending; extract dates from each entry's createdAt):
         {previous_analyses}
         
-        CURRENT DOCUMENT ANALYSIS:
+        CURRENT DOCUMENT ANALYSIS (extract report date from analysis text, fallback to provided {current_date} if missing):
         {current_analysis}
         
-        CURRENT DATE: {current_date}
-        
         CRITICAL INSTRUCTIONS:
-        - Compile ALL data from previous documents and current document into a single historical chain
-        - Use arrow notation "→" to indicate progression or continuation across all documents
+        - Compile ALL data from previous documents and current document into a single historical chain, strictly ordered by document dates: EXTRACT createdAt MM/DD from each previous entry in {previous_analyses}, and EXTRACT report date MM/DD from {current_analysis} (e.g., from 'date:', 'DOI:', or summary date field; fallback to {current_date} only if no date found in analysis)
+        - Use arrow notation "→" to indicate progression or continuation across all documents, ensuring sequence matches the EXTRACTED date order (oldest to newest chronologically, but present most recent first in summary)
         - Include EVERY diagnosis, treatment, finding, etc., without skipping any data
         - If patient has multiple diagnoses, include ALL of them in the chain
         - For first document (no previous), show all pure findings WITHOUT arrows
-        - Show ALL continuing items as they appear in sequence
+        - Show ALL continuing items as they appear in sequence based on EXTRACTED dates
         - Categorize ALL items into these specific categories:
         * diagnostic: Diagnosis changes, medical findings
         * qme: Qualified Medical Evaluator reports, independent medical exams
@@ -164,30 +161,31 @@ class ReportAnalyzer:
         * ur_decision: Utilization Review decisions, work restrictions, treatment approvals
         * legal: Legal developments, attorney letters, claim updates, whether approved or denied along with reason.
         
-        - For EACH category, provide a concise description (3-5 words) with date in MM/DD format
+        - For EACH category, provide a concise description (3-5 words) with date in MM/DD format: STRICTLY use EXTRACTED createdAt for previous documents and EXTRACTED report date for current (do NOT use {current_date} unless extraction fails)
         - Include SPECIFIC FINDINGS like all diagnoses, test results, restrictions - list multiples separated by commas
         - Include ALL categories with data from any document
         - Only include categories that have actual data. Do not include entries with 'None' or empty.
-        - Use format: "Previous Item → Current Item (MM/DD)" for progression across documents, "Item (MM/DD)" for first-time or standalone items
-        - Build a full history chain showing evolution over time
+        - Use format: "Previous Item → Current Item (MM/DD)" for progression across documents, "Item (MM/DD)" for first-time or standalone items, where MM/DD is EXTRACTED from respective analyses (createdAt for prev, report date for current)
+        - Build a full history chain showing evolution over time, ensuring all dates align precisely with EXTRACTED document dates and differ where progression occurs (e.g., prev 09/15 → current 10/09)
         - For diagnostic category, use the full diagnosis string from current_analysis.diagnosis (which includes comma-separated key findings).
         
-        IMPORTANT: Include ALL historical data in the chain. Do not skip or omit any information. Focus on historical progression format.
+        IMPORTANT: Include ALL historical data in the chain. Do not skip or omit any information. ALWAYS extract and use dates from the analyses text first—ignore {current_date} unless explicitly no date in analysis. Focus on historical progression format, with all changes and dates matching the document-specific dates.
         
-        EXAMPLES FOR FIRST DOCUMENT:
-        - First MRI report: {{"diagnostic": "Normal MRI, no mass lesion, clear sinuses (10/02)"}}
-        - First QME report: {{"qme": "QME evaluation, restrictions (10/02)"}}
+        EXAMPLES FOR FIRST DOCUMENT (using extracted report date):
+        - First MRI report (analysis has "Date: 10/02"): {{"diagnostic": "Normal MRI, no mass lesion, clear sinuses (10/02)"}}
+        - First QME report (analysis has "createdAt: 10/02"): {{"qme": "QME evaluation, restrictions (10/02)"}}
         - First legal document: {{"legal": "Claim QM12345 approved (10/02)"}}
         
-        EXAMPLES FOR HISTORICAL CHAIN:
+        EXAMPLES FOR HISTORICAL CHAIN (extracted dates: prev createdAt 09/01 → current report date 10/02):
         - Diagnosis progression: {{"diagnostic": "lumbar strain (09/01) → lumbar strain, disc bulge, no compression (10/02)"}}
         - Multiple work restrictions: {{"ur_decision": "light duty (09/01) → no heavy lifting, no bending (10/02)"}}
         - Legal updates: {{"legal": "Claim QM12345 filed (09/01) → Claim QM12345 approved (10/02)"}}
         
         EXAMPLES OF WHAT TO INCLUDE:
-        - ✅ DO: Chain all diagnoses even if continuing: "strain → strain, bulge, no compression (10/02)"
+        - ✅ DO: Chain all diagnoses even if continuing: "strain (09/01) → strain, bulge, no compression (10/02)"
         - ✅ DO: List multiples: "PT, meds, restrictions (10/02)"
         - ✅ DO: Show all history: "denied (09/01) → approved (10/02)"
+        - ❌ DON'T: Use same date on both sides unless extracted dates match exactly
         
         {format_instructions}
         

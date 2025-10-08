@@ -202,3 +202,40 @@ class DocumentConverter:
                 logger.info(f"🗑️ Cleaned up converted file: {file_path}")
             except Exception as e:
                 logger.warning(f"⚠️ Could not clean up converted file {file_path}: {str(e)}")
+    
+    def convert_to_pdf(self, content: bytes, filename: str) -> bytes:
+        """
+        Convert document bytes to PDF bytes for preview.
+        
+        Args:
+            content: Binary content of the input file
+            filename: Original filename (with extension) to determine format
+            
+        Returns:
+            PDF content as bytes
+        """
+        temp_dir = tempfile.mkdtemp()
+        input_filename = Path(filename).name
+        try:
+            input_path = os.path.join(temp_dir, input_filename)
+            with open(input_path, 'wb') as f:
+                f.write(content)
+            
+            logger.info(f"🔄 Converting {input_filename} to PDF using temporary path: {input_path}")
+            
+            converted_path, was_converted = DocumentConverter.convert_document(input_path, "pdf")
+            
+            with open(converted_path, 'rb') as f:
+                pdf_bytes = f.read()
+            
+            if not pdf_bytes:
+                raise Exception("PDF conversion resulted in empty content")
+            
+            logger.info(f"✅ Converted to PDF: {len(pdf_bytes)} bytes")
+            return pdf_bytes
+            
+        except Exception as e:
+            logger.error(f"❌ Error in convert_to_pdf for {filename}: {str(e)}")
+            raise
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)

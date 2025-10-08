@@ -376,7 +376,7 @@ class DatabaseService:
                     "documentSummary": {
                         "create": {
                             "type": document_summary.get("type", ""),
-                            "date": document_summary.get("date", datetime.now()),
+                            "date":rd if rd else datetime.now(),
                             "summary": document_summary.get("summary", "")
                         }
                     }
