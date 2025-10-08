@@ -153,8 +153,8 @@ class DatabaseService:
                 doi_end = doi_start + timedelta(days=1)
                 where_clause["doi"] = {"gte": doi_start, "lt": doi_end}
             
-            if claim_number:
-                where_clause["claimNumber"] = claim_number
+            # if claim_number:
+            #     where_clause["claimNumber"] = claim_number
             
             logger.info(f"🔍 Getting last 2 documents for patient: {patient_name}")
             

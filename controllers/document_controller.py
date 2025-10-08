@@ -495,20 +495,23 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
             "is_multiple_documents": False
         }
     
-    # Use the latest document for base info
+    # Use the latest document for base info (assuming documents[0] as per DB order)
     latest_doc = documents[0]
     base_response = await format_single_document_base(latest_doc)
     
-    # Collect all full summarySnapshot objects in an array (latest first)
+    # Collect all full summarySnapshot objects in an array (as per DB order)
     summary_snapshots = [doc.get("summarySnapshot") for doc in documents]
     
-    # adl from latest document
+    # adl from latest document (documents[0])
     adl = await format_adl(latest_doc)
     
-    # whats_new from latest document
-    whats_new = latest_doc.get("whatsNew", {})
+    # whats_new from the last item in the array (latest from DB data)
+    whats_new = documents[-1].get("whatsNew", {})
     
-    # document_summary: group by type
+    # status from the last item in the array (latest from DB data)
+    status = documents[-1].get("status")
+    
+    # document_summary: group by type (as per DB order)
     grouped_summaries = {}
     grouped_brief_summaries = {}
     for doc in documents:
@@ -539,7 +542,8 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
         "document_summary": grouped_summaries,
         "brief_summary": grouped_brief_summaries,
         "document_index": 1,
-        "is_latest": True
+        "is_latest": True,
+        "status": status  # Override status from last doc
     })
     
     # Wrap in single document structure
@@ -575,6 +579,8 @@ async def format_adl(document: Dict[str, Any]) -> Dict[str, Any]:
             "work_restrictions": adl_data.get("workRestrictions")
         }
     return None
+
+
 @router.post("/proxy-decrypt")
 async def proxy_decrypt(request: Request):
     """
