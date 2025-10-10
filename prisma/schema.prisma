@@ -71,6 +71,7 @@ briefSummary    String?
 whatsNew        Json?
 blobPath        String?
 patientQuizPage String?
+fileName        String?
 // Relations
 summarySnapshot SummarySnapshot?
 adl             ADL?
@@ -144,4 +145,11 @@ adl         Json     // Array stored as JSON for flexibility
 createdAt   DateTime @default(now())
 updatedAt   DateTime @updatedAt
 
+}
+
+model FailDocs{
+  id          String   @id @default(cuid())
+  reasson     String
+  blobPath    String
+  physicianId String?
 }

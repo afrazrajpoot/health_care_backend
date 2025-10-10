@@ -1,4 +1,5 @@
-# controllers/document_controller.py (updated: refined invalid message for clarity)
+# controllers/document_controller.py (updated: check for existing document before GCS upload and handle like ignored/required field issue)
+
 from fastapi import APIRouter, File, UploadFile, HTTPException, Request, Query
 from typing import Dict, List, Any
 from datetime import datetime
@@ -16,8 +17,25 @@ from pathlib import Path
 from fastapi import Path as FastAPIPath
 from services.document_ai_service import get_document_ai_processor
 from services.document_converter import DocumentConverter
-
+import os
+from urllib.parse import urlparse
 router = APIRouter()
+
+def extract_blob_path_from_gcs_url(gcs_url: str) -> str:
+    """Extract blob path from signed GCS URL."""
+    try:
+        parsed = urlparse(gcs_url)
+        full_path = parsed.path.lstrip('/')
+        parts = full_path.split('/')
+        if len(parts) < 2:
+            raise ValueError("Invalid GCS URL format")
+        blob_name = '/'.join(parts[1:])
+        if '?' in blob_name:
+            blob_name = blob_name.split('?')[0]
+        return blob_name
+    except Exception as e:
+        logger.error(f"❌ Failed to extract blob path from {gcs_url}: {str(e)}")
+        raise ValueError(f"Invalid GCS URL: {str(e)}")
 
 @router.post("/webhook/save-document")
 async def save_document_webhook(request: Request):
@@ -44,6 +62,20 @@ async def save_document_webhook(request: Request):
             user_friendly_msg = f"Invalid document: This file lacks proper patient details ({missing_details}). Please upload a complete medical report with patient name, DOB, and DOI."
             warning_msg = f"Document ignored: {user_friendly_msg} for file {data['filename']}"
             logger.warning(f"⚠️ {warning_msg}")
+            
+            # Extract blob_path from gcs_url (original uploads path)
+            blob_path = data.get("blob_path")
+            if not blob_path:
+                blob_path = extract_blob_path_from_gcs_url(data["gcs_url"])
+            
+            physician_id = data.get("physician_id")
+            db_service = await get_database_service()
+            await db_service.save_fail_doc(
+                reasson=user_friendly_msg,
+                blob_path=blob_path,
+                physician_id=physician_id
+            )
+            
             # Emit ignored event with user-friendly reason
             await sio.emit('task_complete', {
                 'document_id': data.get('document_id', 'unknown'),
@@ -51,12 +83,14 @@ async def save_document_webhook(request: Request):
                 'status': 'ignored',
                 'reason': user_friendly_msg,
                 'gcs_url': data["gcs_url"],
-                'physician_id': data.get("physician_id")
+                'physician_id': physician_id,
+                'blob_path': blob_path
             })
             return {
                 "status": "ignored",
                 "reason": user_friendly_msg,
-                "filename": data["filename"]
+                "filename": data["filename"],
+                "blob_path": blob_path
             }
         
         # Generate AI brief summary
@@ -82,20 +116,37 @@ async def save_document_webhook(request: Request):
         
         if file_exists:
             logger.warning(f"⚠️ Document already exists: {data['filename']}")
+            
+            # Extract blob_path from gcs_url (original uploads path)
+            blob_path = data.get("blob_path")
+            if not blob_path:
+                blob_path = extract_blob_path_from_gcs_url(data["gcs_url"])
+            physician_id = data.get("physician_id")
+            user_friendly_msg = "Document already processed"
+            
+            await db_service.save_fail_doc(
+                reasson=user_friendly_msg,
+                blob_path=blob_path,
+                physician_id=physician_id
+            )
+            
             # Optional: Emit skipped event
             await sio.emit('task_complete', {
                 'document_id': data.get('document_id', 'unknown'),
                 'filename': data["filename"],
                 'status': 'skipped',
-                'reason': 'Document already processed',
-                "user_id": data.get("user_id")  # Pass user_id if available
+                'reason': user_friendly_msg,
+                "user_id": data.get("user_id"),  # Pass user_id if available
+                'blob_path': blob_path,
+                'physician_id': physician_id
             })
-            return {"status": "skipped", "reason": "Document already processed"}
+            return {"status": "skipped", "reason": "Document already processed", "blob_path": blob_path}
         
         # Retrieve previous documents
+        physician_id = data.get("physician_id")
         db_response = await db_service.get_all_unverified_documents(
             document_analysis.patient_name,
-            physicianId=data.get("physician_id", None)
+            physicianId=physician_id
         )
         
         # Extract documents list from database response
@@ -167,7 +218,7 @@ async def save_document_webhook(request: Request):
             adl_data=adl_data,
             document_summary=document_summary,
             rd=rd,
-            physician_id=data.get("physician_id")  # Pass physician_id if provided in webhook payload
+            physician_id=physician_id  # Pass physician_id if provided in webhook payload
         )
 
         logger.info(f"💾 Document saved via webhook with ID: {document_id}")
@@ -178,7 +229,7 @@ async def save_document_webhook(request: Request):
             'filename': data["filename"],
             'status': 'success',
             # 'gcs_url': data["gcs_url"],
-            # 'physician_id': data.get("physician_id")
+            # 'physician_id': physician_id
         }
         # physician_id = data.get("physician_id")
         user_id = data.get("user_id")
@@ -192,6 +243,22 @@ async def save_document_webhook(request: Request):
 
     except Exception as e:
         logger.error(f"❌ Webhook save failed: {str(e)}", exc_info=True)
+        
+        # Save to FailDocs on general exception
+        blob_path = data.get("blob_path", "") if 'data' in locals() else ""
+        if not blob_path and 'data' in locals() and data.get("gcs_url"):
+            blob_path = extract_blob_path_from_gcs_url(data["gcs_url"])
+        physician_id = data.get("physician_id") if 'data' in locals() else None
+        reasson = f"Webhook processing failed: {str(e)}"
+        
+        if blob_path:
+            db_service = await get_database_service()
+            await db_service.save_fail_doc(
+                reasson=reasson,
+                blob_path=blob_path,
+                physician_id=physician_id
+            )
+        
         # Optional: Emit error event on exception
         try:
             await sio.emit('task_error', {
@@ -199,11 +266,13 @@ async def save_document_webhook(request: Request):
                 'filename': data.get('filename', 'unknown') if 'data' in locals() else 'unknown',
                 'error': str(e),
                 'gcs_url': data.get('gcs_url', 'unknown') if 'data' in locals() else 'unknown',
-                'physician_id': data.get('physician_id', None) if 'data' in locals() else None
+                'physician_id': physician_id,
+                'blob_path': blob_path
             })
         except:
             pass  # Ignore emit failure during webhook error
         raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
+
 
 @router.post("/extract-documents", response_model=Dict[str, Any])
 async def extract_documents(
@@ -212,7 +281,8 @@ async def extract_documents(
     userId: str = Query(None, description="Optional user ID for associating documents")
 ):
     """
-    Upload multiple documents: parse/validate synchronously, upload to GCS if valid, then queue for finalization.
+    Upload multiple documents: parse/validate synchronously, check existence before upload to GCS if valid, then queue for finalization.
+    For failed docs: upload to GCS with folder="uploads", save blob_path, reason, and physicianId to FailDocs, emit message.
     """
     if not documents:
         raise HTTPException(status_code=400, detail="No documents provided")
@@ -220,7 +290,8 @@ async def extract_documents(
     file_service = FileService()
     task_ids = []
     ignored_filenames = []
-    uploaded_files = []  # Track for cleanup on global errors
+    successful_uploads = []  # Track only successful uploads for cleanup
+    db_service = await get_database_service()  # Get once for reuse
     
     try:
         logger.info(f"\n🔄 === NEW MULTI-DOCUMENT PROCESSING REQUEST ({len(documents)} files) ===\n")
@@ -230,11 +301,14 @@ async def extract_documents(
         for document in documents:
             document_start_time = datetime.now()
             content = await document.read()
+            file_size = len(content)
+            blob_path = None
+            temp_path = None  # Initialize for finally block
             
             try:
                 file_service.validate_file(document, CONFIG["max_file_size"])
                 logger.info(f"📁 Starting processing for file: {document.filename}")
-                logger.info(f"📏 File size: {len(content)} bytes ({len(content)/(1024*1024):.2f} MB)")
+                logger.info(f"📏 File size: {file_size} bytes ({file_size/(1024*1024):.2f} MB)")
                 logger.info(f"📋 MIME type: {document.content_type}")
                 
                 # Save to temp for processing
@@ -254,7 +328,39 @@ async def extract_documents(
                         logger.info(f"✅ Direct support for: {Path(temp_path).suffix}")
                 except Exception as convert_exc:
                     logger.error(f"❌ Conversion failed for {document.filename}: {str(convert_exc)}")
-                    raise ValueError(f"File conversion failed: {str(convert_exc)}")
+                    
+                    # For conversion failure, upload original to GCS with folder="uploads" and save to FailDocs
+                    try:
+                        gcs_url, blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
+                        # Do NOT append to successful_uploads (it's a fail)
+                        await db_service.save_fail_doc(
+                            reasson=f"File conversion failed: {str(convert_exc)}",
+                            blob_path=blob_path,
+                            physician_id=physicianId
+                        )
+                        logger.info(f"💾 Saved failed (conversion) document to FailDocs: {blob_path}")
+                        
+                        emit_data = {
+                            'document_id': 'failed_conversion',
+                            'filename': document.filename,
+                            'status': 'failed',
+                            'reason': f"File conversion failed: {str(convert_exc)}",
+                            'blob_path': blob_path,
+                            'physician_id': physicianId,
+                            'user_id': userId
+                        }
+                        if userId:
+                            await sio.emit('task_error', emit_data, room=f"user_{userId}")
+                        else:
+                            await sio.emit('task_error', emit_data)
+                    except Exception as upload_exc:
+                        logger.error(f"❌ GCS upload failed for failed conversion: {str(upload_exc)}")
+                    
+                    ignored_filenames.append({
+                        "filename": document.filename,
+                        "reason": f"File conversion failed: {str(convert_exc)}"
+                    })
+                    continue  # Skip to next file
                 
                 # Document AI Processing
                 processor = get_document_ai_processor()
@@ -272,7 +378,7 @@ async def extract_documents(
                     gcs_file_link="",  # Set after upload
                     fileInfo={
                         "originalName": document.filename,
-                        "size": len(content),
+                        "size": file_size,
                         "mimeType": document.content_type or "application/octet-stream",
                         "gcsUrl": ""
                     },
@@ -286,7 +392,34 @@ async def extract_documents(
 
                 # Validation
                 if not result.text:
-                    raise ValueError("No text extracted from document")
+                    reasson = "No text extracted from document"
+                    
+                    # Upload to GCS with folder="uploads" and save to FailDocs
+                    gcs_url, blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
+                    # Do NOT append to successful_uploads
+                    await db_service.save_fail_doc(
+                        reasson=reasson,
+                        blob_path=blob_path,
+                        physician_id=physicianId
+                    )
+                    logger.info(f"💾 Saved failed (no text) document to FailDocs: {blob_path}")
+                    
+                    emit_data = {
+                        'document_id': 'failed_no_text',
+                        'filename': document.filename,
+                        'status': 'failed',
+                        'reason': reasson,
+                        'blob_path': blob_path,
+                        'physician_id': physicianId,
+                        'user_id': userId
+                    }
+                    if userId:
+                        await sio.emit('task_error', emit_data, room=f"user_{userId}")
+                    else:
+                        await sio.emit('task_error', emit_data)
+                    
+                    ignored_filenames.append({"filename": document.filename, "reason": reasson})
+                    continue
 
                 logger.info(f"📝 Validating patient details for {document.filename}...")
                 analyzer = ReportAnalyzer()
@@ -313,6 +446,17 @@ async def extract_documents(
                     user_friendly_msg = f"Invalid document: This file lacks proper patient details ({missing_details}). Please upload a complete medical report with patient name, DOB, and DOI."
                     error_msg = f"Invalid document: {user_friendly_msg} for {document.filename}"
                     logger.warning(f"⚠️ {error_msg}")
+                    
+                    # Upload to GCS with folder="uploads" and save to FailDocs
+                    gcs_url, blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
+                    # Do NOT append to successful_uploads
+                    await db_service.save_fail_doc(
+                        reasson=user_friendly_msg,
+                        blob_path=blob_path,
+                        physician_id=physicianId
+                    )
+                    logger.info(f"💾 Saved failed (validation) document to FailDocs: {blob_path}")
+                    
                     ignored_filenames.append({
                         "filename": document.filename,
                         "reason": user_friendly_msg
@@ -323,6 +467,8 @@ async def extract_documents(
                         'filename': document.filename,
                         'status': 'ignored',
                         'reason': user_friendly_msg,
+                        'blob_path': blob_path,
+                        'physician_id': physicianId,
                         'user_id': userId
                     }
                     if userId:
@@ -333,25 +479,126 @@ async def extract_documents(
 
                 logger.info(f"✅ Validation passed for {document.filename}")
                 
-                # Upload to GCS (only if valid)
+                # NEW: Check if document already exists BEFORE GCS upload (similar to webhook logic)
+                try:
+                    file_exists = await db_service.document_exists(
+                        document.filename, 
+                        file_size
+                    )
+                    if file_exists:
+                        user_friendly_msg = f"Document already exists: {document.filename}. Skipping upload and processing."
+                        logger.warning(f"⚠️ {user_friendly_msg}")
+                        
+                        # Upload to GCS with folder="uploads" and save to FailDocs (treating as fail/skipped)
+                        gcs_url, blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
+                        # Do NOT append to successful_uploads
+                        await db_service.save_fail_doc(
+                            reasson=user_friendly_msg,
+                            blob_path=blob_path,
+                            physician_id=physicianId
+                        )
+                        logger.info(f"💾 Saved skipped (exists) document to FailDocs: {blob_path}")
+                        
+                        ignored_filenames.append({
+                            "filename": document.filename,
+                            "reason": user_friendly_msg
+                        })
+                        # Emit ignored (treating as skipped/ignored like required field issue)
+                        emit_data = {
+                            'document_id': 'ignored_exists',
+                            'filename': document.filename,
+                            'status': 'ignored',
+                            'reason': user_friendly_msg,
+                            'blob_path': blob_path,
+                            'physician_id': physicianId,
+                            'user_id': userId
+                        }
+                        if userId:
+                            await sio.emit('task_complete', emit_data, room=f"user_{userId}")
+                        else:
+                            await sio.emit('task_complete', emit_data)
+                        continue  # Skip to next file - no upload or queuing
+                except Exception as db_exc:
+                    logger.error(f"❌ Database check failed for {document.filename}: {str(db_exc)}")
+                    
+                    # For DB check failure, upload with folder="uploads" and save to FailDocs
+                    try:
+                        gcs_url, blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
+                        # Do NOT append to successful_uploads
+                        await db_service.save_fail_doc(
+                            reasson=f"Database existence check failed: {str(db_exc)}",
+                            blob_path=blob_path,
+                            physician_id=physicianId
+                        )
+                        logger.info(f"💾 Saved failed (db_check) document to FailDocs: {blob_path}")
+                        
+                        emit_data = {
+                            'document_id': 'failed_db_check',
+                            'filename': document.filename,
+                            'status': 'failed',
+                            'reason': f"Database existence check failed: {str(db_exc)}",
+                            'blob_path': blob_path,
+                            'physician_id': physicianId,
+                            'user_id': userId
+                        }
+                        if userId:
+                            await sio.emit('task_error', emit_data, room=f"user_{userId}")
+                        else:
+                            await sio.emit('task_error', emit_data)
+                    except Exception as upload_exc:
+                        logger.error(f"❌ GCS upload failed for db check failure: {str(upload_exc)}")
+                    
+                    ignored_filenames.append({"filename": document.filename, "reason": f"Database existence check failed: {str(db_exc)}"})
+                    raise ValueError(f"Database existence check failed: {str(db_exc)}")
+                
+                # Upload to GCS (only if valid and does not exist)
                 try:
                     logger.info("☁️ Uploading to GCS...")
-                    gcs_url, blob_path = file_service.save_to_gcs(content, document.filename)
+                    gcs_url, blob_path = file_service.save_to_gcs(content, document.filename)  # Default folder="uploads"
                     logger.info(f"✅ GCS upload: {gcs_url} | Blob: {blob_path}")
-                    uploaded_files.append(blob_path)
+                    successful_uploads.append(blob_path)  # Only append here
                     
                     # Update result
                     result.gcs_file_link = gcs_url
                     result.fileInfo["gcsUrl"] = gcs_url
                 except Exception as gcs_exc:
                     logger.error(f"❌ GCS upload failed for {document.filename}: {str(gcs_exc)}")
+                    
+                    # For GCS upload failure after validation, upload to uploads and save to FailDocs
+                    try:
+                        fail_gcs_url, fail_blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
+                        # Do NOT append to successful_uploads
+                        await db_service.save_fail_doc(
+                            reasson=f"GCS upload failed: {str(gcs_exc)}",
+                            blob_path=fail_blob_path,
+                            physician_id=physicianId
+                        )
+                        logger.info(f"💾 Saved failed (gcs) document to FailDocs: {fail_blob_path}")
+                        
+                        emit_data = {
+                            'document_id': 'failed_gcs',
+                            'filename': document.filename,
+                            'status': 'failed',
+                            'reason': f"GCS upload failed: {str(gcs_exc)}",
+                            'blob_path': fail_blob_path,
+                            'physician_id': physicianId,
+                            'user_id': userId
+                        }
+                        if userId:
+                            await sio.emit('task_error', emit_data, room=f"user_{userId}")
+                        else:
+                            await sio.emit('task_error', emit_data)
+                    except Exception as fail_upload_exc:
+                        logger.error(f"❌ Fail GCS upload also failed: {str(fail_upload_exc)}")
+                    
+                    ignored_filenames.append({"filename": document.filename, "reason": f"GCS upload failed: {str(gcs_exc)}"})
                     raise ValueError(f"GCS upload failed: {str(gcs_exc)}")
                 
                 # Prepare and queue task
                 webhook_payload = {
                     "result": result.dict(),
                     "filename": document.filename,
-                    "file_size": len(content),
+                    "file_size": file_size,
                     "mime_type": document.content_type or "application/octet-stream",
                     "processing_time_ms": int(processing_time),
                     "gcs_url": gcs_url,
@@ -368,40 +615,73 @@ async def extract_documents(
                 
             except ValueError as ve:
                 logger.error(f"❌ Validation error for {document.filename}: {str(ve)}")
+                
+                # For ValueError, upload with folder="uploads" and save to FailDocs
+                try:
+                    gcs_url, blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
+                    # Do NOT append to successful_uploads
+                    await db_service.save_fail_doc(
+                        reasson=str(ve),
+                        blob_path=blob_path,
+                        physician_id=physicianId
+                    )
+                    logger.info(f"💾 Saved failed (value_error) document to FailDocs: {blob_path}")
+                    
+                    emit_data = {
+                        'filename': document.filename,
+                        'error': str(ve),
+                        'blob_path': blob_path,
+                        'physician_id': physicianId,
+                        'user_id': userId
+                    }
+                    if userId:
+                        await sio.emit('task_error', emit_data, room=f"user_{userId}")
+                    else:
+                        await sio.emit('task_error', emit_data)
+                except Exception as upload_exc:
+                    logger.error(f"❌ GCS upload failed for value error: {str(upload_exc)}")
+                
                 ignored_filenames.append({
                     "filename": document.filename,
                     "reason": str(ve)
                 })
-                # Emit error
-                emit_data = {
-                    'filename': document.filename,
-                    'error': str(ve),
-                    'user_id': userId
-                }
-                if userId:
-                    await sio.emit('task_error', emit_data, room=f"user_{userId}")
-                else:
-                    await sio.emit('task_error', emit_data)
             except Exception as proc_exc:
                 logger.error(f"❌ Unexpected processing error for {document.filename}: {str(proc_exc)}")
                 logger.debug(f"Traceback: {traceback.format_exc()}")
+                
+                # For unexpected errors, upload with folder="uploads" and save to FailDocs
+                try:
+                    gcs_url, blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
+                    # Do NOT append to successful_uploads
+                    await db_service.save_fail_doc(
+                        reasson=f"Processing failed: {str(proc_exc)}",
+                        blob_path=blob_path,
+                        physician_id=physicianId
+                    )
+                    logger.info(f"💾 Saved failed (processing) document to FailDocs: {blob_path}")
+                    
+                    emit_data = {
+                        'filename': document.filename,
+                        'error': str(proc_exc),
+                        'blob_path': blob_path,
+                        'physician_id': physicianId,
+                        'user_id': userId
+                    }
+                    if userId:
+                        await sio.emit('task_error', emit_data, room=f"user_{userId}")
+                    else:
+                        await sio.emit('task_error', emit_data)
+                except Exception as upload_exc:
+                    logger.error(f"❌ GCS upload failed for processing error: {str(upload_exc)}")
+                
                 ignored_filenames.append({
                     "filename": document.filename,
                     "reason": f"Processing failed: {str(proc_exc)}"
                 })
-                # Emit error
-                emit_data = {
-                    'filename': document.filename,
-                    'error': str(proc_exc),
-                    'user_id': userId
-                }
-                if userId:
-                    await sio.emit('task_error', emit_data, room=f"user_{userId}")
-                else:
-                    await sio.emit('task_error', emit_data)
             finally:
                 # Always cleanup temp files
-                file_service.cleanup_temp_file(temp_path)
+                if temp_path:
+                    file_service.cleanup_temp_file(temp_path)
                 if was_converted and converted_path:
                     DocumentConverter.cleanup_converted_file(converted_path, was_converted)
         
@@ -418,15 +698,18 @@ async def extract_documents(
     except Exception as global_exc:
         logger.error(f"❌ Global error in extract-documents: {str(global_exc)}")
         logger.debug(f"Traceback: {traceback.format_exc()}")
-        # Cleanup any uploaded files
-        for path in uploaded_files:
+        # Cleanup any successful uploads (fails are preserved)
+        for path in successful_uploads:
             try:
                 file_service.delete_from_gcs(path)
-                logger.info(f"🗑️ Cleanup GCS: {path}")
+                logger.info(f"🗑️ Cleanup GCS (successful): {path}")
             except:
                 logger.warning(f"⚠️ Cleanup failed: {path}")
         raise HTTPException(status_code=500, detail=f"Global processing failed: {str(global_exc)}")
+
 from typing import Optional
+
+from datetime import datetime
 
 @router.get('/document')
 async def get_document(
@@ -495,26 +778,42 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
             "is_multiple_documents": False
         }
     
-    # Use the latest document for base info (assuming documents[0] as per DB order)
-    latest_doc = documents[0]
+    # Define function to parse createdAt for sorting
+    def parse_created_at(doc):
+        created_at = doc.get("createdAt")
+        if created_at:
+            if isinstance(created_at, str):
+                return datetime.fromisoformat(created_at.replace('Z', '+00:00'))  # Handle ISO with Z
+            elif isinstance(created_at, datetime):
+                return created_at
+        return datetime.min
+    
+    # Sort documents by createdAt ascending to have previous first
+    sorted_documents = sorted(documents, key=parse_created_at)
+    
+    # Find the latest document based on createdAt
+    latest_doc = max(documents, key=parse_created_at)
+    
+    # Use the latest document for base info
     base_response = await format_single_document_base(latest_doc)
     
-    # Collect all full summarySnapshot objects in an array (as per DB order)
-    summary_snapshots = [doc.get("summarySnapshot") for doc in documents]
+    # Collect all full summarySnapshot objects in an array (chronological order, but reverse to have latest first)
+    summary_snapshots_list = [doc.get("summarySnapshot") for doc in sorted_documents]
+    summary_snapshots = summary_snapshots_list[::-1]  # Reverse to put latest first
     
-    # adl from latest document (documents[0])
+    # adl from latest document
     adl = await format_adl(latest_doc)
     
-    # whats_new from the last item in the array (latest from DB data)
+    # whats_new from the last item in the original array (latest from DB data)
     whats_new = documents[-1].get("whatsNew", {})
     
-    # status from the last item in the array (latest from DB data)
+    # status from the last item in the original array (latest from DB data)
     status = documents[-1].get("status")
     
-    # document_summary: group by type (as per DB order)
+    # document_summary: group by type (as per chronological order)
     grouped_summaries = {}
     grouped_brief_summaries = {}
-    for doc in documents:
+    for doc in sorted_documents:
         # Group brief_summary by type
         doc_summary = doc.get("documentSummary")
         doc_type = doc_summary.get("type", "unknown") if doc_summary else "unknown"
@@ -579,8 +878,6 @@ async def format_adl(document: Dict[str, Any]) -> Dict[str, Any]:
             "work_restrictions": adl_data.get("workRestrictions")
         }
     return None
-
-
 @router.post("/proxy-decrypt")
 async def proxy_decrypt(request: Request):
     """
@@ -605,7 +902,20 @@ async def proxy_decrypt(request: Request):
         logger.error(f"❌ Decryption error: {str(e)}")
         raise HTTPException(status_code=500, detail="Decryption failed")   
     
-
+@router.get("/fail-docs", response_model=List[Dict[str, Any]])
+async def get_fail_documents(
+    physicianId: str = Query(..., description="Physician ID to filter failed documents")
+):
+    """
+    Retrieve failed documents for a specific physician.
+    """
+    try:
+        db_service = await get_database_service()
+        fail_docs = await db_service.get_fail_docs_by_physician(physicianId)
+        return fail_docs
+    except Exception as e:
+        logger.error(f"❌ Error retrieving fail docs for physician {physicianId}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve fail docs: {str(e)}")
 from fastapi.responses import Response
 from services.document_converter import DocumentConverter
 import urllib.parse
@@ -653,3 +963,67 @@ async def preview_file(blob_path: str = FastAPIPath(..., description="GCS blob p
     except Exception as e:
         logger.error(f"❌ Preview error for {blob_path}: {str(e)}")
         raise HTTPException(status_code=500, detail="Preview failed")
+
+
+@router.delete("/fail-docs/{doc_id}")
+async def delete_fail_document(
+    doc_id: str = FastAPIPath(..., description="ID of the failed document to delete"),
+    physicianId: str = Query(..., description="Physician ID to authorize deletion")
+):
+    """
+    Delete a failed document: remove from GCS using blob_path and from DB, scoped to physician.
+    """
+    try:
+        db_service = await get_database_service()
+        file_service = FileService()
+        
+        # Fetch the doc to get blob_path and verify
+        fail_doc = await db_service.prisma.faildocs.find_unique(
+            where={"id": doc_id}
+        )
+        
+        if not fail_doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+            
+        if fail_doc.physicianId != physicianId:
+            raise HTTPException(status_code=403, detail="Unauthorized: Access denied")
+        
+        # Log the blobPath for debugging
+        logger.info(f"Debug: blobPath type={type(fail_doc.blobPath)}, value={repr(fail_doc.blobPath)}")
+        
+        # Safely extract blob_path from GCS
+        # Handle None, Ellipsis, or any non-string values
+        blob_path = None
+        if fail_doc.blobPath and isinstance(fail_doc.blobPath, str) and fail_doc.blobPath != "...":
+            blob_path = fail_doc.blobPath
+        
+        # Delete from GCS (Google Cloud Storage)
+        if blob_path:
+            try:
+                success = file_service.delete_from_gcs(blob_path)
+                if success:
+                    logger.info(f"✅ Successfully deleted from GCS: {blob_path}")
+                else:
+                    logger.warning(f"⚠️ GCS delete returned False for {blob_path}, but proceeding with DB delete")
+            except Exception as gcs_error:
+                logger.error(f"❌ GCS deletion error for {blob_path}: {str(gcs_error)}")
+                # Continue with DB deletion even if GCS deletion fails
+        else:
+            logger.info(f"ℹ️ No valid blob_path found for doc {doc_id}, skipping GCS deletion")
+        
+        # Delete from Database
+        await db_service.delete_fail_doc_by_id(doc_id, physicianId)
+        logger.info(f"✅ Successfully deleted from database: {doc_id}")
+        
+        return {
+            "status": "success",
+            "message": f"Failed document {doc_id} deleted successfully",
+            "doc_id": doc_id,
+            "gcs_deleted": bool(blob_path)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error in delete_fail_document for {doc_id}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Deletion failed: {str(e)}")

@@ -61,13 +61,55 @@ class DatabaseService:
             logger.info("🔌 Disconnected from database")
         except Exception as e:
             logger.warning(f"⚠️ Error disconnecting from database: {str(e)}")
+    async def save_fail_doc(self, reasson: str, blob_path: str, physician_id: Optional[str] = None) -> str:
+            """Save a failed document record to the FailDocs table, including optional physician ID."""
+            try:
+                data = {
+                    "reasson": reasson,
+                    "blobPath": blob_path
+                }
+                if physician_id:
+                    data["physicianId"] = physician_id
+                
+                fail_doc = await self.prisma.faildocs.create(
+                    data=data
+                )
+                logger.info(f"💾 Saved fail doc with ID: {fail_doc.id} (Physician ID: {physician_id if physician_id else 'None'})")
+                return fail_doc.id
+            except Exception as e:
+                logger.error(f"❌ Error saving fail doc: {str(e)}")
+                raise
+    async def get_fail_docs_by_physician(self, physician_id: str) -> List[Dict[str, Any]]:
+        """Fetch failed documents by physician ID."""
+        try:
+            fail_docs = await self.prisma.faildocs.find_many(
+                where={
+                    "physicianId": physician_id
+                }
+            )
+            # Convert to dicts for response
+            fail_docs_list = [
+                {
+                    "id": doc.id,
+                    "reasson": doc.reasson,
+                    "blobPath": doc.blobPath,
+                    "physicianId": doc.physicianId
+                }
+                for doc in fail_docs
+            ]
+            logger.info(f"📋 Fetched {len(fail_docs_list)} fail docs for physician: {physician_id}")
+            return fail_docs_list
+        except Exception as e:
+            logger.error(f"❌ Error fetching fail docs for physician {physician_id}: {str(e)}")
+            raise
     
     async def document_exists(self, filename: str, file_size: int) -> bool:
         """Check if document already exists by filename and size (adjust where clause if needed)"""
         try:
             count = await self.prisma.document.count(
                 where={
-                    "gcsFileLink": {"contains": filename},
+                    # "gcsFileLink": {"contains": filename},
+                    "fileName": filename,
                     # Add "fileSize": file_size if you add that field to schema
                 }
             )
@@ -75,6 +117,30 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"❌ Error checking document existence: {str(e)}")
             return False
+    async def delete_fail_doc_by_id(self, doc_id: str, physician_id: str) -> bool:
+        """Delete a failed document record from the FailDocs table, scoped to physician ID."""
+        try:
+            # First, fetch to verify ownership
+            fail_doc = await self.prisma.faildocs.find_unique(
+                where={
+                    "id": doc_id
+                }
+            )
+            if not fail_doc or fail_doc.physicianId != physician_id:
+                logger.warning(f"⚠️ Unauthorized delete attempt for doc {doc_id} by physician {physician_id}")
+                return False
+            
+            # Delete from DB
+            await self.prisma.faildocs.delete(
+                where={
+                    "id": doc_id
+                }
+            )
+            logger.info(f"🗑️ Deleted fail doc {doc_id} from DB")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error deleting fail doc {doc_id}: {str(e)}")
+            raise
 
     async def get_document(self, document_id: str) -> Optional[Dict[str, Any]]:
         """Get a specific document by ID"""
@@ -167,7 +233,7 @@ class DatabaseService:
                     "documentSummary": True
                     # NO "whatsNew" - scalar Json
                 },
-                order={"createdAt": "desc"},
+                # order={"createdAt": "desc"},
                 take=2  # Limit to last two
             )
             
@@ -357,7 +423,7 @@ class DatabaseService:
                     "createdAt":rd if rd else datetime.now(),
                     "blobPath": blob_path,
                     # Optional: Add these if you extend schema
-                    # "originalName": file_name,
+                    "fileName": file_name,
                     # "fileSize": file_size,
                     # etc.
                     "summarySnapshot": {
@@ -454,6 +520,7 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"❌ Error retrieving PatientQuiz: {str(e)}")
             return None
+    
 _db_service = None
 
 async def get_database_service() -> DatabaseService:

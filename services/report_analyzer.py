@@ -148,12 +148,13 @@ class ReportAnalyzer:
         {current_analysis}
         
         CRITICAL INSTRUCTIONS:
-        - Compile ALL data from previous documents and current document into a single historical chain, strictly ordered by document dates: EXTRACT createdAt MM/DD from each previous entry in {previous_analyses}, and EXTRACT report date MM/DD from {current_analysis} (e.g., from 'date:', 'DOI:', or summary date field; fallback to {current_date} only if no date found in analysis)
-        - Use arrow notation "→" to indicate progression or continuation across all documents, ensuring sequence matches the EXTRACTED date order (oldest to newest chronologically, but present most recent first in summary)
-        - Include EVERY diagnosis, treatment, finding, etc., without skipping any data
-        - If patient has multiple diagnoses, include ALL of them in the chain
-        - For first document (no previous), show all pure findings WITHOUT arrows
-        - Show ALL continuing items as they appear in sequence based on EXTRACTED dates
+        - STRICTLY obey document dates: EXTRACT createdAt MM/DD from each previous entry in {previous_analyses}, and EXTRACT report date MM/DD from {current_analysis} (e.g., from 'date:', 'DOI:', 'rd:', or summary date field; fallback to {current_date} only if no date found in analysis). Treat the extracted report date (rd) from current_analysis as its document date.
+        - Collect ALL entries (previous + current) with their extracted dates, then sort them chronologically by date ascending (oldest first). If a previous createdAt is later than the current rd, that previous entry must appear AFTER current in the chronological chain.
+        - Use arrow notation "→" to indicate progression or continuation in strict chronological order by extracted dates (oldest to newest), NOT by input order. ALWAYS sort the chain by extracted dates ascending, regardless of whether the current document is older or newer than previous ones.
+        - Include EVERY diagnosis, treatment, finding, etc., without skipping any data.
+        - If patient has multiple diagnoses, include ALL of them in the chain.
+        - For first document (no previous), show all pure findings WITHOUT arrows.
+        - Show ALL continuing items as they appear in sequence based on SORTED extracted dates.
         - Categorize ALL items into these specific categories:
         * diagnostic: Diagnosis changes, medical findings
         * qme: Qualified Medical Evaluator reports, independent medical exams
@@ -161,31 +162,36 @@ class ReportAnalyzer:
         * ur_decision: Utilization Review decisions, work restrictions, treatment approvals
         * legal: Legal developments, attorney letters, claim updates, whether approved or denied along with reason.
         
-        - For EACH category, provide a concise description (3-5 words) with date in MM/DD format: STRICTLY use EXTRACTED createdAt for previous documents and EXTRACTED report date for current (do NOT use {current_date} unless extraction fails)
-        - Include SPECIFIC FINDINGS like all diagnoses, test results, restrictions - list multiples separated by commas
-        - Include ALL categories with data from any document
+        - For EACH category, provide a concise description (3-5 words) with date in MM/DD format: STRICTLY use EXTRACTED createdAt for previous documents and EXTRACTED report date (rd) for current (do NOT use {current_date} unless extraction fails). Chain across the sorted sequence for that category.
+        - Include SPECIFIC FINDINGS like all diagnoses, test results, restrictions - list multiples separated by commas.
+        - Include ALL categories with data from any document.
         - Only include categories that have actual data. Do not include entries with 'None' or empty.
-        - Use format: "Previous Item → Current Item (MM/DD)" for progression across documents, "Item (MM/DD)" for first-time or standalone items, where MM/DD is EXTRACTED from respective analyses (createdAt for prev, report date for current)
-        - Build a full history chain showing evolution over time, ensuring all dates align precisely with EXTRACTED document dates and differ where progression occurs (e.g., prev 09/15 → current 10/09)
-        - For diagnostic category, use the full diagnosis string from current_analysis.diagnosis (which includes comma-separated key findings).
+        - Use format: "Previous Item → Current Item (MM/DD)" for progression across documents, "Item (MM/DD)" for first-time or standalone items, where MM/DD is EXTRACTED from respective analyses (createdAt for prev, report date/rd for current). For chains with multiple: "Item1 (date1) → Item2 (date2) → ... → ItemN (dateN)".
+        - Build a full history chain showing evolution over time, ensuring all dates align precisely with EXTRACTED document dates and the sequence is sorted chronologically (oldest to newest), with arrows connecting in order—differ where progression occurs (e.g., 05/15 → 09/12 → 10/05 if dates sort that way). If current document date is earlier (e.g., 05/15) and previous is later (e.g., 09/12), chain as "Item from current (05/15) → Item from previous (09/12)".
+        - For diagnostic category, use the full diagnosis string from each analysis.diagnosis (which includes comma-separated key findings), chaining them in sorted date order.
         
-        IMPORTANT: Include ALL historical data in the chain. Do not skip or omit any information. ALWAYS extract and use dates from the analyses text first—ignore {current_date} unless explicitly no date in analysis. Focus on historical progression format, with all changes and dates matching the document-specific dates.
+        IMPORTANT: Include ALL historical data in the chain. Do not skip or omit any information. ALWAYS extract and use dates from the analyses text first (createdAt for prev, report date/rd for current)—ignore {current_date} unless explicitly no date in analysis. Focus on historical progression format, with all changes and dates matching the document-specific dates, sorted chronologically. The document labeled "current" may actually be older than "previous" documents - ALWAYS sort by extracted dates ascending (oldest first), not by labels. Ensure the arrow chain reflects the true timeline, e.g., if dates are 09/12 (previous) and 05/15 (current), sort to 05/15 → 09/12.
         
         EXAMPLES FOR FIRST DOCUMENT (using extracted report date):
         - First MRI report (analysis has "Date: 10/02"): {{"diagnostic": "Normal MRI, no mass lesion, clear sinuses (10/02)"}}
         - First QME report (analysis has "createdAt: 10/02"): {{"qme": "QME evaluation, restrictions (10/02)"}}
         - First legal document: {{"legal": "Claim QM12345 approved (10/02)"}}
         
-        EXAMPLES FOR HISTORICAL CHAIN (extracted dates: prev createdAt 09/01 → current report date 10/02):
+        EXAMPLES FOR HISTORICAL CHAIN (extracted dates sorted: prev createdAt 09/01, current rd 10/02):
         - Diagnosis progression: {{"diagnostic": "lumbar strain (09/01) → lumbar strain, disc bulge, no compression (10/02)"}}
         - Multiple work restrictions: {{"ur_decision": "light duty (09/01) → no heavy lifting, no bending (10/02)"}}
         - Legal updates: {{"legal": "Claim QM12345 filed (09/01) → Claim QM12345 approved (10/02)"}}
+        
+        EXAMPLES WHEN PREVIOUS IS LATEST (extracted dates sorted: current rd 05/15, prev createdAt 09/12):
+        - {{"diagnostic": "Lumbar Disc Herniation, Left L5 Radiculopathy, L4-L5 disc protrusion (05/15) → Lumbar Disc Herniation, Resolving L5 Radiculopathy (09/12)"}}
         
         EXAMPLES OF WHAT TO INCLUDE:
         - ✅ DO: Chain all diagnoses even if continuing: "strain (09/01) → strain, bulge, no compression (10/02)"
         - ✅ DO: List multiples: "PT, meds, restrictions (10/02)"
         - ✅ DO: Show all history: "denied (09/01) → approved (10/02)"
         - ❌ DON'T: Use same date on both sides unless extracted dates match exactly
+        - ✅ DO: Sort dates chronologically: if current rd 05/15 and prev createdAt 09/12, chain as "item (05/15) → item (09/12)"
+        - ✅ DO: If current is older, it appears first in chain: current rd 05/15, prev 09/12 = "item (05/15) → item (09/12)"
         
         {format_instructions}
         
@@ -338,6 +344,7 @@ class ReportAnalyzer:
         - Status: {current_analysis.status}
         - ADLs Affected: {current_analysis.adls_affected}
         - Summary Points: {', '.join(current_analysis.summary_points)}
+        - Report Date (RD): {current_analysis.rd}
         """
         
         try:
