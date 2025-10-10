@@ -96,15 +96,14 @@ async def save_document_webhook(request: Request):
         # Generate AI brief summary
         brief_summary = analyzer.generate_brief_summary(result_data.get("text", ""))
         
+        # Parse dates with fallback to now() on any parsing error
         try:
             dob = datetime.strptime(document_analysis.dob, "%Y-%m-%d")
-            rd=datetime.strptime(document_analysis.rd, "%Y-%m-%d")
-        except:
-            dob = datetime.now()
-            
-        try:
+            rd = datetime.strptime(document_analysis.rd, "%Y-%m-%d")
             doi = datetime.strptime(document_analysis.doi, "%Y-%m-%d")
-        except:
+        except ValueError:
+            dob = datetime.now()
+            rd = datetime.now()
             doi = datetime.now()
         
         # Mock database service - replace with your actual implementation
@@ -144,11 +143,21 @@ async def save_document_webhook(request: Request):
         
         # Retrieve previous documents
         physician_id = data.get("physician_id")
+        print(physician_id,'physician id in webhook')
+       
+        claimNUmbers = await db_service.get_patient_claim_numbers(
+            document_analysis.patient_name,
+             physicianId=physician_id,
+            dob=dob
+           
+        )
         db_response = await db_service.get_all_unverified_documents(
             document_analysis.patient_name,
-            physicianId=physician_id
+            physicianId=physician_id,
+            claimNumber=document_analysis.claim_number if document_analysis.claim_number else None,
+            dob=dob
         )
-        
+        print(claimNUmbers,'claim numbers')
         # Extract documents list from database response
         previous_documents = db_response.get('documents', []) if db_response else []
         # print(previous_documents,'previous documents')
@@ -163,6 +172,54 @@ async def save_document_webhook(request: Request):
         if whats_new_data is None or not isinstance(whats_new_data, dict):
             logger.warning(f"⚠️ Invalid whats_new data for {data['filename']}; using empty dict")
             whats_new_data = {}
+        
+        # Handle claim number logic
+        claim_to_use = document_analysis.claim_number
+        if not claim_to_use or str(claim_to_use).lower() == "not specified":
+            claim_numbers_list = claimNUmbers.get('claim_numbers', []) if isinstance(claimNUmbers, dict) else claimNUmbers if isinstance(claimNUmbers, list) else []
+            # Deduplicate claim numbers to handle cases where duplicates exist
+            claim_numbers_list = list(set(claim_numbers_list))
+            if len(claim_numbers_list) == 0:
+                # First time: OK to proceed with "Not specified" or extracted value
+                claim_to_use = document_analysis.claim_number or "UNSPECIFIED"
+                logger.info(f"ℹ️ First document for patient '{document_analysis.patient_name}': Using claim '{claim_to_use}'")
+            elif len(claim_numbers_list) == 1:
+                # One previous claim (after dedup): use it
+                claim_to_use = claim_numbers_list[0]
+                logger.info(f"ℹ️ Using single previous claim '{claim_to_use}' for patient '{document_analysis.patient_name}'")
+            else:
+                # Multiple distinct previous claims, no current: invalid
+                user_friendly_msg = "Invalid document: This file lacks a claim number. Patient has multiple associated claims; please upload a report specifying the claim number."
+                warning_msg = f"Document ignored: {user_friendly_msg} for file {data['filename']}"
+                logger.warning(f"⚠️ {warning_msg}")
+                
+                # Extract blob_path from gcs_url (original uploads path)
+                blob_path = data.get("blob_path")
+                if not blob_path:
+                    blob_path = extract_blob_path_from_gcs_url(data["gcs_url"])
+                
+                await db_service.save_fail_doc(
+                    reasson=user_friendly_msg,
+                    blob_path=blob_path,
+                    physician_id=physician_id
+                )
+                
+                # Emit ignored event with user-friendly reason
+                await sio.emit('task_complete', {
+                    'document_id': data.get('document_id', 'unknown'),
+                    'filename': data["filename"],
+                    'status': 'ignored',
+                    'reason': user_friendly_msg,
+                    'gcs_url': data["gcs_url"],
+                    'physician_id': physician_id,
+                    'blob_path': blob_path
+                })
+                return {
+                    "status": "ignored",
+                    "reason": user_friendly_msg,
+                    "filename": data["filename"],
+                    "blob_path": blob_path
+                }
         
         summary_snapshot = {
             "dx": document_analysis.diagnosis,
@@ -208,7 +265,7 @@ async def save_document_webhook(request: Request):
             blob_path=data.get("blob_path", ""),
             gcs_file_link=data["gcs_url"],
             patient_name=document_analysis.patient_name,
-            claim_number=document_analysis.claim_number,
+            claim_number=claim_to_use,  # Use the determined claim number (now guaranteed non-empty string)
             dob=dob,
             doi=doi,
             status=document_analysis.status,
@@ -220,6 +277,19 @@ async def save_document_webhook(request: Request):
             rd=rd,
             physician_id=physician_id  # Pass physician_id if provided in webhook payload
         )
+
+        # Update previous documents with null claim_number to use the current claim_to_use
+        # Only if claim_to_use is not "UNSPECIFIED" or similar placeholder
+        if claim_to_use not in ["Not specified", "UNSPECIFIED", ""]:
+            await db_service.update_previous_claim_numbers(
+                patient_name=document_analysis.patient_name,
+                dob=dob,
+                physician_id=physician_id,
+                claim_number=claim_to_use
+            )
+            logger.info(f"🔄 Updated previous documents' claim numbers for patient '{document_analysis.patient_name}' using claim '{claim_to_use}'")
+        else:
+            logger.info(f"ℹ️ Skipping previous claim update as current claim is placeholder: '{claim_to_use}'")
 
         logger.info(f"💾 Document saved via webhook with ID: {document_id}")
         
@@ -272,7 +342,6 @@ async def save_document_webhook(request: Request):
         except:
             pass  # Ignore emit failure during webhook error
         raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
-
 
 @router.post("/extract-documents", response_model=Dict[str, Any])
 async def extract_documents(

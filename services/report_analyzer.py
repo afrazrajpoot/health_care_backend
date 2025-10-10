@@ -82,7 +82,7 @@ class ReportAnalyzer:
         EXTRACT THE FOLLOWING INFORMATION IN POINT FORM :
         
         - Patient name (full name)
-        - Claim number or case ID (look for patterns like WC-, CL-, Case No., Claim #, etc. If not found, use "Not specified")
+        - Claim number or case ID (look for any identifiers like claim numbers, case IDs, etc. If not found, use "Not specified")
         - Date of birth (DOB) in YYYY-MM-DD format
         - Date of injury (DOI) in YYYY-MM-DD format  
         - Current status (normal, urgent, critical)
@@ -100,7 +100,7 @@ class ReportAnalyzer:
         - For key_concern, next_step, adls_affected, work_restrictions: Keep to 2-3 words each.
         - For summary_points, provide 3-5 bullet points, each 2-3 words.
         - If claim number is not explicitly found, use "Not specified".
-        - Do NOT invent claim numbers. Use patterns: WC-2024-001, CL-12345, Case No. 123, Claim # ABC123.
+        - Do NOT invent claim numbers.
         - If information is missing, use "Not specified".
         
         {format_instructions}
@@ -202,25 +202,6 @@ class ReportAnalyzer:
             input_variables=["previous_analyses", "current_analysis", "current_date"],
             partial_variables={"format_instructions": self.whats_new_parser.get_format_instructions()},
         )
-    def extract_claim_number_from_text(self, document_text: str) -> Optional[str]:
-        try:
-            patterns = [
-                r'WC[-\s]*(\d+[-]\d+)',  # WC-2024-001
-                r'CL[-\s]*(\d+[-]?\d*)',  # CL-12345, CL-2024-001
-                r'Claim[#\s]*([A-Z0-9-]+)',  # Claim #ABC123
-                r'Case[#\s\w]*([A-Z0-9-]+)',  # Case No. 123
-                r'Claim\s*Number[:\s]*([A-Z0-9-]+)',  # Claim Number: WC-2024-001
-            ]
-            for pattern in patterns:
-                matches = re.findall(pattern, document_text, re.IGNORECASE)
-                if matches:
-                    claim_number = matches[0].strip()
-                    logger.info(f"🔍 Found claim number via regex: {claim_number}")
-                    return claim_number
-            return None
-        except Exception as e:
-            logger.error(f"❌ Error extracting claim number via regex: {str(e)}")
-            return None
 
     def extract_document_data(self, document_text: str) -> DocumentAnalysis:
         try:
@@ -232,11 +213,6 @@ class ReportAnalyzer:
                 "document_text": document_text[:15000],
                 "current_date": current_date
             })
-            if result.get('claim_number') in ['Not specified', 'not specified', None, '']:
-                regex_claim = self.extract_claim_number_from_text(document_text)
-                if regex_claim:
-                    result['claim_number'] = regex_claim
-                    logger.info(f"🔄 Updated claim number via regex: {regex_claim}")
             logger.info(f"✅ Extracted data: Patient={result['patient_name']}, Claim={result['claim_number']}, Diagnosis={result['diagnosis']}")
             return DocumentAnalysis(**result)
         except Exception as e:

@@ -219,8 +219,8 @@ class DatabaseService:
                 doi_end = doi_start + timedelta(days=1)
                 where_clause["doi"] = {"gte": doi_start, "lt": doi_end}
             
-            # if claim_number:
-            #     where_clause["claimNumber"] = claim_number
+            if claim_number:
+                where_clause["claimNumber"] = claim_number
             
             logger.info(f"🔍 Getting last 2 documents for patient: {patient_name}")
             
@@ -263,62 +263,201 @@ class DatabaseService:
                 "documents": []
             }
    
+    # async def get_all_unverified_documents(
+    #     self, 
+    #     patient_name: str, 
+    #     physicianId: Optional[str] = None,
+    #     dob: Optional[datetime] = None,
+    # ) -> Optional[Dict[str, Any]]:
+    #     """
+    #     Retrieve all unverified documents for patient where status is NOT 'verified'
+    #     Returns structured response with multiple documents
+    #     """
+    #     try:
+    #         logger.info(f"🔍 Getting unverified documents for patient: {patient_name}")
+            
+    #         where_clause = {
+    #             "patientName": patient_name,
+    #             "dob":dob,
+    #             "status": {"not": "verified"}
+    #         }
+    #         if physicianId:
+    #             where_clause["physicianId"] = physicianId
+            
+    #         # Get all documents where status is NOT verified
+    #         documents = await self.prisma.document.find_many(
+    #             where=where_clause,
+    #             include={
+    #                 "summarySnapshot": True,
+    #                 "adl": True,
+    #                 "documentSummary": True
+    #                 # NO "whatsNew" - scalar Json
+    #             },
+    #             order={"createdAt": "desc"}
+    #         )
+            
+    #         if not documents:
+    #             logger.warning(f"❌ No non-verified documents found for patient: {patient_name}")
+    #             return None
+            
+    #         logger.info(f"📋 Found {len(documents)} documents for {patient_name}")
+            
+    #         # Always return the multi-document structure
+    #         response = {
+    #             "patient_name": patient_name,
+    #             "total_documents": len(documents),
+    #             "documents": []
+    #         }
+            
+    #         for i, doc in enumerate(documents):
+    #             doc_data = doc.dict()
+    #             doc_data["document_index"] = i + 1
+    #             doc_data["is_latest"] = i == 0
+    #             response["documents"].append(doc_data)
+    #             logger.info(f"📄 Added document {i+1}: ID {doc.id}")
+            
+    #         return response
+                    
+    #     except Exception as e:
+    #         logger.error(f"❌ Error retrieving documents for {patient_name}: {str(e)}")
+    #         raise
+
+
     async def get_all_unverified_documents(
         self, 
         patient_name: str, 
-        physicianId: Optional[str] = None
+        physicianId: Optional[str] = None,
+        claimNumber: Optional[str] = None,
+        dob: Optional[datetime] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Retrieve all unverified documents for patient where status is NOT 'verified'
-        Returns structured response with multiple documents
+        Retrieve all unverified documents for a patient where status is NOT 'verified'.
+        If claimNumber is provided and not "not specified", filter by it. Otherwise, use dob (date-only match) for filtering.
         """
         try:
             logger.info(f"🔍 Getting unverified documents for patient: {patient_name}")
-            
+            print(patient_name, physicianId, claimNumber, dob, 'patient_name, physicianId, claimNumber, dob')
+
+            # Base where clause
             where_clause = {
                 "patientName": patient_name,
                 "status": {"not": "verified"}
             }
+
+            # Add physicianId if provided
             if physicianId:
                 where_clause["physicianId"] = physicianId
-            
-            # Get all documents where status is NOT verified
+
+            # Filter by claimNumber if provided and not "not specified", else by dob (date-only match)
+            if claimNumber and str(claimNumber).lower() != "not specified":
+                where_clause["claimNumber"] = claimNumber
+                logger.info(f"📌 Using claimNumber filter: {claimNumber}")
+            elif dob:
+                # Normalize to date-only (00:00 to 23:59)
+                dob_start = datetime.combine(dob.date(), datetime.min.time())
+                dob_end = dob_start + timedelta(days=1)
+                
+                where_clause["dob"] = {
+                    "gte": dob_start,
+                    "lt": dob_end
+                }
+                logger.info(f"📌 Using dob date-only filter: {dob_start.date()}")
+
+            # Fetch documents
             documents = await self.prisma.document.find_many(
                 where=where_clause,
                 include={
                     "summarySnapshot": True,
                     "adl": True,
                     "documentSummary": True
-                    # NO "whatsNew" - scalar Json
                 },
                 order={"createdAt": "desc"}
             )
-            
+
             if not documents:
                 logger.warning(f"❌ No non-verified documents found for patient: {patient_name}")
                 return None
-            
-            logger.info(f"📋 Found {len(documents)} documents for {patient_name}")
-            
-            # Always return the multi-document structure
+
+            logger.info(f"📋 Found {len(documents)} unverified documents for {patient_name}")
+
+            # Structured response
             response = {
                 "patient_name": patient_name,
                 "total_documents": len(documents),
                 "documents": []
             }
-            
+
             for i, doc in enumerate(documents):
                 doc_data = doc.dict()
                 doc_data["document_index"] = i + 1
                 doc_data["is_latest"] = i == 0
                 response["documents"].append(doc_data)
                 logger.info(f"📄 Added document {i+1}: ID {doc.id}")
-            
+
             return response
-                    
+
         except Exception as e:
-            logger.error(f"❌ Error retrieving documents for {patient_name}: {str(e)}")
+            logger.error(f"❌ Error retrieving unverified documents for {patient_name}: {str(e)}")
             raise
+    async def update_previous_claim_numbers(
+        self,
+        patient_name: str,
+        dob: datetime,
+        physician_id: str,
+        claim_number: str
+    ):
+        await self.prisma.document.update_many(
+            where={
+                "patientName": patient_name,
+                "dob": dob,  # Assuming DOB is stored as DateTime in schema
+                "physicianId": physician_id,
+                "claimNumber": "Not specified"  # Update only those with null/missing claimNumber
+            },
+            data={
+                "claimNumber": claim_number
+            }
+        )
+        logger.info(f"Updated claim numbers for patient '{patient_name}' (DOB: {dob}, Physician: {physician_id}) to '{claim_number}'")
+    async def get_patient_claim_numbers(
+        self,
+        patient_name: str,
+        physicianId: Optional[str] = None,
+      
+        dob: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        try:
+            where_clause = {"patientName": patient_name, "status": {"not": "verified"}}
+            
+            if physicianId:
+                where_clause["physicianId"] = physicianId
+            
+            if dob:
+                dob_start = dob.replace(hour=0, minute=0, second=0, microsecond=0)
+                dob_end = dob_start + timedelta(days=1)
+                where_clause["dob"] = {"gte": dob_start, "lt": dob_end}
+
+            logger.info(f"🔍 Fetching claim numbers for patient: {patient_name}")
+
+            documents = await self.prisma.document.find_many(where=where_clause)
+            claim_numbers = [
+                doc.claimNumber for doc in documents if getattr(doc, "claimNumber", None)
+            ]
+
+            logger.info(f"✅ Found {len(claim_numbers)} claim numbers for {patient_name}")
+            
+            return {
+                "patient_name": patient_name,
+                "total_claims": len(claim_numbers),
+                "claim_numbers": claim_numbers
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Error retrieving claim numbers for {patient_name}: {str(e)}")
+            return {
+                "patient_name": patient_name,
+                "total_claims": 0,
+                "claim_numbers": []
+            }
 
     async def get_last_document_for_patient(self, patient_name: str, claim_number: str) -> Optional[Dict[str, Any]]:
         """
