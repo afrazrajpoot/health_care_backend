@@ -583,7 +583,24 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
             "is_multiple_documents": False
         }
     
-    # Define function to parse createdAt for sorting
+    # Define function to parse reportDate for sorting (obey document dates)
+    def parse_report_date(doc):
+        report_date = doc.get("reportDate")
+        if report_date:
+            if isinstance(report_date, str):
+                return datetime.fromisoformat(report_date.replace('Z', '+00:00'))  # Handle ISO with Z
+            elif isinstance(report_date, datetime):
+                return report_date
+        # Fallback to createdAt if no reportDate
+        created_at = doc.get("createdAt")
+        if created_at:
+            if isinstance(created_at, str):
+                return datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+            elif isinstance(created_at, datetime):
+                return created_at
+        return datetime.min
+    
+    # Define function to parse createdAt for chain selection
     def parse_created_at(doc):
         created_at = doc.get("createdAt")
         if created_at:
@@ -593,11 +610,14 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
                 return created_at
         return datetime.min
     
-    # Sort documents by createdAt ascending to have previous first
-    sorted_documents = sorted(documents, key=parse_created_at)
+    # Sort documents by reportDate ascending (oldest first) to obey chronological document order
+    sorted_documents = sorted(documents, key=parse_report_date)
     
-    # Find the latest document based on createdAt
-    latest_doc = max(documents, key=parse_created_at)
+    # Find the latest document based on reportDate
+    latest_doc = max(documents, key=parse_report_date)
+    
+    # Find the last saved document based on createdAt for full whats_new chain
+    last_saved_doc = max(documents, key=parse_created_at)
     
     # Use the latest document for base info
     base_response = await format_single_document_base(latest_doc)
@@ -609,13 +629,13 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
     # adl from latest document
     adl = await format_adl(latest_doc)
     
-    # whats_new from the last item in the original array (latest from DB data)
-    whats_new = documents[-1].get("whatsNew", {})
+    # whats_new from the last saved document (most recent comparison, full chain)
+    whats_new = last_saved_doc.get("whatsNew", {})
     
-    # status from the last item in the original array (latest from DB data)
-    status = documents[-1].get("status")
+    # status from the last saved document
+    status = last_saved_doc.get("status")
     
-    # document_summary: group by type (as per chronological order)
+    # document_summary: group by type (as per chronological reportDate order)
     grouped_summaries = {}
     grouped_brief_summaries = {}
     for doc in sorted_documents:
@@ -647,7 +667,7 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
         "brief_summary": grouped_brief_summaries,
         "document_index": 1,
         "is_latest": True,
-        "status": status  # Override status from last doc
+        "status": status  # Override status from last saved doc
     })
     
     # Wrap in single document structure
@@ -661,17 +681,28 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
 
 async def format_single_document_base(document: Dict[str, Any]) -> Dict[str, Any]:
     """Format base info for a single document"""
+    # Handle datetime fields safely
+    def format_date_field(field_value):
+        if field_value is None:
+            return None
+        if isinstance(field_value, datetime):
+            return field_value.isoformat()
+        if isinstance(field_value, str):
+            # Assume ISO string already
+            return field_value
+        return None
+    
     return {
         "document_id": document.get("id"),
         "patient_name": document.get("patientName"),
-        "dob": document.get("dob").isoformat() if document.get("dob") else None,
-        "doi": document.get("doi").isoformat() if document.get("doi") else None,
+        "dob": document.get("dob"),  # String as per schema
+        "doi": document.get("doi"),  # String as per schema
         "claim_number": document.get("claimNumber"),
         "status": document.get("status"),
         "gcs_file_link": document.get("gcsFileLink"),
         "blob_path": document.get("blobPath"),  # ✅ Ensure blob_path is included (adjust key if DB uses snake_case like "blob_path")
-        "created_at": document.get("createdAt").isoformat() if document.get("createdAt") else None,
-        "updated_at": document.get("updatedAt").isoformat() if document.get("updatedAt") else None,
+        "created_at": format_date_field(document.get("createdAt")),
+        "updated_at": format_date_field(document.get("updatedAt")),
     }
 
 async def format_adl(document: Dict[str, Any]) -> Dict[str, Any]:

@@ -190,79 +190,88 @@ class DatabaseService:
             raise
     
     async def get_document_by_patient_details(
-        self, 
-        patient_name: str,
-        physicianId: Optional[str] = None,
-        dob: Optional[datetime] = None,
-        doi: Optional[datetime] = None,
-        claim_number: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        Retrieve last two documents for patient
-        Returns structured response with multiple documents
-        """
-        try:
-            where_clause = {"patientName": patient_name}
-            
-            if physicianId:
-                where_clause["physicianId"] = physicianId
-            
-            if dob:
-                # Match date ignoring time: gte midnight, lt next midnight
-                dob_start = dob.replace(hour=0, minute=0, second=0, microsecond=0)
-                dob_end = dob_start + timedelta(days=1)
-                where_clause["dob"] = {"gte": dob_start, "lt": dob_end}
-            
-            if doi:
-                # Match date ignoring time: gte midnight, lt next midnight
-                doi_start = doi.replace(hour=0, minute=0, second=0, microsecond=0)
-                doi_end = doi_start + timedelta(days=1)
-                where_clause["doi"] = {"gte": doi_start, "lt": doi_end}
-            
-            if claim_number:
-                where_clause["claimNumber"] = claim_number
-            
-            logger.info(f"🔍 Getting last 2 documents for patient: {patient_name}")
-            
-            # Get the last two documents for this patient name
-            documents = await self.prisma.document.find_many(
-                where=where_clause,
-                include={
-                    "summarySnapshot": True,
-                    "adl": True,
-                    "documentSummary": True
-                    # NO "whatsNew" - scalar Json
-                },
-                # order={"createdAt": "desc"},
-                take=2  # Limit to last two
-            )
-            
-            logger.info(f"📋 Found {len(documents)} documents for {patient_name}")
-            
-            # Always return the multi-document structure
-            response = {
-                "patient_name": patient_name,
-                "total_documents": len(documents),
-                "documents": []
-            }
-            
-            for i, doc in enumerate(documents):
-                doc_data = doc.dict()
-                doc_data["document_index"] = i + 1
-                doc_data["is_latest"] = i == 0
-                response["documents"].append(doc_data)
-                logger.info(f"📄 Added document {i+1}: ID {doc.id}")
-            
-            return response
-                            
-        except Exception as e:
-            logger.error(f"❌ Error retrieving documents for {patient_name}: {str(e)}")
-            return {
-                "patient_name": patient_name,
-                "total_documents": 0,
-                "documents": []
-            }
-   
+            self, 
+            patient_name: str,
+            physicianId: Optional[str] = None,
+            dob: Optional[str] = None,
+            doi: Optional[str] = None,
+            claim_number: Optional[str] = None
+        ) -> Dict[str, Any]:
+            """
+            Retrieve last two documents for patient.
+            Handles dob and doi as strings (or converts datetime to string if needed).
+            """
+            try:
+                where_clause = {"patientName": patient_name}
+                
+                if physicianId:
+                    where_clause["physicianId"] = physicianId
+
+                # ✅ Handle dob (string or datetime)
+                if dob:
+                    if isinstance(dob, datetime):
+                        dob_str = dob.strftime("%Y-%m-%d")
+                    else:
+                        # Try parsing string into datetime for normalization
+                        try:
+                            parsed_dob = datetime.fromisoformat(dob)
+                            dob_str = parsed_dob.strftime("%Y-%m-%d")
+                        except ValueError:
+                            dob_str = dob  # Already correct format
+                    where_clause["dob"] = dob_str
+
+                # ✅ Handle doi (string or datetime)
+                if doi:
+                    if isinstance(doi, datetime):
+                        doi_str = doi.strftime("%Y-%m-%d")
+                    else:
+                        try:
+                            parsed_doi = datetime.fromisoformat(doi)
+                            doi_str = parsed_doi.strftime("%Y-%m-%d")
+                        except ValueError:
+                            doi_str = doi
+                    where_clause["doi"] = doi_str
+
+                if claim_number:
+                    where_clause["claimNumber"] = claim_number
+
+                logger.info(f"🔍 Fetching last 2 documents with filters: {where_clause}")
+                
+                documents = await self.prisma.document.find_many(
+                    where=where_clause,
+                    include={
+                        "summarySnapshot": True,
+                        "adl": True,
+                        "documentSummary": True
+                    },
+                    order={"createdAt": "desc"},
+                    take=2
+                )
+
+                logger.info(f"📋 Found {len(documents)} documents for {patient_name}")
+
+                response = {
+                    "patient_name": patient_name,
+                    "total_documents": len(documents),
+                    "documents": []
+                }
+
+                for i, doc in enumerate(documents):
+                    doc_data = doc.dict()
+                    doc_data["document_index"] = i + 1
+                    doc_data["is_latest"] = i == 0
+                    response["documents"].append(doc_data)
+                    logger.info(f"📄 Added document {i+1}: ID {doc.id}")
+
+                return response
+
+            except Exception as e:
+                logger.error(f"❌ Error retrieving documents for {patient_name}: {str(e)}")
+                return {
+                    "patient_name": patient_name,
+                    "total_documents": 0,
+                    "documents": []
+                }
     # async def get_all_unverified_documents(
     #     self, 
     #     patient_name: str, 
