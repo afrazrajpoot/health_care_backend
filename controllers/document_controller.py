@@ -49,65 +49,24 @@ async def save_document_webhook(request: Request):
         result_data = data["result"]
         analyzer = ReportAnalyzer()
         document_analysis = analyzer.extract_document_data(result_data.get("text", ""))
-        
-        # Enhanced check for required fields: treat "Not specified" as missing
+        print(document_analysis,'document analysis in webhook')
+        # Enhanced check for required fields: treat "Not specified" as missing but don't block processing
         required_fields = {
             "patient_name": document_analysis.patient_name,
             "dob": document_analysis.dob,
             # "doi": document_analysis.doi
         }
         missing_fields = [k for k, v in required_fields.items() if not v or str(v).lower() == "not specified"]
-        if missing_fields:
-            missing_details = ", ".join(missing_fields)
-            user_friendly_msg = f"Invalid document: This file lacks proper patient details ({missing_details}). Please upload a complete medical report with patient name, DOB, and DOI."
-            warning_msg = f"Document ignored: {user_friendly_msg} for file {data['filename']}"
-            logger.warning(f"⚠️ {warning_msg}")
-            
-            # Extract blob_path from gcs_url (original uploads path)
-            blob_path = data.get("blob_path")
-            if not blob_path:
-                blob_path = extract_blob_path_from_gcs_url(data["gcs_url"])
-            
-            physician_id = data.get("physician_id")
-            db_service = await get_database_service()
-            await db_service.save_fail_doc(
-                reasson=user_friendly_msg,
-                blob_path=blob_path,
-                physician_id=physician_id
-            )
-            
-            # Emit ignored event with user-friendly reason
-            await sio.emit('task_complete', {
-                'document_id': data.get('document_id', 'unknown'),
-                'filename': data["filename"],
-                'status': 'ignored',
-                'reason': user_friendly_msg,
-                'gcs_url': data["gcs_url"],
-                'physician_id': physician_id,
-                'blob_path': blob_path
-            })
-            return {
-                "status": "ignored",
-                "reason": user_friendly_msg,
-                "filename": data["filename"],
-                "blob_path": blob_path
-            }
         
-        # Generate AI brief summary
-        brief_summary = analyzer.generate_brief_summary(result_data.get("text", ""))
+        # Extract blob_path from gcs_url (original uploads path)
+        blob_path = data.get("blob_path")
+        if not blob_path:
+            blob_path = extract_blob_path_from_gcs_url(data["gcs_url"])
         
-        # Parse dates with fallback to now() on any parsing error
-        try:
-            dob = datetime.strptime(document_analysis.dob, "%Y-%m-%d")
-            rd = datetime.strptime(document_analysis.rd, "%Y-%m-%d")
-            doi = datetime.strptime(document_analysis.doi, "%Y-%m-%d")
-        except ValueError:
-            dob = datetime.now()
-            rd = datetime.now()
-            doi = datetime.now()
-        
-        # Mock database service - replace with your actual implementation
+        physician_id = data.get("physician_id")
         db_service = await get_database_service()
+        
+        # Check for existing document first (this should still block processing)
         file_exists = await db_service.document_exists(
             data["filename"], 
             data.get("file_size", 0)
@@ -116,11 +75,6 @@ async def save_document_webhook(request: Request):
         if file_exists:
             logger.warning(f"⚠️ Document already exists: {data['filename']}")
             
-            # Extract blob_path from gcs_url (original uploads path)
-            blob_path = data.get("blob_path")
-            if not blob_path:
-                blob_path = extract_blob_path_from_gcs_url(data["gcs_url"])
-            physician_id = data.get("physician_id")
             user_friendly_msg = "Document already processed"
             
             await db_service.save_fail_doc(
@@ -129,7 +83,7 @@ async def save_document_webhook(request: Request):
                 physician_id=physician_id
             )
             
-            # Optional: Emit skipped event
+            # Emit skipped event
             await sio.emit('task_complete', {
                 'document_id': data.get('document_id', 'unknown'),
                 'filename': data["filename"],
@@ -141,86 +95,109 @@ async def save_document_webhook(request: Request):
             })
             return {"status": "skipped", "reason": "Document already processed", "blob_path": blob_path}
         
-        # Retrieve previous documents
-        physician_id = data.get("physician_id")
+        # For missing required fields, we'll process but mark as failed in main flow
+        has_missing_required_fields = len(missing_fields) > 0
+        
+        # Generate AI brief summary (do this even for documents with missing fields)
+        brief_summary = analyzer.generate_brief_summary(result_data.get("text", ""))
+        
+        # Handle dates - use "Not specified" string instead of datetime.now() when not available
+        dob = document_analysis.dob if document_analysis.dob and str(document_analysis.dob).lower() != "not specified" else "Not specified"
+        rd = document_analysis.rd if document_analysis.rd and str(document_analysis.rd).lower() != "not specified" else "Not specified"
+        doi = document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else "Not specified"
+        
+        # For database queries that need datetime, create a fallback (use None or current date as needed)
+        dob_for_query = None
+        if dob and dob.lower() != "not specified":
+            try:
+                dob_for_query = datetime.strptime(dob, "%Y-%m-%d")
+            except ValueError:
+                dob_for_query = None
+        
+        # Parse rd for DB (reportDate): Handle both MM/DD and YYYY-MM-DD formats, convert to datetime object using 2025 as year if MM/DD
+        rd_for_db = None
+        if rd.lower() != "not specified":
+            try:
+                if '/' in rd:  # MM/DD format (e.g., "05/15")
+                    month, day = rd.split('/')
+                    year = 2025  # Current year from "October 11, 2025"
+                    full_date_str = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                elif '-' in rd:  # YYYY-MM-DD format (e.g., "2025-05-15")
+                    full_date_str = rd
+                else:
+                    raise ValueError("Invalid date format")
+                
+                rd_for_db = datetime.strptime(full_date_str, "%Y-%m-%d")
+                logger.debug(f"Parsed rd '{rd}' to datetime: {rd_for_db}")
+            except (ValueError, AttributeError) as parse_err:
+                logger.warning(f"Failed to parse rd '{rd}': {parse_err}; using None")
+                rd_for_db = None
+        
+        # Retrieve previous documents (even for documents with missing fields)
         print(physician_id,'physician id in webhook')
        
         claimNUmbers = await db_service.get_patient_claim_numbers(
-            document_analysis.patient_name,
-             physicianId=physician_id,
-            dob=dob
-           
-        )
-        db_response = await db_service.get_all_unverified_documents(
-            document_analysis.patient_name,
+            document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else "Unknown Patient",
             physicianId=physician_id,
-            claimNumber=document_analysis.claim_number if document_analysis.claim_number else None,
-            dob=dob
+            dob=dob_for_query  # Use the parsed datetime for query, or None
         )
+        
+        db_response = await db_service.get_all_unverified_documents(
+            document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else "Unknown Patient",
+            physicianId=physician_id,
+            claimNumber=document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else None,
+            dob=dob_for_query  # Use the parsed datetime for query, or None
+        )
+        
         print(claimNUmbers,'claim numbers')
         # Extract documents list from database response
         previous_documents = db_response.get('documents', []) if db_response else []
-        # print(previous_documents,'previous documents')
-        # Compare with previous documents using LLM
+        
+        # Compare with previous documents using LLM (even for documents with missing fields)
         whats_new_data = analyzer.compare_with_previous_documents(
             document_analysis, 
             previous_documents
         )
-        # print(whats_new_data,'what new data')
         
         # Ensure whats_new_data is always a dict (empty if invalid) to avoid DB required field error
         if whats_new_data is None or not isinstance(whats_new_data, dict):
             logger.warning(f"⚠️ Invalid whats_new data for {data['filename']}; using empty dict")
             whats_new_data = {}
         
-        # Handle claim number logic
+        # Handle claim number logic (even for documents with missing fields)
         claim_to_use = document_analysis.claim_number
+        claim_numbers_list = []  # Initialize here for scope
         if not claim_to_use or str(claim_to_use).lower() == "not specified":
             claim_numbers_list = claimNUmbers.get('claim_numbers', []) if isinstance(claimNUmbers, dict) else claimNUmbers if isinstance(claimNUmbers, list) else []
             # Deduplicate claim numbers to handle cases where duplicates exist
             claim_numbers_list = list(set(claim_numbers_list))
             if len(claim_numbers_list) == 0:
                 # First time: OK to proceed with "Not specified" or extracted value
-                claim_to_use = document_analysis.claim_number or "UNSPECIFIED"
+                claim_to_use = document_analysis.claim_number or "Not specified"
                 logger.info(f"ℹ️ First document for patient '{document_analysis.patient_name}': Using claim '{claim_to_use}'")
             elif len(claim_numbers_list) == 1:
                 # One previous claim (after dedup): use it
                 claim_to_use = claim_numbers_list[0]
                 logger.info(f"ℹ️ Using single previous claim '{claim_to_use}' for patient '{document_analysis.patient_name}'")
             else:
-                # Multiple distinct previous claims, no current: invalid
-                user_friendly_msg = "Invalid document: This file lacks a claim number. Patient has multiple associated claims; please upload a report specifying the claim number."
-                warning_msg = f"Document ignored: {user_friendly_msg} for file {data['filename']}"
-                logger.warning(f"⚠️ {warning_msg}")
-                
-                # Extract blob_path from gcs_url (original uploads path)
-                blob_path = data.get("blob_path")
-                if not blob_path:
-                    blob_path = extract_blob_path_from_gcs_url(data["gcs_url"])
-                
-                await db_service.save_fail_doc(
-                    reasson=user_friendly_msg,
-                    blob_path=blob_path,
-                    physician_id=physician_id
-                )
-                
-                # Emit ignored event with user-friendly reason
-                await sio.emit('task_complete', {
-                    'document_id': data.get('document_id', 'unknown'),
-                    'filename': data["filename"],
-                    'status': 'ignored',
-                    'reason': user_friendly_msg,
-                    'gcs_url': data["gcs_url"],
-                    'physician_id': physician_id,
-                    'blob_path': blob_path
-                })
-                return {
-                    "status": "ignored",
-                    "reason": user_friendly_msg,
-                    "filename": data["filename"],
-                    "blob_path": blob_path
-                }
+                # Multiple distinct previous claims, no current: always use UNSPECIFIED and flag as pending
+                claim_to_use = "Not specified"
+                pending_reason = "Pending claim assignment: Patient has multiple associated claims"
+                logger.warning(f"⚠️ {pending_reason} for file {data['filename']}; saving as pending")
+        else:
+            # If claim is specified, use it directly
+            claim_numbers_list = []  # No need for prior claims check
+            logger.info(f"ℹ️ Using extracted claim '{claim_to_use}' for patient '{document_analysis.patient_name}'")
         
+        # Determine status: prioritize analyzer status, but override to "pending" for multi-claim issues or "failed" for missing fields
+        base_status = document_analysis.status
+        if len(claim_numbers_list) > 1 and not document_analysis.claim_number:
+            document_status = "pending"
+        elif has_missing_required_fields:
+            document_status = "failed"
+        else:
+            document_status = base_status
+
         summary_snapshot = {
             "dx": document_analysis.diagnosis,
             "keyConcern": document_analysis.key_concern,
@@ -256,6 +233,9 @@ async def save_document_webhook(request: Request):
             document_id=result_data.get("document_id", f"webhook_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         )
         
+        # Use "Not specified" values for missing fields but process normally
+        patient_name_to_use = document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else "Not specified"
+        
         document_id = await db_service.save_document_analysis(
             extraction_result=extraction_result,
             file_name=data["filename"],
@@ -264,57 +244,63 @@ async def save_document_webhook(request: Request):
             processing_time_ms=data.get("processing_time_ms", 0),
             blob_path=data.get("blob_path", ""),
             gcs_file_link=data["gcs_url"],
-            patient_name=document_analysis.patient_name,
-            claim_number=claim_to_use,  # Use the determined claim number (now guaranteed non-empty string)
-            dob=dob,
-            doi=doi,
-            status=document_analysis.status,
-            brief_summary=brief_summary,  # Pass the AI-generated brief summary
+            patient_name=patient_name_to_use,
+            claim_number=claim_to_use,
+            dob=dob,  # Now using string "Not specified" instead of datetime
+            doi=doi,  # Now using string "Not specified" instead of datetime
+            status=document_status,  # Now can be "pending" for multi-claim
+            brief_summary=brief_summary,
             summary_snapshot=summary_snapshot,
-            whats_new=whats_new_data,  # Now always a dict
+            whats_new=whats_new_data,
             adl_data=adl_data,
             document_summary=document_summary,
-            rd=rd,
-            physician_id=physician_id  # Pass physician_id if provided in webhook payload
+            rd=rd_for_db,  # Pass parsed datetime object (or None) instead of string
+            physician_id=physician_id
         )
 
         # Update previous documents with null claim_number to use the current claim_to_use
-        # Only if claim_to_use is not "UNSPECIFIED" or similar placeholder
-        if claim_to_use not in ["Not specified", "UNSPECIFIED", ""]:
+        # Only if claim_to_use is not "Not specified" or similar placeholder and document is not failed/pending
+        if document_status not in ["failed", "pending"] and claim_to_use not in ["Not specified", "UNSPECIFIED", ""]:
             await db_service.update_previous_claim_numbers(
-                patient_name=document_analysis.patient_name,
-                dob=dob,
+                patient_name=patient_name_to_use,
+                dob=dob_for_query,  # Use the parsed datetime for query
                 physician_id=physician_id,
                 claim_number=claim_to_use
             )
-            logger.info(f"🔄 Updated previous documents' claim numbers for patient '{document_analysis.patient_name}' using claim '{claim_to_use}'")
-        else:
-            logger.info(f"ℹ️ Skipping previous claim update as current claim is placeholder: '{claim_to_use}'")
+            logger.info(f"🔄 Updated previous documents' claim numbers for patient '{patient_name_to_use}' using claim '{claim_to_use}'")
+        elif document_status in ["failed", "pending"]:
+            logger.info(f"ℹ️ Skipping previous claim update as document status is {document_status}")
 
-        logger.info(f"💾 Document saved via webhook with ID: {document_id}")
+        logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}")
         
-        # Emit socket event for task complete (now in main process)
+        # Emit socket event for task complete with appropriate status
         emit_data = {
             'document_id': document_id,
             'filename': data["filename"],
-            'status': 'success',
-            # 'gcs_url': data["gcs_url"],
-            # 'physician_id': physician_id
+            'status': document_status,  # Now emits "pending" directly
+            'missing_fields': missing_fields if has_missing_required_fields else None,
+            'pending_reason': pending_reason if document_status == "pending" else None  # Optional: pass reason for UI
         }
-        # physician_id = data.get("physician_id")
+        
         user_id = data.get("user_id")
         if user_id:
             await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
         else:
-            await sio.emit('task_complete', emit_data)  # Broadcast to all
+            await sio.emit('task_complete', emit_data)
+        
         logger.info(f"📡 Emitted 'task_complete' event from webhook: {emit_data}")
         
-        return {"status": "success", "document_id": document_id}
+        return {
+            "status": document_status, 
+            "document_id": document_id,
+            "missing_fields": missing_fields if has_missing_required_fields else None,
+            "pending_reason": pending_reason if document_status == "pending" else None
+        }
 
     except Exception as e:
         logger.error(f"❌ Webhook save failed: {str(e)}", exc_info=True)
         
-        # Save to FailDocs on general exception
+        # Save to FailDocs on general exception (only for true processing errors, not missing field cases)
         blob_path = data.get("blob_path", "") if 'data' in locals() else ""
         if not blob_path and 'data' in locals() and data.get("gcs_url"):
             blob_path = extract_blob_path_from_gcs_url(data["gcs_url"])
@@ -329,7 +315,7 @@ async def save_document_webhook(request: Request):
                 physician_id=physician_id
             )
         
-        # Optional: Emit error event on exception
+        # Emit error event on exception
         try:
             await sio.emit('task_error', {
                 'document_id': data.get('document_id', 'unknown') if 'data' in locals() else 'unknown',
@@ -342,7 +328,6 @@ async def save_document_webhook(request: Request):
         except:
             pass  # Ignore emit failure during webhook error
         raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
-
 @router.post("/extract-documents", response_model=Dict[str, Any])
 async def extract_documents(
     documents: List[UploadFile] = File(...),
@@ -350,8 +335,8 @@ async def extract_documents(
     userId: str = Query(None, description="Optional user ID for associating documents")
 ):
     """
-    Upload multiple documents: parse/validate synchronously, check existence before upload to GCS if valid, then queue for finalization.
-    For failed docs: upload to GCS with folder="uploads", save blob_path, reason, and physicianId to FailDocs, emit message.
+    Upload multiple documents: parse/validate synchronously, then queue for finalization.
+    All documents with extracted text are sent to webhook for processing.
     """
     if not documents:
         raise HTTPException(status_code=400, detail="No documents provided")
@@ -360,7 +345,6 @@ async def extract_documents(
     task_ids = []
     ignored_filenames = []
     successful_uploads = []  # Track only successful uploads for cleanup
-    db_service = await get_database_service()  # Get once for reuse
     
     try:
         logger.info(f"\n🔄 === NEW MULTI-DOCUMENT PROCESSING REQUEST ({len(documents)} files) ===\n")
@@ -398,33 +382,7 @@ async def extract_documents(
                 except Exception as convert_exc:
                     logger.error(f"❌ Conversion failed for {document.filename}: {str(convert_exc)}")
                     
-                    # For conversion failure, upload original to GCS with folder="uploads" and save to FailDocs
-                    try:
-                        gcs_url, blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
-                        # Do NOT append to successful_uploads (it's a fail)
-                        await db_service.save_fail_doc(
-                            reasson=f"File conversion failed: {str(convert_exc)}",
-                            blob_path=blob_path,
-                            physician_id=physicianId
-                        )
-                        logger.info(f"💾 Saved failed (conversion) document to FailDocs: {blob_path}")
-                        
-                        emit_data = {
-                            'document_id': 'failed_conversion',
-                            'filename': document.filename,
-                            'status': 'failed',
-                            'reason': f"File conversion failed: {str(convert_exc)}",
-                            'blob_path': blob_path,
-                            'physician_id': physicianId,
-                            'user_id': userId
-                        }
-                        if userId:
-                            await sio.emit('task_error', emit_data, room=f"user_{userId}")
-                        else:
-                            await sio.emit('task_error', emit_data)
-                    except Exception as upload_exc:
-                        logger.error(f"❌ GCS upload failed for failed conversion: {str(upload_exc)}")
-                    
+                    # For conversion failure, just log and skip
                     ignored_filenames.append({
                         "filename": document.filename,
                         "reason": f"File conversion failed: {str(convert_exc)}"
@@ -451,7 +409,7 @@ async def extract_documents(
                         "mimeType": document.content_type or "application/octet-stream",
                         "gcsUrl": ""
                     },
-                    summary="",  # Set after validation
+                    summary="",  # Set after processing
                     comprehensive_analysis=None,
                     document_id=f"endpoint_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 )
@@ -459,38 +417,15 @@ async def extract_documents(
                 processing_time = (datetime.now() - document_start_time).total_seconds() * 1000
                 logger.info(f"⏱️ Document AI time for {document.filename}: {processing_time:.0f}ms")
 
-                # Validation
+                # Only check if text was extracted - no other validation
                 if not result.text:
-                    reasson = "No text extracted from document"
+                    reason = "No text extracted from document"
+                    logger.warning(f"⚠️ {reason}")
                     
-                    # Upload to GCS with folder="uploads" and save to FailDocs
-                    gcs_url, blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
-                    # Do NOT append to successful_uploads
-                    await db_service.save_fail_doc(
-                        reasson=reasson,
-                        blob_path=blob_path,
-                        physician_id=physicianId
-                    )
-                    logger.info(f"💾 Saved failed (no text) document to FailDocs: {blob_path}")
-                    
-                    emit_data = {
-                        'document_id': 'failed_no_text',
-                        'filename': document.filename,
-                        'status': 'failed',
-                        'reason': reasson,
-                        'blob_path': blob_path,
-                        'physician_id': physicianId,
-                        'user_id': userId
-                    }
-                    if userId:
-                        await sio.emit('task_error', emit_data, room=f"user_{userId}")
-                    else:
-                        await sio.emit('task_error', emit_data)
-                    
-                    ignored_filenames.append({"filename": document.filename, "reason": reasson})
+                    ignored_filenames.append({"filename": document.filename, "reason": reason})
                     continue
 
-                logger.info(f"📝 Validating patient details for {document.filename}...")
+                logger.info(f"📝 Processing document analysis for {document.filename}...")
                 analyzer = ReportAnalyzer()
                 
                 # Skip or stub document type detection to avoid AttributeError
@@ -500,170 +435,28 @@ async def extract_documents(
                 except AttributeError:
                     logger.warning("⚠️ Document type detection unavailable—skipping")
                     detected_type = "unknown"
-                result.summary = f"Document Type: {detected_type} - Validated successfully"
+                result.summary = f"Document Type: {detected_type} - Processed successfully"
                 
+                # Extract document data but DON'T validate any fields
                 document_analysis = analyzer.extract_document_data(result.text)
-                # Enhanced check for required fields: treat "Not specified" as missing
-                required_fields = {
-                    "patient_name": document_analysis.patient_name,
-                    "dob": document_analysis.dob,
-                    # "doi": document_analysis.doi
-                }
-                missing_fields = [k for k, v in required_fields.items() if not v or str(v).lower() == "not specified"]
-                if missing_fields:
-                    missing_details = ", ".join(missing_fields)
-                    user_friendly_msg = f"Invalid document: This file lacks proper patient details ({missing_details}). Please upload a complete medical report with patient name, DOB, and DOI."
-                    error_msg = f"Invalid document: {user_friendly_msg} for {document.filename}"
-                    logger.warning(f"⚠️ {error_msg}")
-                    
-                    # Upload to GCS with folder="uploads" and save to FailDocs
-                    gcs_url, blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
-                    # Do NOT append to successful_uploads
-                    await db_service.save_fail_doc(
-                        reasson=user_friendly_msg,
-                        blob_path=blob_path,
-                        physician_id=physicianId
-                    )
-                    logger.info(f"💾 Saved failed (validation) document to FailDocs: {blob_path}")
-                    
-                    ignored_filenames.append({
-                        "filename": document.filename,
-                        "reason": user_friendly_msg
-                    })
-                    # Emit ignored
-                    emit_data = {
-                        'document_id': 'ignored_validation',
-                        'filename': document.filename,
-                        'status': 'ignored',
-                        'reason': user_friendly_msg,
-                        'blob_path': blob_path,
-                        'physician_id': physicianId,
-                        'user_id': userId
-                    }
-                    if userId:
-                        await sio.emit('task_complete', emit_data, room=f"user_{userId}")
-                    else:
-                        await sio.emit('task_complete', emit_data)
-                    continue  # Skip to next file
-
-                logger.info(f"✅ Validation passed for {document.filename}")
+                logger.info(f"✅ Document analysis completed for {document.filename}")
                 
-                # NEW: Check if document already exists BEFORE GCS upload (similar to webhook logic)
-                try:
-                    file_exists = await db_service.document_exists(
-                        document.filename, 
-                        file_size
-                    )
-                    if file_exists:
-                        user_friendly_msg = f"Document already exists: {document.filename}. Skipping upload and processing."
-                        logger.warning(f"⚠️ {user_friendly_msg}")
-                        
-                        # Upload to GCS with folder="uploads" and save to FailDocs (treating as fail/skipped)
-                        gcs_url, blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
-                        # Do NOT append to successful_uploads
-                        await db_service.save_fail_doc(
-                            reasson=user_friendly_msg,
-                            blob_path=blob_path,
-                            physician_id=physicianId
-                        )
-                        logger.info(f"💾 Saved skipped (exists) document to FailDocs: {blob_path}")
-                        
-                        ignored_filenames.append({
-                            "filename": document.filename,
-                            "reason": user_friendly_msg
-                        })
-                        # Emit ignored (treating as skipped/ignored like required field issue)
-                        emit_data = {
-                            'document_id': 'ignored_exists',
-                            'filename': document.filename,
-                            'status': 'ignored',
-                            'reason': user_friendly_msg,
-                            'blob_path': blob_path,
-                            'physician_id': physicianId,
-                            'user_id': userId
-                        }
-                        if userId:
-                            await sio.emit('task_complete', emit_data, room=f"user_{userId}")
-                        else:
-                            await sio.emit('task_complete', emit_data)
-                        continue  # Skip to next file - no upload or queuing
-                except Exception as db_exc:
-                    logger.error(f"❌ Database check failed for {document.filename}: {str(db_exc)}")
-                    
-                    # For DB check failure, upload with folder="uploads" and save to FailDocs
-                    try:
-                        gcs_url, blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
-                        # Do NOT append to successful_uploads
-                        await db_service.save_fail_doc(
-                            reasson=f"Database existence check failed: {str(db_exc)}",
-                            blob_path=blob_path,
-                            physician_id=physicianId
-                        )
-                        logger.info(f"💾 Saved failed (db_check) document to FailDocs: {blob_path}")
-                        
-                        emit_data = {
-                            'document_id': 'failed_db_check',
-                            'filename': document.filename,
-                            'status': 'failed',
-                            'reason': f"Database existence check failed: {str(db_exc)}",
-                            'blob_path': blob_path,
-                            'physician_id': physicianId,
-                            'user_id': userId
-                        }
-                        if userId:
-                            await sio.emit('task_error', emit_data, room=f"user_{userId}")
-                        else:
-                            await sio.emit('task_error', emit_data)
-                    except Exception as upload_exc:
-                        logger.error(f"❌ GCS upload failed for db check failure: {str(upload_exc)}")
-                    
-                    ignored_filenames.append({"filename": document.filename, "reason": f"Database existence check failed: {str(db_exc)}"})
-                    raise ValueError(f"Database existence check failed: {str(db_exc)}")
-                
-                # Upload to GCS (only if valid and does not exist)
+                # Upload to GCS for all documents with text
                 try:
                     logger.info("☁️ Uploading to GCS...")
                     gcs_url, blob_path = file_service.save_to_gcs(content, document.filename)  # Default folder="uploads"
                     logger.info(f"✅ GCS upload: {gcs_url} | Blob: {blob_path}")
-                    successful_uploads.append(blob_path)  # Only append here
+                    successful_uploads.append(blob_path)
                     
                     # Update result
                     result.gcs_file_link = gcs_url
                     result.fileInfo["gcsUrl"] = gcs_url
                 except Exception as gcs_exc:
                     logger.error(f"❌ GCS upload failed for {document.filename}: {str(gcs_exc)}")
-                    
-                    # For GCS upload failure after validation, upload to uploads and save to FailDocs
-                    try:
-                        fail_gcs_url, fail_blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
-                        # Do NOT append to successful_uploads
-                        await db_service.save_fail_doc(
-                            reasson=f"GCS upload failed: {str(gcs_exc)}",
-                            blob_path=fail_blob_path,
-                            physician_id=physicianId
-                        )
-                        logger.info(f"💾 Saved failed (gcs) document to FailDocs: {fail_blob_path}")
-                        
-                        emit_data = {
-                            'document_id': 'failed_gcs',
-                            'filename': document.filename,
-                            'status': 'failed',
-                            'reason': f"GCS upload failed: {str(gcs_exc)}",
-                            'blob_path': fail_blob_path,
-                            'physician_id': physicianId,
-                            'user_id': userId
-                        }
-                        if userId:
-                            await sio.emit('task_error', emit_data, room=f"user_{userId}")
-                        else:
-                            await sio.emit('task_error', emit_data)
-                    except Exception as fail_upload_exc:
-                        logger.error(f"❌ Fail GCS upload also failed: {str(fail_upload_exc)}")
-                    
                     ignored_filenames.append({"filename": document.filename, "reason": f"GCS upload failed: {str(gcs_exc)}"})
-                    raise ValueError(f"GCS upload failed: {str(gcs_exc)}")
+                    continue
                 
-                # Prepare and queue task
+                # Prepare and queue task - ALL documents with text go to webhook
                 webhook_payload = {
                     "result": result.dict(),
                     "filename": document.filename,
@@ -682,66 +475,9 @@ async def extract_documents(
                 task_ids.append(task.id)
                 logger.info(f"🚀 Task queued for {document.filename}: {task.id}")
                 
-            except ValueError as ve:
-                logger.error(f"❌ Validation error for {document.filename}: {str(ve)}")
-                
-                # For ValueError, upload with folder="uploads" and save to FailDocs
-                try:
-                    gcs_url, blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
-                    # Do NOT append to successful_uploads
-                    await db_service.save_fail_doc(
-                        reasson=str(ve),
-                        blob_path=blob_path,
-                        physician_id=physicianId
-                    )
-                    logger.info(f"💾 Saved failed (value_error) document to FailDocs: {blob_path}")
-                    
-                    emit_data = {
-                        'filename': document.filename,
-                        'error': str(ve),
-                        'blob_path': blob_path,
-                        'physician_id': physicianId,
-                        'user_id': userId
-                    }
-                    if userId:
-                        await sio.emit('task_error', emit_data, room=f"user_{userId}")
-                    else:
-                        await sio.emit('task_error', emit_data)
-                except Exception as upload_exc:
-                    logger.error(f"❌ GCS upload failed for value error: {str(upload_exc)}")
-                
-                ignored_filenames.append({
-                    "filename": document.filename,
-                    "reason": str(ve)
-                })
             except Exception as proc_exc:
                 logger.error(f"❌ Unexpected processing error for {document.filename}: {str(proc_exc)}")
                 logger.debug(f"Traceback: {traceback.format_exc()}")
-                
-                # For unexpected errors, upload with folder="uploads" and save to FailDocs
-                try:
-                    gcs_url, blob_path = file_service.save_to_gcs(content, document.filename, folder="uploads")
-                    # Do NOT append to successful_uploads
-                    await db_service.save_fail_doc(
-                        reasson=f"Processing failed: {str(proc_exc)}",
-                        blob_path=blob_path,
-                        physician_id=physicianId
-                    )
-                    logger.info(f"💾 Saved failed (processing) document to FailDocs: {blob_path}")
-                    
-                    emit_data = {
-                        'filename': document.filename,
-                        'error': str(proc_exc),
-                        'blob_path': blob_path,
-                        'physician_id': physicianId,
-                        'user_id': userId
-                    }
-                    if userId:
-                        await sio.emit('task_error', emit_data, room=f"user_{userId}")
-                    else:
-                        await sio.emit('task_error', emit_data)
-                except Exception as upload_exc:
-                    logger.error(f"❌ GCS upload failed for processing error: {str(upload_exc)}")
                 
                 ignored_filenames.append({
                     "filename": document.filename,
@@ -767,7 +503,7 @@ async def extract_documents(
     except Exception as global_exc:
         logger.error(f"❌ Global error in extract-documents: {str(global_exc)}")
         logger.debug(f"Traceback: {traceback.format_exc()}")
-        # Cleanup any successful uploads (fails are preserved)
+        # Cleanup any successful uploads
         for path in successful_uploads:
             try:
                 file_service.delete_from_gcs(path)

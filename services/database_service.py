@@ -325,31 +325,44 @@ class DatabaseService:
 
     async def get_all_unverified_documents(
         self, 
-        patient_name: str, 
+        patient_name: Optional[str] = None,
         physicianId: Optional[str] = None,
         claimNumber: Optional[str] = None,
         dob: Optional[datetime] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Retrieve all unverified documents for a patient where status is NOT 'verified'.
-        If claimNumber is provided and not "not specified", filter by it. Otherwise, use dob (date-only match) for filtering.
+        Retrieve all unverified documents where status is NOT 'verified'.
+        Filters by patient_name if provided. If claimNumber is provided and not "not specified", filter by it.
+        Otherwise, if dob is provided, use dob (date-only match) for filtering.
+        At least one of patient_name, claimNumber, or dob must be provided.
         """
         try:
-            logger.info(f"🔍 Getting unverified documents for patient: {patient_name}")
+            filters_provided = [f for f in [patient_name, claimNumber, dob] if f is not None]
+            if not filters_provided:
+                logger.warning("❌ No filters provided for retrieving unverified documents")
+                return None
+
+            if claimNumber is not None and str(claimNumber).lower() == "not specified":
+                claimNumber = None
+
+            logger.info(f"🔍 Getting unverified documents with filters: patient_name={patient_name}, physicianId={physicianId}, claimNumber={claimNumber}, dob={dob}")
             print(patient_name, physicianId, claimNumber, dob, 'patient_name, physicianId, claimNumber, dob')
 
             # Base where clause
             where_clause = {
-                "patientName": patient_name,
                 "status": {"not": "verified"}
             }
+
+            # Add patient_name if provided
+            if patient_name:
+                where_clause["patientName"] = patient_name
 
             # Add physicianId if provided
             if physicianId:
                 where_clause["physicianId"] = physicianId
 
-            # Filter by claimNumber if provided and not "not specified", else by dob (date-only match)
-            if claimNumber and str(claimNumber).lower() != "not specified":
+            # Filter by claimNumber if provided, else by dob (date-only match)
+            if claimNumber:
                 where_clause["claimNumber"] = claimNumber
                 logger.info(f"📌 Using claimNumber filter: {claimNumber}")
             elif dob:
@@ -375,14 +388,17 @@ class DatabaseService:
             )
 
             if not documents:
-                logger.warning(f"❌ No non-verified documents found for patient: {patient_name}")
+                logger.warning(f"❌ No non-verified documents found with provided filters")
                 return None
 
-            logger.info(f"📋 Found {len(documents)} unverified documents for {patient_name}")
+            # Determine patient_name for logging/response (use first document's if not provided)
+            response_patient_name = patient_name or documents[0].patientName
+
+            logger.info(f"📋 Found {len(documents)} unverified documents for patient: {response_patient_name}")
 
             # Structured response
             response = {
-                "patient_name": patient_name,
+                "patient_name": response_patient_name,
                 "total_documents": len(documents),
                 "documents": []
             }
@@ -397,12 +413,12 @@ class DatabaseService:
             return response
 
         except Exception as e:
-            logger.error(f"❌ Error retrieving unverified documents for {patient_name}: {str(e)}")
+            logger.error(f"❌ Error retrieving unverified documents: {str(e)}")
             raise
     async def update_previous_claim_numbers(
         self,
         patient_name: str,
-        dob: datetime,
+        dob: str,
         physician_id: str,
         claim_number: str
     ):
@@ -499,8 +515,8 @@ class DatabaseService:
         gcs_file_link: str,
         patient_name: str,
         claim_number: str,
-        dob: datetime,
-        doi: datetime,
+        dob: str,  # Now a string
+        doi: str,  # Now a string
         rd: datetime,
         status: str,
         brief_summary: str,
@@ -539,8 +555,8 @@ class DatabaseService:
             # Encrypt patient details into a URL-safe token
             patient_data = {
                 "patientName": patient_name,
-                "dob": dob.isoformat(),  # Serialize datetime to string
-                "doi": doi.isoformat()
+                "dob": dob,  # Already a string, no need for isoformat()
+                "doi": doi   # Already a string, no need for isoformat()
             }
             patient_json = json.dumps(patient_data)
             encrypted_token = self.cipher_suite.encrypt(patient_json.encode())
@@ -551,15 +567,16 @@ class DatabaseService:
                 data={
                     "patientName": patient_name,
                     "claimNumber": claim_number,
-                    "dob": dob,
-                    "doi": doi,
+                    "dob": dob,  # String value
+                    "doi": doi,  # String value
                     "status": status,
                     "gcsFileLink": gcs_file_link,
                     "briefSummary": brief_summary,
                     "whatsNew": whats_new_json,  # JSON string for scalar Json field
                     "physicianId": physician_id,
                     "patientQuizPage": f"http://localhost:3000/intake-form?token={url_safe_token}",
-                    "createdAt":rd if rd else datetime.now(),
+                  
+                    "reportDate": rd if rd else datetime.now(),
                     "blobPath": blob_path,
                     # Optional: Add these if you extend schema
                     "fileName": file_name,
@@ -581,7 +598,7 @@ class DatabaseService:
                     "documentSummary": {
                         "create": {
                             "type": document_summary.get("type", ""),
-                            "date":rd if rd else datetime.now(),
+                            "date": rd if rd else datetime.now(),
                             "summary": document_summary.get("summary", "")
                         }
                     }
@@ -602,9 +619,8 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"❌ Error saving document analysis: {str(e)}")
             raise
-
+    
     def decrypt_patient_token(self, token: str) -> Dict[str, Any]:
-
         """
         Decrypts the token and returns patient data.
         Use this in the FastAPI route.
@@ -616,38 +632,60 @@ class DatabaseService:
             encrypted_bytes = base64.urlsafe_b64decode(padded_token)
             decrypted_json = self.cipher_suite.decrypt(encrypted_bytes).decode('utf-8')
             patient_data = json.loads(decrypted_json)
-            # Convert strings back to datetime objects
-            patient_data["dob"] = datetime.fromisoformat(patient_data["dob"])
-            patient_data["doi"] = datetime.fromisoformat(patient_data["doi"])
+            # No need to convert to datetime objects since they're stored as strings
+            # patient_data["dob"] and patient_data["doi"] remain as strings
             return patient_data
         except Exception as e:
             logger.error(f"❌ Decryption failed: {str(e)}")
             raise ValueError("Invalid or expired token")
-# Singleton instance
 
     async def get_patient_quiz(self, patient_name: str, dob: str, doi: str) -> Optional[Dict[str, Any]]:
         """Retrieve a PatientQuiz by matching patientName and DATE (ignoring time)"""
         print(patient_name, dob, doi, 'patient_name,dob,doi')
         try:
-            # Parse the date strings into datetime objects (assuming dob and doi are 'YYYY-MM-DD')
-            dob_start = datetime.strptime(dob, "%Y-%m-%d")
-            dob_end = dob_start + timedelta(days=1)
+            # Since dob and doi are now strings, we need to parse them for date comparison
+            # Assuming the format is "YYYY-MM-DD" or "Not specified"
+            if dob.lower() != "not specified":
+                try:
+                    dob_start = datetime.strptime(dob, "%Y-%m-%d")
+                    dob_end = dob_start + timedelta(days=1)
+                except ValueError:
+                    # If date parsing fails, skip the date filter
+                    dob_start = None
+                    dob_end = None
+            else:
+                dob_start = None
+                dob_end = None
 
-            doi_start = datetime.strptime(doi, "%Y-%m-%d")
-            doi_end = doi_start + timedelta(days=1)
+            if doi.lower() != "not specified":
+                try:
+                    doi_start = datetime.strptime(doi, "%Y-%m-%d")
+                    doi_end = doi_start + timedelta(days=1)
+                except ValueError:
+                    # If date parsing fails, skip the date filter
+                    doi_start = None
+                    doi_end = None
+            else:
+                doi_start = None
+                doi_end = None
+
+            # Build the where clause
+            where_clause = {"patientName": patient_name}
+            
+            if dob_start and dob_end:
+                where_clause["dob"] = {
+                    "gte": dob_start.isoformat(),
+                    "lt": dob_end.isoformat(),
+                }
+                
+            if doi_start and doi_end:
+                where_clause["doi"] = {
+                    "gte": doi_start.isoformat(),
+                    "lt": doi_end.isoformat(),
+                }
 
             quiz = await self.prisma.patientquiz.find_first(
-                where={
-                    "patientName": patient_name,
-                    "dob": {
-                        "gte": dob_start.isoformat(),
-                        "lt": dob_end.isoformat(),
-                    },
-                    "doi": {
-                        "gte": doi_start.isoformat(),
-                        "lt": doi_end.isoformat(),
-                    },
-                }
+                where=where_clause
             )
 
             print(quiz, 'quiz')
@@ -659,7 +697,6 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"❌ Error retrieving PatientQuiz: {str(e)}")
             return None
-    
 _db_service = None
 
 async def get_database_service() -> DatabaseService:
