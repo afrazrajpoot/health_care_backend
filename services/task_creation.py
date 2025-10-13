@@ -31,9 +31,8 @@ class TaskCreationResult(BaseModel):
     tasks: List[AITask]
 
 # ------------------ TASK CREATOR ------------------
-
 class TaskCreator:
-    """AI service to generate realistic, department-specific tasks based on document type and content."""
+    """AI service to generate ONE most possible task based on document type and content."""
     
     def __init__(self):
         self.llm = ChatOpenAI(
@@ -44,47 +43,33 @@ class TaskCreator:
         )
         self.parser = JsonOutputParser(pydantic_object=TaskCreationResult)
 
-    # 🧠 SYSTEM PROMPT — defines professional behavior
+    # 🧠 SYSTEM PROMPT - Updated to generate only ONE task
     SYSTEM_PROMPT = """
     You are a workflow automation AI for a California multi-specialty medical group handling
-    Workers’ Compensation (WC) and General Medicine (GM) cases.
+    Workers' Compensation (WC) and General Medicine (GM) cases.
 
-    You create precise, department-specific, actionable follow-up tasks **only when appropriate**
-    based on the type of document uploaded and its context.
+    You create ONE most important, actionable follow-up task based on the document content.
 
     --- KEY RULES ---
-    1. Base task creation on **document type** logic.
-       Examples:
-       • PR-1 / 5021 → Intake or Admin/Compliance tasks (“Verify claim info”, “Confirm employer data”)
-       • PR-2 → Review or RFA tasks *only if new treatment requests appear*
-       • RFA → “Submit to UR” or “Track UR response”
-       • UR Denial → “Prepare IMR package for physician”
-       • Authorization → “Schedule approved MRI” or “Notify patient of approval”
-       • Ortho / Neuro Consult → “Physician Review” (doctor should review consult)
-       • QME / AME → “Physician Review” and “Send to Attorney”
-       • PR-3 / PR-4 → “Finalize MMI report” or “Billing review”
-       • IMR Determination → “Implement IMR decision” (Approved / Denied)
-       • Supplemental Report → “Update claim records”
-       • Attorney Correspondence → “Legal/Attorney Liaison follow-up”
-       • Billing / Lien → “Billing/Compliance” or “Legal/Attorney Liaison”
-       • FCE → “Physician to review FCE results and update work restrictions”
+    1. Analyze the document and select the SINGLE most critical task that needs to be done.
+    2. Choose the task that is most urgent, highest priority, or most relevant to the document type.
+    3. Consider what is the most important next step in the workflow process.
+    4. If multiple tasks seem equally important, choose the one that is most time-sensitive.
 
-    2. DO NOT create scheduling tasks (e.g., MRI, surgery) unless:
-       - The document is an **Authorization** or **RFA Approval**, NOT a PR-2 or DFR.
-    
-    3. DO NOT create duplicate or unnecessary tasks.
-       - Skip tasks that would already have been triggered by previous reports.
+    COMMON PRIORITY TASKS:
+    • Clinical Reports: "Physician to review [document type] findings"
+    • RFAs & Authorizations: "Process authorization for [treatment]"
+    • Consult Reports: "Implement specialist recommendations"
+    • Legal Documents: "Attorney liaison review required"
+    • Urgent/Time-sensitive items always take priority
 
-    4. ALWAYS use professional, concise 1-liners.
-       - Examples: “Submit UR denial for IMR review”, “Notify patient of MRI approval”, “Physician to review Ortho Consult”.
+    DEPARTMENTS (by mode):
+    Workers' Comp (WC):
+        ["Scheduling","RFA/IMR","Physician Review","Intake","Admin/Compliance","Billing/Compliance","Legal/Attorney Liaison"]
+    General Medicine (GM):
+        ["Scheduling","Prior Authorization","Physician Review","Intake/Registration","Referrals/Coordination","Billing/Revenue Cycle","Quality & Compliance","Patient Outreach"]
 
-    5. DEPARTMENTS (by mode)
-       Workers’ Comp (WC):
-         ["Scheduling","RFA/IMR","Physician Review","Intake","Admin/Compliance","Billing/Compliance","Legal/Attorney Liaison"]
-       General Medicine (GM):
-         ["Scheduling","Prior Authorization","Physician Review","Intake/Registration","Referrals/Coordination","Billing/Revenue Cycle","Quality & Compliance","Patient Outreach"]
-
-    Output only structured JSON per the schema.
+    Output only ONE task in structured JSON format.
     """
 
     def create_prompt(self) -> ChatPromptTemplate:
@@ -95,23 +80,18 @@ class TaskCreator:
 
         MODE: {mode}
         SOURCE DOCUMENT: {source_document}
-        TODAY’S DATE: {current_date}
+        TODAY'S DATE: {current_date}
 
-        Return structured JSON strictly matching this format:
+        Generate ONLY ONE most important task in this format:
 
         {{
           "tasks": [
             {{
-              "description": "...",
-              "department": "...",
+              "description": "Single most important task description",
+              "department": "Most relevant department",
               "status": "Pending",
               "due_date": "YYYY-MM-DD",
-              "patient": "...",
-              "quick_notes": {{
-                "status_update": "",
-                "details": "",
-                "one_line_note": ""
-              }},
+              "patient": "Patient name",
               "actions": ["Claim", "Complete"],
               "source_document": "{source_document}"
             }}
@@ -125,20 +105,17 @@ class TaskCreator:
             HumanMessagePromptTemplate.from_template(user_template),
         ])
 
-
-
-    # ----------------------------------------------------------
-    # 🔹 2. EXTENDED generate_tasks()
-    # ----------------------------------------------------------
     def generate_tasks(self, document_analysis: dict, source_document: str = "") -> list[dict]:
-        """Generate structured tasks — combining rule-based + AI-generated ones."""
+        """Generate ONE most possible task - no quick notes, no multiple tasks."""
         try:
             current_date = datetime.now().strftime("%Y-%m-%d")
+            print(f"📝 Creating ONE task for document: {source_document}")
+            
             text_content = " ".join(
                 str(v) for v in document_analysis.values() if isinstance(v, (str, list))
             ).lower()
 
-            # --- Step 1: Detect mode automatically ---
+            # Detect mode
             wc_keywords = ["rfa", "ur denial", "attorney", "qme", "workers", "claim"]
             gm_keywords = ["prior auth", "referral", "consult", "intake", "specialist"]
 
@@ -149,66 +126,7 @@ class TaskCreator:
             else:
                 mode = "WC" if "pr-" in document_analysis.get("document_type", "").lower() else "GM"
 
-            # --- Step 2: Rule-based baseline tasks ---
-            baseline_tasks = []
-            doc_type = document_analysis.get("document_type", "").lower()
-            DOCUMENT_RULES = {
-                "pr-2": [
-                    {
-                        "if_contains": ["pending authorization", "mri", "imaging"],
-                        "create_task": "Submit RFA for imaging authorization",
-                        "department": "RFA/IMR"
-                    },
-                    {
-                        "if_contains": ["referral", "consult"],
-                        "create_task": "Send referral to specialist",
-                        "department": "Scheduling"
-                    },
-                    {
-                        "if_contains": ["modified duty", "restrictions"],
-                        "create_task": "Notify employer of work restrictions",
-                        "department": "Admin/Compliance"
-                    }
-                ],
-                "rfa": [
-                    {"if_contains": ["approved"], "create_task": "Schedule approved treatment", "department": "Scheduling"},
-                    {"if_contains": ["denied"], "create_task": "Prepare IMR packet", "department": "RFA/IMR"}
-                ],
-                "ur denial": [
-                    {"create_task": "Prepare IMR packet for denied treatment", "department": "RFA/IMR"}
-                ],
-                "authorization": [
-                    {"create_task": "Schedule approved procedure", "department": "Scheduling"}
-                ],
-                "ortho consult": [
-                    {"create_task": "Physician to review Ortho Consult", "department": "Physician Review"}
-                ],
-                "attorney letter": [
-                    {"create_task": "Forward correspondence to legal liaison", "department": "Legal/Attorney Liaison"}
-                ],
-            }
-
-
-            for key, rules in DOCUMENT_RULES.items():
-                if key in doc_type:
-                    for rule in rules:
-                        if "if_contains" not in rule or any(term in text_content for term in rule["if_contains"]):
-                            baseline_tasks.append({
-                                "description": rule["create_task"],
-                                "department": rule["department"],
-                                "status": "Pending",
-                                "due_date": datetime.now() + timedelta(days=2),
-                                "patient": document_analysis.get("patient_name", "Unknown"),
-                                "quick_notes": {
-                                    "status_update": "",
-                                    "details": f"Auto-generated from {doc_type.upper()}",
-                                    "one_line_note": rule["create_task"]
-                                },
-                                "actions": ["Claim", "Complete"],
-                                "source_document": source_document or "Unknown"
-                            })
-
-            # --- Step 3: AI-driven refinement / additions ---
+            # AI-driven single task generation
             prompt = self.create_prompt()
             chain = prompt | self.llm | self.parser
 
@@ -221,27 +139,35 @@ class TaskCreator:
                 "format_instructions": self.parser.get_format_instructions()
             })
 
+            # Process the single AI task
+            single_task = result["tasks"][0] if result["tasks"] else {
+                "description": "Review document content",
+                "department": "Physician Review",
+                "status": "Pending", 
+                "due_date": (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d"),
+                "patient": document_analysis.get("patient_name", "Unknown"),
+                "actions": ["Claim", "Complete"],
+                "source_document": source_document or "Unknown"
+            }
 
-            ai_tasks = []
-            for t in result["tasks"]:
-                try:
-                    t["due_date"] = datetime.strptime(t["due_date"], "%Y-%m-%d")
-                except Exception:
-                    t["due_date"] = datetime.now() + timedelta(days=3)
-                ai_tasks.append(t)
+            # Ensure due_date is datetime object
+            try:
+                single_task["due_date"] = datetime.strptime(single_task["due_date"], "%Y-%m-%d")
+            except Exception:
+                single_task["due_date"] = datetime.now() + timedelta(days=2)
 
-            # --- Step 4: Merge intelligently (avoid duplicates) ---
-            def similar(desc1, desc2):
-                return desc1.lower()[:25] in desc2.lower() or desc2.lower()[:25] in desc1.lower()
-
-            merged_tasks = baseline_tasks[:]
-            for ai_t in ai_tasks:
-                if not any(similar(ai_t["description"], bt["description"]) for bt in baseline_tasks):
-                    merged_tasks.append(ai_t)
-
-            logger.info(f"✅ Generated {merged_tasks} tasks for patient: {document_analysis.get('patient_name', 'Unknown')}")
-            return merged_tasks
+            logger.info(f"✅ Generated ONE task for patient: {document_analysis.get('patient_name', 'Unknown')}")
+            return [single_task]
 
         except Exception as e:
-            logger.error(f"❌ Task creation failed: {str(e)}")
-            return []
+            logger.error(f"❌ Single task creation failed: {str(e)}")
+            # Fallback single task
+            return [{
+                "description": "Review and process document",
+                "department": "Physician Review",
+                "status": "Pending",
+                "due_date": datetime.now() + timedelta(days=2),
+                "patient": document_analysis.get("patient_name", "Unknown"),
+                "actions": ["Claim", "Complete"],
+                "source_document": source_document or "Unknown"
+            }]

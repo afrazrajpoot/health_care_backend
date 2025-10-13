@@ -183,12 +183,12 @@ model Task {
   sourceDocument  String?
 
   // Quick notes as a nested JSON field
-  quickNotes      Json     @default("{\"status_update\": \"\", \"details\": \"\", \"one_line_note\": \"\"}")
+  quickNotes      Json?     @default("{\"status_update\": \"\", \"details\": \"\", \"one_line_note\": \"\"}")
 
   // Relation (optional) — link back to Document if available
   documentId      String?  
   document        Document? @relation(fields: [documentId], references: [id])
-
+  physicianId     String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 }
