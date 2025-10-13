@@ -562,15 +562,15 @@ class DatabaseService:
             whats_new_json = json.dumps(whats_new) if whats_new else None
             
             # Encrypt patient details into a URL-safe token
-            patient_data = {
-                "patientName": patient_name,
-                "dob": dob,  # Already a string, no need for isoformat()
-                "doi": doi   # Already a string, no need for isoformat()
-            }
-            patient_json = json.dumps(patient_data)
-            encrypted_token = self.cipher_suite.encrypt(patient_json.encode())
+            # patient_data = {
+            #     "patientName": patient_name,
+            #     "dob": dob,  # Already a string, no need for isoformat()
+            #     "doi": doi   # Already a string, no need for isoformat()
+            # }
+            # patient_json = json.dumps(patient_data)
+            # encrypted_token = self.cipher_suite.encrypt(patient_json.encode())
             # Base64 URL-safe encode for URL (Fernet is already base64, but ensure URL-safe)
-            url_safe_token = base64.urlsafe_b64encode(encrypted_token).decode('utf-8').rstrip('=')
+            # url_safe_token = base64.urlsafe_b64encode(encrypted_token).decode('utf-8').rstrip('=')
             
             document = await self.prisma.document.create(
                 data={
@@ -583,7 +583,7 @@ class DatabaseService:
                     "briefSummary": brief_summary,
                     "whatsNew": whats_new_json,  # JSON string for scalar Json field
                     "physicianId": physician_id,
-                    "patientQuizPage": f"http://localhost:3000/intake-form?token={url_safe_token}",
+                    # "patientQuizPage": f"http://localhost:3000/intake-form?token={url_safe_token}",
                   
                     "reportDate": rd if rd else datetime.now(),
                     "blobPath": blob_path,
@@ -622,7 +622,7 @@ class DatabaseService:
             
             logger.info(f"✅ Document saved with ID: {document.id}")
             logger.info(f"📊 WhatsNew JSON: {whats_new_json[:100]}..." if whats_new_json else "📊 WhatsNew: None")
-            logger.info(f"🔐 Encrypted token: {url_safe_token[:20]}...")
+            # logger.info(f"🔐 Encrypted token: {url_safe_token[:20]}...")
             return document.id
             
         except Exception as e:

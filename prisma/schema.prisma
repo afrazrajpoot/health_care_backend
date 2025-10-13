@@ -70,7 +70,7 @@ gcsFileLink     String
 briefSummary    String?
 whatsNew        Json?
 blobPath        String?
-patientQuizPage String?
+
 fileName        String?
 
 // Relations
@@ -148,4 +148,22 @@ model FailDocs{
   reasson     String
   blobPath    String
   physicianId String?
+}
+
+model IntakeLink {
+  id          String   @id @default(cuid())
+  token       String   @unique
+  patientName String
+  dateOfBirth DateTime
+  visitType   String   @default("Follow-up")
+  language    String   @default("en")
+  mode        String   @default("tele")
+  bodyParts   String?
+  expiresInDays Int    @default(7)
+  requireAuth Boolean  @default(true)
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("intake_links")
 }
