@@ -81,6 +81,9 @@ reportDate      DateTime?
 physicianId     String?
 createdAt       DateTime           @default(now())
 updatedAt       DateTime           @updatedAt
+
+// Relation to tasks
+tasks           Task[]
 }
 
 model SummarySnapshot {
@@ -166,4 +169,26 @@ model IntakeLink {
   updatedAt   DateTime @updatedAt
 
   @@map("intake_links")
+}
+
+
+model Task {
+  id              String   @id @default(cuid())
+  description     String
+  department      String
+  status          String   @default("Pending")
+  dueDate         DateTime?
+  patient         String
+  actions         String[] @default(["Claim", "Complete"])
+  sourceDocument  String?
+
+  // Quick notes as a nested JSON field
+  quickNotes      Json     @default("{\"status_update\": \"\", \"details\": \"\", \"one_line_note\": \"\"}")
+
+  // Relation (optional) — link back to Document if available
+  documentId      String?  
+  document        Document? @relation(fields: [documentId], references: [id])
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 }

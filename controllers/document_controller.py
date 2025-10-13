@@ -2,9 +2,9 @@
 
 from fastapi import APIRouter, File, UploadFile, HTTPException, Request, Query
 from typing import Dict, List, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
-
+from prisma import Prisma
 from models.schemas import ExtractionResult
 from services.file_service import FileService
 from config.settings import CONFIG
@@ -17,6 +17,8 @@ from pathlib import Path
 from fastapi import Path as FastAPIPath
 from services.document_ai_service import get_document_ai_processor
 from services.document_converter import DocumentConverter
+from services.task_creation import TaskCreator
+
 import os
 from urllib.parse import urlparse
 router = APIRouter()
@@ -50,6 +52,52 @@ async def save_document_webhook(request: Request):
         analyzer = ReportAnalyzer()
         document_analysis = analyzer.extract_document_data(result_data.get("text", ""))
         print(document_analysis,'document analysis in webhook')
+        # 🔹 AI Task Creation
+        task_creator = TaskCreator()
+        tasks = task_creator.generate_tasks(document_analysis.dict(), data["filename"])
+        
+        # Save tasks to DB (map AI task keys to Prisma Task model fields)
+        prisma = Prisma()
+        await prisma.connect()
+        created_tasks = 0
+        for task in tasks:
+            try:
+                # Map snake_case keys to camelCase expected by Prisma schema
+                mapped_task = {
+                    "description": task.get("description"),
+                    "department": task.get("department"),
+                    "status": task.get("status", "Pending"),
+                    # Prisma Task model expects `dueDate` (DateTime?)
+                    "dueDate": None,
+                    "patient": task.get("patient", "Unknown"),
+                    "actions": task.get("actions") if isinstance(task.get("actions"), list) else [],
+                    # sourceDocument field in Prisma
+                    "sourceDocument": task.get("source_document") or task.get("sourceDocument") or data.get("filename"),
+                    # quickNotes: keep as JSON/dict
+                    "quickNotes": task.get("quick_notes") or task.get("quickNotes") or {},
+                }
+
+                # Normalize due date if present (accept datetime or ISO string)
+                due_raw = task.get("due_date") or task.get("dueDate")
+                if due_raw:
+                    if isinstance(due_raw, str):
+                        try:
+                            mapped_task["dueDate"] = datetime.strptime(due_raw, "%Y-%m-%d")
+                        except Exception:
+                            # best-effort parse, fallback to now + 3 days
+                            mapped_task["dueDate"] = datetime.now() + timedelta(days=3)
+                    else:
+                        # assume it's already a datetime-like object
+                        mapped_task["dueDate"] = due_raw
+
+                await prisma.task.create(data=mapped_task)
+                created_tasks += 1
+            except Exception as task_err:
+                logger.error(f"❌ Failed to create task for document {data.get('filename')}: {task_err}", exc_info=True)
+                # continue creating other tasks even if one fails
+                continue
+
+        logger.info(f"✅ {created_tasks} / {len(tasks)} tasks created for document {data['filename']}")
         # Enhanced check for required fields: treat "Not specified" as missing but don't block processing
         required_fields = {
             "patient_name": document_analysis.patient_name,
