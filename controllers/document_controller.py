@@ -311,18 +311,45 @@ async def save_document_webhook(request: Request):
 
         logger.info(f"✅ {created_tasks} / {len(tasks)} tasks created for document {data['filename']}")
 
-        # Update previous documents with null claim_number to use the current claim_to_use
-        # Only if claim_to_use is not "Not specified" or similar placeholder and document is not failed/pending
-        if document_status not in ["failed", "pending"] and claim_to_use not in ["Not specified", "UNSPECIFIED", ""]:
-            await db_service.update_previous_claim_numbers(
+        # 🔄 Update previous documents' claim numbers (enhanced to handle "Not specified")
+        should_update_previous = (
+            document_status not in ["failed", "pending"] and
+            patient_name_to_use != "Not specified" and  # Avoid updating if patient is unknown
+            dob_for_query is not None  # Ensure we can query by DOB
+        )
+
+        if should_update_previous:
+            # Fetch previous documents to check for null claims (reuse the earlier query if possible)
+            db_response = await db_service.get_all_unverified_documents(
                 patient_name=patient_name_to_use,
-                dob=dob_for_query,  # Use the parsed datetime for query
-                physician_id=physician_id,
-                claim_number=claim_to_use
+                physicianId=physician_id,
+                claimNumber=None,  # Explicitly fetch all, including null claims
+                dob=dob_for_query
             )
-            logger.info(f"🔄 Updated previous documents' claim numbers for patient '{patient_name_to_use}' using claim '{claim_to_use}'")
-        elif document_status in ["failed", "pending"]:
-            logger.info(f"ℹ️ Skipping previous claim update as document status is {document_status}")
+            previous_documents = db_response.get('documents', []) if db_response else []
+            
+            # Check if any previous docs have null/unset claims
+            has_null_claim_docs = any(
+                doc.get('claim_number') is None or str(doc.get('claim_number', '')).lower() == 'not specified'
+                for doc in previous_documents
+            )
+            
+            if has_null_claim_docs:
+                # Use claim_to_use directly, even if "Not specified" – treat it as a valid string
+                await db_service.update_previous_claim_numbers(
+                    patient_name=patient_name_to_use,
+                    dob=dob_for_query,
+                    physician_id=physician_id,
+                    claim_number=claim_to_use  # Now allows "Not specified"
+                )
+                update_msg = f"🔄 Updated previous documents' claim numbers for patient '{patient_name_to_use}' using claim '{claim_to_use}'"
+                if claim_to_use == "Not specified":
+                    update_msg += " (set nulls to 'Not specified' for consistency)"
+                logger.info(update_msg)
+            else:
+                logger.info(f"ℹ️ No previous documents with null claims for patient '{patient_name_to_use}'; skipping update")
+        else:
+            logger.info(f"ℹ️ Skipping previous claim update: status={document_status}, patient={patient_name_to_use}, has_dob={dob_for_query is not None}")
 
         logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}")
         

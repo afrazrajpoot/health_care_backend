@@ -43,7 +43,7 @@ class TaskCreator:
         )
         self.parser = JsonOutputParser(pydantic_object=TaskCreationResult)
 
-    # 🧠 SYSTEM PROMPT - Updated to generate only ONE task
+    # 🧠 SYSTEM PROMPT - Updated: actions default to ["Unclaim", "Pending"]
     SYSTEM_PROMPT = """
     You are a workflow automation AI for a California multi-specialty medical group handling
     Workers' Compensation (WC) and General Medicine (GM) cases.
@@ -69,6 +69,9 @@ class TaskCreator:
     General Medicine (GM):
         ["Scheduling","Prior Authorization","Physician Review","Intake/Registration","Referrals/Coordination","Billing/Revenue Cycle","Quality & Compliance","Patient Outreach"]
 
+    When generating the task, the 'actions' field must always start as ["Unclaim", "Pending"] 
+    for new tasks, not ["Claim", "Complete"].
+
     Output only ONE task in structured JSON format.
     """
 
@@ -92,7 +95,7 @@ class TaskCreator:
               "status": "Pending",
               "due_date": "YYYY-MM-DD",
               "patient": "Patient name",
-              "actions": ["Claim", "Complete"],
+              "actions": ["Unclaim", "Pending"],
               "source_document": "{source_document}"
             }}
           ]
@@ -106,7 +109,7 @@ class TaskCreator:
         ])
 
     def generate_tasks(self, document_analysis: dict, source_document: str = "") -> list[dict]:
-        """Generate ONE most possible task - no quick notes, no multiple tasks."""
+        """Generate ONE most possible task - default actions are Unclaim and Pending."""
         try:
             current_date = datetime.now().strftime("%Y-%m-%d")
             print(f"📝 Creating ONE task for document: {source_document}")
@@ -146,7 +149,7 @@ class TaskCreator:
                 "status": "Pending", 
                 "due_date": (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d"),
                 "patient": document_analysis.get("patient_name", "Unknown"),
-                "actions": ["Claim", "Complete"],
+                "actions": ["Unclaim", "Pending"],
                 "source_document": source_document or "Unknown"
             }
 
@@ -168,6 +171,6 @@ class TaskCreator:
                 "status": "Pending",
                 "due_date": datetime.now() + timedelta(days=2),
                 "patient": document_analysis.get("patient_name", "Unknown"),
-                "actions": ["Claim", "Complete"],
+                "actions": ["Unclaim", "Pending"],
                 "source_document": source_document or "Unknown"
             }]
