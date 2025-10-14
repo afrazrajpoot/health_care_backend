@@ -123,7 +123,7 @@ async def save_document_webhook(request: Request):
             try:
                 if '/' in rd:  # MM/DD format (e.g., "05/15")
                     month, day = rd.split('/')
-                    year = 2025  # Current year from "October 11, 2025"
+                    year = 2025  # Current year from "October 14, 2025"
                     full_date_str = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
                 elif '-' in rd:  # YYYY-MM-DD format (e.g., "2025-05-15")
                     full_date_str = rd
@@ -136,19 +136,21 @@ async def save_document_webhook(request: Request):
                 logger.warning(f"Failed to parse rd '{rd}': {parse_err}; using None")
                 rd_for_db = None
         
-        # Retrieve previous documents (even for documents with missing fields)
+        # Retrieve previous claim numbers (always for patient/dob/physician)
         print(physician_id,'physician id in webhook')
        
+        patient_name_for_query = document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else "Unknown Patient"
         claimNUmbers = await db_service.get_patient_claim_numbers(
-            document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else "Unknown Patient",
+            patient_name_for_query,
             physicianId=physician_id,
             dob=dob_for_query  # Use the parsed datetime for query, or None
         )
         
+        # Always fetch all previous unverified documents for the patient (ignore new claim for fetching all previous)
         db_response = await db_service.get_all_unverified_documents(
-            document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else "Unknown Patient",
+            patient_name=patient_name_for_query,
             physicianId=physician_id,
-            claimNumber=document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else None,
+            claimNumber=None,  # Always None to fetch all previous for patient/dob
             dob=dob_for_query  # Use the parsed datetime for query, or None
         )
         
@@ -167,36 +169,48 @@ async def save_document_webhook(request: Request):
             logger.warning(f"⚠️ Invalid whats_new data for {data['filename']}; using empty dict")
             whats_new_data = {}
         
-        # Handle claim number logic (even for documents with missing fields)
-        claim_to_use = document_analysis.claim_number
-        claim_numbers_list = []  # Initialize here for scope
-        if not claim_to_use or str(claim_to_use).lower() == "not specified":
-            claim_numbers_list = claimNUmbers.get('claim_numbers', []) if isinstance(claimNUmbers, dict) else claimNUmbers if isinstance(claimNUmbers, list) else []
-            # Deduplicate claim numbers to handle cases where duplicates exist
-            claim_numbers_list = list(set(claim_numbers_list))
-            if len(claim_numbers_list) == 0:
-                # First time: OK to proceed with "Not specified" or extracted value
-                claim_to_use = document_analysis.claim_number or "Not specified"
-                logger.info(f"ℹ️ First document for patient '{document_analysis.patient_name}': Using claim '{claim_to_use}'")
-            elif len(claim_numbers_list) == 1:
-                # One previous claim (after dedup): use it
-                claim_to_use = claim_numbers_list[0]
-                logger.info(f"ℹ️ Using single previous claim '{claim_to_use}' for patient '{document_analysis.patient_name}'")
-            else:
-                # Multiple distinct previous claims, no current: always use UNSPECIFIED and flag as pending
-                claim_to_use = "Not specified"
-                pending_reason = "Pending claim assignment: Patient has multiple associated claims"
-                logger.warning(f"⚠️ {pending_reason} for file {data['filename']}; saving as pending")
-        else:
-            # If claim is specified, use it directly
-            claim_numbers_list = []  # No need for prior claims check
-            logger.info(f"ℹ️ Using extracted claim '{claim_to_use}' for patient '{document_analysis.patient_name}'")
+        # Simplified claim number logic
+        claim_to_use = None
+        pending_reason = None
+        claim_numbers_list = claimNUmbers.get('claim_numbers', []) if isinstance(claimNUmbers, dict) else claimNUmbers if isinstance(claimNUmbers, list) else []
+        # Deduplicate claim numbers to handle cases where duplicates exist
+        claim_numbers_list = list(set(claim_numbers_list))
         
-        # Determine status: prioritize analyzer status, but override to "pending" for multi-claim issues or "failed" for missing fields
+        # Filter to valid claims only (exclude 'Not specified' and None)
+        valid_claims_list = [c for c in claim_numbers_list if c and str(c).lower() != 'not specified']
+        
+        has_new_claim = document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified"
+        
+        if has_new_claim:
+            # If document analysis has claim number, use it
+            claim_to_use = document_analysis.claim_number
+            logger.info(f"ℹ️ Using extracted claim '{claim_to_use}' for patient '{document_analysis.patient_name}'")
+        else:
+            # New document has no claim number
+            if len(previous_documents) == 0:
+                # First time: OK, proceed without claim
+                claim_to_use = "Not specified"
+                logger.info(f"ℹ️ First document for patient '{document_analysis.patient_name}': No claim specified, proceeding as OK")
+            elif len(valid_claims_list) == 0 and len(previous_documents) > 0:
+                # Previous documents exist but no valid claim in them: fail (second or later without claim)
+                claim_to_use = None
+                pending_reason = "No claim number specified and previous documents exist without valid claim"
+                logger.warning(f"⚠️ {pending_reason} for file {data['filename']}")
+            elif len(valid_claims_list) == 1:
+                # One previous valid claim: use it for new document
+                claim_to_use = valid_claims_list[0]
+                logger.info(f"ℹ️ Using single previous valid claim '{claim_to_use}' for patient '{document_analysis.patient_name}'")
+            else:
+                # Multiple previous valid claims: fail
+                claim_to_use = None
+                pending_reason = "No claim number specified and multiple previous valid claims found"
+                logger.warning(f"⚠️ {pending_reason} for file {data['filename']}")
+        
+        # Determine status: fail only for missing fields or claim issues
         base_status = document_analysis.status
-        if len(claim_numbers_list) > 1 and not document_analysis.claim_number:
-            document_status = "pending"
-        elif has_missing_required_fields:
+        if has_missing_required_fields:
+            document_status = "failed"
+        elif claim_to_use is None:
             document_status = "failed"
         else:
             document_status = base_status
@@ -239,6 +253,9 @@ async def save_document_webhook(request: Request):
         # Use "Not specified" values for missing fields but process normally
         patient_name_to_use = document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else "Not specified"
         
+        # If claim_to_use is None, set to "Not specified" for saving but status failed
+        claim_to_save = claim_to_use if claim_to_use is not None else "Not specified"
+        
         # 🆕 FIRST save the document to get the document_id
         document_id = await db_service.save_document_analysis(
             extraction_result=extraction_result,
@@ -249,10 +266,10 @@ async def save_document_webhook(request: Request):
             blob_path=data.get("blob_path", ""),
             gcs_file_link=data["gcs_url"],
             patient_name=patient_name_to_use,
-            claim_number=claim_to_use,
+            claim_number=claim_to_save,
             dob=dob,  # Now using string "Not specified" instead of datetime
             doi=doi,  # Now using string "Not specified" instead of datetime
-            status=document_status,  # Now can be "pending" for multi-claim
+            status=document_status,  # Now "failed" only for specific cases
             brief_summary=brief_summary,
             summary_snapshot=summary_snapshot,
             whats_new=whats_new_data,
@@ -311,11 +328,17 @@ async def save_document_webhook(request: Request):
 
         logger.info(f"✅ {created_tasks} / {len(tasks)} tasks created for document {data['filename']}")
 
-        # 🔄 Update previous documents' claim numbers (enhanced to handle "Not specified")
+        # Prepare dob_str for update
+        dob_str = None
+        if dob_for_query:
+            dob_str = dob_for_query.strftime("%Y-%m-%d")
+
+        # 🔄 Update previous documents' claim numbers (only if new has a valid claim number)
         should_update_previous = (
-            document_status not in ["failed", "pending"] and
+            document_status not in ["failed"] and  # Skip if failed due to claim issues
+            has_new_claim and  # Only update if new doc provided a valid claim
             patient_name_to_use != "Not specified" and  # Avoid updating if patient is unknown
-            dob_for_query is not None  # Ensure we can query by DOB
+            dob_str is not None  # Ensure we have dob string for query
         )
 
         if should_update_previous:
@@ -335,21 +358,17 @@ async def save_document_webhook(request: Request):
             )
             
             if has_null_claim_docs:
-                # Use claim_to_use directly, even if "Not specified" – treat it as a valid string
                 await db_service.update_previous_claim_numbers(
                     patient_name=patient_name_to_use,
-                    dob=dob_for_query,
+                    dob=dob_str,  # Send only date string
                     physician_id=physician_id,
-                    claim_number=claim_to_use  # Now allows "Not specified"
+                    claim_number=claim_to_use
                 )
-                update_msg = f"🔄 Updated previous documents' claim numbers for patient '{patient_name_to_use}' using claim '{claim_to_use}'"
-                if claim_to_use == "Not specified":
-                    update_msg += " (set nulls to 'Not specified' for consistency)"
-                logger.info(update_msg)
+                logger.info(f"🔄 Updated previous documents' claim numbers for patient '{patient_name_to_use}' using claim '{claim_to_use}'")
             else:
                 logger.info(f"ℹ️ No previous documents with null claims for patient '{patient_name_to_use}'; skipping update")
         else:
-            logger.info(f"ℹ️ Skipping previous claim update: status={document_status}, patient={patient_name_to_use}, has_dob={dob_for_query is not None}")
+            logger.info(f"ℹ️ Skipping previous claim update: status={document_status}, has_new_claim={has_new_claim}, patient={patient_name_to_use}, has_dob={dob_str is not None}")
 
         logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}")
         
@@ -357,9 +376,9 @@ async def save_document_webhook(request: Request):
         emit_data = {
             'document_id': document_id,
             'filename': data["filename"],
-            'status': document_status,  # Now emits "pending" directly
+            'status': document_status,
             'missing_fields': missing_fields if has_missing_required_fields else None,
-            'pending_reason': pending_reason if document_status == "pending" else None  # Optional: pass reason for UI
+            'pending_reason': pending_reason if pending_reason else None  # Use the claim-related reason if applicable
         }
         
         user_id = data.get("user_id")
@@ -374,7 +393,7 @@ async def save_document_webhook(request: Request):
             "status": document_status, 
             "document_id": document_id,
             "missing_fields": missing_fields if has_missing_required_fields else None,
-            "pending_reason": pending_reason if document_status == "pending" else None
+            "pending_reason": pending_reason if pending_reason else None
         }
 
     except Exception as e:
@@ -422,6 +441,7 @@ async def extract_documents(
         raise HTTPException(status_code=400, detail="No documents provided")
     
     file_service = FileService()
+    db_service = await get_database_service()  # Get DB service early for existence checks
     task_ids = []
     ignored_filenames = []
     successful_uploads = []  # Track only successful uploads for cleanup
@@ -437,6 +457,8 @@ async def extract_documents(
             file_size = len(content)
             blob_path = None
             temp_path = None  # Initialize for finally block
+            was_converted = False
+            converted_path = None
             
             try:
                 file_service.validate_file(document, CONFIG["max_file_size"])
@@ -444,10 +466,38 @@ async def extract_documents(
                 logger.info(f"📏 File size: {file_size} bytes ({file_size/(1024*1024):.2f} MB)")
                 logger.info(f"📋 MIME type: {document.content_type}")
                 
+                # Early check for existing document
+                file_exists = await db_service.document_exists(
+                    document.filename, 
+                    file_size
+                )
+                
+                if file_exists:
+                    logger.warning(f"⚠️ Document already exists: {document.filename}")
+                    
+                    # Emit skipped event
+                    emit_data = {
+                        'document_id': 'unknown',
+                        'filename': document.filename,
+                        'status': 'skipped',
+                        'reason': 'Document already processed',
+                        'user_id': userId,
+                        'blob_path': blob_path,
+                        'physician_id': physicianId
+                    }
+                    if userId:
+                        await sio.emit('task_complete', emit_data, room=f"user_{userId}")
+                    else:
+                        await sio.emit('task_complete', emit_data)
+                    
+                    ignored_filenames.append({
+                        "filename": document.filename,
+                        "reason": "Document already processed"
+                    })
+                    continue  # Skip to next file
+                
                 # Save to temp for processing
                 temp_path = file_service.save_temp_file(content, document.filename)
-                was_converted = False
-                converted_path = None
                 processing_path = temp_path
                 
                 # Conversion
@@ -591,7 +641,6 @@ async def extract_documents(
             except:
                 logger.warning(f"⚠️ Cleanup failed: {path}")
         raise HTTPException(status_code=500, detail=f"Global processing failed: {str(global_exc)}")
-
 from typing import Optional
 
 from datetime import datetime

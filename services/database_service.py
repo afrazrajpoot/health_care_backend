@@ -332,6 +332,7 @@ class DatabaseService:
     #         raise
 
 
+  
     async def get_all_unverified_documents(
         self, 
         patient_name: Optional[str] = None,
@@ -370,20 +371,14 @@ class DatabaseService:
             if physicianId:
                 where_clause["physicianId"] = physicianId
 
-            # Filter by claimNumber if provided, else by dob (date-only match)
+            # Filter by claimNumber if provided, else by dob (exact string match)
             if claimNumber:
                 where_clause["claimNumber"] = claimNumber
                 logger.info(f"📌 Using claimNumber filter: {claimNumber}")
             elif dob:
-                # Normalize to date-only (00:00 to 23:59)
-                dob_start = datetime.combine(dob.date(), datetime.min.time())
-                dob_end = dob_start + timedelta(days=1)
-                
-                where_clause["dob"] = {
-                    "gte": dob_start,
-                    "lt": dob_end
-                }
-                logger.info(f"📌 Using dob date-only filter: {dob_start.date()}")
+                dob_str = dob.strftime("%Y-%m-%d")
+                where_clause["dob"] = dob_str
+                logger.info(f"📌 Using dob string filter: {dob_str}")
 
             # Fetch documents
             documents = await self.prisma.document.find_many(
@@ -431,6 +426,7 @@ class DatabaseService:
         physician_id: str,
         claim_number: str
     ):
+        print(patient_name,physician_id,claim_number,dob,'patient data claim number')
         await self.prisma.document.update_many(
             where={
                 "patientName": patient_name,
@@ -443,11 +439,11 @@ class DatabaseService:
             }
         )
         logger.info(f"Updated claim numbers for patient '{patient_name}' (DOB: {dob}, Physician: {physician_id}) to '{claim_number}'")
+    
     async def get_patient_claim_numbers(
         self,
         patient_name: str,
         physicianId: Optional[str] = None,
-      
         dob: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         try:
@@ -457,9 +453,8 @@ class DatabaseService:
                 where_clause["physicianId"] = physicianId
             
             if dob:
-                dob_start = dob.replace(hour=0, minute=0, second=0, microsecond=0)
-                dob_end = dob_start + timedelta(days=1)
-                where_clause["dob"] = {"gte": dob_start, "lt": dob_end}
+                dob_str = dob.strftime("%Y-%m-%d")
+                where_clause["dob"] = dob_str
 
             logger.info(f"🔍 Fetching claim numbers for patient: {patient_name}")
 
@@ -483,6 +478,7 @@ class DatabaseService:
                 "total_claims": 0,
                 "claim_numbers": []
             }
+
 
     async def get_last_document_for_patient(self, patient_name: str, claim_number: str) -> Optional[Dict[str, Any]]:
         """
