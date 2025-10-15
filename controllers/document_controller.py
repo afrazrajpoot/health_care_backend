@@ -10,7 +10,7 @@ from services.file_service import FileService
 from config.settings import CONFIG
 from utils.logger import logger
 from services.report_analyzer import ReportAnalyzer
-from services.database_service import get_database_service
+from services.database_service import DatabaseService, get_database_service
 from utils.celery_task import finalize_document_task
 from utils.socket_manager import sio
 from pathlib import Path
@@ -264,6 +264,7 @@ async def save_document_webhook(request: Request):
             mime_type=data.get("mime_type", "application/octet-stream"),
             processing_time_ms=data.get("processing_time_ms", 0),
             blob_path=data.get("blob_path", ""),
+            file_hash=data.get("file_hash"),
             gcs_file_link=data["gcs_url"],
             patient_name=patient_name_to_use,
             claim_number=claim_to_save,
@@ -281,7 +282,7 @@ async def save_document_webhook(request: Request):
 
         # 🔹 AI Task Creation - AFTER document is saved so we have document_id
         task_creator = TaskCreator()
-        tasks = task_creator.generate_tasks(document_analysis.dict(), data["filename"])
+        tasks = await task_creator.generate_tasks(document_analysis.dict(), data["filename"])
         
         # Save tasks to DB (map AI task keys to Prisma Task model fields)
         prisma = Prisma()
@@ -427,6 +428,13 @@ async def save_document_webhook(request: Request):
         except:
             pass  # Ignore emit failure during webhook error
         raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
+
+import hashlib
+
+def compute_file_hash(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
 @router.post("/extract-documents", response_model=Dict[str, Any])
 async def extract_documents(
     documents: List[UploadFile] = File(...),
@@ -467,9 +475,12 @@ async def extract_documents(
                 logger.info(f"📋 MIME type: {document.content_type}")
                 
                 # Early check for existing document
-                file_exists = await db_service.document_exists(
-                    document.filename, 
-                    file_size
+                file_hash = compute_file_hash(content)
+
+                file_exists = await db_service.document_exists_by_hash(
+                file_hash=file_hash,
+                user_id=userId,
+                physician_id=physicianId
                 )
                 
                 if file_exists:
@@ -595,6 +606,7 @@ async def extract_documents(
                     "processing_time_ms": int(processing_time),
                     "gcs_url": gcs_url,
                     "blob_path": blob_path,
+                    "file_hash": file_hash,
                     "document_id": result.document_id,
                     "physician_id": physicianId,
                     "user_id": userId
@@ -641,9 +653,33 @@ async def extract_documents(
             except:
                 logger.warning(f"⚠️ Cleanup failed: {path}")
         raise HTTPException(status_code=500, detail=f"Global processing failed: {str(global_exc)}")
+
+
+
 from typing import Optional
 
 from datetime import datetime
+
+def parse_date(date_str: Optional[str], field_name: str) -> datetime:
+    """Parse a date string safely, supporting multiple formats."""
+    if not date_str or date_str.strip() == "":
+        raise HTTPException(status_code=400, detail=f"{field_name} cannot be empty or missing")
+
+    # Supported formats
+    formats = ["%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y"]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str.strip(), fmt)
+        except ValueError:
+            continue
+
+    # If no format worked
+    raise HTTPException(
+        status_code=400,
+        detail=f"Invalid date format for {field_name}. Expected one of: YYYY-MM-DD, MM/DD/YYYY, DD-MM-YYYY"
+    )
+
 
 @router.get('/document')
 async def get_document(
@@ -659,17 +695,14 @@ async def get_document(
     """
     try:
         logger.info(f"📄 Fetching aggregated document for patient: {patient_name}")
-        
-        # Parse date strings
-        try:
-            dob_date = datetime.strptime(dob, "%Y-%m-%d")
-            doi_date = datetime.strptime(doi, "%Y-%m-%d")
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=f"Invalid date format: {str(e)}")
-        
+
+        # ✅ Parse date strings using helper
+        dob_date = parse_date(dob, "Date of Birth")
+        doi_date = parse_date(doi, "Date of Injury")
+
         db_service = await get_database_service()
         
-        # Get all documents (aggregated structure)
+        # Get all documents
         document_data = await db_service.get_document_by_patient_details(
             patient_name=patient_name,
             physicianId=physicianId,
@@ -677,28 +710,25 @@ async def get_document(
             doi=doi_date,
             claim_number=claim_number
         )
-        
-        # Get patient quiz data
+
         quiz_data = await db_service.get_patient_quiz(patient_name, dob, doi)
        
-        if not document_data or document_data["total_documents"] == 0:
+        if not document_data or document_data.get("total_documents") == 0:
             raise HTTPException(
-                status_code=404, 
+                status_code=404,
                 detail=f"No documents found for patient: {patient_name}"
             )
         
-        # Format the aggregated response
         response = await format_aggregated_document_response(document_data, quiz_data)
         
         logger.info(f"✅ Returned aggregated document for: {patient_name}")
         return response
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"❌ Error fetching document: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
 async def format_aggregated_document_response(all_documents_data: Dict[str, Any], quiz_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Format the aggregated document response from all documents"""
     documents = all_documents_data["documents"]
@@ -992,3 +1022,12 @@ async def delete_fail_document(
     except Exception as e:
         logger.error(f"❌ Error in delete_fail_document for {doc_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Deletion failed: {str(e)}")
+
+
+@router.get("/workflow-stats")
+async def get_workflow_stats():
+    db = DatabaseService()
+    await db.prisma.connect()
+    stats = await db.prisma.workFlowStats.find_first(order={"date": "desc"})
+    await db.prisma.disconnect()
+    return stats or {}

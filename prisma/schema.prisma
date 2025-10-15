@@ -8,20 +8,21 @@ datasource db {
 }
 
 model User {
-  id            String    @id @default(uuid())
+  id            String     @id @default(uuid())
   firstName     String?
   lastName      String?
   phoneNumber   String?
-  email         String?   @unique
+  email         String?    @unique
   password      String?
   role          String?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
   emailVerified DateTime?
   image         String?
-  physicianId    String?
+  physicianId   String?
   accounts      Account[]
   sessions      Session[]
+  Document      Document[]
 }
 
 model Account {
@@ -60,61 +61,66 @@ model VerificationToken {
 }
 
 model Document {
-id              String             @id @default(cuid())
-dob             String?
-doi             String
-patientName     String
-status          String
-claimNumber     String
-gcsFileLink     String
-briefSummary    String?
-whatsNew        Json?
-blobPath        String?
+  id           String  @id @default(cuid())
+  dob          String?
+  doi          String
+  patientName  String
+  status       String
+  claimNumber  String
+  gcsFileLink  String
+  briefSummary String?
+  whatsNew     Json?
+  blobPath     String?
+  fileName     String?
+  fileHash     String? @db.VarChar(64) // ✅ new column for content hash
 
-fileName        String?
+  reportDate  DateTime?
+  physicianId String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
-// Relations
-summarySnapshot SummarySnapshot?
-adl             ADL?
-documentSummary DocumentSummary?
-reportDate      DateTime?
-physicianId     String?
-createdAt       DateTime           @default(now())
-updatedAt       DateTime           @updatedAt
+  // Relations
+  summarySnapshot SummarySnapshot?
+  adl             ADL?
+  documentSummary DocumentSummary?
+  tasks           Task[]
 
-// Relation to tasks
-tasks           Task[]
+  // Optional: If you have users table
+  userId String? // link to the uploader / owner
+  user   User?   @relation(fields: [userId], references: [id])
+
+  @@unique([fileHash, userId]) // ✅ prevent duplicate uploads per user
 }
 
 model SummarySnapshot {
-  id           String    @id @default(cuid())
-  dx           String
-  keyConcern   String
-  nextStep     String
+  id         String @id @default(cuid())
+  dx         String
+  keyConcern String
+  nextStep   String
 
   // Relation back to Document
-  document     Document  @relation(fields: [documentId], references: [id])
-  documentId   String    @unique
+  document   Document @relation(fields: [documentId], references: [id])
+  documentId String   @unique
 }
 
 model ADL {
-  id                 String    @id @default(cuid())
-  adlsAffected       String
-  workRestrictions   String
+  id               String @id @default(cuid())
+  adlsAffected     String
+  workRestrictions String
 
   // Relation back to Document
-  document           Document  @relation(fields: [documentId], references: [id])
-  documentId         String    @unique
+  document   Document @relation(fields: [documentId], references: [id])
+  documentId String   @unique
 }
 
 model DocumentSummary {
-  id        String    @id @default(cuid())
-  type      String
-  date      DateTime
-  summary   String
+  id      String   @id @default(cuid())
+  type    String
+  date    DateTime
+  summary String
 
   // Relation back to Document
-  document  Document  @relation(fields: [documentId], references: [id])
+  document   Document @relation(fields: [documentId], references: [id])
   documentId String   @unique
 }
 
@@ -130,65 +136,78 @@ model AuditLog {
   timestamp DateTime @default(now())
 }
 
-
 model PatientQuiz {
-  id          String   @id @default(cuid())
+  id String @id @default(cuid())
 
   patientName String?
   dob         String?
   doi         String?
   lang        String
-  newAppt     Json?    // Stores { specialist: string | null, date: string | null } or null
-  refill      Json?    // Stores { med: string | null, pain: { pre: number, post: number, delta: number } } or null
-  adl         Json     // Stores { trend: string | null, activities: string[] }
+  newAppt     Json? // Stores { specialist: string | null, date: string | null } or null
+  refill      Json? // Stores { med: string | null, pain: { pre: number, post: number, delta: number } } or null
+  adl         Json // Stores { trend: string | null, activities: string[] }
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
-model FailDocs{
-  id          String   @id @default(cuid())
+model FailDocs {
+  id          String  @id @default(cuid())
   reasson     String
   blobPath    String
   physicianId String?
 }
 
 model IntakeLink {
-  id          String   @id @default(cuid())
-  token       String   @unique
-  patientName String
-  dateOfBirth DateTime
-  visitType   String   @default("Follow-up")
-  language    String   @default("en")
-  mode        String   @default("tele")
-  bodyParts   String?
-  expiresInDays Int    @default(7)
-  requireAuth Boolean  @default(true)
-  expiresAt   DateTime
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id            String   @id @default(cuid())
+  token         String   @unique
+  patientName   String
+  dateOfBirth   DateTime
+  visitType     String   @default("Follow-up")
+  language      String   @default("en")
+  mode          String   @default("tele")
+  bodyParts     String?
+  expiresInDays Int      @default(7)
+  requireAuth   Boolean  @default(true)
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   @@map("intake_links")
 }
 
-
 model Task {
-  id              String   @id @default(cuid())
-  description     String
-  department      String
-  status          String   @default("Pending")
-  dueDate         DateTime?
-  patient         String
-  actions         String[] @default(["Claim", "Complete"])
-  sourceDocument  String?
+  id             String    @id @default(cuid())
+  description    String
+  department     String
+  status         String    @default("Pending")
+  dueDate        DateTime?
+  patient        String
+  actions        String[]  @default(["Claim", "Complete"])
+  sourceDocument String?
 
   // Quick notes as a nested JSON field
-  quickNotes      Json?     @default("{\"status_update\": \"\", \"details\": \"\", \"one_line_note\": \"\"}")
+  quickNotes Json? @default("{\"status_update\": \"\", \"details\": \"\", \"one_line_note\": \"\"}")
 
   // Relation (optional) — link back to Document if available
-  documentId      String?  
-  document        Document? @relation(fields: [documentId], references: [id])
-  physicianId     String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  documentId  String?
+  document    Document? @relation(fields: [documentId], references: [id])
+  physicianId String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+
+
+model WorkflowStats {
+  id                 String   @id @default(cuid())
+  date               DateTime @default(now())
+  referralsProcessed Int      @default(0)
+  rfasMonitored      Int      @default(0)
+  qmeUpcoming        Int      @default(0)
+  payerDisputes      Int      @default(0)
+  externalDocs       Int      @default(0)
+  intakes_created    Int      @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 }

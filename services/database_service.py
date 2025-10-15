@@ -5,7 +5,11 @@ import os
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
-from prisma import Prisma
+try:
+    from prisma import Prisma
+except Exception:
+    # Defer hard error until connect time so the module can be imported in dev/test environments
+    Prisma = None
 from models.schemas import ExtractionResult
 from cryptography.fernet import Fernet
 from cryptography.exceptions import InvalidKey
@@ -18,7 +22,12 @@ class DatabaseService:
     """Service for database operations using your schema structure"""
    
     def __init__(self):
-        self.prisma = Prisma()
+        # Instantiate Prisma client lazily; if Prisma is not installed, keep None
+        self.prisma = Prisma() if Prisma is not None else None
+        # Async lock to prevent concurrent connect/disconnect races
+        self._connect_lock = asyncio.Lock()
+        # Track connection state to avoid double-connect attempts
+        self._connected = False
         self._init_encryption()
         if not os.getenv("DATABASE_URL"):
             raise ValueError("DATABASE_URL environment variable not set")
@@ -45,22 +54,135 @@ class DatabaseService:
                 logger.info("💡 Generate a new one: from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
                 raise ValueError(f"Invalid ENCRYPTION_KEY: {str(e)}. Please set a valid 32-byte base64 key.")
     
+    
+    async def fetch_one(self, query: str, params: Optional[Dict] = None) -> Optional[Dict]:
+        """Run a SELECT query and return a single row as dict"""
+        await self.connect()
+        result = await self.prisma.query_raw(query, params or {})
+        if result and len(result) > 0:
+            return dict(result[0])
+        return None
+
+    async def fetch_all(self, query: str, params: Optional[Dict] = None) -> List[Dict]:
+        """Run a SELECT query and return all rows"""
+        await self.connect()
+        results = await self.prisma.query_raw(query, params or {})
+        return [dict(row) for row in results]
+
+    async def execute(self, query: str, params: Optional[Dict] = None):
+        """Run INSERT/UPDATE/DELETE queries"""
+        await self.connect()
+        return await self.prisma.execute_raw(query, params or {})
+
+    async def document_exists_by_hash(self, file_hash: str, user_id: str, physician_id: Optional[str] = None) -> bool:
+        """Check if a document with the same hash already exists for this user (and optionally physician)."""
+        try:
+            where_clause: Dict[str, Any] = {
+                "fileHash": file_hash,
+                "userId": user_id
+            }
+            if physician_id:
+                where_clause["physicianId"] = physician_id
+
+            # Use Prisma model query which is safer than raw SQL and avoids placeholder syntax
+            doc = await self.prisma.document.find_first(where=where_clause)
+            return doc is not None
+        except Exception as e:
+            logger.error(f"❌ Error checking document by hash: {str(e)}")
+            # Fallback: return False so caller can proceed without blocking
+            return doc is not None
+
+    async def increment_workflow_stat(self, category: str, amount: int = 1):
+        """Increment workflow counter by category (e.g. 'referralsProcessed')."""
+        valid_fields = {
+            "referralsProcessed": "referralsProcessed",
+            "rfasMonitored": "rfasMonitored",
+            "qmeUpcoming": "qmeUpcoming",
+            "payerDisputes": "payerDisputes",
+            "externalDocs": "externalDocs",
+            "intakes_created": "intakes_created",
+        }
+
+        if category not in valid_fields:
+            logger.warning(f"⚠️ Invalid workflow stat category: {category}")
+            return
+        field = valid_fields[category]
+
+        # Use UTC day boundaries for the DateTime `date` field in the WorkflowStats model
+        now_utc = datetime.utcnow()
+        day_start = datetime(now_utc.year, now_utc.month, now_utc.day)
+        next_day = day_start + timedelta(days=1)
+
+        await self.connect()
+        try:
+            # Find today's row by checking the DateTime falls within [day_start, next_day)
+            stats = await self.prisma.workflowstats.find_first(
+                where={"date": {"gte": day_start, "lt": next_day}}
+            )
+
+            if stats:
+                # Increment existing field
+                current_value = getattr(stats, field, 0) or 0
+                new_value = current_value + amount
+                await self.prisma.workflowstats.update(
+                    where={"id": stats.id},
+                    data={field: new_value}
+                )
+            else:
+                # Create new daily entry with the date set to the day's start
+                await self.prisma.workflowstats.create(
+                    data={"date": day_start, field: amount}
+                )
+
+            logger.info(f"📈 Incremented workflow stat: {field} (+{amount})")
+        except Exception as e:
+            logger.error(f"❌ Failed to increment workflow stat: {str(e)}")
+            logger.debug("Exception details for increment_workflow_stat", exc_info=True)
+        finally:
+            await self.disconnect()
+
+
     async def connect(self):
         """Connect to the database"""
-        try:
-            await self.prisma.connect()
-            logger.info("✅ Connected to database")
-        except Exception as e:
-            logger.error(f"❌ Failed to connect to database: {str(e)}")
-            raise
+        # Use a lock to make connect/disconnect concurrency-safe
+        async with self._connect_lock:
+            if getattr(self, "_connected", False):
+                logger.debug("🔁 Database already connected; skipping connect")
+                return
+            if self.prisma is None:
+                raise RuntimeError("Prisma client is not available. Ensure the 'prisma' package is installed and configured.")
+            try:
+                await self.prisma.connect()
+                self._connected = True
+                logger.info("✅ Connected to database")
+            except Exception as e:
+                msg = str(e)
+                # Handle benign 'Already connected' errors from Prisma/engine
+                if "Already connected" in msg or "Already connected to the query engine" in msg:
+                    logger.info("🔁 Prisma reports already connected; marking as connected")
+                    self._connected = True
+                    return
+                logger.error(f"❌ Failed to connect to database: {msg}")
+                raise
     
     async def disconnect(self):
         """Disconnect from the database"""
-        try:
-            await self.prisma.disconnect()
-            logger.info("🔌 Disconnected from database")
-        except Exception as e:
-            logger.warning(f"⚠️ Error disconnecting from database: {str(e)}")
+        async with self._connect_lock:
+            if not getattr(self, "_connected", False):
+                logger.debug("🔌 Database not connected; skipping disconnect")
+                return
+            try:
+                await self.prisma.disconnect()
+                self._connected = False
+                logger.info("🔌 Disconnected from database")
+            except Exception as e:
+                msg = str(e)
+                # If Prisma/engine indicates it's already disconnected, treat as success
+                if "Already disconnected" in msg or "not connected" in msg:
+                    logger.info("🔌 Prisma already disconnected; marking as disconnected")
+                    self._connected = False
+                    return
+                logger.warning(f"⚠️ Error disconnecting from database: {msg}")
     async def save_fail_doc(self, reasson: str, blob_path: str, physician_id: Optional[str] = None) -> str:
             """Save a failed document record to the FailDocs table, including optional physician ID."""
             try:
@@ -531,6 +653,8 @@ class DatabaseService:
         document_summary: Dict[str, Any],
         physician_id: Optional[str] = None,
         blob_path: Optional[str] = None
+    ,
+    file_hash: Optional[str] = None
         
     ) -> str:
         """
@@ -578,6 +702,8 @@ class DatabaseService:
                     "gcsFileLink": gcs_file_link,
                     "briefSummary": brief_summary,
                     "whatsNew": whats_new_json,  # JSON string for scalar Json field
+                    # Optional file hash for deduplication
+                    **({"fileHash": file_hash} if file_hash else {}),
                     "physicianId": physician_id,
                     # "patientQuizPage": f"http://localhost:3000/intake-form?token={url_safe_token}",
                   
@@ -718,3 +844,4 @@ async def cleanup_database_service():
     if _db_service:
         await _db_service.disconnect()
         _db_service = None
+

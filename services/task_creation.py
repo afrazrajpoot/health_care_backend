@@ -8,6 +8,8 @@ import logging
 from config.settings import CONFIG
 import json
 
+from services.database_service import DatabaseService
+
 logger = logging.getLogger("task_ai")
 
 # ------------------ MODELS ------------------
@@ -43,37 +45,134 @@ class TaskCreator:
         )
         self.parser = JsonOutputParser(pydantic_object=TaskCreationResult)
 
-    # 🧠 SYSTEM PROMPT - Updated: actions default to ["Unclaim", "Pending"]
     SYSTEM_PROMPT = """
-    You are a workflow automation AI for a California multi-specialty medical group handling
-    Workers' Compensation (WC) and General Medicine (GM) cases.
+        You are a medical workflow automation AI for a California multi-specialty group.
+        You analyze medical, legal, and administrative documents to generate **specific, actionable follow-up tasks** — not summaries.
 
-    You create ONE most important, actionable follow-up task based on the document content.
+        ---
 
-    --- KEY RULES ---
-    1. Analyze the document and select the SINGLE most critical task that needs to be done.
-    2. Choose the task that is most urgent, highest priority, or most relevant to the document type.
-    3. Consider what is the most important next step in the workflow process.
-    4. If multiple tasks seem equally important, choose the one that is most time-sensitive.
+        ## ⚕️ CORE CONTEXT
 
-    COMMON PRIORITY TASKS:
-    • Clinical Reports: "Physician to review [document type] findings"
-    • RFAs & Authorizations: "Process authorization for [treatment]"
-    • Consult Reports: "Implement specialist recommendations"
-    • Legal Documents: "Attorney liaison review required"
-    • Urgent/Time-sensitive items always take priority
+        You handle two major modes:
+        - **Workers' Compensation (WC)**
+        - **General Medicine (GM)**
 
-    DEPARTMENTS (by mode):
-    Workers' Comp (WC):
-        ["Scheduling","RFA/IMR","Physician Review","Intake","Admin/Compliance","Billing/Compliance","Legal/Attorney Liaison"]
-    General Medicine (GM):
-        ["Scheduling","Prior Authorization","Physician Review","Intake/Registration","Referrals/Coordination","Billing/Revenue Cycle","Quality & Compliance","Patient Outreach"]
+        Your job is to:
+        1. Read the `document_analysis` text.
+        2. Infer **what step** in the patient care lifecycle it represents.
+        3. Generate up to **3 next-step tasks** (short, precise, and department-specific).
+        4. Each task must mirror *real-world medical office workflows* in California.
 
-    When generating the task, the 'actions' field must always start as ["Unclaim", "Pending"] 
-    for new tasks, not ["Claim", "Complete"].
+        ---
 
-    Output only ONE task in structured JSON format.
-    """
+        ## 🩻 WORKERS’ COMP LIFECYCLE (CA FLOW)
+
+        | Step | Event / Document | Task Description | Department |
+        |------|------------------|------------------|-------------|
+        | 1️⃣ | DWC 5021 (Doctor’s First Report) | Chart prep & initial scheduling | Intake / Scheduling |
+        | 2️⃣ | PR-1 (Initial PTP Report) | Physician Review — Establish PTP relationship | Physician Review |
+        | 3️⃣ | RFA submitted | Track RFA & await UR decision | RFA/IMR |
+        | 4️⃣ | UR Decision: Approved | Schedule authorized service | Scheduling |
+        |    | UR Decision: Denied | Prepare IMR appeal packet | RFA/IMR |
+        | 5️⃣ | PR-2 (Progress Report) | Physician Review — Progress findings | Physician Review |
+        | 6️⃣ | Stalled improvement | Request FCE or Specialist Consult | Physician Review |
+        | 7️⃣ | Diagnostic Auth | Schedule diagnostic study | Scheduling |
+        | 8️⃣ | Specialist Consult | Implement specialist recommendations | Physician Review |
+        | 9️⃣ | PR-3 / PR-4 | Determine P&S / MMI status | Physician Review |
+        | 🔟 | QME / AME Report | Review findings & update plan | Physician Review |
+        | 1️⃣1️⃣ | IMR Appeal Outcome | Update case per IMR decision | RFA/IMR | Physician Review |
+        | 1️⃣2️⃣ | Legal / Attorney Letter | Review correspondence | Admin/Legal |
+        | 1️⃣3️⃣ | EOR / Billing Docs | Billing Review / Appeal as needed | Billing/Compliance |
+
+        ---
+
+        ## 🏥 GENERAL MEDICINE (GM) FLOW
+
+        | Document | Example Tasks | Department |
+        |-----------|----------------|-------------|
+        | Referral Letter | Review referral & schedule consult | Referrals / Coordination |
+        | Prior Auth Form | Track prior auth approval | Prior Authorization |
+        | Approval Notice | Schedule authorized service | Scheduling |
+        | Lab or Imaging Report | Review results & update chart | Physician Review |
+        | Progress Note | Physician follow-up or referral review | Physician Review |
+        | Patient Outreach or Missed Appointment | Call patient / reschedule | Patient Outreach |
+        | Compliance Notice | Review & log compliance task | Quality & Compliance |
+        | Billing Statement | Review charge or reconcile denial | Billing / Revenue Cycle |
+
+        ---
+
+        ## ⚙️ CONDITIONAL LOGIC & CONTEXTUAL RULES
+
+        - **UR / RFA / IMR FLOW**
+        - If “RFA submitted” → create “Track RFA & await UR decision”.
+        - If UR says “Approved” → create “Schedule authorized service”.
+        - If UR says “Denied” → create “Prepare IMR appeal packet”.
+
+        - **Attorney Letters**
+        - “Applicant Attorney” → “Physician Review — Attorney Letter” + optional “Acknowledge in writing”.
+        - “Defense Attorney” → “Physician Review — Defense Correspondence” (FYI only).
+
+        - **Adjuster or Nurse Case Manager**
+        - “Review adjuster communication” (Admin/Legal).
+        - If it includes approval → also create “Schedule service” (Scheduling).
+        - “Review NCM notes & confirm plan” (due 2 days).
+
+        - **Diagnostic / Consult Authorization**
+        - “Schedule diagnostic study” or “Schedule specialist consult”.
+
+        - **P2P Request**
+        - Step 1: “Verify & forward written P2P request” (1 day)
+        - Step 2: “Physician drafts written response” (2 days)
+        - Step 3: “Confirm submission & log receipt” (3 days)
+
+        ---
+
+        ## 🕓 PRIORITY & DUE DATES
+
+        | Department | Default Due |
+        |-------------|-------------|
+        | Physician Review | +2 days |
+        | Scheduling | +2 days |
+        | RFA/IMR | +5 days |
+        | Admin/Legal | +3 days |
+        | Intake | same-day |
+        | Billing | +3 days |
+
+        ---
+
+        ## 🧩 OUTPUT RULES
+
+        - Always produce **valid JSON**.
+        - Limit to **1–3 tasks**.
+        - Tasks must be **unique**, **context-aware**, and **department-routed**.
+        - Description must be a clear one-liner.
+        - Each task includes a short `details` and a concise `one_line_note` for dashboard display.
+
+        ---
+
+        ## ✅ OUTPUT FORMAT
+
+        ```json
+        {{
+        "tasks": [
+            {{
+            "description": "Specific one-line actionable step",
+            "department": "Relevant department",
+            "status": "Pending",
+            "due_date": "YYYY-MM-DD",
+            "patient": "Patient name",
+            "actions": ["Claim", "Complete"],
+            "source_document": "{source_document}",
+            "quickNotes": {{
+                "details": "Brief explanation or context",
+                "one_line_note": "Short dashboard note"
+            }}
+            }}
+        ]
+        }}
+        ```
+        """
+
 
     def create_prompt(self) -> ChatPromptTemplate:
         user_template = """
@@ -85,40 +184,42 @@ class TaskCreator:
         SOURCE DOCUMENT: {source_document}
         TODAY'S DATE: {current_date}
 
-        Generate ONLY ONE most important task in this format:
+                Generate upto 1-3 (preferably 1) most important task in this format:
 
-        {{
-          "tasks": [
-            {{
-              "description": "Single most important task description",
-              "department": "Most relevant department",
-              "status": "Pending",
-              "due_date": "YYYY-MM-DD",
-              "patient": "Patient name",
-              "actions": ["Unclaim", "Pending"],
-              "source_document": "{source_document}"
-            }}
-          ]
-        }}
+                {{
+                    "tasks": [
+                        {{
+                            "description": "Single most important task description",
+                            "department": "Most relevant department",
+                            "status": "Pending",
+                            "due_date": "YYYY-MM-DD",
+                            "patient": "Patient name",
+                            "actions": ["Unclaim", "Pending"],
+                            "source_document": "{source_document}"
+                        }}
+                    ]
+                }}
 
-        {format_instructions}
-        """
+                {format_instructions}
+                """
         return ChatPromptTemplate.from_messages([
             SystemMessagePromptTemplate.from_template(self.SYSTEM_PROMPT),
             HumanMessagePromptTemplate.from_template(user_template),
         ])
 
-    def generate_tasks(self, document_analysis: dict, source_document: str = "") -> list[dict]:
-        """Generate ONE most possible task - default actions are Unclaim and Pending."""
+    async def generate_tasks(self, document_analysis: dict, source_document: str = "") -> list[dict]:
+        """Generate one or more AI-driven tasks based on document analysis."""
         try:
             current_date = datetime.now().strftime("%Y-%m-%d")
-            print(f"📝 Creating ONE task for document: {source_document}")
-            
+            patient_name = document_analysis.get("patient_name", "Unknown")
+            document_type = document_analysis.get("document_type", "Unknown")
+            print(f"📝 Creating tasks for document: {source_document} ({document_type})")
+
+            # 🔍 Combine all text content for keyword mode detection
             text_content = " ".join(
                 str(v) for v in document_analysis.values() if isinstance(v, (str, list))
             ).lower()
 
-            # Detect mode
             wc_keywords = ["rfa", "ur denial", "attorney", "qme", "workers", "claim"]
             gm_keywords = ["prior auth", "referral", "consult", "intake", "specialist"]
 
@@ -127,9 +228,9 @@ class TaskCreator:
             elif any(k in text_content for k in gm_keywords):
                 mode = "GM"
             else:
-                mode = "WC" if "pr-" in document_analysis.get("document_type", "").lower() else "GM"
+                mode = "WC" if "pr-" in document_type.lower() else "GM"
 
-            # AI-driven single task generation
+            # 🔗 Build and run the chain
             prompt = self.create_prompt()
             chain = prompt | self.llm | self.parser
 
@@ -138,39 +239,110 @@ class TaskCreator:
                 "current_date": current_date,
                 "source_document": source_document or "Unknown",
                 "mode": mode,
-                "document_type": document_analysis.get("document_type", "Unknown"),
+                "document_type": document_type,
                 "format_instructions": self.parser.get_format_instructions()
             })
 
-            # Process the single AI task
-            single_task = result["tasks"][0] if result["tasks"] else {
-                "description": "Review document content",
-                "department": "Physician Review",
-                "status": "Pending", 
-                "due_date": (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d"),
-                "patient": document_analysis.get("patient_name", "Unknown"),
-                "actions": ["Unclaim", "Pending"],
-                "source_document": source_document or "Unknown"
-            }
+            # Normalize result: some parsers return a dict, others return pydantic objects
+            if isinstance(result, dict):
+                out = result
+            else:
+                try:
+                    out = result.dict()
+                except Exception:
+                    # Fallback: try treating as mapping-like
+                    try:
+                        out = dict(result)
+                    except Exception:
+                        out = {}
 
-            # Ensure due_date is datetime object
-            try:
-                single_task["due_date"] = datetime.strptime(single_task["due_date"], "%Y-%m-%d")
-            except Exception:
-                single_task["due_date"] = datetime.now() + timedelta(days=2)
+            # 🧩 Handle result with multiple tasks
+            ai_tasks = out.get("tasks", [])
+            if not isinstance(ai_tasks, list):
+                ai_tasks = [ai_tasks] if ai_tasks else []
 
-            logger.info(f"✅ Generated ONE task for patient: {document_analysis.get('patient_name', 'Unknown')}")
-            return [single_task]
+            tasks = []
+            for t in ai_tasks:
+                if not isinstance(t, dict):
+                    continue
+
+                # Default fallbacks for robustness
+                task = {
+                    "description": t.get("description", "Review document content"),
+                    "department": t.get("department", "Physician Review"),
+                    "status": t.get("status", "Pending"),
+                    "due_date": t.get("due_date", (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")),
+                    "patient": patient_name,
+                    "actions": t.get("actions", ["Claim", "Complete"]),
+                    "source_document": source_document or "Unknown",
+                    "quickNotes": t.get("quickNotes", {
+                        "details": "AI generated follow-up task.",
+                        "one_line_note": t.get("description", "Review document content")
+                    })
+                }
+
+                # Ensure due_date is valid datetime
+                try:
+                    task["due_date"] = datetime.strptime(task["due_date"], "%Y-%m-%d")
+                except Exception:
+                    task["due_date"] = datetime.now() + timedelta(days=2)
+
+                tasks.append(task)
+
+            # 🧠 If AI failed to generate anything
+            if not tasks:
+                tasks = [{
+                    "description": "Review and process document",
+                    "department": "Physician Review",
+                    "status": "Pending",
+                    "due_date": datetime.now() + timedelta(days=2),
+                    "patient": patient_name,
+                    "actions": ["Claim", "Complete"],
+                    "source_document": source_document or "Unknown",
+                    "quickNotes": {
+                        "details": "Fallback task due to missing AI output.",
+                        "one_line_note": "Review document manually."
+                    }
+                }]
+
+            logger.info(f"✅ Generated {tasks} task(s) for patient: {patient_name}")
+
+            db = DatabaseService()
+            # Use DatabaseService.connect which is concurrency-safe and handles Prisma availability
+            await db.connect()
+
+            # Classify and increment the right counter(s)
+            for t in tasks:
+                desc = t["description"].lower()
+                dept = t["department"].lower()
+
+                if "referral" in desc or "consult" in desc:
+                    await db.increment_workflow_stat("referralsProcessed")
+                elif "rfa" in desc or "ur decision" in desc:
+                    await db.increment_workflow_stat("rfasMonitored")
+                elif "qme" in desc or "ime" in desc:
+                    await db.increment_workflow_stat("qmeUpcoming")
+                elif "dispute" in desc or "appeal" in desc or "claim" in desc:
+                    await db.increment_workflow_stat("payerDisputes")
+                else:
+                    await db.increment_workflow_stat("externalDocs")
+
+            await db.disconnect()
+
+            return tasks
 
         except Exception as e:
-            logger.error(f"❌ Single task creation failed: {str(e)}")
-            # Fallback single task
+            logger.error(f"❌ Task creation failed: {str(e)}")
             return [{
                 "description": "Review and process document",
                 "department": "Physician Review",
                 "status": "Pending",
                 "due_date": datetime.now() + timedelta(days=2),
                 "patient": document_analysis.get("patient_name", "Unknown"),
-                "actions": ["Unclaim", "Pending"],
-                "source_document": source_document or "Unknown"
+                "actions": ["Claim", "Complete"],
+                "source_document": source_document or "Unknown",
+                "quickNotes": {
+                    "details": "Fallback task after error.",
+                    "one_line_note": "Manual review required."
+                }
             }]
