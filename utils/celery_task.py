@@ -1,4 +1,4 @@
-# utils/celery_task.py (updated: added serialization safety and logging)
+# utils/celery_task.py (updated: added serialization safety, logging, and batch processing)
 from config.celery_config import app as celery_app
 from datetime import datetime
 import traceback
@@ -90,3 +90,44 @@ def finalize_document_task(self, webhook_payload: dict):
                 except Exception as del_exc:
                     logger.warning(f"⚠️ Cleanup failed: {str(del_exc)} - {blob_path}")
         raise
+
+@celery_app.task(bind=True, name='process_batch_documents', max_retries=3)
+def process_batch_documents(self, payloads: list[dict]):
+    """
+    Master task: Processes each payload sequentially (one webhook at a time).
+    Ensures first doc finishes before second starts.
+    """
+    file_service = FileService()
+    results = []
+    for i, payload in enumerate(payloads):
+        try:
+            logger.info(f"🔄 === BATCH SEQ {i+1}/{len(payloads)} STARTED: {payload.get('filename')} ===")
+            
+            # Ensure serializable (safety net)
+            payload = serialize_payload(payload)
+            
+            # Call the existing finalize task SYNC (not .delay) for sequencing
+            # This blocks until webhook completes before next iteration
+            result = finalize_document_task(payload)  # Sync call inside the task
+            
+            results.append(result)
+            logger.info(f"✅ Batch seq {i+1} complete: {payload.get('filename')}")
+            
+        except Exception as doc_exc:
+            logger.error(f"❌ Batch seq {i+1} failed for {payload.get('filename')}: {str(doc_exc)}")
+            if self.request.retries < self.max_retries:
+                # Retry the whole batch on failure (or just this doc—adjust as needed)
+                raise self.retry(exc=doc_exc, countdown=60 ** (self.request.retries + 1))
+            else:
+                # On final fail, cleanup this doc only
+                blob_path = payload.get("blob_path")
+                if blob_path:
+                    try:
+                        file_service.delete_from_gcs(blob_path)
+                        logger.info(f"🗑️ Batch cleanup: {blob_path}")
+                    except Exception as cleanup_exc:
+                        logger.warning(f"⚠️ Batch cleanup failed: {str(cleanup_exc)} - {blob_path}")
+                results.append({"status": "failed", "error": str(doc_exc)})
+    
+    logger.info(f"🏁 === BATCH COMPLETE: {len([r for r in results if r.get('status') == 'success'])}/{len(payloads)} processed ===")
+    return {"batch_results": results}
