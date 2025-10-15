@@ -72,11 +72,7 @@ async def save_document_webhook(request: Request):
             
             user_friendly_msg = "Document already processed"
             
-            await db_service.save_fail_doc(
-                reasson=user_friendly_msg,
-                blob_path=blob_path,
-                physician_id=physician_id
-            )
+           
             
             # Emit skipped event
             await sio.emit('task_complete', {
@@ -147,10 +143,12 @@ async def save_document_webhook(request: Request):
         )
         
         # Always fetch all previous unverified documents for the patient (ignore new claim for fetching all previous)
+        # 🆕 Updated: Pass claimNumber only if valid; otherwise None to use dob + patient_name
+        claim_number_for_query = document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else None
         db_response = await db_service.get_all_unverified_documents(
             patient_name=patient_name_for_query,
             physicianId=physician_id,
-            claimNumber=None,  # Always None to fetch all previous for patient/dob
+            claimNumber=claim_number_for_query,  # Use valid claim if available; else None to fallback to dob + patient_name
             dob=dob_for_query  # Use the parsed datetime for query, or None
         )
         
@@ -215,6 +213,99 @@ async def save_document_webhook(request: Request):
         else:
             document_status = base_status
 
+        # Use "Not specified" values for missing fields but process normally
+        patient_name_to_use = document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else "Not specified"
+        
+        # If claim_to_use is None, set to "Not specified" for saving but status failed
+        claim_to_save = claim_to_use if claim_to_use is not None else "Not specified"
+
+        # Prepare dob_str for update
+        dob_str = None
+        if dob_for_query:
+            dob_str = dob_for_query.strftime("%Y-%m-%d")
+
+        # 🔄 Update previous documents' claim numbers FIRST (only if new has a valid claim number)
+        should_update_previous = (
+            document_status not in ["failed"] and  # Skip if failed due to claim issues
+            has_new_claim and  # Only update if new doc provided a valid claim
+            patient_name_to_use != "Not specified" and  # Avoid updating if patient is unknown
+            dob_str is not None  # Ensure we have dob string for query
+        )
+
+        if should_update_previous:
+            # Fetch previous documents to check for null claims (reuse the earlier query if possible)
+            db_response = await db_service.get_all_unverified_documents(
+                patient_name=patient_name_to_use,
+                physicianId=physician_id,
+                claimNumber=None,  # Explicitly fetch all, including null claims
+                dob=dob_for_query
+            )
+            previous_documents = db_response.get('documents', []) if db_response else []
+            
+            # Check if any previous docs have null/unset claims
+            has_null_claim_docs = any(
+                doc.get('claim_number') is None or str(doc.get('claim_number', '')).lower() == 'not specified'
+                for doc in previous_documents
+            )
+            
+            if has_null_claim_docs:
+                await db_service.update_previous_claim_numbers(
+                    patient_name=patient_name_to_use,
+                    dob=dob_str,  # Send only date string
+                    physician_id=physician_id,
+                    claim_number=claim_to_use
+                )
+                logger.info(f"🔄 Updated previous documents' claim numbers for patient '{patient_name_to_use}' using claim '{claim_to_use}'")
+            else:
+                logger.info(f"ℹ️ No previous documents with null claims for patient '{patient_name_to_use}'; skipping update")
+        else:
+            logger.info(f"ℹ️ Skipping previous claim update: status={document_status}, has_new_claim={has_new_claim}, patient={patient_name_to_use}, has_dob={dob_str is not None}")
+
+        if document_status == "failed":
+            # Fail: save to FailDocs, no further processing, no AI tasks
+            fail_reason = pending_reason if pending_reason else f"Missing required fields: {', '.join(missing_fields)}"
+            logger.warning(f"⚠️ Failing document {data['filename']}: {fail_reason}")
+            
+      # In the except block of the webhook function, update to call save_fail_doc (assuming it's intended to be there; add if missing):
+            await db_service.save_fail_doc(
+        reasson=fail_reason,
+        db=dob,
+        doi=doi,
+        claim_number=claim_to_save,
+        patient_name=patient_name_to_use,
+        document_text=result_data.get("text", ""),
+        physician_id=physician_id,
+        gcs_file_link=data["gcs_url"],
+        file_name=data["filename"],
+        file_hash=data.get("file_hash"),
+        blob_path=blob_path
+    )
+            
+            # Emit failed event
+            emit_data = {
+                'document_id': data.get('document_id', 'unknown'),
+                'filename': data["filename"],
+                'status': 'failed',
+                'missing_fields': missing_fields if has_missing_required_fields else None,
+                'pending_reason': pending_reason if pending_reason else None
+            }
+            
+            user_id = data.get("user_id")
+            if user_id:
+                await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
+            else:
+                await sio.emit('task_complete', emit_data)
+            
+            logger.info(f"📡 Emitted 'task_complete' failed event from webhook: {emit_data}")
+            
+            return {
+                "status": "failed", 
+                "reason": fail_reason,
+                "missing_fields": missing_fields if has_missing_required_fields else None,
+                "pending_reason": pending_reason if pending_reason else None
+            }
+        
+        # Success: proceed with saving to main document and creating tasks
         summary_snapshot = {
             "dx": document_analysis.diagnosis,
             "keyConcern": document_analysis.key_concern,
@@ -249,12 +340,6 @@ async def save_document_webhook(request: Request):
             comprehensive_analysis=result_data.get("comprehensive_analysis"),
             document_id=result_data.get("document_id", f"webhook_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         )
-        
-        # Use "Not specified" values for missing fields but process normally
-        patient_name_to_use = document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else "Not specified"
-        
-        # If claim_to_use is None, set to "Not specified" for saving but status failed
-        claim_to_save = claim_to_use if claim_to_use is not None else "Not specified"
         
         # 🆕 FIRST save the document to get the document_id
         document_id = await db_service.save_document_analysis(
@@ -329,48 +414,6 @@ async def save_document_webhook(request: Request):
 
         logger.info(f"✅ {created_tasks} / {len(tasks)} tasks created for document {data['filename']}")
 
-        # Prepare dob_str for update
-        dob_str = None
-        if dob_for_query:
-            dob_str = dob_for_query.strftime("%Y-%m-%d")
-
-        # 🔄 Update previous documents' claim numbers (only if new has a valid claim number)
-        should_update_previous = (
-            document_status not in ["failed"] and  # Skip if failed due to claim issues
-            has_new_claim and  # Only update if new doc provided a valid claim
-            patient_name_to_use != "Not specified" and  # Avoid updating if patient is unknown
-            dob_str is not None  # Ensure we have dob string for query
-        )
-
-        if should_update_previous:
-            # Fetch previous documents to check for null claims (reuse the earlier query if possible)
-            db_response = await db_service.get_all_unverified_documents(
-                patient_name=patient_name_to_use,
-                physicianId=physician_id,
-                claimNumber=None,  # Explicitly fetch all, including null claims
-                dob=dob_for_query
-            )
-            previous_documents = db_response.get('documents', []) if db_response else []
-            
-            # Check if any previous docs have null/unset claims
-            has_null_claim_docs = any(
-                doc.get('claim_number') is None or str(doc.get('claim_number', '')).lower() == 'not specified'
-                for doc in previous_documents
-            )
-            
-            if has_null_claim_docs:
-                await db_service.update_previous_claim_numbers(
-                    patient_name=patient_name_to_use,
-                    dob=dob_str,  # Send only date string
-                    physician_id=physician_id,
-                    claim_number=claim_to_use
-                )
-                logger.info(f"🔄 Updated previous documents' claim numbers for patient '{patient_name_to_use}' using claim '{claim_to_use}'")
-            else:
-                logger.info(f"ℹ️ No previous documents with null claims for patient '{patient_name_to_use}'; skipping update")
-        else:
-            logger.info(f"ℹ️ Skipping previous claim update: status={document_status}, has_new_claim={has_new_claim}, patient={patient_name_to_use}, has_dob={dob_str is not None}")
-
         logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}")
         
         # Emit socket event for task complete with appropriate status
@@ -407,13 +450,7 @@ async def save_document_webhook(request: Request):
         physician_id = data.get("physician_id") if 'data' in locals() else None
         reasson = f"Webhook processing failed: {str(e)}"
         
-        if blob_path:
-            db_service = await get_database_service()
-            await db_service.save_fail_doc(
-                reasson=reasson,
-                blob_path=blob_path,
-                physician_id=physician_id
-            )
+      
         
         # Emit error event on exception
         try:
@@ -428,7 +465,417 @@ async def save_document_webhook(request: Request):
         except:
             pass  # Ignore emit failure during webhook error
         raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
+@router.post("/update-fail-document")
+async def update_fail_document(request: Request):
+    try:
+        data = await request.json()
+        logger.info(f"📥 Update fail document request for ID: {data.get('fail_doc_id', 'unknown')}")
 
+        fail_doc_id = data.get("fail_doc_id")
+        if not fail_doc_id:
+            raise HTTPException(status_code=400, detail="Missing required fail_doc_id in request payload")
+
+        updated_document_text = data.get("document_text")
+        updated_dob = data.get("dob")
+        updated_doi = data.get("doi")
+        updated_claim_number = data.get("claim_number")
+        updated_patient_name = data.get("patient_name")
+
+        db_service = await get_database_service()
+        fail_doc = await db_service.get_fail_doc_by_id(fail_doc_id)
+
+        if not fail_doc:
+            raise HTTPException(status_code=404, detail="Fail document not found")
+
+        # Use updated values if provided, otherwise fallback to fail_doc values
+        document_text = updated_document_text or fail_doc.documentText
+        dob_str = updated_dob or fail_doc.db
+        doi = updated_doi or fail_doc.doi
+        claim_number = updated_claim_number or fail_doc.claimNumber
+        patient_name = updated_patient_name or fail_doc.patientName
+        physician_id = fail_doc.physicianId
+        filename = fail_doc.fileName
+        gcs_url = fail_doc.gcsFileLink
+        blob_path = fail_doc.blobPath
+        file_hash = fail_doc.fileHash
+
+        # Mock result_data similar to webhook (since no new extraction, use the text directly)
+        result_data = {
+            "text": document_text,
+            "pages": 0,  # Default
+            "entities": [],  # Default
+            "tables": [],  # Default
+            "formFields": [],  # Default
+            "confidence": 0.0,  # Default
+            "success": False,  # Default
+            "gcs_file_link": gcs_url,
+            "fileInfo": {},  # Default
+            "comprehensive_analysis": None,  # Default
+            "document_id": f"update_fail_{fail_doc_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        }
+
+        analyzer = ReportAnalyzer()
+        document_analysis = analyzer.extract_document_data(result_data.get("text", ""))
+        print(document_analysis, 'document analysis in update fail route')
+
+        # Check for existing document first (this should still block processing)
+        file_exists = await db_service.document_exists(filename, 0)  # file_size default to 0
+
+        if file_exists:
+            logger.warning(f"⚠️ Document already exists: {filename}")
+
+            user_friendly_msg = "Document already processed"
+
+            # Emit skipped event
+            await sio.emit('task_complete', {
+                'document_id': fail_doc_id,
+                'filename': filename,
+                'status': 'skipped',
+                'reason': user_friendly_msg,
+                "user_id": data.get("user_id"),  # Pass user_id if available
+                'blob_path': blob_path,
+                'physician_id': physician_id
+            })
+            return {"status": "skipped", "reason": "Document already processed", "blob_path": blob_path}
+
+        # Generate AI brief summary (do this even for documents with missing fields)
+        brief_summary = analyzer.generate_brief_summary(result_data.get("text", ""))
+
+        # Handle dates - use "Not specified" string instead of datetime.now() when not available
+        dob = dob_str if dob_str and str(dob_str).lower() != "not specified" else "Not specified"
+        rd = document_analysis.rd if document_analysis.rd and str(document_analysis.rd).lower() != "not specified" else "Not specified"
+        doi = doi if doi and str(doi).lower() != "not specified" else "Not specified"
+
+        # For database queries that need datetime, create a fallback (use None or current date as needed)
+        dob_for_query = None
+        if dob and dob.lower() != "not specified":
+            try:
+                dob_for_query = datetime.strptime(dob, "%Y-%m-%d")
+            except ValueError:
+                dob_for_query = None
+
+        # Parse rd for DB (reportDate): Handle both MM/DD and YYYY-MM-DD formats, convert to datetime object using 2025 as year if MM/DD
+        rd_for_db = None
+        if rd.lower() != "not specified":
+            try:
+                if '/' in rd:  # MM/DD format (e.g., "05/15")
+                    month, day = rd.split('/')
+                    year = 2025  # Current year from "October 14, 2025"
+                    full_date_str = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                elif '-' in rd:  # YYYY-MM-DD format (e.g., "2025-05-15")
+                    full_date_str = rd
+                else:
+                    raise ValueError("Invalid date format")
+
+                rd_for_db = datetime.strptime(full_date_str, "%Y-%m-%d")
+                logger.debug(f"Parsed rd '{rd}' to datetime: {rd_for_db}")
+            except (ValueError, AttributeError) as parse_err:
+                logger.warning(f"Failed to parse rd '{rd}': {parse_err}; using None")
+                rd_for_db = None
+
+        print(physician_id, 'physician id in update fail route')
+
+        patient_name_for_query = patient_name if patient_name and str(patient_name).lower() != "not specified" else "Unknown Patient"
+        claimNUmbers = await db_service.get_patient_claim_numbers(
+            patient_name_for_query,
+            physicianId=physician_id,
+            dob=dob_for_query  # Use the parsed datetime for query, or None
+        )
+
+        # Always fetch all previous unverified documents for the patient (ignore new claim for fetching all previous)
+        # 🆕 Updated: Pass claimNumber only if valid; otherwise None to use dob + patient_name
+        claim_number_for_query = claim_number if claim_number and str(claim_number).lower() != "not specified" else None
+        db_response = await db_service.get_all_unverified_documents(
+            patient_name=patient_name_for_query,
+            physicianId=physician_id,
+            claimNumber=claim_number_for_query,  # Use valid claim if available; else None to fallback to dob + patient_name
+            dob=dob_for_query  # Use the parsed datetime for query, or None
+        )
+
+        print(claimNUmbers, 'claim numbers')
+        # Extract documents list from database response
+        previous_documents = db_response.get('documents', []) if db_response else []
+
+        # Compare with previous documents using LLM (even for documents with missing fields)
+        whats_new_data = analyzer.compare_with_previous_documents(
+            document_analysis,
+            previous_documents
+        )
+
+        # Ensure whats_new_data is always a dict (empty if invalid) to avoid DB required field error
+        if whats_new_data is None or not isinstance(whats_new_data, dict):
+            logger.warning(f"⚠️ Invalid whats_new data for {filename}; using empty dict")
+            whats_new_data = {}
+
+        # Simplified claim number logic
+        claim_to_use = None
+        pending_reason = None
+        claim_numbers_list = claimNUmbers.get('claim_numbers', []) if isinstance(claimNUmbers, dict) else claimNUmbers if isinstance(claimNUmbers, list) else []
+        # Deduplicate claim numbers to handle cases where duplicates exist
+        claim_numbers_list = list(set(claim_numbers_list))
+
+        # Filter to valid claims only (exclude 'Not specified' and None)
+        valid_claims_list = [c for c in claim_numbers_list if c and str(c).lower() != 'not specified']
+
+        has_new_claim = claim_number and str(claim_number).lower() != "not specified"
+
+        if has_new_claim:
+            # If document analysis has claim number, use it
+            claim_to_use = claim_number
+            logger.info(f"ℹ️ Using extracted claim '{claim_to_use}' for patient '{patient_name}'")
+        else:
+            # New document has no claim number
+            if len(previous_documents) == 0:
+                # First time: OK, proceed without claim
+                claim_to_use = "Not specified"
+                logger.info(f"ℹ️ First document for patient '{patient_name}': No claim specified, proceeding as OK")
+            elif len(valid_claims_list) == 0 and len(previous_documents) > 0:
+                # Previous documents exist but no valid claim in them: fail (second or later without claim)
+                claim_to_use = None
+                pending_reason = "No claim number specified and previous documents exist without valid claim"
+                logger.warning(f"⚠️ {pending_reason} for file {filename}")
+            elif len(valid_claims_list) == 1:
+                # One previous valid claim: use it for new document
+                claim_to_use = valid_claims_list[0]
+                logger.info(f"ℹ️ Using single previous valid claim '{claim_to_use}' for patient '{patient_name}'")
+            else:
+                # Multiple previous valid claims: fail
+                claim_to_use = None
+                pending_reason = "No claim number specified and multiple previous valid claims found"
+                logger.warning(f"⚠️ {pending_reason} for file {filename}")
+
+        # Determine status: always proceed to success unless claim issues (no validation for missing fields)
+        base_status = document_analysis.status
+        document_status = base_status  # Default to base
+        if claim_to_use is None:
+            document_status = "failed"
+
+        # Use "Not specified" values for missing fields but process normally
+        patient_name_to_use = patient_name if patient_name and str(patient_name).lower() != "not specified" else "Not specified"
+
+        # If claim_to_use is None, set to "Not specified" for saving but status failed
+        claim_to_save = claim_to_use if claim_to_use is not None else "Not specified"
+
+        # Prepare dob_str for update
+        dob_str_for_query = None
+        if dob_for_query:
+            dob_str_for_query = dob_for_query.strftime("%Y-%m-%d")
+
+        # 🔄 Update previous documents' claim numbers (only if new has a valid claim number)
+        should_update_previous = (
+            document_status not in ["failed"] and  # Skip if failed due to claim issues
+            has_new_claim and  # Only update if new doc provided a valid claim
+            patient_name_to_use != "Not specified" and  # Avoid updating if patient is unknown
+            dob_str_for_query is not None  # Ensure we have dob string for query
+        )
+
+        if should_update_previous:
+            # Fetch previous documents to check for null claims (reuse the earlier query if possible)
+            db_response = await db_service.get_all_unverified_documents(
+                patient_name=patient_name_to_use,
+                physicianId=physician_id,
+                claimNumber=None,  # Explicitly fetch all, including null claims
+                dob=dob_for_query
+            )
+            previous_documents = db_response.get('documents', []) if db_response else []
+
+            # Check if any previous docs have null/unset claims
+            has_null_claim_docs = any(
+                doc.get('claim_number') is None or str(doc.get('claim_number', '')).lower() == 'not specified'
+                for doc in previous_documents
+            )
+
+            if has_null_claim_docs:
+                await db_service.update_previous_claim_numbers(
+                    patient_name=patient_name_to_use,
+                    dob=dob_str_for_query,  # Send only date string
+                    physician_id=physician_id,
+                    claim_number=claim_to_use
+                )
+                logger.info(f"🔄 Updated previous documents' claim numbers for patient '{patient_name_to_use}' using claim '{claim_to_use}'")
+            else:
+                logger.info(f"ℹ️ No previous documents with null claims for patient '{patient_name_to_use}'; skipping update")
+        else:
+            logger.info(f"ℹ️ Skipping previous claim update: status={document_status}, has_new_claim={has_new_claim}, patient={patient_name_to_use}, has_dob={dob_str_for_query is not None}")
+
+        # Early return ONLY on claim-related failures
+        if document_status == "failed":
+            # Emit failed event
+            emit_data = {
+                'document_id': fail_doc_id,
+                'filename': filename,
+                'status': 'failed',
+                'pending_reason': pending_reason if pending_reason else None
+            }
+
+            user_id = data.get("user_id")
+            if user_id:
+                await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
+            else:
+                await sio.emit('task_complete', emit_data)
+
+            logger.info(f"📡 Emitted 'task_complete' failed event from update route: {emit_data}")
+
+            return {
+                "status": "failed",
+                "reason": pending_reason,
+                "pending_reason": pending_reason if pending_reason else None
+            }
+
+        # Success: proceed with saving to main document and creating tasks, then delete FailDoc
+        # (This now runs always, as long as no claim issues, assuming all data provided in body)
+        summary_snapshot = {
+            "dx": document_analysis.diagnosis,
+            "keyConcern": document_analysis.key_concern,
+            "nextStep": document_analysis.next_step
+        }
+
+        adl_data = {
+            "adlsAffected": document_analysis.adls_affected,
+            "workRestrictions": document_analysis.work_restrictions
+        }
+
+        summary_text = " | ".join(document_analysis.summary_points) if document_analysis.summary_points else "No summary"
+
+        document_summary = {
+            "type": document_analysis.document_type,
+            "createdAt": datetime.now(),
+            "summary": summary_text
+        }
+
+        # Mock ExtractionResult - replace with your actual implementation
+        extraction_result = ExtractionResult(
+            text=result_data.get("text", ""),
+            pages=result_data.get("pages", 0),
+            entities=result_data.get("entities", []),
+            tables=result_data.get("tables", []),
+            formFields=result_data.get("formFields", []),
+            confidence=result_data.get("confidence", 0.0),
+            success=result_data.get("success", False),
+            gcs_file_link=result_data.get("gcs_file_link", gcs_url),
+            fileInfo=result_data.get("fileInfo", {}),
+            summary=summary_text,
+            comprehensive_analysis=result_data.get("comprehensive_analysis"),
+            document_id=result_data.get("document_id", f"update_fail_{fail_doc_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        )
+
+        # 🆕 FIRST save the document to get the document_id
+        document_id = await db_service.save_document_analysis(
+            extraction_result=extraction_result,
+            file_name=filename,
+            file_size=0,  # Not available in fail_doc, set default
+            mime_type="application/octet-stream",  # Default
+            processing_time_ms=0,  # Default
+            blob_path=blob_path,
+            file_hash=file_hash,
+            gcs_file_link=gcs_url,
+            patient_name=patient_name_to_use,
+            claim_number=claim_to_save,
+            dob=dob,  # Now using string "Not specified" instead of datetime
+            doi=doi,  # Now using string "Not specified" instead of datetime
+            status=document_status,  # Now "failed" only for specific cases
+            brief_summary=brief_summary,
+            summary_snapshot=summary_snapshot,
+            whats_new=whats_new_data,
+            adl_data=adl_data,
+            document_summary=document_summary,
+            rd=rd_for_db,  # Pass parsed datetime object (or None) instead of string
+            physician_id=physician_id
+        )
+
+        # 🔹 AI Task Creation - AFTER document is saved so we have document_id
+        task_creator = TaskCreator()
+        tasks = await task_creator.generate_tasks(document_analysis.dict(), filename)
+
+        # Save tasks to DB (map AI task keys to Prisma Task model fields)
+        prisma = Prisma()
+        await prisma.connect()
+        created_tasks = 0
+        for task in tasks:
+            try:
+                # Map snake_case keys to camelCase expected by Prisma schema
+                mapped_task = {
+                    "description": task.get("description"),
+                    "department": task.get("department"),
+                    "status": task.get("status", "Pending"),
+                    # Prisma Task model expects `dueDate` (DateTime?)
+                    "dueDate": None,
+                    "patient": task.get("patient", "Unknown"),
+                    "actions": task.get("actions") if isinstance(task.get("actions"), list) else [],
+                    # sourceDocument field in Prisma
+                    "sourceDocument": task.get("source_document") or task.get("sourceDocument") or filename,
+                    # 🆕 Save document_id and physician_id - NOW we have the document_id
+                    "documentId": document_id,  # Use the actual document_id from the saved document
+                    "physicianId": physician_id,
+                    # 🚫 REMOVED quickNotes entirely
+                }
+
+                # Normalize due date if present (accept datetime or ISO string)
+                due_raw = task.get("due_date") or task.get("dueDate")
+                if due_raw:
+                    if isinstance(due_raw, str):
+                        try:
+                            mapped_task["dueDate"] = datetime.strptime(due_raw, "%Y-%m-%d")
+                        except Exception:
+                            # best-effort parse, fallback to now + 3 days
+                            mapped_task["dueDate"] = datetime.now() + timedelta(days=3)
+                    else:
+                        # assume it's already a datetime-like object
+                        mapped_task["dueDate"] = due_raw
+
+                await prisma.task.create(data=mapped_task)
+                created_tasks += 1
+            except Exception as task_err:
+                logger.error(f"❌ Failed to create task for document {filename}: {task_err}", exc_info=True)
+                # continue creating other tasks even if one fails
+                continue
+
+        logger.info(f"✅ {created_tasks} / {len(tasks)} tasks created for updated document {filename}")
+
+        # Delete the FailDoc since successfully processed (no update, just delete)
+        await db_service.delete_fail_doc(fail_doc_id)
+        logger.info(f"🗑️ Deleted fail doc {fail_doc_id} after successful update")
+
+        logger.info(f"💾 Fail document updated and saved via route with ID: {document_id}, status: {document_status}")
+
+        # Emit socket event for task complete with appropriate status
+        emit_data = {
+            'document_id': document_id,
+            'filename': filename,
+            'status': document_status,
+            'pending_reason': pending_reason if pending_reason else None  # Use the claim-related reason if applicable
+        }
+
+        user_id = data.get("user_id")
+        if user_id:
+            await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
+        else:
+            await sio.emit('task_complete', emit_data)
+
+        logger.info(f"📡 Emitted 'task_complete' event from update route: {emit_data}")
+
+        return {
+            "status": document_status,
+            "document_id": document_id,
+            "pending_reason": pending_reason if pending_reason else None
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Update fail document failed: {str(e)}", exc_info=True)
+
+        # On exception, no update to FailDoc, just emit error
+        try:
+            await sio.emit('task_error', {
+                'document_id': data.get('fail_doc_id', 'unknown') if 'data' in locals() else 'unknown',
+                'filename': fail_doc.fileName if 'fail_doc' in locals() else 'unknown',
+                'error': str(e),
+                'gcs_url': gcs_url if 'gcs_url' in locals() else 'unknown',
+                'physician_id': physician_id if 'physician_id' in locals() else None,
+                'blob_path': blob_path if 'blob_path' in locals() else ''
+            })
+        except:
+            pass  # Ignore emit failure during error
+        raise HTTPException(status_code=500, detail=f"Update fail document processing failed: {str(e)}")
 import hashlib
 
 def compute_file_hash(content: bytes) -> str:

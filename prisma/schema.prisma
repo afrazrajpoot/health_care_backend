@@ -154,8 +154,17 @@ model PatientQuiz {
 model FailDocs {
   id          String  @id @default(cuid())
   reasson     String
-  blobPath    String
+
+  dob          String?
+  doi         String?
+  claimNumber String?
+  patientName String?
+  documentText String?
   physicianId String?
+  gcsFileLink String?
+  fileName    String?
+  fileHash    String?
+  blobPath    String?
 }
 
 model IntakeLink {

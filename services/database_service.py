@@ -183,24 +183,68 @@ class DatabaseService:
                     self._connected = False
                     return
                 logger.warning(f"⚠️ Error disconnecting from database: {msg}")
-    async def save_fail_doc(self, reasson: str, blob_path: str, physician_id: Optional[str] = None) -> str:
-            """Save a failed document record to the FailDocs table, including optional physician ID."""
-            try:
-                data = {
-                    "reasson": reasson,
-                    "blobPath": blob_path
-                }
-                if physician_id:
-                    data["physicianId"] = physician_id
-                
-                fail_doc = await self.prisma.faildocs.create(
-                    data=data
-                )
-                logger.info(f"💾 Saved fail doc with ID: {fail_doc.id} (Physician ID: {physician_id if physician_id else 'None'})")
-                return fail_doc.id
-            except Exception as e:
-                logger.error(f"❌ Error saving fail doc: {str(e)}")
-                raise
+    async def save_fail_doc(
+        self, 
+        reasson: str, 
+        db: Optional[str] = None,
+        doi: Optional[str] = None,
+        claim_number: Optional[str] = None,
+        patient_name: Optional[str] = None,
+        document_text: Optional[str] = None,
+        physician_id: Optional[str] = None,
+        gcs_file_link: Optional[str] = None,
+        file_name: Optional[str] = None,
+        file_hash: Optional[str] = None,
+        blob_path: Optional[str] = None
+    ) -> str:
+        """Save a failed document record to the FailDocs table."""
+        try:
+            data = {
+                "reasson": reasson,
+            }
+            if db is not None:
+                data["dob"] = db
+            if doi is not None:
+                data["doi"] = doi
+            if claim_number is not None:
+                data["claimNumber"] = claim_number
+            if patient_name is not None:
+                data["patientName"] = patient_name
+            if document_text is not None:
+                data["documentText"] = document_text
+            if physician_id is not None:
+                data["physicianId"] = physician_id
+            if gcs_file_link is not None:
+                data["gcsFileLink"] = gcs_file_link
+            if file_name is not None:
+                data["fileName"] = file_name
+            if file_hash is not None:
+                data["fileHash"] = file_hash
+            if blob_path is not None:
+                data["blobPath"] = blob_path
+            
+            fail_doc = await self.prisma.faildocs.create(
+                data=data
+            )
+            logger.info(f"💾 Saved fail doc with ID: {fail_doc.id} (Physician ID: {physician_id if physician_id else 'None'})")
+            return fail_doc.id
+        except Exception as e:
+            logger.error(f"❌ Error saving fail doc: {str(e)}")
+            raise
+    async def get_fail_doc_by_id(self, fail_doc_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a failed document record by its ID from the FailDocs table."""
+        try:
+            fail_doc = await self.prisma.faildocs.find_unique(
+                where={"id": fail_doc_id}
+            )
+            if fail_doc is None:
+                logger.warning(f"⚠️ Fail doc not found with ID: {fail_doc_id}")
+            else:
+                logger.info(f"📄 Retrieved fail doc with ID: {fail_doc_id}")
+            return fail_doc
+        except Exception as e:
+            logger.error(f"❌ Error retrieving fail doc {fail_doc_id}: {str(e)}")
+            raise
     async def get_fail_docs_by_physician(self, physician_id: str) -> List[Dict[str, Any]]:
         """Fetch failed documents by physician ID."""
         try:
@@ -455,6 +499,7 @@ class DatabaseService:
 
 
   
+
     async def get_all_unverified_documents(
         self, 
         patient_name: Optional[str] = None,
@@ -464,8 +509,9 @@ class DatabaseService:
     ) -> Optional[Dict[str, Any]]:
         """
         Retrieve all unverified documents where status is NOT 'verified'.
-        Filters by patient_name if provided. If claimNumber is provided and not "not specified", filter by it.
-        Otherwise, if dob is provided, use dob (date-only match) for filtering.
+        Filters by patient_name if provided. 
+        If claimNumber is provided and valid, filter by it (in addition to patient_name and dob if available).
+        Otherwise, filter by patient_name and dob if available.
         At least one of patient_name, claimNumber, or dob must be provided.
         """
         try:
@@ -474,6 +520,7 @@ class DatabaseService:
                 logger.warning("❌ No filters provided for retrieving unverified documents")
                 return None
 
+            # Normalize claimNumber: set to None if "not specified"
             if claimNumber is not None and str(claimNumber).lower() == "not specified":
                 claimNumber = None
 
@@ -493,11 +540,11 @@ class DatabaseService:
             if physicianId:
                 where_clause["physicianId"] = physicianId
 
-            # Filter by claimNumber if provided, else by dob (exact string match)
+            # 🆕 Updated: Add claimNumber filter if provided (valid); always add dob filter if provided (no elif)
             if claimNumber:
                 where_clause["claimNumber"] = claimNumber
                 logger.info(f"📌 Using claimNumber filter: {claimNumber}")
-            elif dob:
+            if dob:
                 dob_str = dob.strftime("%Y-%m-%d")
                 where_clause["dob"] = dob_str
                 logger.info(f"📌 Using dob string filter: {dob_str}")
@@ -769,7 +816,20 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"❌ Decryption failed: {str(e)}")
             raise ValueError("Invalid or expired token")
-
+    async def delete_fail_doc(
+        self,
+        fail_doc_id: str
+    ) -> dict:
+        """Delete a failed document record from the FailDocs table."""
+        try:
+            deleted_fail_doc = await self.prisma.faildocs.delete(
+                where={"id": fail_doc_id}
+            )
+            logger.info(f"🗑️ Deleted fail doc with ID: {fail_doc_id}")
+            return deleted_fail_doc
+        except Exception as e:
+            logger.error(f"❌ Error deleting fail doc {fail_doc_id}: {str(e)}")
+        raise
     async def get_patient_quiz(self, patient_name: str, dob: str, doi: str) -> Optional[Dict[str, Any]]:
         """Retrieve a PatientQuiz by matching patientName and DATE (ignoring time)"""
         print(patient_name, dob, doi, 'patient_name,dob,doi')
