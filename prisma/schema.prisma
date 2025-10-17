@@ -137,19 +137,23 @@ model AuditLog {
 }
 
 model PatientQuiz {
-  id String @id @default(cuid())
+  id             String   @id @default(cuid())
+  patientName    String
+  dob            String?
+  doi            String?
+  lang           String
+  bodyAreas      String?
+  newAppointments Json?   // Stores [{type: string, date: string}] or null
+  refill         Json?    // Stores {needed: boolean, before: string, after: string} or null
+  adl            Json     // Stores {state: string, list: string[]}
+  therapies      Json?    // Stores [{therapy: string, effect: string}] or null
 
-  patientName String?
-  dob         String?
-  doi         String?
-  lang        String
-  newAppt     Json? // Stores { specialist: string | null, date: string | null } or null
-  refill      Json? // Stores { med: string | null, pain: { pre: number, post: number, delta: number } } or null
-  adl         Json // Stores { trend: string | null, activities: string[] }
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  @@map("patient_quizzes")
 }
+
 
 model FailDocs {
   id          String  @id @default(cuid())
