@@ -10,6 +10,7 @@ from services.file_service import FileService
 from config.settings import CONFIG
 from utils.logger import logger
 from services.report_analyzer import ReportAnalyzer
+from services.phi_sanitizer import redact_phi
 from services.database_service import DatabaseService, get_database_service
 from utils.celery_task import finalize_document_task
 from utils.socket_manager import sio
@@ -50,7 +51,12 @@ async def save_document_webhook(request: Request):
 
         result_data = data["result"]
         analyzer = ReportAnalyzer()
-        document_analysis = analyzer.extract_document_data(result_data.get("text", ""))
+        # Extract raw text from Google Document AI
+        raw_text = result_data.get("text", "")
+        # Redact PHI before sending to OpenAI
+        sanitized_text, phi_map = redact_phi(raw_text)
+        # Use sanitized_text for OpenAI summarization and analysis
+        document_analysis = analyzer.extract_document_data(sanitized_text)
         print(document_analysis,'document analysis in webhook')
         
         # Extract blob_path from gcs_url (original uploads path)
@@ -98,7 +104,50 @@ async def save_document_webhook(request: Request):
         has_missing_required_fields = len(missing_fields) > 0
         
         # Generate AI brief summary (do this even for documents with missing fields)
-        brief_summary = analyzer.generate_brief_summary(result_data.get("text", ""))
+        # Summarize using OpenAI (with PHI redacted)
+        brief_summary = analyzer.generate_brief_summary(sanitized_text)
+        # Restore PHI in summary if needed (robust, case-insensitive, handles claim_number/claimNumber/dob/doi)
+        import re
+        def relink_phi(text, phi_map):
+            """
+            Replaces placeholders with original PHI values (case-insensitive).
+            Handles DOB, DOI, Claim Number normalization automatically.
+            """
+            for placeholder, original_value in phi_map.items():
+                # Simple replacement
+                text = re.sub(re.escape(placeholder), original_value, text, flags=re.IGNORECASE)
+
+                # Handle known label patterns like "DOB:", "DOI:", "Claim #:" etc.
+                if "CLAIM" in placeholder:
+                    text = re.sub(r"(claim\s*(number|#)?\s*:?\s*)" + re.escape(placeholder),
+                                lambda m: m.group(1) + original_value, text, flags=re.IGNORECASE)
+                elif "DOB" in placeholder:
+                    text = re.sub(r"(dob\s*:?\s*)" + re.escape(placeholder),
+                                lambda m: m.group(1) + original_value, text, flags=re.IGNORECASE)
+                elif "DOI" in placeholder:
+                    text = re.sub(r"(doi\s*:?\s*)" + re.escape(placeholder),
+                                lambda m: m.group(1) + original_value, text, flags=re.IGNORECASE)
+            return text
+
+
+        # Robustly re-link PHI for extracted fields if they are 'Not specified' but a matching PHI exists
+        def robust_field_relink(field_value, phi_map, field_type):
+            if field_value and str(field_value).lower() != 'not specified':
+                return field_value
+            # Try to find a PHI value matching the field type
+            for placeholder, original_value in phi_map.items():
+                if field_type == 'claim_number' and ('claim' in original_value.lower() or 'claim' in placeholder.lower()):
+                    return original_value
+                if field_type == 'dob' and re.match(r'\d{2}/\d{2}/\d{4}', original_value):
+                    return original_value
+                if field_type == 'doi' and re.match(r'\d{2}/\d{2}/\d{4}', original_value):
+                    return original_value
+            return field_value
+
+        # Overwrite extracted fields if possible
+        document_analysis.claim_number = robust_field_relink(document_analysis.claim_number, phi_map, 'claim_number')
+        document_analysis.dob = robust_field_relink(document_analysis.dob, phi_map, 'dob')
+        document_analysis.doi = robust_field_relink(document_analysis.doi, phi_map, 'doi')
         
         # Handle dates - use "Not specified" string instead of datetime.now() when not available
         dob = document_analysis.dob if document_analysis.dob and str(document_analysis.dob).lower() != "not specified" else "Not specified"
@@ -276,6 +325,8 @@ async def save_document_webhook(request: Request):
         }
         
         summary_text = " | ".join(document_analysis.summary_points) if document_analysis.summary_points else "No summary"
+    # Restore PHI in summary_text if needed (robust, case-insensitive, handles claim_number/claimNumber/dob/doi)
+        summary_text = relink_phi(summary_text, phi_map)
         
         document_summary = {
             "type": document_analysis.document_type,
@@ -285,7 +336,7 @@ async def save_document_webhook(request: Request):
         
         # Mock ExtractionResult - replace with your actual implementation
         extraction_result = ExtractionResult(
-            text=result_data.get("text", ""),
+            text=raw_text,
             pages=result_data.get("pages", 0),
             entities=result_data.get("entities", []),
             tables=result_data.get("tables", []),
