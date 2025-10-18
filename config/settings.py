@@ -15,7 +15,10 @@ class Settings:
         self.gcs_bucket_name = os.getenv("GCS_BUCKET_NAME")  # New: GCS bucket name
         self.host = os.getenv("HOST", "0.0.0.0")
         self.port = int(os.getenv("PORT", "8000"))
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        self.azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        self.azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+        self.azure_openai_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+        self.azure_openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION")
         
         # Validate credentials file
         if not os.path.exists(self.credentials_path):

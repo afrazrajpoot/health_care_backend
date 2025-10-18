@@ -1,6 +1,6 @@
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import PromptTemplate
-from langchain_openai import ChatOpenAI
+from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
@@ -37,10 +37,12 @@ class ReportAnalyzer:
     """Service for extracting structured data from medical documents"""
     
     def __init__(self):
-        self.llm = ChatOpenAI(
-            model="gpt-4o",
-            api_key=CONFIG.get("openai_api_key"),
-            temperature=0.0,  # Lower temp for consistency
+        self.llm = AzureChatOpenAI(
+            azure_endpoint=CONFIG.get("azure_openai_endpoint"),
+            api_key=CONFIG.get("azure_openai_api_key"),
+            deployment_name=CONFIG.get("azure_openai_deployment"),
+            api_version=CONFIG.get("azure_openai_api_version"),
+            temperature=0.0,
             timeout=120
         )
         self.parser = JsonOutputParser(pydantic_object=DocumentAnalysis)

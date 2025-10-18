@@ -1,4 +1,4 @@
-from langchain_openai import ChatOpenAI
+from langchain_openai import AzureChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
@@ -37,10 +37,12 @@ class TaskCreator:
     """AI service to generate consistent tasks based on document type and content."""
     
     def __init__(self):
-        self.llm = ChatOpenAI(
-            model="gpt-4o",
-            api_key=CONFIG.get("openai_api_key"),
-            temperature=0.1,  # Lower temperature for more consistency
+        self.llm = AzureChatOpenAI(
+            azure_endpoint=CONFIG.get("azure_openai_endpoint"),
+            api_key=CONFIG.get("azure_openai_api_key"),
+            deployment_name=CONFIG.get("azure_openai_deployment"),
+            api_version=CONFIG.get("azure_openai_api_version"),
+            temperature=0.1,
             timeout=90,
         )
         self.parser = JsonOutputParser(pydantic_object=TaskCreationResult)
