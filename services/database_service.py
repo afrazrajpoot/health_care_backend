@@ -360,7 +360,7 @@ class DatabaseService:
             patient_name: str,
             physicianId: Optional[str] = None,
             dob: Optional[str] = None,
-            doi: Optional[str] = None,
+            # doi: Optional[str] = None,
             claim_number: Optional[str] = None
         ) -> Dict[str, Any]:
             """
@@ -387,16 +387,16 @@ class DatabaseService:
                     where_clause["dob"] = dob_str
 
                 # ✅ Handle doi (string or datetime)
-                if doi:
-                    if isinstance(doi, datetime):
-                        doi_str = doi.strftime("%Y-%m-%d")
-                    else:
-                        try:
-                            parsed_doi = datetime.fromisoformat(doi)
-                            doi_str = parsed_doi.strftime("%Y-%m-%d")
-                        except ValueError:
-                            doi_str = doi
-                    where_clause["doi"] = doi_str
+                # if doi:
+                #     if isinstance(doi, datetime):
+                #         doi_str = doi.strftime("%Y-%m-%d")
+                #     else:
+                #         try:
+                #             parsed_doi = datetime.fromisoformat(doi)
+                #             doi_str = parsed_doi.strftime("%Y-%m-%d")
+                #         except ValueError:
+                #             doi_str = doi
+                #     where_clause["doi"] = doi_str
 
                 if claim_number:
                     where_clause["claimNumber"] = claim_number
@@ -438,6 +438,33 @@ class DatabaseService:
                     "total_documents": 0,
                     "documents": []
                 }
+            
+
+    async def get_tasks_by_document_ids(self, document_ids: list[str], physician_id: Optional[str] = None) -> list[dict]:
+        """Fetch tasks (with quickNotes) by document IDs, optionally filtered by physician_id"""
+        where_clause = {
+            "documentId": {"in": document_ids},
+            "status": "Pending"  # ✅ Only fetch Pending status tasks
+        }
+        if physician_id:
+            where_clause["physicianId"] = physician_id
+        
+        tasks = await self.prisma.task.find_many(
+            where=where_clause,
+            order={"createdAt": "asc"}
+        )
+        
+        # Manually select the fields you care about
+        tasks_data = [
+            {
+                "id": t.id,
+                "documentId": t.documentId,
+                "quickNotes": getattr(t, "quickNotes", None)
+            }
+            for t in tasks
+        ]
+        return tasks_data
+
     # async def get_all_unverified_documents(
     #     self, 
     #     patient_name: str, 
@@ -904,4 +931,3 @@ async def cleanup_database_service():
     if _db_service:
         await _db_service.disconnect()
         _db_service = None
-
