@@ -10,7 +10,6 @@ from services.file_service import FileService
 from config.settings import CONFIG
 from utils.logger import logger
 from services.report_analyzer import ReportAnalyzer
-from services.phi_sanitizer import redact_phi
 from services.database_service import DatabaseService, get_database_service
 from utils.celery_task import finalize_document_task
 from utils.socket_manager import sio
@@ -40,6 +39,132 @@ def extract_blob_path_from_gcs_url(gcs_url: str) -> str:
         logger.error(f"❌ Failed to extract blob path from {gcs_url}: {str(e)}")
         raise ValueError(f"Invalid GCS URL: {str(e)}")
 
+
+import os
+import re
+from google.cloud import dlp_v2
+from typing import Dict, Tuple, Any
+from datetime import datetime, timedelta
+
+PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT', 'your-gcp-project-id')
+
+def deidentify_and_extract_phi(text: str) -> Tuple[Dict[str, Any], str]:
+    """
+    Uses Google Cloud DLP to inspect for PHI, extract key PHI values, and de-identify the text.
+    Returns extracted PHI dict and de-identified text.
+    """
+    client = dlp_v2.DlpServiceClient()
+    parent = f"projects/{PROJECT_ID}/locations/global"
+
+    # Default PHI structure
+    extracted_phi = {
+        "patient_name": None,
+        "claim_number": None,
+        "dates": []
+    }
+
+    # PHI info types relevant to healthcare
+    phi_info_types = [
+        dlp_v2.InfoType(name="PERSON_NAME"),
+        dlp_v2.InfoType(name="DATE"),
+        dlp_v2.InfoType(name="PHONE_NUMBER"),
+        dlp_v2.InfoType(name="EMAIL_ADDRESS"),
+        dlp_v2.InfoType(name="US_SOCIAL_SECURITY_NUMBER"),
+        dlp_v2.InfoType(name="ADDRESS"),
+        dlp_v2.InfoType(name="MEDICAL_RECORD_NUMBER"),
+    ]
+
+    inspect_config = dlp_v2.InspectConfig(
+        info_types=phi_info_types,
+        min_likelihood=dlp_v2.Likelihood.POSSIBLE,
+    )
+
+    inspect_request = dlp_v2.InspectContentRequest(
+        parent=parent,
+        inspect_config=inspect_config,
+        item=dlp_v2.ContentItem(value=text),
+    )
+
+    try:
+        inspect_response = client.inspect_content(request=inspect_request)
+    except Exception as e:
+        print("❌ Permission denied for DLP API. Make sure the service is enabled and IAM roles are correct.")
+        print(e)
+        # Return default values so later code won't crash
+        return extracted_phi, text
+    except Exception as e:
+        print("❌ Unexpected error while calling DLP API:", e)
+        return extracted_phi, text
+
+    # Extract PHI from findings
+    for finding in inspect_response.result.findings:
+        info_type = finding.info_type.name
+        start = finding.location.content_locations[0].content_location.byte_range.start
+        end = finding.location.content_locations[0].content_location.byte_range.end
+        value = text[start:end].strip()
+
+        if info_type == "PERSON_NAME" and not extracted_phi["patient_name"]:
+            extracted_phi["patient_name"] = value
+        elif info_type == "MEDICAL_RECORD_NUMBER" and not extracted_phi["claim_number"]:
+            extracted_phi["claim_number"] = value
+        elif info_type == "DATE":
+            extracted_phi["dates"].append(value)
+
+    # Fallback regex for claim number if not found
+    if not extracted_phi["claim_number"]:
+        claim_match = re.search(r'claim\s*#?\s*([A-Z0-9-]+)', text, re.I)
+        if claim_match:
+            extracted_phi["claim_number"] = claim_match.group(1)
+
+    # De-identify the text
+    deidentify_config = dlp_v2.DeidentifyConfig(
+        info_type_transformations=dlp_v2.InfoTypeTransformations(
+            transformations=[
+                dlp_v2.InfoTypeTransformations.InfoTypeTransformation(
+                    primitive_transformation=dlp_v2.PrimitiveTransformation(
+                        replace_with_info_type_config=dlp_v2.ReplaceWithInfoTypeConfig(),
+                    ),
+                    info_types=phi_info_types,
+                )
+            ]
+        )
+    )
+
+    deidentify_request = dlp_v2.DeidentifyContentRequest(
+        parent=parent,
+        deidentify_config=deidentify_config,
+        inspect_config=inspect_config,
+        item=dlp_v2.ContentItem(value=text),
+    )
+
+    try:
+        deidentify_response = client.deidentify_content(request=deidentify_request)
+        deidentified_text = deidentify_response.item.value
+    except Exception as e:
+        print("❌ Error during de-identification:", e)
+        deidentified_text = text
+
+    return extracted_phi, deidentified_text
+
+
+
+
+
+
+
+
+def pseudonymize_structured(analysis: Dict[str, Any]) -> Dict[str, Any]:
+    pseudo = analysis.copy() if isinstance(analysis, dict) else analysis.__dict__.copy()
+    pseudo["patient_name"] = "[PATIENT]"
+    if pseudo.get("dob") and str(pseudo["dob"]).lower() != "not specified":
+        pseudo["dob"] = "[DOB]"
+    if pseudo.get("rd") and str(pseudo["rd"]).lower() != "not specified":
+        pseudo["rd"] = "[REPORT_DATE]"
+    if pseudo.get("doi") and str(pseudo["doi"]).lower() != "not specified":
+        pseudo["doi"] = "[DOCUMENT_DATE]"
+    if pseudo.get("claim_number") and str(pseudo["claim_number"]).lower() != "not specified":
+        pseudo["claim_number"] = "[CLAIM_NUMBER]"
+    return pseudo
 @router.post("/webhook/save-document")
 async def save_document_webhook(request: Request):
     try:
@@ -50,14 +175,30 @@ async def save_document_webhook(request: Request):
             raise HTTPException(status_code=400, detail="Missing required fields in webhook payload")
 
         result_data = data["result"]
+        text = result_data.get("text", "")
+        
+        # HIPAA Compliance: De-identify PHI before LLM processing
+        extracted_phi, deidentified_text = deidentify_and_extract_phi(text)
+        
         analyzer = ReportAnalyzer()
-        # Extract raw text from Google Document AI
-        raw_text = result_data.get("text", "")
-        # Redact PHI before sending to OpenAI
-        sanitized_text, phi_map = redact_phi(raw_text)
-        # Use sanitized_text for OpenAI summarization and analysis
-        document_analysis = analyzer.extract_document_data(sanitized_text)
+        # Use de-identified text for LLM-based extraction
+        document_analysis = analyzer.extract_document_data(deidentified_text)
         print(document_analysis,'document analysis in webhook')
+        
+        # Override extracted PHI with real values from DLP
+        if extracted_phi["patient_name"]:
+            document_analysis.patient_name = extracted_phi["patient_name"]
+        if extracted_phi["claim_number"]:
+            document_analysis.claim_number = extracted_phi["claim_number"]
+        
+        # Assign dates: first as DOB, second as RD, third as DOI
+        dates = extracted_phi["dates"]
+        if len(dates) > 0:
+            document_analysis.dob = dates[0]
+        if len(dates) > 1:
+            document_analysis.rd = dates[1]
+        if len(dates) > 2:
+            document_analysis.doi = dates[2]
         
         # Extract blob_path from gcs_url (original uploads path)
         blob_path = data.get("blob_path")
@@ -103,51 +244,8 @@ async def save_document_webhook(request: Request):
         # For missing required fields, we'll process but mark as failed in main flow
         has_missing_required_fields = len(missing_fields) > 0
         
-        # Generate AI brief summary (do this even for documents with missing fields)
-        # Summarize using OpenAI (with PHI redacted)
-        brief_summary = analyzer.generate_brief_summary(sanitized_text)
-        # Restore PHI in summary if needed (robust, case-insensitive, handles claim_number/claimNumber/dob/doi)
-        import re
-        def relink_phi(text, phi_map):
-            """
-            Replaces placeholders with original PHI values (case-insensitive).
-            Handles DOB, DOI, Claim Number normalization automatically.
-            """
-            for placeholder, original_value in phi_map.items():
-                # Simple replacement
-                text = re.sub(re.escape(placeholder), original_value, text, flags=re.IGNORECASE)
-
-                # Handle known label patterns like "DOB:", "DOI:", "Claim #:" etc.
-                if "CLAIM" in placeholder:
-                    text = re.sub(r"(claim\s*(number|#)?\s*:?\s*)" + re.escape(placeholder),
-                                lambda m: m.group(1) + original_value, text, flags=re.IGNORECASE)
-                elif "DOB" in placeholder:
-                    text = re.sub(r"(dob\s*:?\s*)" + re.escape(placeholder),
-                                lambda m: m.group(1) + original_value, text, flags=re.IGNORECASE)
-                elif "DOI" in placeholder:
-                    text = re.sub(r"(doi\s*:?\s*)" + re.escape(placeholder),
-                                lambda m: m.group(1) + original_value, text, flags=re.IGNORECASE)
-            return text
-
-
-        # Robustly re-link PHI for extracted fields if they are 'Not specified' but a matching PHI exists
-        def robust_field_relink(field_value, phi_map, field_type):
-            if field_value and str(field_value).lower() != 'not specified':
-                return field_value
-            # Try to find a PHI value matching the field type
-            for placeholder, original_value in phi_map.items():
-                if field_type == 'claim_number' and ('claim' in original_value.lower() or 'claim' in placeholder.lower()):
-                    return original_value
-                if field_type == 'dob' and re.match(r'\d{2}/\d{2}/\d{4}', original_value):
-                    return original_value
-                if field_type == 'doi' and re.match(r'\d{2}/\d{2}/\d{4}', original_value):
-                    return original_value
-            return field_value
-
-        # Overwrite extracted fields if possible
-        document_analysis.claim_number = robust_field_relink(document_analysis.claim_number, phi_map, 'claim_number')
-        document_analysis.dob = robust_field_relink(document_analysis.dob, phi_map, 'dob')
-        document_analysis.doi = robust_field_relink(document_analysis.doi, phi_map, 'doi')
+        # Generate AI brief summary (do this even for documents with missing fields) - use de-identified text
+        brief_summary = analyzer.generate_brief_summary(deidentified_text)
         
         # Handle dates - use "Not specified" string instead of datetime.now() when not available
         dob = document_analysis.dob if document_analysis.dob and str(document_analysis.dob).lower() != "not specified" else "Not specified"
@@ -162,13 +260,13 @@ async def save_document_webhook(request: Request):
             except ValueError:
                 dob_for_query = None
         
-        # Parse rd for DB (reportDate): Handle both MM/DD and YYYY-MM-DD formats, convert to datetime object using 2025 as year if MM/DD
+        # Parse rd for DB (reportDate): Handle both MM/DD and YYYY-MM-DD formats, convert to datetime object using current year if MM/DD
         rd_for_db = None
         if rd.lower() != "not specified":
             try:
                 if '/' in rd:  # MM/DD format (e.g., "05/15")
                     month, day = rd.split('/')
-                    year = 2025  # Current year from "October 14, 2025"
+                    year = datetime.now().year  # Use dynamic current year
                     full_date_str = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
                 elif '-' in rd:  # YYYY-MM-DD format (e.g., "2025-05-15")
                     full_date_str = rd
@@ -205,10 +303,12 @@ async def save_document_webhook(request: Request):
         # Extract documents list from database response
         previous_documents = db_response.get('documents', []) if db_response else []
         
-        # Compare with previous documents using LLM (even for documents with missing fields)
+        # Compare with previous documents using LLM (pseudonymize for compliance)
+        pseudo_analysis = pseudonymize_structured(document_analysis)
+        pseudo_previous = [pseudonymize_structured(doc) for doc in previous_documents]
         whats_new_data = analyzer.compare_with_previous_documents(
-            document_analysis, 
-            previous_documents
+            pseudo_analysis, 
+            pseudo_previous
         )
         
         # Ensure whats_new_data is always a dict (empty if invalid) to avoid DB required field error
@@ -273,20 +373,19 @@ async def save_document_webhook(request: Request):
             fail_reason = pending_reason if pending_reason else f"Missing required fields: {', '.join(missing_fields)}"
             logger.warning(f"⚠️ Failing document {data['filename']}: {fail_reason}")
             
-      # In the except block of the webhook function, update to call save_fail_doc (assuming it's intended to be there; add if missing):
             await db_service.save_fail_doc(
-        reasson=fail_reason,
-        db=dob,
-        doi=doi,
-        claim_number=claim_to_save,
-        patient_name=patient_name_to_use,
-        document_text=result_data.get("text", ""),
-        physician_id=physician_id,
-        gcs_file_link=data["gcs_url"],
-        file_name=data["filename"],
-        file_hash=data.get("file_hash"),
-        blob_path=blob_path
-    )
+                reason=fail_reason,
+                dob=dob,
+                doi=doi,
+                claim_number=claim_to_save,
+                patient_name=patient_name_to_use,
+                document_text=result_data.get("text", ""),
+                physician_id=physician_id,
+                gcs_file_link=data["gcs_url"],
+                file_name=data["filename"],
+                file_hash=data.get("file_hash"),
+                blob_path=blob_path
+            )
             
             # Emit failed event
             emit_data = {
@@ -325,8 +424,6 @@ async def save_document_webhook(request: Request):
         }
         
         summary_text = " | ".join(document_analysis.summary_points) if document_analysis.summary_points else "No summary"
-    # Restore PHI in summary_text if needed (robust, case-insensitive, handles claim_number/claimNumber/dob/doi)
-        summary_text = relink_phi(summary_text, phi_map)
         
         document_summary = {
             "type": document_analysis.document_type,
@@ -336,7 +433,7 @@ async def save_document_webhook(request: Request):
         
         # Mock ExtractionResult - replace with your actual implementation
         extraction_result = ExtractionResult(
-            text=raw_text,
+            text=result_data.get("text", ""),
             pages=result_data.get("pages", 0),
             entities=result_data.get("entities", []),
             tables=result_data.get("tables", []),
@@ -499,7 +596,7 @@ async def save_document_webhook(request: Request):
         if not blob_path and 'data' in locals() and data.get("gcs_url"):
             blob_path = extract_blob_path_from_gcs_url(data["gcs_url"])
         physician_id = data.get("physician_id") if 'data' in locals() else None
-        reasson = f"Webhook processing failed: {str(e)}"
+        reason = f"Webhook processing failed: {str(e)}"
         
       
         
@@ -516,7 +613,6 @@ async def save_document_webhook(request: Request):
         except:
             pass  # Ignore emit failure during webhook error
         raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
-
 @router.post("/update-fail-document")
 async def update_fail_document(request: Request):
     try:
@@ -928,6 +1024,7 @@ async def update_fail_document(request: Request):
         except:
             pass  # Ignore emit failure during error
         raise HTTPException(status_code=500, detail=f"Update fail document processing failed: {str(e)}")
+
 import hashlib
 
 def compute_file_hash(content: bytes) -> str:
@@ -1206,7 +1303,7 @@ def parse_date(date_str: Optional[str], field_name: str) -> datetime:
 async def get_document(
     patient_name: str,
     dob: str,
-    doi: str,
+    # doi: str,
     physicianId: Optional[str] = None,
     claim_number: Optional[str] = None
 ):
@@ -1219,7 +1316,7 @@ async def get_document(
 
         # ✅ Parse date strings using helper
         dob_date = parse_date(dob, "Date of Birth")
-        doi_date = parse_date(doi, "Date of Injury")
+        # doi_date = parse_date(doi, "Date of Injury")
 
         db_service = await get_database_service()
         
@@ -1228,19 +1325,33 @@ async def get_document(
             patient_name=patient_name,
             physicianId=physicianId,
             dob=dob_date,
-            doi=doi_date,
+            # doi=doi_date,
             claim_number=claim_number
         )
 
-        quiz_data = await db_service.get_patient_quiz(patient_name, dob, doi)
+        # quiz_data = await db_service.get_patient_quiz(patient_name, dob, doi)
        
         if not document_data or document_data.get("total_documents") == 0:
             raise HTTPException(
                 status_code=404,
                 detail=f"No documents found for patient: {patient_name}"
             )
+
+        # ✅ Fetch tasks (quick notes) for the document IDs, filtered by physicianId if provided
+        documents = document_data["documents"]
+        document_ids = [doc["id"] for doc in documents]
+        tasks = await db_service.get_tasks_by_document_ids(
+            document_ids=document_ids,
+            physician_id=physicianId  # Optional filter
+        )
+        # Create a mapping of document_id to quickNotes
+        tasks_dict = {task["documentId"]: task["quickNotes"] for task in tasks}
         
-        response = await format_aggregated_document_response(document_data, quiz_data)
+        response = await format_aggregated_document_response(
+            all_documents_data=document_data, 
+            # quiz_data=quiz_data, 
+            tasks_dict=tasks_dict
+        )
         
         logger.info(f"✅ Returned aggregated document for: {patient_name}")
         return response
@@ -1250,7 +1361,13 @@ async def get_document(
     except Exception as e:
         logger.error(f"❌ Error fetching document: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-async def format_aggregated_document_response(all_documents_data: Dict[str, Any], quiz_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+
+
+async def format_aggregated_document_response(
+    all_documents_data: Dict[str, Any], 
+    quiz_data: Optional[Dict[str, Any]] = None,
+    tasks_dict: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """Format the aggregated document response from all documents"""
     documents = all_documents_data["documents"]
     
@@ -1306,6 +1423,15 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
     summary_snapshots_list = [doc.get("summarySnapshot") for doc in sorted_documents]
     summary_snapshots = summary_snapshots_list[::-1]  # Reverse to put latest first
     
+    # ✅ Collect quick notes snapshots in chronological order, reverse to latest first, FILTER OUT None/null
+    quick_notes_snapshots_list = [
+        tasks_dict.get(doc["id"]) if tasks_dict else None 
+        for doc in sorted_documents
+    ]
+    # Filter out None/null values
+    quick_notes_snapshots_filtered = [note for note in quick_notes_snapshots_list if note is not None]
+    quick_notes_snapshots = quick_notes_snapshots_filtered[::-1]
+    
     # adl from latest document
     adl = await format_adl(latest_doc)
     
@@ -1341,6 +1467,7 @@ async def format_aggregated_document_response(all_documents_data: Dict[str, Any]
     
     base_response.update({
         "summary_snapshots": summary_snapshots,
+        "quick_notes_snapshots": quick_notes_snapshots,  # ✅ Now filtered, no nulls
         "whats_new": whats_new,
         "adl": adl,
         "document_summary": grouped_summaries,
@@ -1394,6 +1521,10 @@ async def format_adl(document: Dict[str, Any]) -> Dict[str, Any]:
             "work_restrictions": adl_data.get("workRestrictions")
         }
     return None
+
+
+
+
 @router.post("/proxy-decrypt")
 async def proxy_decrypt(request: Request):
     """

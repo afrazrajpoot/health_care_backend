@@ -269,6 +269,19 @@ class ReportAnalyzer:
         logger.info(f"DEBUG: previous_documents = {previous_documents}")
         logger.info(f"DEBUG: Has previous? {bool(previous_documents)}")
         
+        # ✅ FIX: Ensure current_analysis is a DocumentAnalysis instance
+        if isinstance(current_analysis, dict):
+            try:
+                current_analysis = DocumentAnalysis(**current_analysis)
+                logger.info(f"✅ Converted dict to DocumentAnalysis for current_analysis")
+            except Exception as e:
+                logger.error(f"❌ Failed to convert dict to DocumentAnalysis: {str(e)}")
+                # Fallback to empty analysis if conversion fails
+                current_analysis = self.create_fallback_analysis()
+        elif not isinstance(current_analysis, DocumentAnalysis):
+            logger.warning(f"⚠️ current_analysis is unexpected type {type(current_analysis)}; using fallback")
+            current_analysis = self.create_fallback_analysis()
+        
         # Collect ALL previous whats_new data from all documents
         all_previous_whats_new = {}
         if previous_documents:
@@ -347,7 +360,7 @@ class ReportAnalyzer:
             
             logger.info(f"✅ MERGED 'What's New' (preserving history): {merged_result}")
             
-            # CRITICAL FIX: If no previous documents and AI returns empty, create initial whats_new
+            # CRITICAL FIX: If no previous documents and AI returns empty, generate initial whats_new
             if not previous_documents and not merged_result:
                 merged_result = self._create_initial_whats_new(current_analysis, mm_dd)
                 
@@ -360,7 +373,6 @@ class ReportAnalyzer:
                 return self._create_initial_whats_new(current_analysis, mm_dd)
             else:
                 return all_previous_whats_new
-
     def _create_initial_whats_new(self, current_analysis: DocumentAnalysis, mm_dd: str) -> Dict[str, str]:
         """Create initial whats_new data for first document"""
         initial_whats_new = {}
