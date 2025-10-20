@@ -617,6 +617,98 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"❌ Error retrieving unverified documents: {str(e)}")
             raise
+    
+
+
+    async def get_claim_numbers(
+            self, 
+            patient_name: Optional[str] = None,
+            physicianId: Optional[str] = None,
+            claimNumber: Optional[str] = None,
+            dob: Optional[datetime] = None,
+        ) -> Optional[Dict[str, Any]]:
+            """
+            Retrieve all unverified documents where status is NOT 'verified'.
+            Filters by patient_name if provided. 
+            If claimNumber is provided and valid, filter by it (in addition to patient_name and dob if available).
+            Otherwise, filter by patient_name and dob if available.
+            At least one of patient_name, claimNumber, or dob must be provided.
+            """
+            try:
+                filters_provided = [f for f in [patient_name, claimNumber, dob] if f is not None]
+                if not filters_provided:
+                    logger.warning("❌ No filters provided for retrieving unverified documents")
+                    return None
+
+                # Normalize claimNumber: set to None if "not specified"
+                if claimNumber is not None and str(claimNumber).lower() == "not specified":
+                    claimNumber = None
+
+                logger.info(f"🔍 Getting unverified documents with filters: patient_name={patient_name}, physicianId={physicianId}, claimNumber={claimNumber}, dob={dob}")
+                print(patient_name, physicianId, claimNumber, dob, 'patient_name, physicianId, claimNumber, dob')
+
+                # Base where clause
+                where_clause = {
+                    # "status": {"not": "verified"}
+                }
+
+                # Add patient_name if provided
+                if patient_name:
+                    where_clause["patientName"] = patient_name
+
+                # Add physicianId if provided
+                if physicianId:
+                    where_clause["physicianId"] = physicianId
+
+                # 🆕 Updated: Add claimNumber filter if provided (valid); always add dob filter if provided (no elif)
+                if claimNumber:
+                    where_clause["claimNumber"] = claimNumber
+                    logger.info(f"📌 Using claimNumber filter: {claimNumber}")
+                if dob:
+                    dob_str = dob.strftime("%Y-%m-%d")
+                    where_clause["dob"] = dob_str
+                    logger.info(f"📌 Using dob string filter: {dob_str}")
+
+                # Fetch documents
+                documents = await self.prisma.document.find_many(
+                    where=where_clause,
+                    include={
+                        "summarySnapshot": True,
+                        "adl": True,
+                        "documentSummary": True
+                    },
+                    order={"createdAt": "desc"}
+                )
+
+                if not documents:
+                    logger.warning(f"❌ No non-verified documents found with provided filters")
+                    return None
+
+                # Determine patient_name for logging/response (use first document's if not provided)
+                response_patient_name = patient_name or documents[0].patientName
+
+                logger.info(f"📋 Found {len(documents)} unverified documents for patient: {response_patient_name}")
+
+                # Structured response
+                response = {
+                    "patient_name": response_patient_name,
+                    "total_documents": len(documents),
+                    "documents": []
+                }
+
+                for i, doc in enumerate(documents):
+                    doc_data = doc.dict()
+                    doc_data["document_index"] = i + 1
+                    doc_data["is_latest"] = i == 0
+                    response["documents"].append(doc_data)
+                    logger.info(f"📄 Added document {i+1}: ID {doc.id}")
+
+                return response
+
+            except Exception as e:
+                logger.error(f"❌ Error retrieving unverified documents: {str(e)}")
+                raise
+        
     async def update_previous_claim_numbers(
         self,
         patient_name: str,

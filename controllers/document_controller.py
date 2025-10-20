@@ -288,7 +288,7 @@ async def save_document_webhook(request: Request):
         # Always fetch all previous unverified documents for the patient (ignore new claim for fetching all previous)
         # 🆕 Updated: Pass claimNumber only if valid; otherwise None to use dob + patient_name
         claim_number_for_query = document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else None
-        db_response = await db_service.get_all_unverified_documents(
+        db_response = await db_service.get_claim_numbers(
             patient_name=patient_name_for_query,
             physicianId=physician_id,
             claimNumber=claim_number_for_query,  # Use valid claim if available; else None to fallback to dob + patient_name
