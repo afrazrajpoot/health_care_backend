@@ -87,7 +87,7 @@ class TaskCreator:
         - **Billing Document** → ALWAYS: "Review billing and reconcile as needed"
 
         ### Department Consistency:
-        - Imaging/Lab Reports → "Physician Review"
+        - Imaging/Lab Reports → "General Staff"
         - Scheduling Tasks → "Scheduling" 
         - Legal Documents → "Admin/Legal"
         - RFA/UR/IMR → "RFA/IMR"
@@ -103,7 +103,7 @@ class TaskCreator:
         | Step | Event / Document | Task Description | Department |
         |------|------------------|------------------|-------------|
         | 1️⃣ | DWC 5021 (Doctor's First Report) | Chart prep & initial scheduling | Scheduling |
-        | 2️⃣ | PR-1 (Initial PTP Report) | Physician Review — Establish PTP relationship | General Staff |
+        | 2️⃣ | PR-1 (Initial PTP Report) | Review findings — Establish PTP relationship | General Staff |
         | 3️⃣ | RFA submitted | Track RFA & await UR decision | RFA/IMR |
         | 4️⃣ | UR Decision: Approved | Schedule authorized service | Scheduling |
         |    | UR Decision: Denied | Prepare IMR appeal packet | RFA/IMR |
@@ -164,7 +164,7 @@ class TaskCreator:
 
         | Department | Default Due |
         |-------------|-------------|
-        | Physician Review | +2 days |
+        | General Staff | +2 days |
         | Scheduling | +2 days |
         | RFA/IMR | +5 days |
         | Admin/Legal | +3 days |
@@ -216,7 +216,7 @@ class TaskCreator:
         if any(term in document_type_lower or term in content_lower for term in ['mri', 'imaging', 'radiology', 'x-ray', 'ct', 'scan']):
             return {
                 "description": "Review imaging findings and update treatment plan",
-                "department": "Physician Review",
+                "department": "General Staff",
                 "due_days": 2
             }
         
@@ -224,7 +224,7 @@ class TaskCreator:
         elif any(term in document_type_lower or term in content_lower for term in ['lab', 'blood', 'test', 'result', 'chemistry', 'hematology']):
             return {
                 "description": "Review lab results and assess clinical significance",
-                "department": "Physician Review", 
+                "department": "General Staff", 
                 "due_days": 2
             }
         
@@ -253,7 +253,7 @@ class TaskCreator:
         elif any(term in document_type_lower for term in ['pr-', 'progress', 'follow-up']):
             return {
                 "description": "Physician follow-up based on progress findings",
-                "department": "Physician Review",
+                "department": "General Staff",
                 "due_days": 2
             }
         
@@ -277,7 +277,7 @@ class TaskCreator:
         elif any(term in document_type_lower or term in content_lower for term in ['qme', 'ame', 'independent medical']):
             return {
                 "description": "Review findings & update treatment plan",
-                "department": "Physician Review",
+                "department": "General Staff",
                 "due_days": 2
             }
         
@@ -300,7 +300,7 @@ class TaskCreator:
         # Default fallback
         return {
             "description": "Review document and determine next steps",
-            "department": "Physician Review",
+            "department": "General Staff",
             "due_days": 2
         }
 
