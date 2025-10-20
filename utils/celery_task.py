@@ -41,7 +41,7 @@ def finalize_document_task(self, webhook_payload: dict):
         if webhook_payload.get('physician_id'):
             logger.info(f"👨‍⚕️ Physician ID: {webhook_payload['physician_id']}")
         
-        webhook_url = CONFIG.get("api_base_url", "http://localhost:8000") + "/api/webhook/save-document"
+        webhook_url = CONFIG.get("api_base_url", "http://localhost:8005") + "/api/webhook/save-document"
         logger.info(f"🌐 Calling webhook: {webhook_url}")
         
         response = requests.post(webhook_url, json=webhook_payload, timeout=30)
