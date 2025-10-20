@@ -102,18 +102,18 @@ class TaskCreator:
 
         | Step | Event / Document | Task Description | Department |
         |------|------------------|------------------|-------------|
-        | 1️⃣ | DWC 5021 (Doctor's First Report) | Chart prep & initial scheduling | Intake / Scheduling |
-        | 2️⃣ | PR-1 (Initial PTP Report) | Physician Review — Establish PTP relationship | Physician Review |
+        | 1️⃣ | DWC 5021 (Doctor's First Report) | Chart prep & initial scheduling | Scheduling |
+        | 2️⃣ | PR-1 (Initial PTP Report) | Physician Review — Establish PTP relationship | General Staff |
         | 3️⃣ | RFA submitted | Track RFA & await UR decision | RFA/IMR |
         | 4️⃣ | UR Decision: Approved | Schedule authorized service | Scheduling |
         |    | UR Decision: Denied | Prepare IMR appeal packet | RFA/IMR |
-        | 5️⃣ | PR-2 (Progress Report) | Physician follow-up based on progress findings | Physician Review |
-        | 6️⃣ | Stalled improvement | Request FCE or Specialist Consult | Physician Review |
+        | 5️⃣ | PR-2 (Progress Report) | Physician follow-up based on progress findings | General Staff |
+        | 6️⃣ | Stalled improvement | Request FCE or Specialist Consult | General Staff |
         | 7️⃣ | Diagnostic Auth | Schedule diagnostic study | Scheduling |
-        | 8️⃣ | Specialist Consult | Implement specialist recommendations | Physician Review |
-        | 9️⃣ | PR-3 / PR-4 | Determine P&S / MMI status | Physician Review |
-        | 🔟 | QME / AME Report | Review findings & update treatment plan | Physician Review |
-        | 1️⃣1️⃣ | IMR Appeal Outcome | Update case per IMR decision | RFA/IMR | Physician Review |
+        | 8️⃣ | Specialist Consult | Implement specialist recommendations | General Staff |
+        | 9️⃣ | PR-3 / PR-4 | Determine P&S / MMI status | General Staff |
+        | 🔟 | QME / AME Report | Review findings & update treatment plan | General Staff |
+        | 1️⃣1️⃣ | IMR Appeal Outcome | Update case per IMR decision | RFA/IMR | General Staff |
         | 1️⃣2️⃣ | Legal / Attorney Letter | Review legal correspondence and respond as needed | Admin/Legal |
         | 1️⃣3️⃣ | EOR / Billing Docs | Review billing and reconcile as needed | Billing/Compliance |
 
@@ -126,8 +126,8 @@ class TaskCreator:
         | Referral Letter | Review referral & schedule consult | Referrals / Coordination |
         | Prior Auth Form | Track prior auth approval | Prior Authorization |
         | Approval Notice | Schedule authorized service | Scheduling |
-        | Lab or Imaging Report | Review results & update chart | Physician Review |
-        | Progress Note | Physician follow-up based on progress findings | Physician Review |
+        | Lab or Imaging Report | Review results & update chart | General Staff |
+        | Progress Note | Physician follow-up based on progress findings | General Staff |
         | Patient Outreach or Missed Appointment | Call patient / reschedule | Patient Outreach |
         | Compliance Notice | Review & log compliance task | Quality & Compliance |
         | Billing Statement | Review billing and reconcile as needed | Billing / Revenue Cycle |

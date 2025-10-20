@@ -140,6 +140,7 @@ model PatientQuiz {
   id             String   @id @default(cuid())
   patientName    String
   dob            String?
+  claimNumber    String?
   doi            String?
   lang           String
   bodyAreas      String?
@@ -157,7 +158,7 @@ model PatientQuiz {
 
 model FailDocs {
   id          String  @id @default(cuid())
-  reasson     String
+  reason     String
 
   dob          String?
   doi         String?
@@ -176,6 +177,7 @@ model IntakeLink {
   token         String   @unique
   patientName   String
   dateOfBirth   DateTime
+  claimNumber   String?  
   visitType     String   @default("Follow-up")
   language      String   @default("en")
   mode          String   @default("tele")

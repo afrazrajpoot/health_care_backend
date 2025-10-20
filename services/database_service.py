@@ -183,54 +183,56 @@ class DatabaseService:
                     self._connected = False
                     return
                 logger.warning(f"⚠️ Error disconnecting from database: {msg}")
+        
     async def save_fail_doc(
-        self, 
-        reasson: str, 
-        db: Optional[str] = None,
-        doi: Optional[str] = None,
-        claim_number: Optional[str] = None,
-        patient_name: Optional[str] = None,
-        document_text: Optional[str] = None,
-        physician_id: Optional[str] = None,
-        gcs_file_link: Optional[str] = None,
-        file_name: Optional[str] = None,
-        file_hash: Optional[str] = None,
-        blob_path: Optional[str] = None
-    ) -> str:
-        """Save a failed document record to the FailDocs table."""
-        try:
-            data = {
-                "reasson": reasson,
-            }
-            if db is not None:
-                data["dob"] = db
-            if doi is not None:
-                data["doi"] = doi
-            if claim_number is not None:
-                data["claimNumber"] = claim_number
-            if patient_name is not None:
-                data["patientName"] = patient_name
-            if document_text is not None:
-                data["documentText"] = document_text
-            if physician_id is not None:
-                data["physicianId"] = physician_id
-            if gcs_file_link is not None:
-                data["gcsFileLink"] = gcs_file_link
-            if file_name is not None:
-                data["fileName"] = file_name
-            if file_hash is not None:
-                data["fileHash"] = file_hash
-            if blob_path is not None:
-                data["blobPath"] = blob_path
-            
-            fail_doc = await self.prisma.faildocs.create(
-                data=data
-            )
-            logger.info(f"💾 Saved fail doc with ID: {fail_doc.id} (Physician ID: {physician_id if physician_id else 'None'})")
-            return fail_doc.id
-        except Exception as e:
-            logger.error(f"❌ Error saving fail doc: {str(e)}")
-            raise
+            self, 
+            reason: str, 
+            db: Optional[str] = None,
+            doi: Optional[str] = None,
+            claim_number: Optional[str] = None,
+            patient_name: Optional[str] = None,
+            document_text: Optional[str] = None,
+            physician_id: Optional[str] = None,
+            gcs_file_link: Optional[str] = None,
+            file_name: Optional[str] = None,
+            file_hash: Optional[str] = None,
+            blob_path: Optional[str] = None
+        ) -> str:
+            """Save a failed document record to the FailDocs table."""
+            try:
+                data = {
+                    "reason": reason,
+                }
+                if db is not None:
+                    data["dob"] = db
+                if doi is not None:
+                    data["doi"] = doi
+                if claim_number is not None:
+                    data["claimNumber"] = claim_number
+                if patient_name is not None:
+                    data["patientName"] = patient_name
+                if document_text is not None:
+                    data["documentText"] = document_text
+                if physician_id is not None:
+                    data["physicianId"] = physician_id
+                if gcs_file_link is not None:
+                    data["gcsFileLink"] = gcs_file_link
+                if file_name is not None:
+                    data["fileName"] = file_name
+                if file_hash is not None:
+                    data["fileHash"] = file_hash
+                if blob_path is not None:
+                    data["blobPath"] = blob_path
+                
+                fail_doc = await self.prisma.faildocs.create(
+                    data=data
+                )
+                logger.info(f"💾 Saved fail doc with ID: {fail_doc.id} (Physician ID: {physician_id if physician_id else 'None'})")
+                return fail_doc.id
+            except Exception as e:
+                logger.error(f"❌ Error saving fail doc: {str(e)}")
+                raise
+    
     async def get_fail_doc_by_id(self, fail_doc_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a failed document record by its ID from the FailDocs table."""
         try:
@@ -257,7 +259,7 @@ class DatabaseService:
             fail_docs_list = [
                 {
                     "id": doc.id,
-                    "reasson": doc.reasson,
+                    "reason": doc.reason,
                     "blobPath": doc.blobPath,
                     "physicianId": doc.physicianId
                 }
@@ -643,7 +645,7 @@ class DatabaseService:
         dob: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         try:
-            where_clause = {"patientName": patient_name, "status": {"not": "verified"}}
+            where_clause = {"patientName": patient_name}
             
             if physicianId:
                 where_clause["physicianId"] = physicianId

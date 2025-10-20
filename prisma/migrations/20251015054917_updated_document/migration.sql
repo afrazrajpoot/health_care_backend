@@ -141,7 +141,7 @@ CREATE TABLE "PatientQuiz" (
 -- CreateTable
 CREATE TABLE "FailDocs" (
     "id" TEXT NOT NULL,
-    "reasson" TEXT NOT NULL,
+    "reason" TEXT NOT NULL,
     "blobPath" TEXT NOT NULL,
     "physicianId" TEXT,
 

@@ -147,12 +147,6 @@ def deidentify_and_extract_phi(text: str) -> Tuple[Dict[str, Any], str]:
     return extracted_phi, deidentified_text
 
 
-
-
-
-
-
-
 def pseudonymize_structured(analysis: Dict[str, Any]) -> Dict[str, Any]:
     pseudo = analysis.copy() if isinstance(analysis, dict) else analysis.__dict__.copy()
     pseudo["patient_name"] = "[PATIENT]"
@@ -165,6 +159,9 @@ def pseudonymize_structured(analysis: Dict[str, Any]) -> Dict[str, Any]:
     if pseudo.get("claim_number") and str(pseudo["claim_number"]).lower() != "not specified":
         pseudo["claim_number"] = "[CLAIM_NUMBER]"
     return pseudo
+
+
+
 @router.post("/webhook/save-document")
 async def save_document_webhook(request: Request):
     try:
@@ -374,7 +371,7 @@ async def save_document_webhook(request: Request):
             
             await db_service.save_fail_doc(
                 reason=fail_reason,
-                dob=dob,
+                db=dob,
                 doi=doi,
                 claim_number=claim_to_save,
                 patient_name=patient_name_to_use,
