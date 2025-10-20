@@ -215,16 +215,16 @@ class TaskCreator:
         # MRI/Imaging consistency
         if any(term in document_type_lower or term in content_lower for term in ['mri', 'imaging', 'radiology', 'x-ray', 'ct', 'scan']):
             return {
-                "description": "Review imaging findings and update treatment plan",
-                "department": "General Staff",
+                "description": f"Review {document_type.title()} and update plan",  # dynamic one-liner
+                "department": "Radiology",
                 "due_days": 2
             }
         
         # Lab results consistency
         elif any(term in document_type_lower or term in content_lower for term in ['lab', 'blood', 'test', 'result', 'chemistry', 'hematology']):
             return {
-                "description": "Review lab results and assess clinical significance",
-                "department": "General Staff", 
+                "description": f"Review {document_type.title()} and assess results",
+                "department": "Lab/Pathology", 
                 "due_days": 2
             }
         
@@ -232,19 +232,19 @@ class TaskCreator:
         elif 'rfa' in document_type_lower or 'rfa' in content_lower:
             if 'denied' in content_lower or 'denial' in content_lower:
                 return {
-                    "description": "Prepare IMR appeal packet",
+                    "description": "Prepare IMR appeal for denied RFA",
                     "department": "RFA/IMR",
                     "due_days": 5
                 }
             elif 'approved' in content_lower or 'approval' in content_lower:
                 return {
-                    "description": "Schedule authorized service",
+                    "description": "Schedule authorized service from RFA approval",
                     "department": "Scheduling",
                     "due_days": 2
                 }
             else:
                 return {
-                    "description": "Track RFA & await UR decision",
+                    "description": "Track RFA and await UR decision",
                     "department": "RFA/IMR",
                     "due_days": 5
                 }
@@ -252,15 +252,15 @@ class TaskCreator:
         # Progress reports consistency
         elif any(term in document_type_lower for term in ['pr-', 'progress', 'follow-up']):
             return {
-                "description": "Physician follow-up based on progress findings",
-                "department": "General Staff",
+                "description": f"Review {document_type.title()} and update care plan",
+                "department": "Case Management",
                 "due_days": 2
             }
         
         # Attorney letters consistency
         elif any(term in document_type_lower or term in content_lower for term in ['attorney', 'legal', 'lawyer', 'counsel']):
             return {
-                "description": "Review legal correspondence and respond as needed",
+                "description": f"Review legal document and respond if needed",
                 "department": "Admin/Legal", 
                 "due_days": 3
             }
@@ -268,7 +268,7 @@ class TaskCreator:
         # Referral consistency
         elif any(term in document_type_lower or term in content_lower for term in ['referral', 'consult', 'specialist']):
             return {
-                "description": "Review referral & schedule consult",
+                "description": f"Review referral and schedule consult",
                 "department": "Referrals / Coordination",
                 "due_days": 2
             }
@@ -276,15 +276,15 @@ class TaskCreator:
         # QME/AME consistency
         elif any(term in document_type_lower or term in content_lower for term in ['qme', 'ame', 'independent medical']):
             return {
-                "description": "Review findings & update treatment plan",
-                "department": "General Staff",
+                "description": f"Review QME/AME findings and update plan",
+                "department": "Case Management",
                 "due_days": 2
             }
         
         # Billing consistency
         elif any(term in document_type_lower or term in content_lower for term in ['billing', 'invoice', 'payment', 'eob', 'eor']):
             return {
-                "description": "Review billing and reconcile as needed",
+                "description": f"Review billing and reconcile",
                 "department": "Billing/Compliance",
                 "due_days": 3
             }
@@ -292,15 +292,15 @@ class TaskCreator:
         # Prior auth consistency
         elif any(term in document_type_lower or term in content_lower for term in ['prior auth', 'authorization', 'pre-cert']):
             return {
-                "description": "Track prior auth approval",
+                "description": f"Track prior auth approval",
                 "department": "Prior Authorization",
                 "due_days": 3
             }
         
         # Default fallback
         return {
-            "description": "Review document and determine next steps",
-            "department": "General Staff",
+            "description": f"Review {document_type.title()} and determine next steps",
+            "department": "Case Management",
             "due_days": 2
         }
 
@@ -410,56 +410,22 @@ class TaskCreator:
                     except Exception:
                         out = {}
 
-            # Process tasks
-            ai_tasks = out.get("tasks", [])
-            if not isinstance(ai_tasks, list):
-                ai_tasks = [ai_tasks] if ai_tasks else []
-
-            tasks = []
-            for t in ai_tasks:
-                if not isinstance(t, dict):
-                    continue
-
-                # Use consistent template as base, allow AI to enhance quickNotes
-                task = {
-                    "description": consistent_template["description"],  # Always use consistent description
-                    "department": consistent_template["department"],    # Always use consistent department
-                    "status": t.get("status", "Pending"),
-                    "due_date": due_date,  # Use calculated due date
-                    "patient": patient_name,
-                    "actions": t.get("actions", ["Claim", "Complete"]),
-                    "source_document": source_document or "Unknown",
-                    "quickNotes": t.get("quickNotes", {
-                        "details": f"AI generated follow-up task for {document_type}",
-                        "one_line_note": consistent_template["description"]
-                    })
+            # Always return a single, clear, one-line task with dynamic description and relevant department
+            task = {
+                "description": consistent_template["description"],
+                "department": consistent_template["department"],
+                "status": "Pending",
+                "due_date": due_date,
+                "patient": patient_name,
+                "actions": ["Claim", "Complete"],
+                "source_document": source_document or "Unknown",
+                "quickNotes": {
+                    "details": f"AI generated follow-up task for {document_type}",
+                    "one_line_note": consistent_template["description"]
                 }
-
-                # Ensure due_date is valid datetime
-                try:
-                    task["due_date"] = datetime.strptime(task["due_date"], "%Y-%m-%d")
-                except Exception:
-                    task["due_date"] = current_date + timedelta(days=consistent_template["due_days"])
-
-                tasks.append(task)
-
-            # Fallback if AI failed
-            if not tasks:
-                tasks = [{
-                    "description": consistent_template["description"],
-                    "department": consistent_template["department"],
-                    "status": "Pending",
-                    "due_date": current_date + timedelta(days=consistent_template["due_days"]),
-                    "patient": patient_name,
-                    "actions": ["Claim", "Complete"],
-                    "source_document": source_document or "Unknown",
-                    "quickNotes": {
-                        "details": f"Consistent task for {document_type}",
-                        "one_line_note": consistent_template["description"]
-                    }
-                }]
-
-            logger.info(f"✅ Generated {len(tasks)} consistent task(s) for patient: {patient_name}")
+            }
+            logger.info(f"✅ Generated 1 consistent task for patient: {patient_name}")
+            tasks = [task]
 
             # Database operations
             db = DatabaseService()
