@@ -147,6 +147,12 @@ def deidentify_and_extract_phi(text: str) -> Tuple[Dict[str, Any], str]:
     return extracted_phi, deidentified_text
 
 
+
+
+
+
+
+
 def pseudonymize_structured(analysis: Dict[str, Any]) -> Dict[str, Any]:
     pseudo = analysis.copy() if isinstance(analysis, dict) else analysis.__dict__.copy()
     pseudo["patient_name"] = "[PATIENT]"
@@ -159,9 +165,6 @@ def pseudonymize_structured(analysis: Dict[str, Any]) -> Dict[str, Any]:
     if pseudo.get("claim_number") and str(pseudo["claim_number"]).lower() != "not specified":
         pseudo["claim_number"] = "[CLAIM_NUMBER]"
     return pseudo
-
-
-
 @router.post("/webhook/save-document")
 async def save_document_webhook(request: Request):
     try:
@@ -178,7 +181,8 @@ async def save_document_webhook(request: Request):
         extracted_phi, deidentified_text = deidentify_and_extract_phi(text)
         
         analyzer = ReportAnalyzer()
-        document_analysis = analyzer.extract_document_data(result_data.get("text", ""))
+        # Use de-identified text for LLM-based extraction
+        document_analysis = analyzer.extract_document_data(deidentified_text)
         print(document_analysis,'document analysis in webhook')
         
         # Override extracted PHI with real values from DLP
@@ -240,8 +244,8 @@ async def save_document_webhook(request: Request):
         # For missing required fields, we'll process but mark as failed in main flow
         has_missing_required_fields = len(missing_fields) > 0
         
-        # Generate AI brief summary (do this even for documents with missing fields)
-        brief_summary = analyzer.generate_brief_summary(result_data.get("text", ""))
+        # Generate AI brief summary (do this even for documents with missing fields) - use de-identified text
+        brief_summary = analyzer.generate_brief_summary(deidentified_text)
         
         # Handle dates - use "Not specified" string instead of datetime.now() when not available
         dob = document_analysis.dob if document_analysis.dob and str(document_analysis.dob).lower() != "not specified" else "Not specified"
@@ -288,7 +292,7 @@ async def save_document_webhook(request: Request):
         # Always fetch all previous unverified documents for the patient (ignore new claim for fetching all previous)
         # 🆕 Updated: Pass claimNumber only if valid; otherwise None to use dob + patient_name
         claim_number_for_query = document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else None
-        db_response = await db_service.get_claim_numbers(
+        db_response = await db_service.get_all_unverified_documents(
             patient_name=patient_name_for_query,
             physicianId=physician_id,
             claimNumber=claim_number_for_query,  # Use valid claim if available; else None to fallback to dob + patient_name
@@ -329,25 +333,27 @@ async def save_document_webhook(request: Request):
             claim_to_use = document_analysis.claim_number
             logger.info(f"ℹ️ Using extracted claim '{claim_to_use}' for patient '{document_analysis.patient_name}'")
         else:
-            # New document has no claim number
-            if len(previous_documents) == 0:
-                # First time: OK, proceed without claim
-                claim_to_use = "Not specified"
-                logger.info(f"ℹ️ First document for patient '{document_analysis.patient_name}': No claim specified, proceeding as OK")
-            elif len(valid_claims_list) == 0 and len(previous_documents) > 0:
-                # Previous documents exist but no valid claim in them: fail (second or later without claim)
-                claim_to_use = None
-                pending_reason = "No claim number specified and previous documents exist without valid claim"
-                logger.warning(f"⚠️ {pending_reason} for file {data['filename']}")
-            elif len(valid_claims_list) == 1:
-                # One previous valid claim: use it for new document
+            # No new claim from document: use existing patient claims if unambiguous
+            if len(valid_claims_list) == 1:
+                # Single valid claim from patient history: use it (works for first doc or subsequent)
                 claim_to_use = valid_claims_list[0]
                 logger.info(f"ℹ️ Using single previous valid claim '{claim_to_use}' for patient '{document_analysis.patient_name}'")
-            else:
+            elif len(valid_claims_list) > 1:
                 # Multiple previous valid claims: fail
                 claim_to_use = None
                 pending_reason = "No claim number specified and multiple previous valid claims found"
                 logger.warning(f"⚠️ {pending_reason} for file {data['filename']}")
+            else:
+                # No valid claims: OK for first doc, but fail if previous docs exist without claims
+                if len(previous_documents) == 0:
+                    # First time: OK, proceed without claim
+                    claim_to_use = "Not specified"
+                    logger.info(f"ℹ️ First document for patient '{document_analysis.patient_name}': No claim specified, proceeding as OK")
+                else:
+                    # Previous documents exist but no valid claim: fail (second or later without claim)
+                    claim_to_use = None
+                    pending_reason = "No claim number specified and previous documents exist without valid claim"
+                    logger.warning(f"⚠️ {pending_reason} for file {data['filename']}")
         
         # Determine status: fail only for missing fields or claim issues
         base_status = document_analysis.status
@@ -609,6 +615,7 @@ async def save_document_webhook(request: Request):
         except:
             pass  # Ignore emit failure during webhook error
         raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
+
 @router.post("/update-fail-document")
 async def update_fail_document(request: Request):
     try:
@@ -1048,7 +1055,7 @@ async def extract_documents(
     
     try:
         logger.info(f"\n🔄 === NEW MULTI-DOCUMENT PROCESSING REQUEST ({len(documents)} files) ===\n")
-        if physicianId:
+        if physicianId: 
             logger.info(f"👨‍⚕️ Physician ID provided: {physicianId}")
         
         for document in documents:

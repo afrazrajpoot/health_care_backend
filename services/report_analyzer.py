@@ -139,6 +139,7 @@ class ReportAnalyzer:
             input_variables=["document_text", "current_date"],
             partial_variables={"format_instructions": self.brief_summary_parser.get_format_instructions()},
         )
+
     def create_whats_new_prompt(self) -> PromptTemplate:
         template = """
         You are a medical document comparison expert. Compile the patient's complete medical history and current document into a historical progression format.
@@ -171,6 +172,7 @@ class ReportAnalyzer:
         - Use format: "Previous Item → Current Item (MM/DD)" for progression across documents, "Item (MM/DD)" for first-time or standalone items, where MM/DD is EXTRACTED from respective analyses (reportDate for prev, report date/rd for current). For chains with multiple: "Item1 (date1) → Item2 (date2) → ... → ItemN (dateN)".
         - Build a full history chain showing evolution over time, ensuring all dates align precisely with EXTRACTED document dates and the sequence is sorted chronologically (oldest to newest), with arrows connecting in order—differ where progression occurs (e.g., 05/15 → 09/12 → 10/05 if dates sort that way). If current document date is earlier (e.g., 05/15) and previous is later (e.g., 09/12), chain as "Item from current (05/15) → Item from previous (09/12)".
         - For diagnostic category, use the full diagnosis string from each analysis.diagnosis (which includes comma-separated key findings), chaining them in sorted date order.
+        - OUTPUT MUST BE A FLAT JSON OBJECT: {{"category": "description string", ...}}. Do NOT nest values as objects or arrays—keep all values as simple strings.
         
         IMPORTANT: Include ALL historical data in the chain. Do not skip or omit any information. ALWAYS extract and use dates from the analyses text first (reportDate for prev, report date/rd for current)—ignore {current_date} unless explicitly no date in analysis. Focus on historical progression format, with all changes and dates matching the document-specific dates, sorted chronologically. The document labeled "current" may actually be older than "previous" documents - ALWAYS sort by extracted dates ascending (oldest first), not by labels. Ensure the arrow chain reflects the true timeline, e.g., if dates are 09/12 (previous) and 05/15 (current), sort to 05/15 → 09/12.
         
@@ -204,6 +206,7 @@ class ReportAnalyzer:
             input_variables=["previous_analyses", "current_analysis", "current_date"],
             partial_variables={"format_instructions": self.whats_new_parser.get_format_instructions()},
         )
+
     def extract_document_data(self, document_text: str) -> DocumentAnalysis:
         try:
           
@@ -302,25 +305,32 @@ class ReportAnalyzer:
         
         logger.info(f"DEBUG: Accumulated previous whats_new: {all_previous_whats_new}")
         
-        # Prepare previous analyses as a formatted string INCLUDING all accumulated whats_new data
+        # ✅ KEY FIX: If no previous documents, skip LLM entirely and create initial whats_new directly (no error risk)
         if not previous_documents:
-            previous_analyses = "No previous documents available. This is the first report for the patient."
-        else:
-            previous_analyses = "ACCUMULATED HISTORY FROM PREVIOUS DOCUMENTS:\n"
-            for category, value in all_previous_whats_new.items():
-                previous_analyses += f"- {category}: {value}\n"
-            
-            # Also include the most recent document details for context
-            most_recent = sorted(
-                previous_documents, 
-                key=lambda d: d.get('createdAt') or d.get('created_at') or datetime.min,
-                reverse=True
-            )[0]
-            previous_analyses += f"\nMOST RECENT DOCUMENT SUMMARY:\n"
-            previous_analyses += f"- Diagnosis: {most_recent.get('diagnosis', 'N/A')}\n"
-            previous_analyses += f"- Document Type: {most_recent.get('document_type', 'N/A')}\n"
-            previous_analyses += f"- Key Concerns: {most_recent.get('key_concern', 'N/A')}\n"
-            previous_analyses += f"- Work Restrictions: {most_recent.get('work_restrictions', 'N/A')}\n"
+            logger.info("✅ No previous documents: Creating initial whats_new directly.")
+            initial_whats_new = self._create_initial_whats_new(current_analysis, mm_dd)
+            # Merge with empty previous (just returns initial)
+            merged_result = {**all_previous_whats_new, **initial_whats_new}
+            logger.info(f"✅ Final merged 'What's New' (initial): {merged_result}")
+            return merged_result
+        
+        # For previous data: Proceed with LLM, but with robust parsing
+        # Prepare previous analyses as a formatted string INCLUDING all accumulated whats_new data
+        previous_analyses = "ACCUMULATED HISTORY FROM PREVIOUS DOCUMENTS:\n"
+        for category, value in all_previous_whats_new.items():
+            previous_analyses += f"- {category}: {value}\n"
+        
+        # Also include the most recent document details for context
+        most_recent = sorted(
+            previous_documents, 
+            key=lambda d: d.get('createdAt') or d.get('created_at') or datetime.min,
+            reverse=True
+        )[0]
+        previous_analyses += f"\nMOST RECENT DOCUMENT SUMMARY:\n"
+        previous_analyses += f"- Diagnosis: {most_recent.get('diagnosis', 'N/A')}\n"
+        previous_analyses += f"- Document Type: {most_recent.get('document_type', 'N/A')}\n"
+        previous_analyses += f"- Key Concerns: {most_recent.get('key_concern', 'N/A')}\n"
+        previous_analyses += f"- Work Restrictions: {most_recent.get('work_restrictions', 'N/A')}\n"
         
         # Current analysis as detailed formatted string
         current_analysis_str = f"""
@@ -340,41 +350,62 @@ class ReportAnalyzer:
         try:
             prompt = self.create_whats_new_prompt()
             chain = prompt | self.llm | self.whats_new_parser
-            result = chain.invoke({
+            raw_result = chain.invoke({
                 "previous_analyses": previous_analyses,
                 "current_analysis": current_analysis_str,
                 "current_date": current_date
             })
             
-            # FIX: Ensure result is a dictionary and handle the case where AI returns invalid data
+            # ✅ ROBUST PARSING FIX: Manually parse JSON and flatten nested values
+            if isinstance(raw_result, str):
+                try:
+                    result = json.loads(raw_result)
+                except json.JSONDecodeError as je:
+                    logger.error(f"❌ Invalid JSON from LLM: {raw_result[:200]}... Error: {str(je)}")
+                    raise  # Re-raise to trigger fallback
+            else:
+                result = raw_result  # Assume it's already a dict from parser
+            
             if not isinstance(result, dict):
                 logger.error(f"❌ AI returned non-dict result: {result}")
-                result = {}
+                raise ValueError("Non-dict result from LLM")
+            
+            # Flatten any nested dicts/strings (handles cases like {"diagnostic": {"value": "str"}} -> {"diagnostic": "str"})
+            flattened_result = {}
+            for category, value in result.items():
+                if isinstance(value, dict):
+                    # Extract first string value or str(value)
+                    nested_str = None
+                    for k, v in value.items():
+                        if isinstance(v, str):
+                            nested_str = v
+                            break
+                    if nested_str:
+                        flattened_result[category] = nested_str
+                    else:
+                        flattened_result[category] = str(value)  # Fallback to str repr
+                elif isinstance(value, str) and value.strip().lower() != 'none':
+                    flattened_result[category] = value
+                # Skip empty/non-strings
+            
+            logger.info(f"✅ Parsed LLM result (flattened): {flattened_result}")
             
             # Merge previous whats_new with new changes - PRESERVE ALL HISTORY
             merged_result = all_previous_whats_new.copy()  # Start with all previous data
-            
-            # Add new changes from current analysis
-            for category, value in result.items():
-                if value and isinstance(value, str) and value.strip() and value.lower() != 'none':
+            for category, value in flattened_result.items():
+                if value and value.strip():
                     # Update with latest value (this will overwrite previous with updated info)
                     merged_result[category] = value
             
             logger.info(f"✅ MERGED 'What's New' (preserving history): {merged_result}")
-            
-            # CRITICAL FIX: If no previous documents and AI returns empty, generate initial whats_new
-            if not previous_documents and not merged_result:
-                merged_result = self._create_initial_whats_new(current_analysis, mm_dd)
-                
             return merged_result
             
         except Exception as e:
             logger.error(f"❌ AI comparison failed: {str(e)}")
-            # FIX: Return proper initial whats_new if no previous, otherwise return accumulated data
-            if not previous_documents:
-                return self._create_initial_whats_new(current_analysis, mm_dd)
-            else:
-                return all_previous_whats_new
+            # Fallback: Return accumulated previous data (no new changes added)
+            logger.info(f"✅ Falling back to previous whats_new only: {all_previous_whats_new}")
+            return all_previous_whats_new
+
     def _create_initial_whats_new(self, current_analysis: DocumentAnalysis, mm_dd: str) -> Dict[str, str]:
         """Create initial whats_new data for first document"""
         initial_whats_new = {}
