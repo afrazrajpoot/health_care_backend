@@ -209,7 +209,6 @@ class ReportAnalyzer:
 
     def extract_document_data(self, document_text: str) -> DocumentAnalysis:
         try:
-          
             prompt = self.create_extraction_prompt()
             chain = prompt | self.llm | self.parser
             current_date = datetime.now().strftime("%Y-%m-%d")
@@ -250,6 +249,7 @@ class ReportAnalyzer:
             dob=datetime.now().strftime("%Y-%m-%d"),
             doi=datetime.now().strftime("%Y-%m-%d"),
             status="normal",
+            rd=datetime.now().strftime("%Y-%m-%d"),
             diagnosis="Not specified",
             key_concern="Not specified",
             next_step="Not specified",
@@ -362,13 +362,14 @@ class ReportAnalyzer:
                     result = json.loads(raw_result)
                 except json.JSONDecodeError as je:
                     logger.error(f"❌ Invalid JSON from LLM: {raw_result[:200]}... Error: {str(je)}")
-                    raise  # Re-raise to trigger fallback
+                    # Fallback to default structure
+                    return self._create_default_whats_new(current_analysis)
             else:
                 result = raw_result  # Assume it's already a dict from parser
             
             if not isinstance(result, dict):
                 logger.error(f"❌ AI returned non-dict result: {result}")
-                raise ValueError("Non-dict result from LLM")
+                return self._create_default_whats_new(current_analysis)
             
             # Flatten any nested dicts/strings (handles cases like {"diagnostic": {"value": "str"}} -> {"diagnostic": "str"})
             flattened_result = {}
@@ -390,6 +391,11 @@ class ReportAnalyzer:
             
             logger.info(f"✅ Parsed LLM result (flattened): {flattened_result}")
             
+            # ✅ ENSURE NON-EMPTY RESULT: If flattened result is empty, use default
+            if not flattened_result:
+                logger.warning("⚠️ Flattened result is empty; using default structure")
+                flattened_result = self._create_default_whats_new(current_analysis)
+            
             # Merge previous whats_new with new changes - PRESERVE ALL HISTORY
             merged_result = all_previous_whats_new.copy()  # Start with all previous data
             for category, value in flattened_result.items():
@@ -397,14 +403,23 @@ class ReportAnalyzer:
                     # Update with latest value (this will overwrite previous with updated info)
                     merged_result[category] = value
             
+            # ✅ FINAL SAFETY CHECK: Ensure result is never empty
+            if not merged_result:
+                logger.warning("⚠️ Merged result is empty; creating default structure")
+                merged_result = self._create_default_whats_new(current_analysis)
+            
             logger.info(f"✅ MERGED 'What's New' (preserving history): {merged_result}")
             return merged_result
             
         except Exception as e:
             logger.error(f"❌ AI comparison failed: {str(e)}")
-            # Fallback: Return accumulated previous data (no new changes added)
-            logger.info(f"✅ Falling back to previous whats_new only: {all_previous_whats_new}")
-            return all_previous_whats_new
+            # Fallback: Return accumulated previous data OR create default if empty
+            if all_previous_whats_new:
+                logger.info(f"✅ Falling back to previous whats_new only: {all_previous_whats_new}")
+                return all_previous_whats_new
+            else:
+                logger.info("✅ No previous data available; creating default whats_new")
+                return self._create_default_whats_new(current_analysis)
 
     def _create_initial_whats_new(self, current_analysis: DocumentAnalysis, mm_dd: str) -> Dict[str, str]:
         """Create initial whats_new data for first document"""
@@ -430,8 +445,40 @@ class ReportAnalyzer:
         if current_analysis.work_restrictions and current_analysis.work_restrictions.lower() not in ['not specified', 'none', '']:
             initial_whats_new['ur_decision'] = f"{current_analysis.work_restrictions} ({mm_dd})"
         
+        # ✅ Ensure we always return at least one entry
+        if not initial_whats_new:
+            initial_whats_new['processing'] = f"Document processed ({mm_dd})"
+        
         logger.info(f"✅ Created initial whats_new: {initial_whats_new}")
         return initial_whats_new
+
+    def _create_default_whats_new(self, current_analysis: DocumentAnalysis) -> Dict[str, str]:
+        """Create a default whats_new structure when comparison fails or returns empty"""
+        mm_dd = datetime.now().strftime("%m/%d")
+        
+        default_whats_new = {
+            "initial_processing": f"Document processed ({mm_dd})"
+        }
+        
+        # Add document-type specific default entries
+        doc_type_lower = current_analysis.document_type.lower()
+        
+        if any(word in doc_type_lower for word in ["mri", "ct", "x-ray", "imaging", "scan"]):
+            default_whats_new["diagnostic"] = f"Imaging report - {current_analysis.diagnosis} ({mm_dd})" if current_analysis.diagnosis and current_analysis.diagnosis.lower() != "not specified" else f"Imaging report ({mm/dd})"
+        elif "qme" in doc_type_lower:
+            default_whats_new["qme"] = f"QME evaluation ({mm_dd})"
+        elif any(word in doc_type_lower for word in ["legal", "attorney", "claim"]):
+            default_whats_new["legal"] = f"Legal document processed ({mm_dd})"
+        else:
+            default_whats_new["medical"] = f"Medical report - {current_analysis.diagnosis} ({mm_dd})" if current_analysis.diagnosis and current_analysis.diagnosis.lower() != "not specified" else f"Medical report ({mm_dd})"
+        
+        # Add work restrictions if available
+        if (current_analysis.work_restrictions and 
+            current_analysis.work_restrictions.lower() not in ['not specified', 'none', '']):
+            default_whats_new["ur_decision"] = f"Work restrictions: {current_analysis.work_restrictions} ({mm_dd})"
+        
+        logger.info(f"✅ Created default whats_new: {default_whats_new}")
+        return default_whats_new
 
     def format_whats_new_as_highlights(self, whats_new_dict: Dict[str, str], current_date: str) -> List[str]:
         """

@@ -12,6 +12,7 @@ from utils.logger import logger
 from services.report_analyzer import ReportAnalyzer
 from services.database_service import DatabaseService, get_database_service
 from utils.celery_task import finalize_document_task
+from services.progress_service import progress_service
 from utils.socket_manager import sio
 from pathlib import Path
 from fastapi import Path as FastAPIPath
@@ -21,6 +22,11 @@ from services.task_creation import TaskCreator
 
 import os
 from urllib.parse import urlparse
+
+
+
+from utils.celery_task import process_batch_documents
+
 router = APIRouter()
 
 def extract_blob_path_from_gcs_url(gcs_url: str) -> str:
@@ -399,6 +405,7 @@ async def save_document_webhook(request: Request):
             }
             
             user_id = data.get("user_id")
+            print( data.get("user_id"),'userid in webhook')
             if user_id:
                 await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
             else:
@@ -1034,6 +1041,10 @@ def compute_file_hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+
+
+
+
 @router.post("/extract-documents", response_model=Dict[str, Any])
 async def extract_documents(
     documents: List[UploadFile] = File(...),
@@ -1048,44 +1059,54 @@ async def extract_documents(
         raise HTTPException(status_code=400, detail="No documents provided")
     
     file_service = FileService()
-    db_service = await get_database_service()  # Get DB service early for existence checks
-    payloads = []  # Collect all valid payloads for batch task
+    db_service = await get_database_service()
+    payloads = []
     ignored_filenames = []
-    successful_uploads = []  # Track only successful uploads for cleanup
+    successful_uploads = []
     
     try:
-        logger.info(f"\n🔄 === NEW MULTI-DOCUMENT PROCESSING REQUEST ({len(documents)} files) ===\n")
+        api_start_msg = f"\n🔄 === NEW MULTI-DOCUMENT PROCESSING REQUEST ({len(documents)} files) ===\n"
+        logger.info(api_start_msg)
+        print(api_start_msg)  # DEBUG PRINT
         if physicianId: 
             logger.info(f"👨‍⚕️ Physician ID provided: {physicianId}")
+            print(f"👨‍⚕️ Physician ID provided: {physicianId}")  # DEBUG PRINT
         
         for document in documents:
             document_start_time = datetime.now()
             content = await document.read()
             file_size = len(content)
             blob_path = None
-            temp_path = None  # Initialize for finally block
+            temp_path = None
             was_converted = False
             converted_path = None
             
             try:
                 file_service.validate_file(document, CONFIG["max_file_size"])
-                logger.info(f"📁 Starting processing for file: {document.filename}")
+                file_start_msg = f"📁 Starting processing for file: {document.filename}"
+                logger.info(file_start_msg)
+                print(file_start_msg)  # DEBUG PRINT
                 logger.info(f"📏 File size: {file_size} bytes ({file_size/(1024*1024):.2f} MB)")
+                print(f"📏 File size: {file_size} bytes ({file_size/(1024*1024):.2f} MB)")  # DEBUG PRINT
                 logger.info(f"📋 MIME type: {document.content_type}")
+                print(f"📋 MIME type: {document.content_type}")  # DEBUG PRINT
                 
                 # Early check for existing document
                 file_hash = compute_file_hash(content)
 
                 file_exists = await db_service.document_exists_by_hash(
-                file_hash=file_hash,
-                user_id=userId,
-                physician_id=physicianId
+                    file_hash=file_hash,
+                    user_id=userId,
+                    physician_id=physicianId
                 )
                 
                 if file_exists:
-                    logger.warning(f"⚠️ Document already exists: {document.filename}")
+                    exists_msg = f"⚠️ Document already exists: {document.filename}"
+                    logger.warning(exists_msg)
+                    print(exists_msg)  # DEBUG PRINT
                     
-                    # Emit skipped event
+                    # Emit skipped event using your existing sio
+                    from utils.socket_manager import sio
                     emit_data = {
                         'document_id': 'unknown',
                         'filename': document.filename,
@@ -1104,7 +1125,7 @@ async def extract_documents(
                         "filename": document.filename,
                         "reason": "Document already processed"
                     })
-                    continue  # Skip to next file
+                    continue
                 
                 # Save to temp for processing
                 temp_path = file_service.save_temp_file(content, document.filename)
@@ -1113,21 +1134,27 @@ async def extract_documents(
                 # Conversion
                 try:
                     if DocumentConverter.needs_conversion(temp_path):
-                        logger.info(f"🔄 Converting file: {Path(temp_path).suffix}")
+                        convert_msg = f"🔄 Converting file: {Path(temp_path).suffix}"
+                        logger.info(convert_msg)
+                        print(convert_msg)  # DEBUG PRINT
                         converted_path, was_converted = DocumentConverter.convert_document(temp_path, target_format="pdf")
                         processing_path = converted_path
                         logger.info(f"✅ Converted to: {processing_path}")
+                        print(f"✅ Converted to: {processing_path}")  # DEBUG PRINT
                     else:
-                        logger.info(f"✅ Direct support for: {Path(temp_path).suffix}")
+                        direct_msg = f"✅ Direct support for: {Path(temp_path).suffix}"
+                        logger.info(direct_msg)
+                        print(direct_msg)  # DEBUG PRINT
                 except Exception as convert_exc:
-                    logger.error(f"❌ Conversion failed for {document.filename}: {str(convert_exc)}")
+                    convert_error = f"❌ Conversion failed for {document.filename}: {str(convert_exc)}"
+                    logger.error(convert_error)
+                    print(convert_error)  # DEBUG PRINT
                     
-                    # For conversion failure, just log and skip
                     ignored_filenames.append({
                         "filename": document.filename,
                         "reason": f"File conversion failed: {str(convert_exc)}"
                     })
-                    continue  # Skip to next file
+                    continue
                 
                 # Document AI Processing
                 processor = get_document_ai_processor()
@@ -1142,61 +1169,78 @@ async def extract_documents(
                     formFields=document_result.formFields,
                     confidence=document_result.confidence,
                     success=document_result.success,
-                    gcs_file_link="",  # Set after upload
+                    gcs_file_link="",
                     fileInfo={
                         "originalName": document.filename,
                         "size": file_size,
                         "mimeType": document.content_type or "application/octet-stream",
                         "gcsUrl": ""
                     },
-                    summary="",  # Set after processing
+                    summary="",
                     comprehensive_analysis=None,
                     document_id=f"endpoint_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 )
                 
                 processing_time = (datetime.now() - document_start_time).total_seconds() * 1000
-                logger.info(f"⏱️ Document AI time for {document.filename}: {processing_time:.0f}ms")
+                ai_time_msg = f"⏱️ Document AI time for {document.filename}: {processing_time:.0f}ms"
+                logger.info(ai_time_msg)
+                print(ai_time_msg)  # DEBUG PRINT
 
-                # Only check if text was extracted - no other validation
+                # Only check if text was extracted
                 if not result.text:
                     reason = "No text extracted from document"
-                    logger.warning(f"⚠️ {reason}")
-                    
+                    no_text_msg = f"⚠️ {reason}"
+                    logger.warning(no_text_msg)
+                    print(no_text_msg)  # DEBUG PRINT
                     ignored_filenames.append({"filename": document.filename, "reason": reason})
                     continue
 
-                logger.info(f"📝 Processing document analysis for {document.filename}...")
+                analysis_msg = f"📝 Processing document analysis for {document.filename}..."
+                logger.info(analysis_msg)
+                print(analysis_msg)  # DEBUG PRINT
                 analyzer = ReportAnalyzer()
                 
-                # Skip or stub document type detection to avoid AttributeError
+                # Document type detection
                 try:
                     detected_type = analyzer.detect_document_type_preview(result.text)
-                    logger.info(f"🔍 Detected type: {detected_type}")
+                    detect_msg = f"🔍 Detected type: {detected_type}"
+                    logger.info(detect_msg)
+                    print(detect_msg)  # DEBUG PRINT
                 except AttributeError:
-                    logger.warning("⚠️ Document type detection unavailable—skipping")
+                    warn_msg = "⚠️ Document type detection unavailable—skipping"
+                    logger.warning(warn_msg)
+                    print(warn_msg)  # DEBUG PRINT
                     detected_type = "unknown"
                 result.summary = f"Document Type: {detected_type} - Processed successfully"
                 
-                # Extract document data but DON'T validate any fields
+                # Extract document data
                 document_analysis = analyzer.extract_document_data(result.text)
-                logger.info(f"✅ Document analysis completed for {document.filename}")
+                analysis_complete_msg = f"✅ Document analysis completed for {document.filename}"
+                logger.info(analysis_complete_msg)
+                print(analysis_complete_msg)  # DEBUG PRINT
                 
-                # Upload to GCS for all documents with text
+                # Upload to GCS
                 try:
-                    logger.info("☁️ Uploading to GCS...")
-                    gcs_url, blob_path = file_service.save_to_gcs(content, document.filename)  # Default folder="uploads"
-                    logger.info(f"✅ GCS upload: {gcs_url} | Blob: {blob_path}")
+                    gcs_msg = "☁️ Uploading to GCS..."
+                    logger.info(gcs_msg)
+                    print(gcs_msg)  # DEBUG PRINT
+                    gcs_url, blob_path = file_service.save_to_gcs(content, document.filename)
+                    gcs_success_msg = f"✅ GCS upload: {gcs_url} | Blob: {blob_path}"
+                    logger.info(gcs_success_msg)
+                    print(gcs_success_msg)  # DEBUG PRINT
                     successful_uploads.append(blob_path)
                     
                     # Update result
                     result.gcs_file_link = gcs_url
                     result.fileInfo["gcsUrl"] = gcs_url
                 except Exception as gcs_exc:
-                    logger.error(f"❌ GCS upload failed for {document.filename}: {str(gcs_exc)}")
+                    gcs_error = f"❌ GCS upload failed for {document.filename}: {str(gcs_exc)}"
+                    logger.error(gcs_error)
+                    print(gcs_error)  # DEBUG PRINT
                     ignored_filenames.append({"filename": document.filename, "reason": f"GCS upload failed: {str(gcs_exc)}"})
                     continue
                 
-                # Prepare payload - ALL documents with text go to batch
+                # Prepare payload
                 webhook_payload = {
                     "result": result.dict(),
                     "filename": document.filename,
@@ -1210,12 +1254,16 @@ async def extract_documents(
                     "physician_id": physicianId,
                     "user_id": userId
                 }
-                logger.info(f"📤 Adding payload to batch for {document.filename} (size: {len(str(webhook_payload))} chars)")
+                payload_msg = f"📤 Adding payload to batch for {document.filename} (size: {len(str(webhook_payload))} chars)"
+                logger.info(payload_msg)
+                print(payload_msg)  # DEBUG PRINT
                 
                 payloads.append(webhook_payload)
                 
             except Exception as proc_exc:
-                logger.error(f"❌ Unexpected processing error for {document.filename}: {str(proc_exc)}")
+                proc_error = f"❌ Unexpected processing error for {document.filename}: {str(proc_exc)}"
+                logger.error(proc_error)
+                print(proc_error)  # DEBUG PRINT
                 logger.debug(f"Traceback: {traceback.format_exc()}")
                 
                 ignored_filenames.append({
@@ -1223,59 +1271,83 @@ async def extract_documents(
                     "reason": f"Processing failed: {str(proc_exc)}"
                 })
             finally:
-                # Always cleanup temp files
+                # Cleanup temp files
                 if temp_path:
                     file_service.cleanup_temp_file(temp_path)
                 if was_converted and converted_path:
                     DocumentConverter.cleanup_converted_file(converted_path, was_converted)
         
         total_ignored = len(ignored_filenames)
-        logger.info(f"✅ Preprocessing complete: {len(payloads)} ready for batch, {total_ignored} ignored")
+        preprocess_msg = f"✅ Preprocessing complete: {len(payloads)} ready for batch, {total_ignored} ignored"
+        logger.info(preprocess_msg)
+        print(preprocess_msg)  # DEBUG PRINT
         
+        task_id = None
         if payloads:
-            # Enqueue ONE master batch task for sequential processing
-            from utils.celery_task import process_batch_documents
+            # Enqueue batch task
             task = process_batch_documents.delay(payloads)
             task_id = task.id
-            logger.info(f"🚀 Batch task queued for {len(payloads)} docs: {task_id}")
             
-            # Emit initial socket event for batch start
-            if userId:
-                await sio.emit('batch_started', {
-                    'task_id': task_id,
-                    'filenames': [p['filename'] for p in payloads],
-                    'user_id': userId
-                })
-            else:
-                await sio.emit('batch_started', {
-                    'task_id': task_id,
-                    'filenames': [p['filename'] for p in payloads]
-                })
+            # Initialize progress tracking (NOW SYNC - no await needed)
+            filenames = [p['filename'] for p in payloads]
+            progress_service.initialize_task_progress(  # Changed to sync call
+                task_id=task_id,
+                total_steps=len(payloads),
+                filenames=filenames,
+                user_id=userId
+            )
+            
+            queued_msg = f"🚀 Batch task queued for {len(payloads)} docs: {task_id}"
+            logger.info(queued_msg)
+            print(queued_msg)  # DEBUG PRINT
+            
         else:
-            task_id = None
-            logger.info("ℹ️ No payloads to queue")
+            no_payload_msg = "ℹ️ No payloads to queue"
+            logger.info(no_payload_msg)
+            print(no_payload_msg)  # DEBUG PRINT
         
-        logger.info("✅ === END MULTI-DOCUMENT REQUEST ===\n")
+        end_msg = "✅ === END MULTI-DOCUMENT REQUEST ===\n"
+        logger.info(end_msg)
+        print(end_msg)  # DEBUG PRINT
         
         return {
-            "task_id": task_id,  # Single batch task ID
+            "task_id": task_id,
             "payload_count": len(payloads),
             "ignored": ignored_filenames,
             "ignored_count": total_ignored
         }
     
     except Exception as global_exc:
-        logger.error(f"❌ Global error in extract-documents: {str(global_exc)}")
+        global_error = f"❌ Global error in extract-documents: {str(global_exc)}"
+        logger.error(global_error)
+        print(global_error)  # DEBUG PRINT
         logger.debug(f"Traceback: {traceback.format_exc()}")
         # Cleanup any successful uploads
         for path in successful_uploads:
             try:
                 file_service.delete_from_gcs(path)
-                logger.info(f"🗑️ Cleanup GCS (successful): {path}")
+                cleanup_msg = f"🗑️ Cleanup GCS (successful): {path}"
+                logger.info(cleanup_msg)
+                print(cleanup_msg)  # DEBUG PRINT
             except:
-                logger.warning(f"⚠️ Cleanup failed: {path}")
+                warn_msg = f"⚠️ Cleanup failed: {path}"
+                logger.warning(warn_msg)
+                print(warn_msg)  # DEBUG PRINT
         raise HTTPException(status_code=500, detail=f"Global processing failed: {str(global_exc)}")
 
+@router.get("/progress/{task_id}")
+async def get_progress(task_id: str):
+    """Get current progress for a task"""
+    try:
+        progress = await progress_service.get_progress(task_id)
+        if not progress:
+            raise HTTPException(status_code=404, detail="Task progress not found")
+        return progress
+    except Exception as e:
+        error_msg = f"❌ Error getting progress for task {task_id}: {str(e)}"
+        logger.error(error_msg)
+        print(error_msg)  # DEBUG PRINT
+        raise HTTPException(status_code=500, detail=f"Error retrieving progress: {str(e)}")
 
 from typing import Optional
 
