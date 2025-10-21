@@ -1,4 +1,4 @@
-# services/progress_service.py (ensured fractional calculation always overrides any manual percentage; added task_complete emit at 100%)
+# services/progress_service.py
 import asyncio
 from typing import Dict, List, Optional
 from datetime import datetime
@@ -56,12 +56,8 @@ class ProgressService:
             logger.info(f"📊 Progress initialized for task {task_id}: {total_steps} files, user: {user_id}")
             print(f"📊 Progress initialized for task {task_id}: {total_steps} files, user: {user_id}")  # DEBUG PRINT
             
-            # Emit batch started in background (non-blocking)
-            if asyncio.iscoroutinefunction(self.emit_batch_started):
-                asyncio.create_task(self.emit_batch_started(task_id, filenames, total_steps, user_id))
-            else:
-                # If not async, call sync version if exists
-                pass
+            # Use background thread for async operations in Celery context
+            self._emit_batch_started_background(task_id, filenames, total_steps, user_id)
             
             return progress_data
         except Exception as e:
@@ -69,8 +65,28 @@ class ProgressService:
             print(f"❌ Failed to initialize progress for task {task_id}: {str(e)}")  # DEBUG PRINT
             raise
     
-    async def emit_batch_started(self, task_id: str, filenames: List[str], total_files: int, user_id: str = None):
-        """Emit batch started event - ASYNC (background)"""
+    def _emit_batch_started_background(self, task_id: str, filenames: List[str], total_files: int, user_id: str = None):
+        """Background emit using thread for sync Celery compatibility"""
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            import asyncio
+
+            def emit_in_thread():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(self._emit_batch_started_async(task_id, filenames, total_files, user_id))
+                finally:
+                    loop.close()
+
+            executor = ThreadPoolExecutor(max_workers=1)
+            executor.submit(emit_in_thread)
+            logger.info(f"📡 Background batch_started emit queued for task {task_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to queue batch_started emit for task {task_id}: {str(e)}")
+
+    async def _emit_batch_started_async(self, task_id: str, filenames: List[str], total_files: int, user_id: str = None):
+        """Internal async method to emit batch started event"""
         try:
             emit_data = {
                 'task_id': task_id,
@@ -176,6 +192,10 @@ class ProgressService:
                 complete_msg = f"🏁 Task {task_id} completed: {progress['completed_steps']}/{total_steps} files"
                 logger.info(complete_msg)
                 print(complete_msg)
+                
+                # Schedule reset after completion
+                self._schedule_reset_task(task_id, progress)
+                
                 self._emit_task_complete_background(task_id, progress)
             
             # Save updated progress
@@ -194,6 +214,98 @@ class ProgressService:
             logger.error(error_msg)
             print(error_msg)
             return None
+
+    def _schedule_reset_task(self, task_id: str, progress: Dict):
+        """Schedule progress reset after completion"""
+        try:
+            # Schedule reset after 30 seconds (give time for frontend to receive final updates)
+            reset_delay = 30  # seconds
+            
+            def delayed_reset():
+                import time
+                time.sleep(reset_delay)
+                self.reset_task_progress(task_id)
+            
+            from concurrent.futures import ThreadPoolExecutor
+            executor = ThreadPoolExecutor(max_workers=1)
+            executor.submit(delayed_reset)
+            
+            logger.info(f"⏰ Reset scheduled for task {task_id} in {reset_delay} seconds")
+            print(f"⏰ Reset scheduled for task {task_id} in {reset_delay} seconds")
+        except Exception as e:
+            logger.error(f"❌ Failed to schedule reset for task {task_id}: {str(e)}")
+
+    def reset_task_progress(self, task_id: str):
+        """Reset/remove progress data for a completed task"""
+        try:
+            progress_key = f"progress:{task_id}"
+            
+            # Get progress data before deletion for emitting reset event
+            progress_data = self.redis_client.get(progress_key)
+            if progress_data:
+                progress = json.loads(progress_data)
+                user_id = progress.get('user_id')
+                
+                # Delete the progress data
+                deleted = self.redis_client.delete(progress_key)
+                
+                if deleted:
+                    logger.info(f"🔄 Progress reset for task {task_id}")
+                    print(f"🔄 Progress reset for task {task_id}")
+                    
+                    # Emit reset event
+                    self._emit_progress_reset_background(task_id, user_id)
+                else:
+                    logger.warning(f"⚠️ No progress found to reset for task {task_id}")
+                    print(f"⚠️ No progress found to reset for task {task_id}")
+            else:
+                logger.warning(f"⚠️ No progress data found for task {task_id} during reset")
+                print(f"⚠️ No progress data found for task {task_id} during reset")
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to reset progress for task {task_id}: {str(e)}")
+            print(f"❌ Failed to reset progress for task {task_id}: {str(e)}")
+
+    def _emit_progress_reset_background(self, task_id: str, user_id: str = None):
+        """Background emit for progress_reset event"""
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            import asyncio
+
+            def emit_in_thread():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(self._emit_progress_reset_async(task_id, user_id))
+                finally:
+                    loop.close()
+
+            executor = ThreadPoolExecutor(max_workers=1)
+            executor.submit(emit_in_thread)
+            logger.info(f"🔄 Background progress_reset emit queued for task {task_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to queue progress_reset emit for task {task_id}: {str(e)}")
+
+    async def _emit_progress_reset_async(self, task_id: str, user_id: str = None):
+        """Emit progress_reset event when task progress is cleared"""
+        try:
+            reset_data = {
+                'task_id': task_id,
+                'message': 'Progress reset after completion'
+            }
+            
+            if user_id:
+                await sio.emit('progress_reset', reset_data, room=f"user_{user_id}")
+                logger.info(f"🔄 progress_reset emitted to user_{user_id} for task {task_id}")
+                print(f"🔄 progress_reset emitted to user_{user_id} for task {task_id}")
+            else:
+                await sio.emit('progress_reset', reset_data)
+                logger.info(f"🔄 progress_reset broadcast for task {task_id}")
+                print(f"🔄 progress_reset broadcast for task {task_id}")
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to emit progress_reset for task {task_id}: {str(e)}")
+
     def _emit_progress_update_background(self, task_id: str, progress: Dict):
         """Background emit using thread for sync Celery compatibility"""
         try:
@@ -278,6 +390,41 @@ class ProgressService:
                 print(f"🏁 task_complete broadcast for task {task_id}")  # DEBUG PRINT
         except Exception as e:
             logger.error(f"❌ Failed to emit task_complete for task {task_id}: {str(e)}")
+
+    def cleanup_completed_tasks(self, older_than_hours: int = 1):
+        """Clean up progress data for completed tasks older than specified hours"""
+        try:
+            pattern = "progress:*"
+            keys = self.redis_client.keys(pattern)
+            cleaned_count = 0
+            
+            for key in keys:
+                try:
+                    progress_data = self.redis_client.get(key)
+                    if progress_data:
+                        progress = json.loads(progress_data)
+                        
+                        # Check if task is completed and older than threshold
+                        if progress.get('status') == 'completed':
+                            end_time_str = progress.get('end_time')
+                            if end_time_str:
+                                end_time = datetime.fromisoformat(end_time_str)
+                                time_diff = datetime.now() - end_time
+                                
+                                if time_diff.total_seconds() > (older_than_hours * 3600):
+                                    self.redis_client.delete(key)
+                                    cleaned_count += 1
+                                    logger.info(f"🧹 Cleaned up old progress: {key}")
+                except Exception as e:
+                    logger.error(f"❌ Error processing key {key}: {str(e)}")
+                    continue
+            
+            logger.info(f"🧹 Cleanup completed: {cleaned_count} old progress entries removed")
+            return cleaned_count
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to cleanup completed tasks: {str(e)}")
+            return 0
 
     async def get_progress(self, task_id: str) -> Optional[Dict]:
         """Get current progress for a task - ASYNC for API"""

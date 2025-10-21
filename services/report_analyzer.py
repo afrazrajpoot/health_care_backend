@@ -45,9 +45,7 @@ class ReportAnalyzer:
             temperature=0.0,
             timeout=120
         )
-        self.parser = JsonOutputParser(pydantic_object=DocumentAnalysis)
         self.whats_new_parser = JsonOutputParser()  # Raw JSON parser for dynamic flat dict output
-        self.brief_summary_parser = JsonOutputParser(pydantic_object=BriefSummary)
 
     def detect_document_type_preview(self, text: str) -> str:
         """
@@ -71,176 +69,7 @@ class ReportAnalyzer:
         except Exception as e:
             logger.warning(f"⚠️ Document type detection failed: {str(e)}")
             return "unknown"
-
-    def create_extraction_prompt(self) -> PromptTemplate:
-        template = """
-        You are a medical document analysis expert. Extract structured information from the following medical document.
-        
-        DOCUMENT TEXT:
-        {document_text}
-        
-        CURRENT DATE: {current_date}
-        
-        EXTRACT THE FOLLOWING INFORMATION IN POINT FORM :
-        
-        - Patient name (full name)
-        - Claim number or case ID (look for any identifiers like claim numbers, case IDs, etc. If not found, use "Not specified")
-        - Date of birth (DOB) in YYYY-MM-DD format
-        - Date of injury (DOI) in YYYY-MM-DD format  
-        - Current status (normal, urgent, critical)
-        - Primary diagnosis and 2-3 key findings (comma-separated if multiple)
-        - Key clinical concerns 
-        - Recommended next steps 
-        - Activities of daily living affected
-        - Work restrictions 
-        - Document type
-        - 3-5 key summary points 
-        -Report date (RD) in YYYY-MM-DD format
-        
-        CRITICAL INSTRUCTIONS:
-        - For diagnosis, include primary diagnosis plus 2-3 key findings (e.g., "Normal MRI, no mass lesion, clear sinuses"), comma-separated, up to 10 words total.
-        - For key_concern, next_step, adls_affected, work_restrictions: Keep to 2-3 words each.
-        - For summary_points, provide 3-5 bullet points, each 2-3 words.
-        - If claim number is not explicitly found, use "Not specified".
-        - Do NOT invent claim numbers.
-        - If information is missing, use "Not specified".
-        
-        {format_instructions}
-        
-        Return ONLY valid JSON. No additional text.
-        """
-        return PromptTemplate(
-            template=template,
-            input_variables=["document_text", "current_date"],
-            partial_variables={"format_instructions": self.parser.get_format_instructions()},
-        )
-
-    def create_brief_summary_prompt(self) -> PromptTemplate:
-        template = """
-        You are a medical document summarization expert. Generate a brief summary of the following medical document.
-        
-        DOCUMENT TEXT:
-        {document_text}
-        
-        CURRENT DATE: {current_date}
-        
-        CRITICAL INSTRUCTIONS:
-        - Create a concise 1-2 sentence summary capturing the essence of the report.
-        - Focus on key findings, diagnosis, and recommendations.
-        - Keep it professional and objective.
-        - If information is missing, use "Not specified".
-        
-        {format_instructions}
-        
-        Return ONLY valid JSON. No additional text.
-        """
-        return PromptTemplate(
-            template=template,
-            input_variables=["document_text", "current_date"],
-            partial_variables={"format_instructions": self.brief_summary_parser.get_format_instructions()},
-        )
-
-    def create_whats_new_prompt(self) -> PromptTemplate:
-        template = """
-        You are a medical document comparison expert. Compile the patient's complete medical history and current document into a historical progression format.
-        
-        PATIENT'S MEDICAL HISTORY (most recent first, ordered by reportDate descending; extract dates from each entry's reportDate):
-        {previous_analyses}
-        
-        CURRENT DOCUMENT ANALYSIS (extract report date from analysis text, fallback to provided {current_date} if missing):
-        {current_analysis}
-        
-        CRITICAL INSTRUCTIONS:
-        - STRICTLY obey document dates: EXTRACT reportDate MM/DD from each previous entry in {previous_analyses}, and EXTRACT report date MM/DD from {current_analysis} (e.g., from 'date:', 'DOI:', 'rd:', or summary date field; fallback to {current_date} only if no date found in analysis). Treat the extracted report date (rd) from current_analysis as its document date.
-        - Collect ALL entries (previous + current) with their extracted dates, then sort them chronologically by date ascending (oldest first). If a previous reportDate is later than the current rd, that previous entry must appear AFTER current in the chronological chain.
-        - Use arrow notation "→" to indicate progression or continuation in strict chronological order by extracted dates (oldest to newest), NOT by input order. ALWAYS sort the chain by extracted dates ascending, regardless of whether the current document is older or newer than previous ones.
-        - Include EVERY diagnosis, treatment, finding, etc., without skipping any data.
-        - If patient has multiple diagnoses, include ALL of them in the chain.
-        - For first document (no previous), show all pure findings WITHOUT arrows.
-        - Show ALL continuing items as they appear in sequence based on SORTED extracted dates.
-        - Categorize ALL items into these specific categories:
-        * diagnostic: Diagnosis changes, medical findings
-        * qme: Qualified Medical Evaluator reports, independent medical exams
-        * raf: Risk Adjustment Factor reports, claim adjustments
-        * ur_decision: Utilization Review decisions, work restrictions, treatment approvals
-        * legal: Legal developments, attorney letters, claim updates, whether approved or denied along with reason.
-        
-        - For EACH category, provide a concise description (3-5 words) with date in MM/DD format: STRICTLY use EXTRACTED reportDate for previous documents and EXTRACTED report date (rd) for current (do NOT use {current_date} unless extraction fails). Chain across the sorted sequence for that category.
-        - Include SPECIFIC FINDINGS like all diagnoses, test results, restrictions - list multiples separated by commas.
-        - Include ALL categories with data from any document.
-        - Only include categories that have actual data. Do not include entries with 'None' or empty.
-        - Use format: "Previous Item → Current Item (MM/DD)" for progression across documents, "Item (MM/DD)" for first-time or standalone items, where MM/DD is EXTRACTED from respective analyses (reportDate for prev, report date/rd for current). For chains with multiple: "Item1 (date1) → Item2 (date2) → ... → ItemN (dateN)".
-        - Build a full history chain showing evolution over time, ensuring all dates align precisely with EXTRACTED document dates and the sequence is sorted chronologically (oldest to newest), with arrows connecting in order—differ where progression occurs (e.g., 05/15 → 09/12 → 10/05 if dates sort that way). If current document date is earlier (e.g., 05/15) and previous is later (e.g., 09/12), chain as "Item from current (05/15) → Item from previous (09/12)".
-        - For diagnostic category, use the full diagnosis string from each analysis.diagnosis (which includes comma-separated key findings), chaining them in sorted date order.
-        - OUTPUT MUST BE A FLAT JSON OBJECT: {{"category": "description string", ...}}. Do NOT nest values as objects or arrays—keep all values as simple strings.
-        
-        IMPORTANT: Include ALL historical data in the chain. Do not skip or omit any information. ALWAYS extract and use dates from the analyses text first (reportDate for prev, report date/rd for current)—ignore {current_date} unless explicitly no date in analysis. Focus on historical progression format, with all changes and dates matching the document-specific dates, sorted chronologically. The document labeled "current" may actually be older than "previous" documents - ALWAYS sort by extracted dates ascending (oldest first), not by labels. Ensure the arrow chain reflects the true timeline, e.g., if dates are 09/12 (previous) and 05/15 (current), sort to 05/15 → 09/12.
-        
-        EXAMPLES FOR FIRST DOCUMENT (using extracted report date):
-        - First MRI report (analysis has "Date: 10/02"): {{"diagnostic": "Normal MRI, no mass lesion, clear sinuses (10/02)"}}
-        - First QME report (analysis has "reportDate: 10/02"): {{"qme": "QME evaluation, restrictions (10/02)"}}
-        - First legal document: {{"legal": "Claim QM12345 approved (10/02)"}}
-        
-        EXAMPLES FOR HISTORICAL CHAIN (extracted dates sorted: prev reportDate 09/01, current rd 10/02):
-        - Diagnosis progression: {{"diagnostic": "lumbar strain (09/01) → lumbar strain, disc bulge, no compression (10/02)"}}
-        - Multiple work restrictions: {{"ur_decision": "light duty (09/01) → no heavy lifting, no bending (10/02)"}}
-        - Legal updates: {{"legal": "Claim QM12345 filed (09/01) → Claim QM12345 approved (10/02)"}}
-        
-        EXAMPLES WHEN PREVIOUS IS LATEST (extracted dates sorted: current rd 05/15, prev reportDate 09/12):
-        - {{"diagnostic": "Lumbar Disc Herniation, Left L5 Radiculopathy, L4-L5 disc protrusion (05/15) → Lumbar Disc Herniation, Resolving L5 Radiculopathy (09/12)"}}
-        
-        EXAMPLES OF WHAT TO INCLUDE:
-        - ✅ DO: Chain all diagnoses even if continuing: "strain (09/01) → strain, bulge, no compression (10/02)"
-        - ✅ DO: List multiples: "PT, meds, restrictions (10/02)"
-        - ✅ DO: Show all history: "denied (09/01) → approved (10/02)"
-        - ❌ DON'T: Use same date on both sides unless extracted dates match exactly
-        - ✅ DO: Sort dates chronologically: if current rd 05/15 and prev reportDate 09/12, chain as "item (05/15) → item (09/12)"
-        - ✅ DO: If current is older, it appears first in chain: current rd 05/15, prev 09/12 = "item (05/15) → item (09/12)"
-        
-        {format_instructions}
-        
-        Return ONLY valid JSON. No additional text.
-        """
-        return PromptTemplate(
-            template=template,
-            input_variables=["previous_analyses", "current_analysis", "current_date"],
-            partial_variables={"format_instructions": self.whats_new_parser.get_format_instructions()},
-        )
-
-    def extract_document_data(self, document_text: str) -> DocumentAnalysis:
-        try:
-            prompt = self.create_extraction_prompt()
-            chain = prompt | self.llm | self.parser
-            current_date = datetime.now().strftime("%Y-%m-%d")
-            result = chain.invoke({
-                "document_text": document_text[:15000],
-                "current_date": current_date
-            })
-            logger.info(f"✅ Extracted data: Patient={result['patient_name']}, Claim={result['claim_number']}, Diagnosis={result['diagnosis']}")
-            return DocumentAnalysis(**result)
-        except Exception as e:
-            logger.error(f"❌ Document analysis failed: {str(e)}")
-            return self.create_fallback_analysis()
-
-    def generate_brief_summary(self, document_text: str) -> str:
-        """
-        Generate a brief AI-powered summary of the document.
-        """
-        try:
-            prompt = self.create_brief_summary_prompt()
-            chain = prompt | self.llm | self.brief_summary_parser
-            current_date = datetime.now().strftime("%Y-%m-%d")
-            result = chain.invoke({
-                "document_text": document_text[:15000],
-                "current_date": current_date
-            })
-            brief_summary = result.get('brief_summary', 'Not specified')
-            logger.info(f"✅ Generated brief summary: {brief_summary}")
-            return brief_summary
-        except Exception as e:
-            logger.error(f"❌ Brief summary generation failed: {str(e)}")
-            return "Brief summary unavailable"
-
+    
     def create_fallback_analysis(self) -> DocumentAnalysis:
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         return DocumentAnalysis(
@@ -464,7 +293,7 @@ class ReportAnalyzer:
         doc_type_lower = current_analysis.document_type.lower()
         
         if any(word in doc_type_lower for word in ["mri", "ct", "x-ray", "imaging", "scan"]):
-            default_whats_new["diagnostic"] = f"Imaging report - {current_analysis.diagnosis} ({mm_dd})" if current_analysis.diagnosis and current_analysis.diagnosis.lower() != "not specified" else f"Imaging report ({mm/dd})"
+            default_whats_new["diagnostic"] = f"Imaging report - {current_analysis.diagnosis} ({mm_dd})" if current_analysis.diagnosis and current_analysis.diagnosis.lower() != "not specified" else f"Imaging report ({mm_dd})"
         elif "qme" in doc_type_lower:
             default_whats_new["qme"] = f"QME evaluation ({mm_dd})"
         elif any(word in doc_type_lower for word in ["legal", "attorney", "claim"]):
@@ -479,6 +308,73 @@ class ReportAnalyzer:
         
         logger.info(f"✅ Created default whats_new: {default_whats_new}")
         return default_whats_new
+
+    def create_whats_new_prompt(self) -> PromptTemplate:
+        template = """
+        You are a medical document comparison expert. Compile the patient's complete medical history and current document into a historical progression format.
+        
+        PATIENT'S MEDICAL HISTORY (most recent first, ordered by reportDate descending; extract dates from each entry's reportDate):
+        {previous_analyses}
+        
+        CURRENT DOCUMENT ANALYSIS (extract report date from analysis text, fallback to provided {current_date} if missing):
+        {current_analysis}
+        
+        CRITICAL INSTRUCTIONS:
+        - STRICTLY obey document dates: EXTRACT reportDate MM/DD from each previous entry in {previous_analyses}, and EXTRACT report date MM/DD from {current_analysis} (e.g., from 'date:', 'DOI:', 'rd:', or summary date field; fallback to {current_date} only if no date found in analysis). Treat the extracted report date (rd) from current_analysis as its document date.
+        - Collect ALL entries (previous + current) with their extracted dates, then sort them chronologically by date ascending (oldest first). If a previous reportDate is later than the current rd, that previous entry must appear AFTER current in the chronological chain.
+        - Use arrow notation "→" to indicate progression or continuation in strict chronological order by extracted dates (oldest to newest), NOT by input order. ALWAYS sort the chain by extracted dates ascending, regardless of whether the current document is older or newer than previous ones.
+        - Include EVERY diagnosis, treatment, finding, etc., without skipping any data.
+        - If patient has multiple diagnoses, include ALL of them in the chain.
+        - For first document (no previous), show all pure findings WITHOUT arrows.
+        - Show ALL continuing items as they appear in sequence based on SORTED extracted dates.
+        - Categorize ALL items into these specific categories:
+        * diagnostic: Diagnosis changes, medical findings
+        * qme: Qualified Medical Evaluator reports, independent medical exams
+        * raf: Risk Adjustment Factor reports, claim adjustments
+        * ur_decision: Utilization Review decisions, work restrictions, treatment approvals
+        * legal: Legal developments, attorney letters, claim updates, whether approved or denied along with reason.
+        
+        - For EACH category, provide a concise description (3-5 words) with date in MM/DD format: STRICTLY use EXTRACTED reportDate for previous documents and EXTRACTED report date (rd) for current (do NOT use {current_date} unless extraction fails). Chain across the sorted sequence for that category.
+        - Include SPECIFIC FINDINGS like all diagnoses, test results, restrictions - list multiples separated by commas.
+        - Include ALL categories with data from any document.
+        - Only include categories that have actual data. Do not include entries with 'None' or empty.
+        - Use format: "Previous Item → Current Item (MM/DD)" for progression across documents, "Item (MM/DD)" for first-time or standalone items, where MM/DD is EXTRACTED from respective analyses (reportDate for prev, report date/rd for current). For chains with multiple: "Item1 (date1) → Item2 (date2) → ... → ItemN (dateN)".
+        - Build a full history chain showing evolution over time, ensuring all dates align precisely with EXTRACTED document dates and the sequence is sorted chronologically (oldest to newest), with arrows connecting in order—differ where progression occurs (e.g., 05/15 → 09/12 → 10/05 if dates sort that way). If current document date is earlier (e.g., 05/15) and previous is later (e.g., 09/12), chain as "Item from current (05/15) → Item from previous (09/12)".
+        - For diagnostic category, use the full diagnosis string from each analysis.diagnosis (which includes comma-separated key findings), chaining them in sorted date order.
+        - OUTPUT MUST BE A FLAT JSON OBJECT: {{"category": "description string", ...}}. Do NOT nest values as objects or arrays—keep all values as simple strings.
+        
+        IMPORTANT: Include ALL historical data in the chain. Do not skip or omit any information. ALWAYS extract and use dates from the analyses text first (reportDate for prev, report date/rd for current)—ignore {current_date} unless explicitly no date in analysis. Focus on historical progression format, with all changes and dates matching the document-specific dates, sorted chronologically. The document labeled "current" may actually be older than "previous" documents - ALWAYS sort by extracted dates ascending (oldest first), not by labels. Ensure the arrow chain reflects the true timeline, e.g., if dates are 09/12 (previous) and 05/15 (current), sort to 05/15 → 09/12.
+        
+        EXAMPLES FOR FIRST DOCUMENT (using extracted report date):
+        - First MRI report (analysis has "Date: 10/02"): {{"diagnostic": "Normal MRI, no mass lesion, clear sinuses (10/02)"}}
+        - First QME report (analysis has "reportDate: 10/02"): {{"qme": "QME evaluation, restrictions (10/02)"}}
+        - First legal document: {{"legal": "Claim QM12345 approved (10/02)"}}
+        
+        EXAMPLES FOR HISTORICAL CHAIN (extracted dates sorted: prev reportDate 09/01, current rd 10/02):
+        - Diagnosis progression: {{"diagnostic": "lumbar strain (09/01) → lumbar strain, disc bulge, no compression (10/02)"}}
+        - Multiple work restrictions: {{"ur_decision": "light duty (09/01) → no heavy lifting, no bending (10/02)"}}
+        - Legal updates: {{"legal": "Claim QM12345 filed (09/01) → Claim QM12345 approved (10/02)"}}
+        
+        EXAMPLES WHEN PREVIOUS IS LATEST (extracted dates sorted: current rd 05/15, prev reportDate 09/12):
+        - {{"diagnostic": "Lumbar Disc Herniation, Left L5 Radiculopathy, L4-L5 disc protrusion (05/15) → Lumbar Disc Herniation, Resolving L5 Radiculopathy (09/12)"}}
+        
+        EXAMPLES OF WHAT TO INCLUDE:
+        - ✅ DO: Chain all diagnoses even if continuing: "strain (09/01) → strain, bulge, no compression (10/02)"
+        - ✅ DO: List multiples: "PT, meds, restrictions (10/02)"
+        - ✅ DO: Show all history: "denied (09/01) → approved (10/02)"
+        - ❌ DON'T: Use same date on both sides unless extracted dates match exactly
+        - ✅ DO: Sort dates chronologically: if current rd 05/15 and prev reportDate 09/12, chain as "item (05/15) → item (09/12)"
+        - ✅ DO: If current is older, it appears first in chain: current rd 05/15, prev 09/12 = "item (05/15) → item (09/12)"
+        
+        {format_instructions}
+        
+        Return ONLY valid JSON. No additional text.
+        """
+        return PromptTemplate(
+            template=template,
+            input_variables=["previous_analyses", "current_analysis", "current_date"],
+            partial_variables={"format_instructions": self.whats_new_parser.get_format_instructions()},
+        )
 
     def format_whats_new_as_highlights(self, whats_new_dict: Dict[str, str], current_date: str) -> List[str]:
         """

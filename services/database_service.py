@@ -621,67 +621,177 @@ class DatabaseService:
 
 
   
-    async def update_previous_claim_numbers(
+    async def update_previous_fields(
         self,
         patient_name: str,
         dob: str,
         physician_id: str,
-        claim_number: str
-    ):
-        print(patient_name,physician_id,claim_number,dob,'patient data claim number')
-        await self.prisma.document.update_many(
-            where={
-                "patientName": patient_name,
-                "dob": dob,  # Assuming DOB is stored as DateTime in schema
-                "physicianId": physician_id,
-                "claimNumber": "Not specified"  # Update only those with null/missing claimNumber
-            },
-            data={
-                "claimNumber": claim_number
-            }
+        claim_number: str,
+        doi: Optional[str] = None,
+    ) -> int:
+        print(patient_name, physician_id, claim_number, dob, 'patient data for update')
+        
+        # 🆕 IMPROVED: Fetch based on looser criteria to catch docs with incorrect/missing fields
+        # Primary: physician_id + (patient_name OR claim_number match/missing)
+        or_conditions = []
+        
+        # Condition 1: Matches patient_name (if provided)
+        if patient_name and patient_name.lower() != "not specified":
+            or_conditions.append({"patientName": patient_name})
+        
+        # Condition 2: Matches claim_number or missing
+        if claim_number and claim_number.lower() != "not specified":
+            or_conditions.append({"claimNumber": {"in": [claim_number, "Not specified"]}})
+        
+        # If no OR conditions, fallback to just physician_id
+        fetch_where = {
+            "physicianId": physician_id,
+        }
+        
+        if or_conditions:
+            fetch_where["OR"] = or_conditions
+        
+        # 🆕 FIXED: No 'select' parameter
+        documents_to_update = await self.prisma.document.find_many(
+            where=fetch_where,
         )
-        logger.info(f"Updated claim numbers for patient '{patient_name}' (DOB: {dob}, Physician: {physician_id}) to '{claim_number}'")
+        
+        logger.info(f"🔍 Found {len(documents_to_update)} documents to potentially update for physician '{physician_id}'")
+        
+        updated_count = 0
+        for doc in documents_to_update:
+            # Determine updates needed for this doc
+            update_data = {}
+            
+            # Update patientName if missing or doesn't match new one
+            if (not doc.patientName or str(doc.patientName).lower() == "not specified" or
+                str(doc.patientName).lower() != patient_name.lower()):
+                update_data["patientName"] = patient_name
+                logger.debug(f"  - Will update patientName for doc {doc.id}: '{doc.patientName}' -> '{patient_name}'")
+            
+            # Update dob if missing or doesn't match new one
+            if (not doc.dob or str(doc.dob).lower() == "not specified" or
+                str(doc.dob) != dob):
+                update_data["dob"] = dob
+                logger.debug(f"  - Will update dob for doc {doc.id}: '{doc.dob}' -> '{dob}'")
+            
+            # Update claimNumber if missing
+            if not doc.claimNumber or str(doc.claimNumber).lower() == "not specified":
+                update_data["claimNumber"] = claim_number
+                logger.debug(f"  - Will update claimNumber for doc {doc.id}: '{doc.claimNumber}' -> '{claim_number}'")
+            
+            # Update doi if provided and missing or doesn't match
+            if doi and str(doi).lower() != "not specified":
+                if (not doc.doi or str(doc.doi).lower() == "not specified" or
+                    str(doc.doi) != doi):
+                    update_data["doi"] = doi
+                    logger.debug(f"  - Will update doi for doc {doc.id}: '{doc.doi}' -> '{doi}'")
+            
+            # Only update if there's something to change
+            if update_data:
+                await self.prisma.document.update(
+                    where={"id": doc.id},
+                    data=update_data
+                )
+                updated_count += 1
+                logger.info(f"  ✅ Updated doc {doc.id} with: {update_data}")
+            else:
+                logger.debug(f"  ℹ️ No updates needed for doc {doc.id}")
+        
+        logger.info(f"🔄 Updated {updated_count} previous documents for patient '{patient_name}' (DOB: {dob}, Physician: {physician_id}) with fields: patientName={patient_name}, dob={dob}, claimNumber={claim_number}, doi={doi}")
+        
+        return updated_count
     
     async def get_patient_claim_numbers(
         self,
-        patient_name: str,
+        patient_name: Optional[str] = None,
         physicianId: Optional[str] = None,
         dob: Optional[datetime] = None,
+        claim_number: Optional[str] = None,  # 🆕 NEW: Optional claim_number for lookup
     ) -> Dict[str, Any]:
         try:
-            where_clause = {"patientName": patient_name}
+            where_clause = {}
             
-            if physicianId:
-                where_clause["physicianId"] = physicianId
-            
-            if dob:
-                dob_str = dob.strftime("%Y-%m-%d")
-                where_clause["dob"] = dob_str
-
-            logger.info(f"🔍 Fetching claim numbers for patient: {patient_name}")
+            # 🆕 ENHANCED: Support multiple lookup strategies (prioritize claim_number if provided)
+            if claim_number:
+                where_clause["claimNumber"] = claim_number
+                logger.info(f"🔍 Fetching data using claim number: {claim_number}")
+            else:
+                # Fallback to patient_name + optional dob/physician
+                if patient_name:
+                    where_clause["patientName"] = patient_name
+                if physicianId:
+                    where_clause["physicianId"] = physicianId
+                if dob:
+                    dob_str = dob.strftime("%Y-%m-%d")
+                    where_clause["dob"] = dob_str
+                logger.info(f"🔍 Fetching data for patient: {patient_name or 'unknown'}")
 
             documents = await self.prisma.document.find_many(where=where_clause)
+            
+            # 🆕 EXPANDED: Extract not just claim_numbers, but also patient_name, dob, doi
             claim_numbers = [
                 doc.claimNumber for doc in documents if getattr(doc, "claimNumber", None)
             ]
+            patient_names = [
+                doc.patientName for doc in documents if getattr(doc, "patientName", None)
+            ]
+            dobs = [
+                doc.dob for doc in documents if getattr(doc, "dob", None)
+            ]
+            dois = [
+                doc.doi for doc in documents if getattr(doc, "doi", None)
+            ]
+            
+            # 🆕 DEDUPLICATE AND PRIORITIZE: Use first non-None/"Not specified" value for each field
+            def get_first_valid(lst):
+                for item in lst:
+                    if item and str(item).lower() != "not specified":
+                        return item
+                return None
+            
+            primary_patient_name = get_first_valid(patient_names) or patient_names[0] if patient_names else None
+            primary_dob = get_first_valid(dobs) or dobs[0] if dobs else None
+            primary_doi = get_first_valid(dois) or dois[0] if dois else None
+            primary_claim_number = get_first_valid(claim_numbers) or claim_numbers[0] if claim_numbers else None
 
-            logger.info(f"✅ Found {len(claim_numbers)} claim numbers for {patient_name}")
+            # 🆕 NEW: Detect conflicting claim numbers
+            valid_claims_set = set([c for c in claim_numbers if c and str(c).lower() != 'not specified'])
+            has_conflicting_claims = len(valid_claims_set) > 1
+
+            logger.info(f"✅ Found data for lookup: patient_name={primary_patient_name}, dob={primary_dob}, doi={primary_doi}, claim={primary_claim_number}, conflicting_claims={has_conflicting_claims}")
             
             return {
-                "patient_name": patient_name,
-                "total_claims": len(claim_numbers),
-                "claim_numbers": claim_numbers
+                "patient_name": primary_patient_name,
+                "dob": primary_dob,
+                "doi": primary_doi,
+                "claim_number": primary_claim_number,
+                "total_documents": len(documents),
+                "has_conflicting_claims": has_conflicting_claims,
+                "unique_valid_claims": list(valid_claims_set),
+                "documents": [  # 🆕 OPTIONAL: Include full docs if needed for further processing
+                    {
+                        "patientName": doc.patientName,
+                        "dob": doc.dob,
+                        "doi": doc.doi,
+                        "claimNumber": doc.claimNumber,
+                        "id": doc.id  # For reference
+                    } for doc in documents
+                ]
             }
 
         except Exception as e:
-            logger.error(f"❌ Error retrieving claim numbers for {patient_name}: {str(e)}")
+            logger.error(f"❌ Error retrieving data for lookup: {str(e)}")
             return {
-                "patient_name": patient_name,
-                "total_claims": 0,
-                "claim_numbers": []
+                "patient_name": None,
+                "dob": None,
+                "doi": None,
+                "claim_number": None,
+                "total_documents": 0,
+                "has_conflicting_claims": False,
+                "unique_valid_claims": [],
+                "documents": []
             }
-
-
     async def get_last_document_for_patient(self, patient_name: str, claim_number: str) -> Optional[Dict[str, Any]]:
         """
         Retrieve the most recent document for a specific patient and claim number.

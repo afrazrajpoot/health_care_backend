@@ -19,7 +19,7 @@ from fastapi import Path as FastAPIPath
 from services.document_ai_service import get_document_ai_processor
 from services.document_converter import DocumentConverter
 from services.task_creation import TaskCreator
-
+from services.resoning_agent import EnhancedReportAnalyzer
 import os
 from urllib.parse import urlparse
 
@@ -186,25 +186,49 @@ async def save_document_webhook(request: Request):
         # HIPAA Compliance: De-identify PHI before LLM processing
         extracted_phi, deidentified_text = deidentify_and_extract_phi(text)
         
-        analyzer = ReportAnalyzer()
-        # Use de-identified text for LLM-based extraction
-        document_analysis = analyzer.extract_document_data(deidentified_text)
-        print(document_analysis,'document analysis in webhook')
+        # 🆕 USE ENHANCED ANALYZER WITH REASONING
+        analyzer = EnhancedReportAnalyzer()
         
-        # Override extracted PHI with real values from DLP
+        # Use reasoning system to extract data with intelligent date assignment
+        document_analysis = analyzer.extract_document_data_with_reasoning(deidentified_text)
+        print(document_analysis, 'document analysis in webhook (with reasoning)')
+        
+        # 🆕 OVERRIDE WITH REAL PHI VALUES FROM DLP (preserving reasoned dates as fallback)
         if extracted_phi["patient_name"]:
             document_analysis.patient_name = extracted_phi["patient_name"]
         if extracted_phi["claim_number"]:
             document_analysis.claim_number = extracted_phi["claim_number"]
         
-        # Assign dates: first as DOB, second as RD, third as DOI
+        # 🆕 ENHANCED DATE HANDLING: Use reasoned dates as primary, DLP dates as fallback
         dates = extracted_phi["dates"]
-        if len(dates) > 0:
+        
+        # FIXED: Safe access to date_reasoning
+        has_date_reasoning = hasattr(document_analysis, 'date_reasoning') and document_analysis.date_reasoning is not None
+        
+        # Only override reasoned dates if DLP provides better information
+        if len(dates) > 0 and (not document_analysis.dob or document_analysis.dob.lower() == "not specified"):
             document_analysis.dob = dates[0]
-        if len(dates) > 1:
+            if has_date_reasoning:
+                document_analysis.date_reasoning.reasoning += " | DOB overridden by DLP extraction"
+        
+        if len(dates) > 1 and (not document_analysis.rd or document_analysis.rd.lower() == "not specified"):
             document_analysis.rd = dates[1]
-        if len(dates) > 2:
+            if has_date_reasoning:
+                document_analysis.date_reasoning.reasoning += " | RD overridden by DLP extraction"
+        
+        if len(dates) > 2 and (not document_analysis.doi or document_analysis.doi.lower() == "not specified"):
             document_analysis.doi = dates[2]
+            if has_date_reasoning:
+                document_analysis.date_reasoning.reasoning += " | DOI overridden by DLP extraction"
+        
+        # 🆕 LOG REASONING RESULTS - FIXED: Safe access
+        if has_date_reasoning:
+            logger.info(f"🔍 Date reasoning completed:")
+            logger.info(f"   - Reasoning: {document_analysis.date_reasoning.reasoning}")
+            logger.info(f"   - Confidence: {document_analysis.date_reasoning.confidence_scores}")
+            logger.info(f"   - Extracted dates: {document_analysis.date_reasoning.extracted_dates}")
+        else:
+            logger.info("ℹ️ No date reasoning available in document analysis")
         
         # Extract blob_path from gcs_url (original uploads path)
         blob_path = data.get("blob_path")
@@ -225,8 +249,6 @@ async def save_document_webhook(request: Request):
             
             user_friendly_msg = "Document already processed"
             
-           
-            
             # Emit skipped event
             await sio.emit('task_complete', {
                 'document_id': data.get('document_id', 'unknown'),
@@ -239,34 +261,46 @@ async def save_document_webhook(request: Request):
             })
             return {"status": "skipped", "reason": "Document already processed", "blob_path": blob_path}
         
-        # Enhanced check for required fields: treat "Not specified" as missing but don't block processing
+        # 🆕 ENHANCED: Check for missing fields BEFORE querying, but allow claim_number-only lookups
         required_fields = {
             "patient_name": document_analysis.patient_name,
             "dob": document_analysis.dob,
-            # "doi": document_analysis.doi
+            # "doi": document_analysis.doi  # DOI is now optional
         }
         missing_fields = [k for k, v in required_fields.items() if not v or str(v).lower() == "not specified"]
         
-        # For missing required fields, we'll process but mark as failed in main flow
-        has_missing_required_fields = len(missing_fields) > 0
+        # 🆕 NEW LOGIC: If claim_number is present, we can fetch missing fields; otherwise, fail on missing required
+        has_claim_number = document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified"
+        has_missing_required_fields = len(missing_fields) > 0 and not has_claim_number
         
+        # For missing required fields (without claim fallback), we'll process but mark as failed in main flow
         # Generate AI brief summary (do this even for documents with missing fields) - use de-identified text
         brief_summary = analyzer.generate_brief_summary(deidentified_text)
         
-        # Handle dates - use "Not specified" string instead of datetime.now() when not available
+        # 🆕 ENHANCED DATE HANDLING: Use reasoned dates with better fallbacks
         dob = document_analysis.dob if document_analysis.dob and str(document_analysis.dob).lower() != "not specified" else "Not specified"
         rd = document_analysis.rd if document_analysis.rd and str(document_analysis.rd).lower() != "not specified" else "Not specified"
         doi = document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else "Not specified"
         
-        # For database queries that need datetime, create a fallback (use None or current date as needed)
+        # 🆕 IMPROVED DATE PARSING WITH REASONING CONTEXT - FIXED: Safe access
         dob_for_query = None
         if dob and dob.lower() != "not specified":
             try:
                 dob_for_query = datetime.strptime(dob, "%Y-%m-%d")
             except ValueError:
-                dob_for_query = None
+                # Try alternative formats from reasoning system
+                if has_date_reasoning:
+                    for date_str in document_analysis.date_reasoning.extracted_dates:
+                        try:
+                            dob_for_query = datetime.strptime(date_str, "%Y-%m-%d")
+                            logger.info(f"🔄 Used alternative date from reasoning for DOB: {date_str}")
+                            break
+                        except ValueError:
+                            continue
+                if not dob_for_query:
+                    dob_for_query = None
         
-        # Parse rd for DB (reportDate): Handle both MM/DD and YYYY-MM-DD formats, convert to datetime object using current year if MM/DD
+        # 🆕 ENHANCED RD PARSING: Use reasoning context for better date interpretation - FIXED: Safe access
         rd_for_db = None
         if rd.lower() != "not specified":
             try:
@@ -282,30 +316,87 @@ async def save_document_webhook(request: Request):
                 rd_for_db = datetime.strptime(full_date_str, "%Y-%m-%d")
                 logger.debug(f"Parsed rd '{rd}' to datetime: {rd_for_db}")
             except (ValueError, AttributeError) as parse_err:
-                logger.warning(f"Failed to parse rd '{rd}': {parse_err}; using None")
-                rd_for_db = None
+                logger.warning(f"Failed to parse rd '{rd}': {parse_err}; checking reasoning context")
+                # Fallback to reasoning system dates
+                if has_date_reasoning:
+                    for date_str in document_analysis.date_reasoning.extracted_dates:
+                        try:
+                            rd_for_db = datetime.strptime(date_str, "%Y-%m-%d")
+                            logger.info(f"🔄 Used reasoning date for RD fallback: {date_str}")
+                            break
+                        except ValueError:
+                            continue
+                if not rd_for_db:
+                    rd_for_db = None
         
-        # Retrieve previous claim numbers (always for patient/dob/physician)
+        # 🆕 ENHANCED LOOKUP: Use claim_number if available; otherwise fallback to patient_name + dob + physician
         print(physician_id,'physician id in webhook')
        
-        patient_name_for_query = document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else "Unknown Patient"
-        claimNUmbers = await db_service.get_patient_claim_numbers(
-            patient_name_for_query,
-            physicianId=physician_id,
-            dob=dob_for_query  # Use the parsed datetime for query, or None
-        )
+        patient_name_for_query = document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else None
+        claim_number_for_query = document_analysis.claim_number if has_claim_number else None
         
-        # Always fetch all previous unverified documents for the patient (ignore new claim for fetching all previous)
-        # 🆕 Updated: Pass claimNumber only if valid; otherwise None to use dob + patient_name
-        claim_number_for_query = document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else None
-        db_response = await db_service.get_all_unverified_documents(
+        # 🆕 NEW: Perform lookup to fetch missing data using claim_number or partial info
+        lookup_data = await db_service.get_patient_claim_numbers(
             patient_name=patient_name_for_query,
             physicianId=physician_id,
-            claimNumber=claim_number_for_query,  # Use valid claim if available; else None to fallback to dob + patient_name
-            dob=dob_for_query  # Use the parsed datetime for query, or None
+            dob=dob_for_query,
+            claim_number=claim_number_for_query  # Prioritize claim if available
         )
         
-        print(claimNUmbers,'claim numbers')
+        print(lookup_data,'lookup data')
+        
+        # 🆕 NEW: Check for conflicting claim numbers from lookup
+        has_conflicting_claims = lookup_data.get("has_conflicting_claims", False) if lookup_data else False
+        conflicting_claims_reason = None
+        if has_conflicting_claims:
+            conflicting_claims_reason = f"Multiple conflicting claim numbers found: {lookup_data.get('unique_valid_claims', [])}"
+            logger.warning(f"⚠️ {conflicting_claims_reason}")
+        
+        # 🆕 NEW: Override missing fields from lookup if available (only if no conflicts)
+        if lookup_data and lookup_data.get("total_documents", 0) > 0 and not has_conflicting_claims:
+            fetched_patient_name = lookup_data.get("patient_name")
+            fetched_dob = lookup_data.get("dob")
+            fetched_doi = lookup_data.get("doi")
+            fetched_claim_number = lookup_data.get("claim_number")
+            
+            # Update document_analysis with fetched data if current is missing/"Not specified"
+            if not document_analysis.patient_name or str(document_analysis.patient_name).lower() == "not specified":
+                document_analysis.patient_name = fetched_patient_name
+                logger.info(f"🔄 Overrode patient_name from lookup: {fetched_patient_name}")
+            
+            if not document_analysis.dob or str(document_analysis.dob).lower() == "not specified":
+                document_analysis.dob = fetched_dob
+                logger.info(f"🔄 Overrode DOB from lookup: {fetched_dob}")
+            
+            if not document_analysis.doi or str(document_analysis.doi).lower() == "not specified":
+                document_analysis.doi = fetched_doi
+                logger.info(f"🔄 Overrode DOI from lookup: {fetched_doi}")
+            
+            # Also update claim if fetched (but only if not already set)
+            if not has_claim_number and fetched_claim_number:
+                document_analysis.claim_number = fetched_claim_number
+                logger.info(f"🔄 Overrode claim_number from lookup: {fetched_claim_number}")
+        
+        # 🆕 UPDATED: Re-check missing fields after lookup overrides
+        updated_required_fields = {
+            "patient_name": document_analysis.patient_name,
+            "dob": document_analysis.dob,
+            # "doi": document_analysis.doi  # Still optional
+        }
+        updated_missing_fields = [k for k, v in updated_required_fields.items() if not v or str(v).lower() == "not specified"]
+        has_missing_required_fields = len(updated_missing_fields) > 0  # Now stricter after lookup
+        
+        # Always fetch all previous unverified documents for the patient (now using updated fields)
+        # 🆕 Updated: Use updated claim_number after lookup
+        updated_claim_number_for_query = document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else None
+        updated_patient_name_for_query = document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else "Unknown Patient"
+        db_response = await db_service.get_all_unverified_documents(
+            patient_name=updated_patient_name_for_query,
+            physicianId=physician_id,
+            claimNumber=updated_claim_number_for_query,
+            dob=dob_for_query
+        )
+        
         # Extract documents list from database response
         previous_documents = db_response.get('documents', []) if db_response else []
         
@@ -322,68 +413,38 @@ async def save_document_webhook(request: Request):
             logger.warning(f"⚠️ Invalid whats_new data for {data['filename']}; using empty dict")
             whats_new_data = {}
         
-        # Simplified claim number logic
-        claim_to_use = None
+        # 🆕 SIMPLIFIED CLAIM LOGIC: Now handled via lookup above; use updated values
+        claim_to_use = document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else "Not specified"
         pending_reason = None
-        claim_numbers_list = claimNUmbers.get('claim_numbers', []) if isinstance(claimNUmbers, dict) else claimNUmbers if isinstance(claimNUmbers, list) else []
-        # Deduplicate claim numbers to handle cases where duplicates exist
-        claim_numbers_list = list(set(claim_numbers_list))
         
-        # Filter to valid claims only (exclude 'Not specified' and None)
-        valid_claims_list = [c for c in claim_numbers_list if c and str(c).lower() != 'not specified']
+        # 🆕 CHECK FOR AMBIGUITY ONLY AFTER LOOKUP (if multiple docs found but conflicting data)
+        if lookup_data and lookup_data.get("total_documents", 0) > 1:
+            # If multiple docs found via claim, but we picked primary - log warning but proceed
+            logger.warning(f"⚠️ Multiple documents found via lookup ({lookup_data['total_documents']}); using primary values")
         
-        has_new_claim = document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified"
-        
-        if has_new_claim:
-            # If document analysis has claim number, use it
-            claim_to_use = document_analysis.claim_number
-            logger.info(f"ℹ️ Using extracted claim '{claim_to_use}' for patient '{document_analysis.patient_name}'")
-        else:
-            # No new claim from document: use existing patient claims if unambiguous
-            if len(valid_claims_list) == 1:
-                # Single valid claim from patient history: use it (works for first doc or subsequent)
-                claim_to_use = valid_claims_list[0]
-                logger.info(f"ℹ️ Using single previous valid claim '{claim_to_use}' for patient '{document_analysis.patient_name}'")
-            elif len(valid_claims_list) > 1:
-                # Multiple previous valid claims: fail
-                claim_to_use = None
-                pending_reason = "No claim number specified and multiple previous valid claims found"
-                logger.warning(f"⚠️ {pending_reason} for file {data['filename']}")
-            else:
-                # No valid claims: OK for first doc, but fail if previous docs exist without claims
-                if len(previous_documents) == 0:
-                    # First time: OK, proceed without claim
-                    claim_to_use = "Not specified"
-                    logger.info(f"ℹ️ First document for patient '{document_analysis.patient_name}': No claim specified, proceeding as OK")
-                else:
-                    # Previous documents exist but no valid claim: fail (second or later without claim)
-                    claim_to_use = None
-                    pending_reason = "No claim number specified and previous documents exist without valid claim"
-                    logger.warning(f"⚠️ {pending_reason} for file {data['filename']}")
-        
-        # Determine status: fail only for missing fields or claim issues
+        # Determine status: fail only for still-missing fields after lookup OR conflicting claims
         base_status = document_analysis.status
         if has_missing_required_fields:
             document_status = "failed"
-        elif claim_to_use is None:
+            pending_reason = f"Missing required fields after lookup: {', '.join(updated_missing_fields)}"
+        elif has_conflicting_claims:
             document_status = "failed"
+            pending_reason = conflicting_claims_reason
         else:
             document_status = base_status
 
-        # Use "Not specified" values for missing fields but process normally
+        # Use updated values for saving
         patient_name_to_use = document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else "Not specified"
-        
-        # If claim_to_use is None, set to "Not specified" for saving but status failed
-        claim_to_save = claim_to_use if claim_to_use is not None else "Not specified"
+        claim_to_save = claim_to_use if claim_to_use != "Not specified" else "Not specified"
 
         if document_status == "failed":
             # Fail: save to FailDocs, no further processing, no AI tasks
-            fail_reason = pending_reason if pending_reason else f"Missing required fields: {', '.join(missing_fields)}"
+            fail_reason = pending_reason if pending_reason else f"Missing required fields: {', '.join(updated_missing_fields)}"
             logger.warning(f"⚠️ Failing document {data['filename']}: {fail_reason}")
             
             await db_service.save_fail_doc(
                 reason=fail_reason,
-                db=dob,
+                db=dob,  # Still using original dob string
                 doi=doi,
                 claim_number=claim_to_save,
                 patient_name=patient_name_to_use,
@@ -400,8 +461,8 @@ async def save_document_webhook(request: Request):
                 'document_id': data.get('document_id', 'unknown'),
                 'filename': data["filename"],
                 'status': 'failed',
-                'missing_fields': missing_fields if has_missing_required_fields else None,
-                'pending_reason': pending_reason if pending_reason else None
+                'missing_fields': updated_missing_fields if has_missing_required_fields else None,
+                'pending_reason': pending_reason
             }
             
             user_id = data.get("user_id")
@@ -416,11 +477,11 @@ async def save_document_webhook(request: Request):
             return {
                 "status": "failed", 
                 "reason": fail_reason,
-                "missing_fields": missing_fields if has_missing_required_fields else None,
-                "pending_reason": pending_reason if pending_reason else None
+                "missing_fields": updated_missing_fields if has_missing_required_fields else None,
+                "pending_reason": pending_reason
             }
         
-        # Success: proceed with saving to main document and creating tasks
+        # Success: proceed with saving to main document and creating tasks (using updated fields)
         summary_snapshot = {
             "dx": document_analysis.diagnosis,
             "keyConcern": document_analysis.key_concern,
@@ -440,6 +501,16 @@ async def save_document_webhook(request: Request):
             "summary": summary_text
         }
         
+        # 🆕 INCLUDE DATE REASONING IN EXTRACTION RESULT - FIXED: Safe access
+        date_reasoning_data = None
+        if has_date_reasoning:
+            date_reasoning_data = {
+                "reasoning": document_analysis.date_reasoning.reasoning,
+                "confidence_scores": document_analysis.date_reasoning.confidence_scores,
+                "extracted_dates": document_analysis.date_reasoning.extracted_dates,
+                "date_contexts": document_analysis.date_reasoning.date_contexts
+            }
+        
         # Mock ExtractionResult - replace with your actual implementation
         extraction_result = ExtractionResult(
             text=result_data.get("text", ""),
@@ -453,10 +524,12 @@ async def save_document_webhook(request: Request):
             fileInfo=result_data.get("fileInfo", {}),
             summary=summary_text,
             comprehensive_analysis=result_data.get("comprehensive_analysis"),
-            document_id=result_data.get("document_id", f"webhook_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+            document_id=result_data.get("document_id", f"webhook_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),
+            # 🆕 ADD DATE REASONING DATA
+            date_reasoning=date_reasoning_data
         )
         
-        # 🆕 FIRST save the document to get the document_id
+        # 🆕 FIRST save the document to get the document_id (using updated fields)
         document_id = await db_service.save_document_analysis(
             extraction_result=extraction_result,
             file_name=data["filename"],
@@ -468,15 +541,15 @@ async def save_document_webhook(request: Request):
             gcs_file_link=data["gcs_url"],
             patient_name=patient_name_to_use,
             claim_number=claim_to_save,
-            dob=dob,  # Now using string "Not specified" instead of datetime
-            doi=doi,  # Now using string "Not specified" instead of datetime
-            status=document_status,  # Now "failed" only for specific cases
+            dob=dob,  # Updated dob string
+            doi=doi,  # Updated doi string
+            status=document_status,
             brief_summary=brief_summary,
             summary_snapshot=summary_snapshot,
             whats_new=whats_new_data,
             adl_data=adl_data,
             document_summary=document_summary,
-            rd=rd_for_db,  # Pass parsed datetime object (or None) instead of string
+            rd=rd_for_db,
             physician_id=physician_id
         )
 
@@ -502,7 +575,7 @@ async def save_document_webhook(request: Request):
                     # sourceDocument field in Prisma
                     "sourceDocument": task.get("source_document") or task.get("sourceDocument") or data.get("filename"),
                     # 🆕 Save document_id and physician_id - NOW we have the document_id
-                    "documentId": document_id,  # Use the actual document_id from the saved document
+                    "documentId": document_id,
                     "physicianId": data.get("physician_id"),
                     # 🚫 REMOVED quickNotes entirely
                 }
@@ -529,57 +602,57 @@ async def save_document_webhook(request: Request):
 
         logger.info(f"✅ {created_tasks} / {len(tasks)} tasks created for document {data['filename']}")
 
-        # Prepare dob_str for update
+        # Prepare dob_str for update (using updated dob)
         dob_str = None
-        if dob_for_query:
-            dob_str = dob_for_query.strftime("%Y-%m-%d")
+        updated_dob_for_query = None
+        if document_analysis.dob and str(document_analysis.dob).lower() != "not specified":
+            try:
+                updated_dob_for_query = datetime.strptime(document_analysis.dob, "%Y-%m-%d")
+                dob_str = updated_dob_for_query.strftime("%Y-%m-%d")
+            except ValueError:
+                updated_dob_for_query = dob_for_query  # Fallback
+                if updated_dob_for_query:
+                    dob_str = updated_dob_for_query.strftime("%Y-%m-%d")
 
-        # 🔄 Update previous documents' claim numbers (only if new has a valid claim number)
+        # 🔄 Update previous documents' fields (now includes patient_name, dob, doi if new doc provides via lookup)
+        # 🆕 EXPANDED: Update if new doc has valid claim and missing fields were filled from lookup (skip if conflicts)
         should_update_previous = (
-            document_status not in ["failed"] and  # Skip if failed due to claim issues
-            has_new_claim and  # Only update if new doc provided a valid claim
-            patient_name_to_use != "Not specified" and  # Avoid updating if patient is unknown
-            dob_str is not None  # Ensure we have dob string for query
+            document_status not in ["failed"] and
+            (has_claim_number or lookup_data.get("total_documents", 0) > 0) and  # Updated if claim or successful lookup
+            not has_conflicting_claims and  # 🆕 NEW: Skip update if conflicting claims
+            patient_name_to_use != "Not specified" and
+            updated_dob_for_query is not None
         )
 
         if should_update_previous:
-            # Fetch previous documents to check for null claims (reuse the earlier query if possible)
-            db_response = await db_service.get_all_unverified_documents(
+            # 🆕 UPDATED: Now using the improved fetch-and-update logic in update_previous_fields
+            # Pass dob_str instead of dob (string format)
+            updated_count = await db_service.update_previous_fields(
                 patient_name=patient_name_to_use,
-                physicianId=physician_id,
-                claimNumber=None,  # Explicitly fetch all, including null claims
-                dob=dob_for_query
+                dob=dob_str,  # String format for DB
+                physician_id=physician_id,
+                claim_number=claim_to_use,
+                doi=document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else None
             )
-            previous_documents = db_response.get('documents', []) if db_response else []
-            
-            # Check if any previous docs have null/unset claims
-            has_null_claim_docs = any(
-                doc.get('claim_number') is None or str(doc.get('claim_number', '')).lower() == 'not specified'
-                for doc in previous_documents
-            )
-            
-            if has_null_claim_docs:
-                await db_service.update_previous_claim_numbers(
-                    patient_name=patient_name_to_use,
-                    dob=dob_str,  # Send only date string
-                    physician_id=physician_id,
-                    claim_number=claim_to_use
-                )
-                logger.info(f"🔄 Updated previous documents' claim numbers for patient '{patient_name_to_use}' using claim '{claim_to_use}'")
-            else:
-                logger.info(f"ℹ️ No previous documents with null claims for patient '{patient_name_to_use}'; skipping update")
+            logger.info(f"🔄 Updated {updated_count} previous documents' fields for patient '{patient_name_to_use}' using new data")
         else:
-            logger.info(f"ℹ️ Skipping previous claim update: status={document_status}, has_new_claim={has_new_claim}, patient={patient_name_to_use}, has_dob={dob_str is not None}")
+            logger.info(f"ℹ️ Skipping previous update: status={document_status}, has_claim_or_lookup={has_claim_number or lookup_data.get('total_documents', 0) > 0}, has_conflicts={has_conflicting_claims}, patient={patient_name_to_use}, has_dob={updated_dob_for_query is not None}")
 
         logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}")
         
-        # Emit socket event for task complete with appropriate status
+        # 🆕 INCLUDE REASONING INFO IN EMIT DATA - FIXED: Safe access
         emit_data = {
             'document_id': document_id,
             'filename': data["filename"],
             'status': document_status,
-            'missing_fields': missing_fields if has_missing_required_fields else None,
-            'pending_reason': pending_reason if pending_reason else None  # Use the claim-related reason if applicable
+            'missing_fields': updated_missing_fields if has_missing_required_fields else None,
+            'pending_reason': pending_reason,
+            # 🆕 ADD REASONING METADATA
+            'date_reasoning_confidence': document_analysis.date_reasoning.confidence_scores if has_date_reasoning else {},
+            'extracted_dates_count': len(document_analysis.date_reasoning.extracted_dates) if has_date_reasoning else 0,
+            # 🆕 ADD LOOKUP METADATA
+            'lookup_used': lookup_data.get("total_documents", 0) > 0,
+            'fields_overridden_from_lookup': len(updated_missing_fields) < len(missing_fields)  # If fewer missing after
         }
         
         user_id = data.get("user_id")
@@ -593,8 +666,26 @@ async def save_document_webhook(request: Request):
         return {
             "status": document_status, 
             "document_id": document_id,
-            "missing_fields": missing_fields if has_missing_required_fields else None,
-            "pending_reason": pending_reason if pending_reason else None
+            "missing_fields": updated_missing_fields if has_missing_required_fields else None,
+            "pending_reason": pending_reason,
+            # 🆕 RETURN REASONING SUMMARY - FIXED: Safe access
+            "date_reasoning_summary": {
+                "used_reasoning": has_date_reasoning,
+                "confidence_scores": document_analysis.date_reasoning.confidence_scores if has_date_reasoning else {},
+                "dates_extracted": len(document_analysis.date_reasoning.extracted_dates) if has_date_reasoning else 0
+            },
+            # 🆕 RETURN LOOKUP SUMMARY
+            "lookup_summary": {
+                "documents_found": lookup_data.get("total_documents", 0),
+                "has_conflicting_claims": has_conflicting_claims,
+                "unique_valid_claims": lookup_data.get("unique_valid_claims", []) if lookup_data else [],
+                "fields_fetched": {
+                    "patient_name": bool(lookup_data.get("patient_name")),
+                    "dob": bool(lookup_data.get("dob")),
+                    "doi": bool(lookup_data.get("doi")),
+                    "claim_number": bool(lookup_data.get("claim_number"))
+                }
+            }
         }
 
     except Exception as e:
@@ -606,8 +697,6 @@ async def save_document_webhook(request: Request):
             blob_path = extract_blob_path_from_gcs_url(data["gcs_url"])
         physician_id = data.get("physician_id") if 'data' in locals() else None
         reason = f"Webhook processing failed: {str(e)}"
-        
-      
         
         # Emit error event on exception
         try:
@@ -1214,7 +1303,7 @@ async def extract_documents(
                 result.summary = f"Document Type: {detected_type} - Processed successfully"
                 
                 # Extract document data
-                document_analysis = analyzer.extract_document_data(result.text)
+       
                 analysis_complete_msg = f"✅ Document analysis completed for {document.filename}"
                 logger.info(analysis_complete_msg)
                 print(analysis_complete_msg)  # DEBUG PRINT
