@@ -276,6 +276,8 @@ class WebhookService:
         Step 3: Fetch previous documents, compare, and determine final status/reason.
         """
         document_analysis = lookup_result["document_analysis"]
+        print(lookup_result,'lookup_result in compare and determine status')
+        print(document_analysis,'document_analysis in compare and determine status')
         lookup_data = lookup_result["lookup_data"]
         is_first_time_claim_only = lookup_result.get("is_first_time_claim_only", False)
 
@@ -296,6 +298,7 @@ class WebhookService:
             document_analysis,
             previous_documents
         )
+        print(whats_new_data,'whats_new_data my wat new data')
 
         # Ensure whats_new_data is always a dict
         if whats_new_data is None or not isinstance(whats_new_data, dict):
