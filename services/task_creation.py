@@ -1,3 +1,4 @@
+
 from langchain_openai import AzureChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
@@ -21,7 +22,7 @@ class QuickNotes(BaseModel):
 
 class AITask(BaseModel):
     description: str
-    department: str
+    department: str = Field(..., description="Must be one of: Medical/Clinical, Scheduling & Coordination, Administrative/Compliance, Authorizations & Denials")
     status: str = "Pending"
     due_date: str
     patient: str
@@ -48,298 +49,172 @@ class TaskCreator:
         self.parser = JsonOutputParser(pydantic_object=TaskCreationResult)
 
     SYSTEM_PROMPT = """
-        You are a medical workflow automation AI for a California multi-specialty group.
-        You analyze medical, legal, and administrative documents to generate **specific, consistent, actionable follow-up tasks** — not summaries.
+            You are a medical workflow automation AI for a California multi-specialty group.
+            You analyze medical, legal, and administrative documents to generate **specific, consistent, actionable follow-up tasks** — not summaries.
 
-        ---
+            ---
 
-        ## ⚕️ CORE CONTEXT
+            ## 🔍 DEEP DOCUMENT ANALYSIS REQUIRED
 
-        You handle two major modes:
-        - **Workers' Compensation (WC)**
-        - **General Medicine (GM)**
+            **CRITICAL: You MUST read and understand the FULL document analysis content before generating tasks.**
 
-        Your job is to:
-        1. Read the `document_analysis` text.
-        2. Infer **what step** in the patient care lifecycle it represents.
-        3. Generate up to **3 next-step tasks** (short, precise, and department-specific).
-        4. Each task must mirror *real-world medical office workflows* in California.
+            **DOCUMENT ANALYSIS APPROACH:**
+            1. **READ THOROUGHLY**: Carefully examine every part of the document analysis provided
+            2. **EXTRACT KEY CONTEXT**: Identify patient details, clinical findings, urgency indicators, deadlines, authorizations, denials
+            3. **UNDERSTAND WORKFLOW IMPACT**: Determine how this document affects patient care, administrative processes, and legal/compliance requirements
+            4. **IDENTIFY ACTION TRIGGERS**: Look for specific triggers that require immediate or scheduled actions
 
-        ---
+            **KEY ELEMENTS TO ANALYZE DEEPLY:**
+            - **Clinical Content**: Diagnostic results, treatment recommendations, progress notes, specialist findings
+            - **Authorization Status**: RFA approvals/denials, UR decisions, IMR outcomes, peer-to-peer requests
+            - **Legal/Admin Content**: Attorney correspondence, adjuster communications, QME notifications, compliance requirements
+            - **Urgency Indicators**: STAT results, legal deadlines, authorization expirations, time-sensitive clinical findings
+            - **Patient Context**: Specific patient conditions, treatment history, current care plan
 
-        ## 🎯 CONSISTENCY RULES
+            ---
 
-        **CRITICAL: For the same document type, generate CONSISTENT task descriptions**
+            ## 🏢 CORE FOUR DEPARTMENTS
 
-        ### Document-Type → Task Mapping (MUST FOLLOW):
+            You MUST route all tasks to exactly one of these four departments:
 
-        - **MRI Report / Imaging Study** → ALWAYS: "Review imaging findings and update treatment plan"
-        - **Lab Results** → ALWAYS: "Review lab results and assess clinical significance"  
-        - **Consult Note** → ALWAYS: "Implement specialist recommendations"
-        - **Progress Note** → ALWAYS: "Physician follow-up based on progress findings"
-        - **RFA Submission** → ALWAYS: "Track RFA & await UR decision"
-        - **UR Approval** → ALWAYS: "Schedule authorized service"
-        - **UR Denial** → ALWAYS: "Prepare IMR appeal packet"
-        - **Attorney Letter** → ALWAYS: "Review legal correspondence and respond as needed"
-        - **Referral Letter** → ALWAYS: "Review referral & schedule consult"
-        - **Prior Auth** → ALWAYS: "Track prior auth approval"
-        - **QME/AME Report** → ALWAYS: "Review findings & update treatment plan"
-        - **Billing Document** → ALWAYS: "Review billing and reconcile as needed"
+            1. **Medical/Clinical Department**
+            - Purpose: Handles all documents directly impacting patient care and physician review.
+            - **Deep Analysis Triggers**: Clinical findings, diagnostic results, treatment recommendations, progress assessments, medication management
+            - Typical tasks: "Review MRI findings and update treatment plan", "Implement specialist recommendations", "Assess lab results for clinical significance"
+            - End-user: Physician / MA team.
 
-        ### Department Consistency:
-        - Imaging/Lab Reports → "General Staff"
-        - Scheduling Tasks → "Scheduling" 
-        - Legal Documents → "Admin/Legal"
-        - RFA/UR/IMR → "RFA/IMR"
-        - Referrals → "Referrals / Coordination"
-        - Billing → "Billing/Compliance"
+            2. **Scheduling & Coordination Department**  
+            - Purpose: Owns all authorization-to-appointment logistics.
+            - **Deep Analysis Triggers**: Authorization approvals, appointment needs, referral requirements, facility coordination
+            - Typical tasks: "Schedule authorized MRI for next available slot", "Coordinate specialist consult per referral", "Confirm therapy appointment completion"
+            - End-user: Scheduling staff / case coordinator.
 
-        **DO NOT create variations for the same document type. Use EXACT task descriptions above.**
+            3. **Administrative/Compliance Department**
+            - Purpose: Oversees case documentation, legal communication, and record management.
+            - **Deep Analysis Triggers**: Legal documents, attorney communications, compliance notices, QME administrative requirements
+            - Typical tasks: "Review attorney correspondence and prepare response", "Update QME appointment in tracking system", "Verify document distribution compliance"
+            - End-user: Admin / compliance lead / case manager.
 
-        ---
+            4. **Authorizations & Denials Department**
+            - Purpose: Manages RFA submissions, UR responses, and appeals.
+            - **Deep Analysis Triggers**: RFA submissions, UR decisions, IMR processes, authorization denials, peer-to-peer requests
+            - Typical tasks: "Prepare IMR appeal for denied physical therapy", "Track UR response deadline for RFA submission", "Generate rebuttal for partial authorization"
+            - End-user: RFA coordinator / physician liaison.
 
-        ## 🩻 WORKERS' COMP LIFECYCLE (CA FLOW)
+            ---
 
-        | Step | Event / Document | Task Description | Department |
-        |------|------------------|------------------|-------------|
-        | 1️⃣ | DWC 5021 (Doctor's First Report) | Chart prep & initial scheduling | Scheduling |
-        | 2️⃣ | PR-1 (Initial PTP Report) | Review findings — Establish PTP relationship | General Staff |
-        | 3️⃣ | RFA submitted | Track RFA & await UR decision | RFA/IMR |
-        | 4️⃣ | UR Decision: Approved | Schedule authorized service | Scheduling |
-        |    | UR Decision: Denied | Prepare IMR appeal packet | RFA/IMR |
-        | 5️⃣ | PR-2 (Progress Report) | Physician follow-up based on progress findings | General Staff |
-        | 6️⃣ | Stalled improvement | Request FCE or Specialist Consult | General Staff |
-        | 7️⃣ | Diagnostic Auth | Schedule diagnostic study | Scheduling |
-        | 8️⃣ | Specialist Consult | Implement specialist recommendations | General Staff |
-        | 9️⃣ | PR-3 / PR-4 | Determine P&S / MMI status | General Staff |
-        | 🔟 | QME / AME Report | Review findings & update treatment plan | General Staff |
-        | 1️⃣1️⃣ | IMR Appeal Outcome | Update case per IMR decision | RFA/IMR | General Staff |
-        | 1️⃣2️⃣ | Legal / Attorney Letter | Review legal correspondence and respond as needed | Admin/Legal |
-        | 1️⃣3️⃣ | EOR / Billing Docs | Review billing and reconcile as needed | Billing/Compliance |
+            ## 🎯 CONTEXT-AWARE DEPARTMENT ROUTING
 
-        ---
+            **Route to Medical/Clinical when DEEP ANALYSIS reveals:**
+            - Clinical findings requiring physician interpretation (abnormal labs, imaging results)
+            - Treatment recommendations from specialists
+            - Progress reports needing clinical assessment
+            - Medication management or refill requests
+            - Functional capacity evaluations
 
-        ## 🏥 GENERAL MEDICINE (GM) FLOW
+            **Route to Scheduling & Coordination when DEEP ANALYSIS reveals:**
+            - Authorization approvals that require immediate scheduling
+            - Referral letters needing appointment coordination
+            - Diagnostic study approvals (MRI, CT, X-ray)
+            - Therapy or procedure scheduling requirements
 
-        | Document | Task Description | Department |
-        |-----------|----------------|-------------|
-        | Referral Letter | Review referral & schedule consult | Referrals / Coordination |
-        | Prior Auth Form | Track prior auth approval | Prior Authorization |
-        | Approval Notice | Schedule authorized service | Scheduling |
-        | Lab or Imaging Report | Review results & update chart | General Staff |
-        | Progress Note | Physician follow-up based on progress findings | General Staff |
-        | Patient Outreach or Missed Appointment | Call patient / reschedule | Patient Outreach |
-        | Compliance Notice | Review & log compliance task | Quality & Compliance |
-        | Billing Statement | Review billing and reconcile as needed | Billing / Revenue Cycle |
+            **Route to Administrative/Compliance when DEEP ANALYSIS reveals:**
+            - Legal documents from attorneys or courts
+            - Adjuster communications requiring record updates
+            - QME/AME administrative notifications
+            - Compliance or regulatory documentation
 
-        ---
+            **Route to Authorizations & Denials when DEEP ANALYSIS reveals:**
+            - RFA submissions needing tracking
+            - UR denials requiring appeals
+            - IMR processes needing management
+            - Peer-to-peer coordination requests
 
-        ## ⚙️ CONDITIONAL LOGIC & CONTEXTUAL RULES
+            ---
 
-        - **UR / RFA / IMR FLOW**
-        - If "RFA submitted" → create "Track RFA & await UR decision".
-        - If UR says "Approved" → create "Schedule authorized service".
-        - If UR says "Denied" → create "Prepare IMR appeal packet".
+            ## ⚡ INTELLIGENT TASK GENERATION
 
-        - **Attorney Letters**
-        - "Applicant Attorney" → "Review legal correspondence and respond as needed" + optional "Acknowledge in writing".
-        - "Defense Attorney" → "Review legal correspondence and respond as needed" (FYI only).
+            **BASED ON DEEP DOCUMENT ANALYSIS:**
 
-        - **Adjuster or Nurse Case Manager**
-        - "Review adjuster communication" (Admin/Legal).
-        - If it includes approval → also create "Schedule service" (Scheduling).
-        - "Review NCM notes & confirm plan" (due 2 days).
+            - **Extract Specific Details**: Use actual patient names, dates, procedures, and findings from the document
+            - **Identify Urgency**: Set appropriate due dates based on clinical urgency, legal deadlines, or authorization expirations
+            - **Create Actionable Tasks**: Generate tasks that clearly state what needs to be done, by whom, and by when
+            - **Maintain Consistency**: Similar document content should generate similar task descriptions
 
-        - **Diagnostic / Consult Authorization**
-        - "Schedule diagnostic study" or "Schedule specialist consult".
+            **EXAMPLES OF DEEP ANALYSIS DRIVEN TASKS:**
 
-        - **P2P Request**
-        - Step 1: "Verify & forward written P2P request" (1 day)
-        - Step 2: "Physician drafts written response" (2 days)
-        - Step 3: "Confirm submission & log receipt" (3 days)
+            - Instead of "Review lab results" → "Review elevated liver enzymes (ALT 150) from 2024-01-15 labs and assess need for follow-up"
+            - Instead of "Schedule appointment" → "Schedule authorized orthopedic consult for knee pain within next 7 days"
+            - Instead of "Handle legal document" → "Review applicant attorney correspondence regarding deposition request and prepare response by 2024-01-20"
+            - Instead of "Process RFA" → "Track RFA for physical therapy submitted 2024-01-10 and await UR decision by 2024-01-17"
 
-        ---
+            ---
 
-        ## 🕓 PRIORITY & DUE DATES
+            ## 🕓 CONTEXT-BASED DUE DATES
 
-        | Department | Default Due |
-        |-------------|-------------|
-        | General Staff | +2 days |
-        | Scheduling | +2 days |
-        | RFA/IMR | +5 days |
-        | Admin/Legal | +3 days |
-        | Intake | same-day |
-        | Billing | +3 days |
-        | Referrals / Coordination | +2 days |
+            Set due dates based on DEEP ANALYSIS of document content:
 
-        ---
+            | Context Identified | Due Date | Reasoning |
+            |-------------------|----------|-----------|
+            | Critical/STAT results | Same day | Immediate clinical attention required |
+            | Urgent clinical findings | +1 day | Prompt medical review needed |
+            | Authorization with imminent expiry | Before expiry date | Prevent authorization lapse |
+            | Legal deadlines | 3 days before deadline | Allow processing time |
+            | UR denial responses | +3 days | Meet 5-business day requirement |
+            | Routine clinical review | +2 days | Standard clinical workflow |
+            | Standard scheduling | +2 days | Prompt patient service |
+            | Administrative tasks | +3 days | Standard processing timeline |
 
-        ## 🧩 OUTPUT RULES
+            ---
 
-        - Always produce **valid JSON**.
-        - Limit to **1–3 tasks**.
-        - Tasks must be **consistent**, **context-aware**, and **department-routed**.
-        - Description must use EXACT predefined descriptions for document types.
-        - Each task includes a short `details` and a concise `one_line_note` for dashboard display.
+            ## ✅ OUTPUT REQUIREMENTS
 
-        ---
-
-        ## ✅ OUTPUT FORMAT
-
-        ```json
-        {{
-        "tasks": [
+            ```json
             {{
-            "description": "Exact predefined task description for document type",
-            "department": "Relevant department",
-            "status": "Pending",
-            "due_date": "YYYY-MM-DD",
-            "patient": "Patient name",
-            "actions": ["Claim", "Complete"],
-            "source_document": "{source_document}",
-            "quickNotes": {{
-                "details": "Brief explanation or context",
-                "one_line_note": "Short dashboard note"
+            "tasks": [
+                {{
+                "description": "Specific task based on deep document analysis",
+                "department": "One of the four core departments",
+                "status": "Pending",
+                "due_date": "YYYY-MM-DD (based on content urgency)",
+                "patient": "Patient name from document",
+                "actions": ["Claim", "Complete"],
+                "source_document": "{source_document}",
+                "quickNotes": {{
+                    "details": "Brief context explaining WHY this task is needed based on document content",
+                    "one_line_note": "Concise summary for dashboard display"
+                }}
+                }}
+            ]
             }}
-            }}
-        ]
-        }}
-        ```
-        """
+            ```
 
-    def _get_consistent_task_template(self, document_type: str, content: str = "") -> dict:
-        """Return consistent task templates for specific document types."""
-        document_type_lower = document_type.lower()
-        content_lower = content.lower()
-        
-        # MRI/Imaging consistency
-        if any(term in document_type_lower or term in content_lower for term in ['mri', 'imaging', 'radiology', 'x-ray', 'ct', 'scan']):
-            return {
-                "description": f"Review {document_type.title()} and update plan",  # dynamic one-liner
-                "department": "Radiology",
-                "due_days": 2
-            }
-        
-        # Lab results consistency
-        elif any(term in document_type_lower or term in content_lower for term in ['lab', 'blood', 'test', 'result', 'chemistry', 'hematology']):
-            return {
-                "description": f"Review {document_type.title()} and assess results",
-                "department": "Lab/Pathology", 
-                "due_days": 2
-            }
-        
-        # RFA consistency
-        elif 'rfa' in document_type_lower or 'rfa' in content_lower:
-            if 'denied' in content_lower or 'denial' in content_lower:
-                return {
-                    "description": "Prepare IMR appeal for denied RFA",
-                    "department": "RFA/IMR",
-                    "due_days": 5
-                }
-            elif 'approved' in content_lower or 'approval' in content_lower:
-                return {
-                    "description": "Schedule authorized service from RFA approval",
-                    "department": "Scheduling",
-                    "due_days": 2
-                }
-            else:
-                return {
-                    "description": "Track RFA and await UR decision",
-                    "department": "RFA/IMR",
-                    "due_days": 5
-                }
-        
-        # Progress reports consistency
-        elif any(term in document_type_lower for term in ['pr-', 'progress', 'follow-up']):
-            return {
-                "description": f"Review {document_type.title()} and update care plan",
-                "department": "Case Management",
-                "due_days": 2
-            }
-        
-        # Attorney letters consistency
-        elif any(term in document_type_lower or term in content_lower for term in ['attorney', 'legal', 'lawyer', 'counsel']):
-            return {
-                "description": f"Review legal document and respond if needed",
-                "department": "Admin/Legal", 
-                "due_days": 3
-            }
-        
-        # Referral consistency
-        elif any(term in document_type_lower or term in content_lower for term in ['referral', 'consult', 'specialist']):
-            return {
-                "description": f"Review referral and schedule consult",
-                "department": "Referrals / Coordination",
-                "due_days": 2
-            }
-        
-        # QME/AME consistency
-        elif any(term in document_type_lower or term in content_lower for term in ['qme', 'ame', 'independent medical']):
-            return {
-                "description": f"Review QME/AME findings and update plan",
-                "department": "Case Management",
-                "due_days": 2
-            }
-        
-        # Billing consistency
-        elif any(term in document_type_lower or term in content_lower for term in ['billing', 'invoice', 'payment', 'eob', 'eor']):
-            return {
-                "description": f"Review billing and reconcile",
-                "department": "Billing/Compliance",
-                "due_days": 3
-            }
-        
-        # Prior auth consistency
-        elif any(term in document_type_lower or term in content_lower for term in ['prior auth', 'authorization', 'pre-cert']):
-            return {
-                "description": f"Track prior auth approval",
-                "department": "Prior Authorization",
-                "due_days": 3
-            }
-        
-        # Default fallback
-        return {
-            "description": f"Review {document_type.title()} and determine next steps",
-            "department": "Case Management",
-            "due_days": 2
-        }
+            **GENERATION RULES:**
+            - Generate 1-3 tasks MAXIMUM
+            - Focus on MOST CRITICAL next steps identified through deep analysis
+            - Each task must be directly supported by document content
+            - Use specific details from the document in task descriptions
+            - Ensure department assignment aligns with workflow ownership
 
-    def create_prompt(self, consistent_template: dict, patient_name: str, source_document: str) -> ChatPromptTemplate:
+            **REMEMBER: Your tasks should reflect a DEEP UNDERSTANDING of the document content, not just superficial categorization.**
+            """
+    def create_prompt(self, patient_name: str, source_document: str) -> ChatPromptTemplate:
         user_template = """
         DOCUMENT TYPE: {document_type}
         DOCUMENT ANALYSIS:
         {document_analysis}
 
-        MODE: {mode}
         SOURCE DOCUMENT: {source_document}
         TODAY'S DATE: {current_date}
         PATIENT: {patient_name}
 
-        **CONSISTENCY REQUIREMENTS:**
-        - PRIMARY TASK MUST BE: "{consistent_description}"
-        - DEPARTMENT MUST BE: "{consistent_department}"
-        - DUE IN: {consistent_due_days} days
+        Analyze this document and generate 1-3 specific, actionable tasks routed to the appropriate department.
 
-        Generate 1-3 tasks (preferably 1) using the primary task above as the main task.
-        You may add additional tasks ONLY if clearly warranted by the document content.
-
-        {{
-            "tasks": [
-                {{
-                    "description": "{consistent_description}",
-                    "department": "{consistent_department}",
-                    "status": "Pending",
-                    "due_date": "{consistent_due_date}",
-                    "patient": "{patient_name}",
-                    "actions": ["Claim", "Complete"],
-                    "source_document": "{source_document}",
-                    "quickNotes": {{
-                        "details": "Brief context from document analysis",
-                        "one_line_note": "Short note for dashboard"
-                    }}
-                }}
-            ]
-        }}
+        Key considerations:
+        - What is the most critical next step for patient care?
+        - Which department is best equipped to handle this task?
+        - What is the appropriate timeframe for completion?
+        - How can we ensure consistent task descriptions for similar documents?
 
         {format_instructions}
         """
@@ -350,126 +225,155 @@ class TaskCreator:
         ])
 
     async def generate_tasks(self, document_analysis: dict, source_document: str = "") -> list[dict]:
-        """Generate consistent AI-driven tasks based on document analysis."""
+        """Generate AI-driven tasks based on document analysis using only the four core departments."""
         try:
+            print(document_analysis,'document_analysis')
             current_date = datetime.now()
             patient_name = document_analysis.get("patient_name", "Unknown")
             document_type = document_analysis.get("document_type", "Unknown")
             
-            print(f"📝 Creating consistent tasks for document: {source_document} ({document_type})")
+            print(f"📝 Creating AI-driven tasks for document: {source_document} ({document_type})")
 
-            # Get text content for analysis
-            text_content = " ".join(
-                str(v) for v in document_analysis.values() if isinstance(v, (str, list))
-            ).lower()
-
-            # Get consistent task template FIRST
-            consistent_template = self._get_consistent_task_template(document_type, text_content)
-            
-            # Calculate due date
-            due_date = (current_date + timedelta(days=consistent_template["due_days"])).strftime("%Y-%m-%d")
-            
-            # Determine mode
-            wc_keywords = ["rfa", "ur denial", "attorney", "qme", "workers", "claim", "pr-"]
-            gm_keywords = ["prior auth", "referral", "consult", "intake", "specialist"]
-
-            if any(k in text_content for k in wc_keywords):
-                mode = "WC"
-            elif any(k in text_content for k in gm_keywords):
-                mode = "GM"
-            else:
-                mode = "WC" if "pr-" in document_type.lower() else "GM"
-
-            # Create and run the chain with consistency enforcement
-            prompt = self.create_prompt(consistent_template, patient_name, source_document)
+            # Create and run the chain - let LLM handle all routing decisions
+            prompt = self.create_prompt(patient_name, source_document)
             chain = prompt | self.llm | self.parser
 
             result = chain.invoke({
                 "document_analysis": json.dumps(document_analysis, indent=2),
                 "current_date": current_date.strftime("%Y-%m-%d"),
                 "source_document": source_document or "Unknown",
-                "mode": mode,
                 "document_type": document_type,
                 "patient_name": patient_name,
-                "consistent_description": consistent_template["description"],
-                "consistent_department": consistent_template["department"],
-                "consistent_due_days": consistent_template["due_days"],
-                "consistent_due_date": due_date,
                 "format_instructions": self.parser.get_format_instructions()
             })
 
             # Normalize result
             if isinstance(result, dict):
-                out = result
+                tasks_data = result
             else:
                 try:
-                    out = result.dict()
+                    tasks_data = result.dict()
                 except Exception:
                     try:
-                        out = dict(result)
+                        tasks_data = dict(result)
                     except Exception:
-                        out = {}
+                        tasks_data = {"tasks": []}
 
-            # Always return a single, clear, one-line task with dynamic description and relevant department
-            task = {
-                "description": consistent_template["description"],
-                "department": consistent_template["department"],
+            tasks = tasks_data.get("tasks", [])
+            
+            # Validate department routing
+            valid_departments = [
+                "Medical/Clinical", 
+                "Scheduling & Coordination", 
+                "Administrative/Compliance", 
+                "Authorizations & Denials"
+            ]
+            
+            validated_tasks = []
+            for task in tasks:
+                # Ensure department is one of the four core departments
+                if task.get("department") not in valid_departments:
+                    # Let LLM re-route if invalid department
+                    task["department"] = await self._determine_correct_department(task, document_analysis)
+                
+                validated_tasks.append(task)
+
+            logger.info(f"✅ Generated {len(validated_tasks)} AI-driven tasks for patient: {patient_name}")
+
+            # Database operations for analytics
+            await self._update_workflow_analytics(validated_tasks)
+
+            return validated_tasks
+
+        except Exception as e:
+            logger.error(f"❌ AI task creation failed: {str(e)}")
+            
+            # Fallback to basic task with Medical/Clinical as default
+            current_date = datetime.now()
+            due_date = (current_date + timedelta(days=2)).strftime("%Y-%m-%d")
+            
+            return [{
+                "description": f"Review {document_analysis.get('document_type', 'document')} and determine appropriate action",
+                "department": "Medical/Clinical",
                 "status": "Pending",
                 "due_date": due_date,
-                "patient": patient_name,
+                "patient": document_analysis.get("patient_name", "Unknown"),
                 "actions": ["Claim", "Complete"],
                 "source_document": source_document or "Unknown",
                 "quickNotes": {
-                    "details": f"AI generated follow-up task for {document_type}",
-                    "one_line_note": consistent_template["description"]
+                    "details": "Fallback task after system error",
+                    "one_line_note": "Review document and route appropriately"
                 }
-            }
-            logger.info(f"✅ Generated 1 consistent task for patient: {patient_name}")
-            tasks = [task]
+            }]
 
-            # Database operations
+    async def _determine_correct_department(self, task: dict, document_analysis: dict) -> str:
+        """Use LLM to determine correct department for misrouted tasks."""
+        try:
+            correction_prompt = """
+            Based on the task description and document analysis, route this task to the correct department.
+            
+            Available Departments:
+            - Medical/Clinical: Clinical review, treatment decisions, medical findings
+            - Scheduling & Coordination: Appointment scheduling, referral coordination
+            - Administrative/Compliance: Legal documents, compliance, administrative tasks  
+            - Authorizations & Denials: RFA, UR, IMR, insurance authorizations
+
+            Task: {task_description}
+            Document Type: {document_type}
+            
+            Return ONLY the department name, nothing else.
+            """
+            
+            prompt = ChatPromptTemplate.from_template(correction_prompt)
+            chain = prompt | self.llm
+            
+            response = await chain.ainvoke({
+                "task_description": task.get("description", ""),
+                "document_type": document_analysis.get("document_type", "")
+            })
+            
+            department = response.content.strip()
+            valid_departments = [
+                "Medical/Clinical", 
+                "Scheduling & Coordination", 
+                "Administrative/Compliance", 
+                "Authorizations & Denials"
+            ]
+            
+            return department if department in valid_departments else "Medical/Clinical"
+            
+        except Exception:
+            return "Medical/Clinical"
+
+    async def _update_workflow_analytics(self, tasks: list[dict]):
+        """Update workflow analytics based on generated tasks."""
+        try:
             db = DatabaseService()
             await db.connect()
 
-            for t in tasks:
-                desc = t["description"].lower()
-                dept = t["department"].lower()
+            for task in tasks:
+                department = task.get("department", "").lower()
+                description = task.get("description", "").lower()
 
-                if "referral" in desc or "consult" in desc:
-                    await db.increment_workflow_stat("referralsProcessed")
-                elif "rfa" in desc or "ur decision" in desc:
+                # Map departments to analytics categories
+                if "medical" in department or "clinical" in department:
+                    await db.increment_workflow_stat("clinicalReviews")
+                elif "scheduling" in department or "coordination" in department:
+                    await db.increment_workflow_stat("schedulingTasks")
+                elif "administrative" in department or "compliance" in department:
+                    await db.increment_workflow_stat("adminTasks")
+                elif "authorization" in department or "denial" in department:
+                    await db.increment_workflow_stat("authTasks")
+
+                # Additional specific tracking
+                if "rfa" in description or "ur" in description or "imr" in description:
                     await db.increment_workflow_stat("rfasMonitored")
-                elif "qme" in desc or "ime" in desc:
-                    await db.increment_workflow_stat("qmeUpcoming")
-                elif "dispute" in desc or "appeal" in desc or "claim" in desc:
-                    await db.increment_workflow_stat("payerDisputes")
-                else:
-                    await db.increment_workflow_stat("externalDocs")
+                elif "qme" in description or "ime" in description:
+                    await db.increment_workflow_stat("qmeUpdating")
+                elif "attorney" in description or "legal" in description:
+                    await db.increment_workflow_stat("legalDocs")
 
             await db.disconnect()
 
-            return tasks
-
         except Exception as e:
-            logger.error(f"❌ Consistent task creation failed: {str(e)}")
-            
-            # Even in error, return consistent task
-            current_date = datetime.now()
-            document_type = document_analysis.get("document_type", "Unknown")
-            patient_name = document_analysis.get("patient_name", "Unknown")
-            
-            consistent_template = self._get_consistent_task_template(document_type)
-            
-            return [{
-                "description": consistent_template["description"],
-                "department": consistent_template["department"],
-                "status": "Pending",
-                "due_date": current_date + timedelta(days=consistent_template["due_days"]),
-                "patient": patient_name,
-                "actions": ["Claim", "Complete"],
-                "source_document": source_document or "Unknown",
-                "quickNotes": {
-                    "details": "Fallback consistent task after error",
-                    "one_line_note": consistent_template["description"]
-                }
-            }]
+            logger.error(f"❌ Analytics update failed: {str(e)}")

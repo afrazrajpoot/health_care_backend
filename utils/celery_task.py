@@ -1,3 +1,4 @@
+
 from config.celery_config import app as celery_app
 from datetime import datetime
 import traceback
@@ -211,6 +212,7 @@ def finalize_document_task(self, webhook_payload: dict, batch_task_id: str = Non
 def process_batch_documents(self, payloads: list[dict]):
     """
     Master batch processing task with queue tracking and deduplication
+    Handles both batches and single documents (as a batch of 1).
     """
     try:
         file_service = FileService()
@@ -511,164 +513,6 @@ def finalize_document_task_worker(webhook_payload: dict, batch_task_id: str = No
             "processing_time_ms": int(processing_time),
             "filename": filename,
             "file_index": file_index,
-            "queue_id": queue_id
-        }
-
-@celery_app.task(bind=True, name='process_single_document', max_retries=0, retry_backoff=False)  # Disabled retries and backoff
-def process_single_document(self, webhook_payload: dict):
-    """
-    Process a single document with progress tracking and deduplication
-    """
-    start_time = datetime.now()
-    filename = webhook_payload.get('filename', 'unknown')
-    
-    # FIX: Get task ID safely
-    task_id = getattr(self.request, 'id', None)
-    if not task_id:
-        task_id = str(uuid.uuid4())
-        logger.warning(f"⚠️ Using fallback single task ID: {task_id}")
-    
-    user_id = webhook_payload.get('user_id')
-    
-    # ===== DEDUPLICATION CHECK =====
-    document_hash = progress_service.create_document_hash(filename)
-    if progress_service.is_processing(document_hash):
-        processing_task = progress_service.get_processing_task(document_hash)
-        skip_msg = f"⚠️ Single document already processing: {filename} by task {processing_task}"
-        logger.warning(skip_msg)
-        
-        return {
-            "status": "skipped",
-            "reason": "already_processing",
-            "filename": filename,
-            "processing_task": processing_task
-        }
-    
-    # Mark as processing
-    progress_service.mark_processing(document_hash, task_id)
-    
-    start_msg = f"🚀 Single document start: {filename} for task {task_id}, user {user_id}"
-    logger.info(start_msg)
-    print(start_msg)
-    
-    # ===== QUEUE INITIALIZATION =====
-    queue_id = None
-    if user_id:
-        queue_id = progress_service.get_user_queue(user_id)
-        if not queue_id:
-            queue_id = progress_service.initialize_queue_progress(user_id)
-    
-    # Initialize progress for single file with queue reference
-    progress_service.initialize_task_progress(
-        task_id=task_id,
-        total_steps=1,
-        filenames=[filename],
-        user_id=user_id,
-        queue_id=queue_id
-    )
-    
-    try:
-        webhook_payload = serialize_payload(webhook_payload)
-        
-        # Move to active in queue
-        if queue_id:
-            progress_service.move_task_to_active(queue_id, task_id)
-        
-        # Progress updates for single file
-        progress_steps = [10, 25, 40, 60, 80, 90, 100]
-        for progress_step in progress_steps:
-            time.sleep(0.5)
-            
-            status_messages = {
-                10: "Uploading to cloud...",
-                25: "Extracting text...", 
-                40: "Analyzing content...",
-                60: "Processing data...",
-                80: "Generating summary...",
-                90: "Finalizing...",
-                100: "Completed"
-            }
-            
-            progress_service.update_progress(
-                task_id=task_id,
-                current_step=1,
-                current_file=f"{filename} - {status_messages.get(progress_step, 'Processing...')}",
-                status='processing',
-                file_progress=progress_step
-            )
-        
-        # Webhook call (increased timeout for long-running reasoning)
-        webhook_url = CONFIG.get("api_base_url", "https://api.kebilo.com") + "/api/webhook/save-document"
-        response = requests.post(webhook_url, json=webhook_payload, timeout=300)  # Increased to 5 minutes
-        
-        if response.status_code != 200:
-            raise ValueError(f"Webhook status {response.status_code}: {response.text}")
-        
-        response_data = response.json()
-        
-        # Mark as completed
-        progress_service.update_progress(
-            task_id=task_id,
-            current_step=1,
-            current_file=f"{filename} - Completed",
-            status='completed',
-            file_progress=100,
-            completed=True
-        )
-        
-        # Complete in queue
-        if queue_id:
-            progress_service.complete_task_in_queue(queue_id, task_id, success=True)
-        
-        processing_time = (datetime.now() - start_time).total_seconds() * 1000
-        success_msg = f"✅ Single document succeeded: {filename}"
-        logger.info(success_msg)
-        print(success_msg)
-        
-        # Clear processing mark
-        progress_service.mark_completed(document_hash)
-        
-        return {
-            "status": "success",
-            "response": response_data,
-            "processing_time_ms": int(processing_time),
-            "filename": filename,
-            "task_id": task_id,
-            "queue_id": queue_id
-        }
-        
-    except Exception as e:
-        error_str = str(e)
-        error_msg = f"❌ Single document failed: {filename} - {error_str}"
-        logger.error(error_msg)
-        print(error_msg)
-        
-        # Mark as failed
-        progress_service.update_progress(
-            task_id=task_id,
-            current_step=1,
-            current_file=f"{filename} - Failed",
-            status='failed',
-            file_progress=100,
-            completed=True,
-            failed_file=filename
-        )
-        
-        # Mark as failed in queue
-        if queue_id:
-            progress_service.complete_task_in_queue(queue_id, task_id, success=False)
-        
-        processing_time = (datetime.now() - start_time).total_seconds() * 1000
-        
-        # Clear processing mark
-        progress_service.mark_completed(document_hash)
-        
-        return {
-            "status": "failed",
-            "error": error_str,
-            "processing_time_ms": int(processing_time),
-            "filename": filename,
-            "task_id": task_id,
             "queue_id": queue_id
         }
 

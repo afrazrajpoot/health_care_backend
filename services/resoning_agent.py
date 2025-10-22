@@ -5,9 +5,8 @@ from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any, Tuple, TypedDict
 from datetime import datetime, timedelta
-import re
+import re, json
 import logging
-import json
 from services.report_analyzer import ReportAnalyzer
 
 from config.settings import CONFIG
@@ -26,7 +25,7 @@ class DateReasoning(BaseModel):
 class DocumentAnalysis(BaseModel):
     """Structured analysis of medical document matching database schema"""
     patient_name: str = Field(..., description="Full name of the patient")
-    claim_number: str = Field(..., description="Claim number or case ID. Use 'Not specified' if not found")
+    claim_number: str = Field(..., description="Claim number. Use 'Not specified' if not found")
     dob: str = Field(..., description="Date of birth in YYYY-MM-DD format")
     doi: str = Field(..., description="Date of injury in YYYY-MM-DD format")
     status: str = Field(..., description="Current status: normal, urgent, critical, etc.")
@@ -124,7 +123,7 @@ class ComprehensiveDocumentReasoningSystem:
         2. PATIENT INFORMATION PATTERNS:
            - Patient Name: Look for "Patient:", demographics section, near DOB
            - DOB: Look for "DOB:", "Date of Birth:", birth date patterns
-           - Claim Number: Look for "Claim #", "Case #", "Claim Number:", insurance references
+           - Claim Number: Look for "Claim #", "Claim Number:", 
         
         3. CLINICAL CONTEXT UNDERSTANDING:
            - Document Type: Progress Note, Imaging Report, Consultation, etc.
@@ -139,7 +138,7 @@ class ComprehensiveDocumentReasoningSystem:
         
         5. WORKERS COMP CONTEXT (if applicable):
            - Look for "WRKCMP", "Work Comp", "State Comp", industrial injury context
-           - Claim numbers often follow patterns like numbers/letters combinations
+           - Claim number: Must be near "claim" keyword or "claim number"
         
         SPECIFIC PATTERNS TO RECOGNIZE:
         
@@ -150,8 +149,8 @@ class ComprehensiveDocumentReasoningSystem:
         
         EXTRACTION RULES:
         
-        - Patient Name: Extract full name from demographics (e.g., "Cynthia L Williams")
-        - Claim Number: Look near "Claim #", case numbers, insurance references
+        - Patient Name: Extract full name from demographics (e.g., "Jhon Doe")
+        - Claim Number: Look near "Claim #", but must have a keyword "claim" or "claim number" nearby
         - Status: Infer from clinical urgency (pain 8/10 → urgent, routine findings → normal)
         - Diagnosis: Primary condition + 2-3 key findings from objective assessment
         - Key Concerns: 2-3 word summary of main clinical issues
@@ -273,7 +272,7 @@ class ComprehensiveDocumentReasoningSystem:
             PROFESSIONAL EXTRACTION:
             - Patient Name: Infer full names from demographics, avoid non-names
             - DOB: Detect birth date mentions, formats like MM/DD/YYYY
-            - Claim Number: Identify claim/case IDs from insurance/workers comp context
+            - Claim Number: Identify claim number must be near "claim" keyword or "claim number"
             - Flag presence and list potentials with reasoning for accuracy
             
             {format_instructions}
@@ -322,7 +321,7 @@ class ComprehensiveDocumentReasoningSystem:
             CURRENT DATE: {current_date}
             
             OCCUPATIONAL REASONING:
-            - Look for indicators: WRKCMP, work-related injury, claim references
+            - Look for indicators: WRKCMP, work-related injury, claim number
             - Infer work status: light duty, off work, full duty from limitations
             - Flag as workers_comp if evidence supports
             
@@ -386,7 +385,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
         
         1. PATIENT INFORMATION:
            - Patient Name: Use the most likely full name from demographics
-           - Claim Number: Extract from claim/case number patterns
+           - Claim Number: Extract from claim number , must be near "claim" keyword or "claim number"
            - DOB: Extract date of birth from explicit labels
            - DOI: Look for injury dates in workers comp context
         

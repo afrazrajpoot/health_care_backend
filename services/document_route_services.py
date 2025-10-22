@@ -1,3 +1,5 @@
+
+
 # services/document_extractor_service.py
 import traceback
 from datetime import datetime
@@ -104,7 +106,7 @@ class DocumentExtractorService:
             # Document AI Processing
             processor = get_document_ai_processor()
             document_result = processor.process_document(processing_path)
-
+           
             # Build ExtractionResult
             result = ExtractionResult(
                 text=document_result.text,
@@ -243,6 +245,7 @@ class DocumentExtractorService:
     ) -> str:
         """
         Queue the batch for processing and initialize progress tracking.
+        Handles both batches and single documents (as a batch of 1).
         Returns task_id.
         """
         if not payloads:
@@ -274,6 +277,3 @@ class DocumentExtractorService:
                 logger.info(f"🗑️ Cleanup GCS (successful): {path}")
             except Exception as e:
                 logger.warning(f"⚠️ Cleanup failed: {path} - {str(e)}")
-
-
-
