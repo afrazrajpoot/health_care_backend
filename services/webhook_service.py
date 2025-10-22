@@ -176,7 +176,6 @@ class WebhookService:
         """
         logger.info(f"🔍 Performing patient lookup for physician_id: {physician_id}")
 
-        # Enhanced lookup: Use claim_number if available; otherwise fallback to patient_name + dob + physician
         lookup_data = await db_service.get_patient_claim_numbers(
             patient_name=processed_data["patient_name_for_query"],
             physicianId=physician_id,
@@ -187,29 +186,29 @@ class WebhookService:
 
         # Check if this is first time document with only claim number (no previous documents found)
         is_first_time_claim_only = (
-            processed_data["has_claim_number"] and 
-            not processed_data["has_patient_name"] and 
-            lookup_data and 
-            lookup_data.get("total_documents", 0) == 0
+            processed_data["has_claim_number"]
+            and not processed_data["has_patient_name"]
+            and lookup_data
+            and lookup_data.get("total_documents", 0) == 0
         )
-        
+
         if is_first_time_claim_only:
             logger.info("✅ First time document with only claim number - no conflicts expected")
 
-        # Check for conflicting claim numbers from lookup
+        # Check for conflicting claim numbers
         has_conflicting_claims = lookup_data.get("has_conflicting_claims", False) if lookup_data else False
         conflicting_claims_reason = None
-        
-        # Don't treat as conflict if it's first time with only claim number
+
+        # Ignore conflicts for first-time claim-only documents
         if has_conflicting_claims and is_first_time_claim_only:
             has_conflicting_claims = False
             logger.info("🔄 Ignoring conflicts for first-time claim-only document")
-        
+
         if has_conflicting_claims and not is_first_time_claim_only:
             conflicting_claims_reason = f"Multiple conflicting claim numbers found: {lookup_data.get('unique_valid_claims', [])}"
             logger.warning(f"⚠️ {conflicting_claims_reason}")
 
-        # Override missing fields from lookup if available (only if no conflicts or first-time claim-only)
+        # Override missing fields
         document_analysis = processed_data["document_analysis"]
         if lookup_data and lookup_data.get("total_documents", 0) > 0 and (not has_conflicting_claims or is_first_time_claim_only):
             fetched_patient_name = lookup_data.get("patient_name")
@@ -217,7 +216,6 @@ class WebhookService:
             fetched_doi = lookup_data.get("doi")
             fetched_claim_number = lookup_data.get("claim_number")
 
-            # Update document_analysis with fetched data if current is missing/"Not specified"
             if not document_analysis.patient_name or str(document_analysis.patient_name).lower() == "not specified":
                 document_analysis.patient_name = fetched_patient_name
                 logger.info(f"🔄 Overrode patient_name from lookup: {fetched_patient_name}")
@@ -230,22 +228,36 @@ class WebhookService:
                 document_analysis.doi = fetched_doi
                 logger.info(f"🔄 Overrode DOI from lookup: {fetched_doi}")
 
-            # Also update claim if fetched (but only if not already set)
             if not processed_data["has_claim_number"] and fetched_claim_number:
                 document_analysis.claim_number = fetched_claim_number
                 logger.info(f"🔄 Overrode claim_number from lookup: {fetched_claim_number}")
 
-        # Updated claim after lookup
-        updated_claim_number_for_query = document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else None
-        updated_patient_name_for_query = document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else "Unknown Patient"
+        updated_claim_number_for_query = (
+            document_analysis.claim_number
+            if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified"
+            else None
+        )
+        updated_patient_name_for_query = (
+            document_analysis.patient_name
+            if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified"
+            else "Unknown Patient"
+        )
 
-        # Re-check missing fields after lookup overrides
+        # Re-check missing fields
         updated_required_fields = {
             "patient_name": document_analysis.patient_name,
             "dob": document_analysis.dob,
         }
         updated_missing_fields = [k for k, v in updated_required_fields.items() if not v or str(v).lower() == "not specified"]
         has_missing_required_fields = len(updated_missing_fields) > 0
+
+        # ✅ NEW RULE: If document already has a valid claim number → don't treat missing fields or conflicts as failure
+        if processed_data.get("has_claim_number"):
+            logger.info("✅ Document has claim number — skipping failure conditions for missing fields or conflicts.")
+            has_conflicting_claims = False
+            has_missing_required_fields = False
+            conflicting_claims_reason = None
+            updated_missing_fields = []
 
         return {
             "lookup_data": lookup_data,
@@ -255,9 +267,10 @@ class WebhookService:
             "has_missing_required_fields": has_missing_required_fields,
             "updated_claim_number_for_query": updated_claim_number_for_query,
             "updated_patient_name_for_query": updated_patient_name_for_query,
-            "document_analysis": document_analysis,  # Updated
-            "is_first_time_claim_only": is_first_time_claim_only  # New flag
+            "document_analysis": document_analysis,
+            "is_first_time_claim_only": is_first_time_claim_only,
         }
+
     async def compare_and_determine_status(self, processed_data: dict, lookup_result: dict, db_service, physician_id: str) -> dict:
         """
         Step 3: Fetch previous documents, compare, and determine final status/reason.
@@ -603,6 +616,8 @@ class WebhookService:
                 }
             }
         }
+    
+    
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
         Orchestrates the full webhook processing pipeline using the 4 steps.
