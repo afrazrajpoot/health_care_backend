@@ -2,7 +2,7 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 import re
 import logging
@@ -12,7 +12,7 @@ from config.settings import CONFIG
 
 logger = logging.getLogger("document_ai")
 
-# Pydantic models
+# Pydantic models (retained for type hints)
 class DocumentAnalysis(BaseModel):
     """Structured analysis of medical document matching database schema"""
     patient_name: str = Field(..., description="Full name of the patient")
@@ -90,30 +90,33 @@ class ReportAnalyzer:
     
     def compare_with_previous_documents(
         self, 
-        current_analysis: DocumentAnalysis, 
+        current_analysis: Any, 
         previous_documents: List[Dict[str, Any]]  
     ) -> Dict[str, str]:
         """
         Use LLM to compare previous documents with current analysis and generate 'What's New'.
         PRESERVES all previous whats_new data and adds new changes.
+        Returns empty dict if no meaningful new data found (no fallback 'processing' messages).
         """
         mm_dd = datetime.now().strftime("%m/%d")
         current_date = datetime.now().strftime("%Y-%m-%d")
-        
         logger.info(f"DEBUG: previous_documents = {previous_documents}")
         logger.info(f"DEBUG: Has previous? {bool(previous_documents)}")
-        
-        # ✅ FIX: Ensure current_analysis is a DocumentAnalysis instance
-        if isinstance(current_analysis, dict):
-            try:
+          
+        # ✅ FLEXIBLE TYPE HANDLING: Handle foreign Pydantic models or dicts
+        try:
+            if hasattr(current_analysis, 'dict'):
+                # It's a Pydantic model (possibly from another module)
+                current_analysis_dict = current_analysis.dict()
+                current_analysis = DocumentAnalysis(**current_analysis_dict)
+                logger.info(f"✅ Converted foreign Pydantic model to local DocumentAnalysis")
+            elif isinstance(current_analysis, dict):
                 current_analysis = DocumentAnalysis(**current_analysis)
-                logger.info(f"✅ Converted dict to DocumentAnalysis for current_analysis")
-            except Exception as e:
-                logger.error(f"❌ Failed to convert dict to DocumentAnalysis: {str(e)}")
-                # Fallback to empty analysis if conversion fails
-                current_analysis = self.create_fallback_analysis()
-        elif not isinstance(current_analysis, DocumentAnalysis):
-            logger.warning(f"⚠️ current_analysis is unexpected type {type(current_analysis)}; using fallback")
+                logger.info(f"✅ Converted dict to DocumentAnalysis")
+            elif not isinstance(current_analysis, DocumentAnalysis):
+                raise AttributeError("Not a valid analysis object")
+        except Exception as e:
+            logger.error(f"❌ Failed to convert current_analysis: {str(e)}")
             current_analysis = self.create_fallback_analysis()
         
         # Collect ALL previous whats_new data from all documents
@@ -140,6 +143,9 @@ class ReportAnalyzer:
             initial_whats_new = self._create_initial_whats_new(current_analysis, mm_dd)
             # Merge with empty previous (just returns initial)
             merged_result = {**all_previous_whats_new, **initial_whats_new}
+            # ✅ MINIMAL FIX: Ensure non-empty for required field
+            if not merged_result:
+                merged_result = {'initial': f"Initial document ({mm_dd})"}
             logger.info(f"✅ Final merged 'What's New' (initial): {merged_result}")
             return merged_result
         
@@ -161,7 +167,7 @@ class ReportAnalyzer:
         previous_analyses += f"- Key Concerns: {most_recent.get('key_concern', 'N/A')}\n"
         previous_analyses += f"- Work Restrictions: {most_recent.get('work_restrictions', 'N/A')}\n"
         
-        # Current analysis as detailed formatted string
+        # Current analysis as detailed formatted string (using dot notation for DocumentAnalysis)
         current_analysis_str = f"""
         CURRENT DOCUMENT ANALYSIS (Date: {current_date}):
         - Document Type: {current_analysis.document_type}
@@ -191,14 +197,14 @@ class ReportAnalyzer:
                     result = json.loads(raw_result)
                 except json.JSONDecodeError as je:
                     logger.error(f"❌ Invalid JSON from LLM: {raw_result[:200]}... Error: {str(je)}")
-                    # Fallback to default structure
-                    return self._create_default_whats_new(current_analysis)
+                    # Fallback to previous data only (no new defaults)
+                    return all_previous_whats_new
             else:
                 result = raw_result  # Assume it's already a dict from parser
             
             if not isinstance(result, dict):
                 logger.error(f"❌ AI returned non-dict result: {result}")
-                return self._create_default_whats_new(current_analysis)
+                return all_previous_whats_new  # Fallback to previous only
             
             # Flatten any nested dicts/strings (handles cases like {"diagnostic": {"value": "str"}} -> {"diagnostic": "str"})
             flattened_result = {}
@@ -220,11 +226,6 @@ class ReportAnalyzer:
             
             logger.info(f"✅ Parsed LLM result (flattened): {flattened_result}")
             
-            # ✅ ENSURE NON-EMPTY RESULT: If flattened result is empty, use default
-            if not flattened_result:
-                logger.warning("⚠️ Flattened result is empty; using default structure")
-                flattened_result = self._create_default_whats_new(current_analysis)
-            
             # Merge previous whats_new with new changes - PRESERVE ALL HISTORY
             merged_result = all_previous_whats_new.copy()  # Start with all previous data
             for category, value in flattened_result.items():
@@ -232,82 +233,52 @@ class ReportAnalyzer:
                     # Update with latest value (this will overwrite previous with updated info)
                     merged_result[category] = value
             
-            # ✅ FINAL SAFETY CHECK: Ensure result is never empty
+            # ✅ FINAL SAFETY CHECK: Ensure result is never empty - but allow empty if no data (no 'processing' fallback)
             if not merged_result:
-                logger.warning("⚠️ Merged result is empty; creating default structure")
-                merged_result = self._create_default_whats_new(current_analysis)
-            
+                merged_result = {'update': f"Document updated ({mm_dd})"}
             logger.info(f"✅ MERGED 'What's New' (preserving history): {merged_result}")
             return merged_result
             
         except Exception as e:
             logger.error(f"❌ AI comparison failed: {str(e)}")
-            # Fallback: Return accumulated previous data OR create default if empty
-            if all_previous_whats_new:
-                logger.info(f"✅ Falling back to previous whats_new only: {all_previous_whats_new}")
-                return all_previous_whats_new
-            else:
-                logger.info("✅ No previous data available; creating default whats_new")
-                return self._create_default_whats_new(current_analysis)
+            # Fallback: Return accumulated previous data only (no defaults)
+            if not all_previous_whats_new:
+                all_previous_whats_new = {'fallback': f"Comparison failed ({mm_dd})"}
+            return all_previous_whats_new
 
     def _create_initial_whats_new(self, current_analysis: DocumentAnalysis, mm_dd: str) -> Dict[str, str]:
-        """Create initial whats_new data for first document"""
+        """Create initial whats_new data for first document - no fallback 'processing'"""
         initial_whats_new = {}
         
         # Based on document type, create appropriate initial entries
-        doc_type_lower = current_analysis.document_type.lower()
+        doc_type_lower = current_analysis.document_type.lower() if current_analysis.document_type else ''
+        diagnosis_lower = current_analysis.diagnosis.lower() if current_analysis.diagnosis else ''
+        work_restrictions_lower = current_analysis.work_restrictions.lower() if current_analysis.work_restrictions else ''
         
-        if 'mri' in doc_type_lower or 'imaging' in doc_type_lower or 'scan' in doc_type_lower:
-            if current_analysis.diagnosis and current_analysis.diagnosis.lower() not in ['not specified', 'none']:
+        if any(word in doc_type_lower for word in ['mri', 'imaging', 'scan', 'ct', 'x-ray']):
+            if diagnosis_lower not in ['not specified', 'none']:
                 initial_whats_new['diagnostic'] = f"{current_analysis.diagnosis} ({mm_dd})"
         elif 'qme' in doc_type_lower or 'evaluator' in doc_type_lower:
             initial_whats_new['qme'] = f"QME evaluation ({mm_dd})"
-        elif 'legal' in doc_type_lower or 'attorney' in doc_type_lower or 'claim' in doc_type_lower:
-            if current_analysis.claim_number and current_analysis.claim_number.lower() != 'not specified':
-                initial_whats_new['legal'] = f"Claim {current_analysis.claim_number} ({mm_dd})"
+        elif any(word in doc_type_lower for word in ['legal', 'attorney', 'claim']):
+            claim_num = current_analysis.claim_number
+            if claim_num and claim_num.lower() != 'not specified':
+                initial_whats_new['legal'] = f"Claim {claim_num} ({mm_dd})"
         
         # Default fallback for any document type if no specific match
-        if not initial_whats_new and current_analysis.diagnosis and current_analysis.diagnosis.lower() not in ['not specified', 'none']:
+        if not initial_whats_new and diagnosis_lower not in ['not specified', 'none']:
             initial_whats_new['diagnostic'] = f"{current_analysis.diagnosis} ({mm_dd})"
         
         # Add work restrictions if specified
-        if current_analysis.work_restrictions and current_analysis.work_restrictions.lower() not in ['not specified', 'none', '']:
+        if work_restrictions_lower not in ['not specified', 'none', '']:
             initial_whats_new['ur_decision'] = f"{current_analysis.work_restrictions} ({mm_dd})"
         
-        # ✅ Ensure we always return at least one entry
+        # ✅ MINIMAL FIX: Ensure non-empty for required field
         if not initial_whats_new:
-            initial_whats_new['processing'] = f"Document processed ({mm_dd})"
+            initial_whats_new['initial'] = f"Initial document ({mm_dd})"
         
         logger.info(f"✅ Created initial whats_new: {initial_whats_new}")
         return initial_whats_new
-
-    def _create_default_whats_new(self, current_analysis: DocumentAnalysis) -> Dict[str, str]:
-        """Create a default whats_new structure when comparison fails or returns empty"""
-        mm_dd = datetime.now().strftime("%m/%d")
-        
-        default_whats_new = {
-            "initial_processing": f"Document processed ({mm_dd})"
-        }
-        
-        # Add document-type specific default entries
-        doc_type_lower = current_analysis.document_type.lower()
-        
-        if any(word in doc_type_lower for word in ["mri", "ct", "x-ray", "imaging", "scan"]):
-            default_whats_new["diagnostic"] = f"Imaging report - {current_analysis.diagnosis} ({mm_dd})" if current_analysis.diagnosis and current_analysis.diagnosis.lower() != "not specified" else f"Imaging report ({mm_dd})"
-        elif "qme" in doc_type_lower:
-            default_whats_new["qme"] = f"QME evaluation ({mm_dd})"
-        elif any(word in doc_type_lower for word in ["legal", "attorney", "claim"]):
-            default_whats_new["legal"] = f"Legal document processed ({mm_dd})"
-        else:
-            default_whats_new["medical"] = f"Medical report - {current_analysis.diagnosis} ({mm_dd})" if current_analysis.diagnosis and current_analysis.diagnosis.lower() != "not specified" else f"Medical report ({mm_dd})"
-        
-        # Add work restrictions if available
-        if (current_analysis.work_restrictions and 
-            current_analysis.work_restrictions.lower() not in ['not specified', 'none', '']):
-            default_whats_new["ur_decision"] = f"Work restrictions: {current_analysis.work_restrictions} ({mm_dd})"
-        
-        logger.info(f"✅ Created default whats_new: {default_whats_new}")
-        return default_whats_new
 
     def create_whats_new_prompt(self) -> PromptTemplate:
         template = """
