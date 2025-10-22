@@ -173,7 +173,7 @@ class TaskCreator:
             {{
             "tasks": [
                 {{
-                "description": "Specific task based on deep document analysis",
+                "description": "Specific task based on deep document analysis should be precisely described (should not be more than 5-10 words)  but using actual details from the document and clear action items",
                 "department": "One of the four core departments",
                 "status": "Pending",
                 "due_date": "YYYY-MM-DD (based on content urgency)",

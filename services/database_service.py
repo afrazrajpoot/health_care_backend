@@ -895,7 +895,6 @@ class DatabaseService:
                     # Optional file hash for deduplication
                     **({"fileHash": file_hash} if file_hash else {}),
                     "physicianId": physician_id,
-                    # "patientQuizPage": f"http://localhost:3000/intake-form?token={url_safe_token}",
                   
                     "reportDate": rd if rd else datetime.now(),
                     "blobPath": blob_path,
