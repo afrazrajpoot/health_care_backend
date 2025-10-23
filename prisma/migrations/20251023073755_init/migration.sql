@@ -123,27 +123,38 @@ CREATE TABLE "AuditLog" (
 );
 
 -- CreateTable
-CREATE TABLE "PatientQuiz" (
+CREATE TABLE "patient_quizzes" (
     "id" TEXT NOT NULL,
-    "patientName" TEXT,
+    "patientName" TEXT NOT NULL,
     "dob" TEXT,
+    "claimNumber" TEXT,
     "doi" TEXT,
     "lang" TEXT NOT NULL,
-    "newAppt" JSONB,
+    "bodyAreas" TEXT,
+    "newAppointments" JSONB,
     "refill" JSONB,
     "adl" JSONB NOT NULL,
+    "therapies" JSONB,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "PatientQuiz_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "patient_quizzes_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "FailDocs" (
     "id" TEXT NOT NULL,
     "reason" TEXT NOT NULL,
-    "blobPath" TEXT NOT NULL,
+    "dob" TEXT,
+    "doi" TEXT,
+    "claimNumber" TEXT,
+    "patientName" TEXT,
+    "documentText" TEXT,
     "physicianId" TEXT,
+    "gcsFileLink" TEXT,
+    "fileName" TEXT,
+    "fileHash" TEXT,
+    "blobPath" TEXT,
 
     CONSTRAINT "FailDocs_pkey" PRIMARY KEY ("id")
 );
@@ -154,6 +165,7 @@ CREATE TABLE "intake_links" (
     "token" TEXT NOT NULL,
     "patientName" TEXT NOT NULL,
     "dateOfBirth" TIMESTAMP(3) NOT NULL,
+    "claimNumber" TEXT,
     "visitType" TEXT NOT NULL DEFAULT 'Follow-up',
     "language" TEXT NOT NULL DEFAULT 'en',
     "mode" TEXT NOT NULL DEFAULT 'tele',
@@ -184,6 +196,22 @@ CREATE TABLE "Task" (
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "Task_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "WorkflowStats" (
+    "id" TEXT NOT NULL,
+    "date" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "referralsProcessed" INTEGER NOT NULL DEFAULT 0,
+    "rfasMonitored" INTEGER NOT NULL DEFAULT 0,
+    "qmeUpcoming" INTEGER NOT NULL DEFAULT 0,
+    "payerDisputes" INTEGER NOT NULL DEFAULT 0,
+    "externalDocs" INTEGER NOT NULL DEFAULT 0,
+    "intakes_created" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "WorkflowStats_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateIndex
