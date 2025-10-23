@@ -132,6 +132,27 @@ class TaskCreator:
 
             ---
 
+            ## 🧠 KEYWORD → DEPARTMENT → TASK MAPPING REFERENCE
+
+            You MUST first check if the document contains any of the following **keyword cues**.  
+            If so, use the corresponding department and example trigger before generating refined, document-specific task details.
+
+            | Keyword Cues | Department | Example Trigger |
+            |---------------|-------------|------------------|
+            | “MRI”, “X-ray”, “Lab”, “Impression” | Medical / Clinical | Create task: Review Results + Update Chart Summary |
+            | “Authorization”, “Referral”, “Consult”, “Schedule” | Scheduling | Create task: Coordinate Appointment |
+            | “Denied”, “UR”, “Non-Cert”, “IMR-Eligible” | Authorizations & Denials | Create task: Prepare UR Rebuttal or Flag IMR Eligibility |
+            | “Attorney”, “MPN”, “Address Update”, “C&R”, “EOR”, “EOB”, “Settlement” | Administrative / Compliance | Create task: Update Records / File Correspondence |
+
+            If multiple keywords match, prioritize department routing in this order:
+            **Medical/Clinical → Authorizations & Denials → Scheduling → Administrative/Compliance.**
+
+            You may refine the final task wording to use specific patient and document context,  
+            but keep it aligned with the department and trigger pattern above.
+
+            ---
+
+
             ## ⚡ INTELLIGENT TASK GENERATION
 
             **BASED ON DEEP DOCUMENT ANALYSIS:**
@@ -198,6 +219,8 @@ class TaskCreator:
 
             **REMEMBER: Your tasks should reflect a DEEP UNDERSTANDING of the document content, not just superficial categorization.**
             """
+    
+    
     def create_prompt(self, patient_name: str, source_document: str) -> ChatPromptTemplate:
         user_template = """
         DOCUMENT TYPE: {document_type}
@@ -208,7 +231,7 @@ class TaskCreator:
         TODAY'S DATE: {current_date}
         PATIENT: {patient_name}
 
-        Analyze this document and generate 1-3 specific, actionable tasks routed to the appropriate department.
+        Analyze this document and generate 1 specific, actionable tasks routed to the appropriate department.
 
         Key considerations:
         - What is the most critical next step for patient care?
