@@ -821,7 +821,6 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"❌ Error retrieving document for {patient_name}: {str(e)}")
             raise
-    
     async def save_document_analysis(
         self,
         extraction_result: ExtractionResult,
@@ -832,90 +831,93 @@ class DatabaseService:
         gcs_file_link: str,
         patient_name: str,
         claim_number: str,
-        dob: str,  # Now a string
-        doi: str,  # Now a string
+        dob: str,
+        doi: str,
         rd: datetime,
         status: str,
         brief_summary: str,
-        summary_snapshot: Dict[str, str],
-        whats_new: Dict[str, str],
-        adl_data: Dict[str, str],
+        summary_snapshot: Dict[str, Any],
+        whats_new: Dict[str, Any],
+        adl_data: Dict[str, Any],
         document_summary: Dict[str, Any],
         physician_id: Optional[str] = None,
-        blob_path: Optional[str] = None
-    ,
-    file_hash: Optional[str] = None
-        
+        blob_path: Optional[str] = None,
+        file_hash: Optional[str] = None,
+        mode: Optional[str] = None
     ) -> str:
         """
-        Save document analysis results to database.
-        whatsNew set as JSON string for compatibility.
-        Encrypts patient details in URL token.
+        Save document analysis results to the database.
+
+        - Stores extracted metadata and relationships in Prisma models.
+        - Handles JSON fields and optional relations.
+        - Checks for duplicate documents based on file name.
         """
         try:
-            logger.info(f"💾 Saving document analysis for {patient_name} (Claim: {claim_number})")
-            
-            # ✅ NEW: Check if document already exists (using filename in gcsFileLink)
+            print(summary_snapshot, 'summary_snapshot')
+
+            # ✅ Step 1: Check if document already exists (using filename)
             if await self.document_exists(file_name, file_size):
                 existing_doc = await self.prisma.document.find_first(
                     where={"gcsFileLink": {"contains": file_name}},
                     order={"createdAt": "desc"}
                 )
-                logger.warning(f"⚠️ Document already exists: {file_name} (ID: {existing_doc.id if existing_doc else 'N/A'}). Skipping save.")
-                return existing_doc.id if existing_doc else "unknown"  # Return existing ID or handle as needed
-            
-            # Ensure document_summary has 'date' key
+                logger.warning(
+                    f"⚠️ Document already exists: {file_name} "
+                    f"(ID: {existing_doc.id if existing_doc else 'N/A'}). Skipping save."
+                )
+                return existing_doc.id if existing_doc else "unknown"
+
+            # ✅ Step 2: Ensure document_summary has 'date'
             if "createdAt" in document_summary and "date" not in document_summary:
                 document_summary["date"] = document_summary["createdAt"]
-            
-            # Handle whatsNew as JSON string for Prisma Json field
+
+            # ✅ Step 3: Handle whatsNew as JSON string (for scalar Json field)
             whats_new_json = json.dumps(whats_new) if whats_new else None
-            
-            # Encrypt patient details into a URL-safe token
-            # patient_data = {
-            #     "patientName": patient_name,
-            #     "dob": dob,  # Already a string, no need for isoformat()
-            #     "doi": doi   # Already a string, no need for isoformat()
-            # }
-            # patient_json = json.dumps(patient_data)
-            # encrypted_token = self.cipher_suite.encrypt(patient_json.encode())
-            # Base64 URL-safe encode for URL (Fernet is already base64, but ensure URL-safe)
-            # url_safe_token = base64.urlsafe_b64encode(encrypted_token).decode('utf-8').rstrip('=')
-            
+
+            # ✅ Step 4: Create Document with nested relations
             document = await self.prisma.document.create(
                 data={
                     "patientName": patient_name,
                     "claimNumber": claim_number,
-                    "dob": dob,  # String value
-                    "doi": doi,  # String value
+                    "dob": dob,
+                    "doi": doi,
                     "status": status,
                     "gcsFileLink": gcs_file_link,
                     "briefSummary": brief_summary,
-                    "whatsNew": whats_new_json,  # JSON string for scalar Json field
-                    # Optional file hash for deduplication
-                    **({"fileHash": file_hash} if file_hash else {}),
+                    "whatsNew": whats_new_json,
                     "physicianId": physician_id,
-                    # "patientQuizPage": f"http://localhost:3000/intake-form?token={url_safe_token}",
-                  
                     "reportDate": rd if rd else datetime.now(),
                     "blobPath": blob_path,
-                    # Optional: Add these if you extend schema
                     "fileName": file_name,
-                    # "fileSize": file_size,
-                    # etc.
+                    "mode": mode,
+                    **({"fileHash": file_hash} if file_hash else {}),
+
+                    # ✅ Enhanced Summary Snapshot
                     "summarySnapshot": {
                         "create": {
                             "dx": summary_snapshot.get("dx", ""),
                             "keyConcern": summary_snapshot.get("keyConcern", ""),
-                            "nextStep": summary_snapshot.get("nextStep", "")
+                            "nextStep": summary_snapshot.get("nextStep", ""),
+                            "urDecision": summary_snapshot.get("ur-decision")
+                            or summary_snapshot.get("urDecision", None),
+                            "recommended": summary_snapshot.get("recommended", None),
+                            "aiOutcome": summary_snapshot.get("ai_outcome")
+                            or summary_snapshot.get("aiOutcome", None),
+                            "consultingDoctors": summary_snapshot.get("consulting_doctors", [])
+                            if isinstance(summary_snapshot.get("consulting_doctors", []), list)
+                            else []
                         }
                     },
+
+                    # ✅ ADL (Activities of Daily Living)
                     "adl": {
                         "create": {
                             "adlsAffected": adl_data.get("adlsAffected", ""),
                             "workRestrictions": adl_data.get("workRestrictions", "")
                         }
                     },
+
+                    # ✅ Document Summary
                     "documentSummary": {
                         "create": {
                             "type": document_summary.get("type", ""),
@@ -927,20 +929,20 @@ class DatabaseService:
                 include={
                     "summarySnapshot": True,
                     "adl": True,
-                    "documentSummary": True,
-                    # NO "whatsNew" - scalar
+                    "documentSummary": True
                 }
             )
-            
+
+            # ✅ Step 5: Logging and response
             logger.info(f"✅ Document saved with ID: {document.id}")
-            logger.info(f"📊 WhatsNew JSON: {whats_new_json[:100]}..." if whats_new_json else "📊 WhatsNew: None")
-            # logger.info(f"🔐 Encrypted token: {url_safe_token[:20]}...")
+            if whats_new_json:
+                logger.info(f"📊 WhatsNew JSON: {whats_new_json[:100]}...")
             return document.id
-            
+
         except Exception as e:
             logger.error(f"❌ Error saving document analysis: {str(e)}")
             raise
-    
+
     def decrypt_patient_token(self, token: str) -> Dict[str, Any]:
         """
         Decrypts the token and returns patient data.

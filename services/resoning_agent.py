@@ -13,7 +13,7 @@ from config.settings import CONFIG
 
 logger = logging.getLogger("document_ai")
 
-# Pydantic models (unchanged)
+# Pydantic models (enhanced with extracted keywords for recommendations/decision/outcome)
 class DateReasoning(BaseModel):
     """Structured reasoning about dates found in document"""
     extracted_dates: List[str] = Field(..., description="All dates found in the document in YYYY-MM-DD format")
@@ -23,7 +23,7 @@ class DateReasoning(BaseModel):
     predicted_assignments: Dict[str, str] = Field(..., description="Predicted date assignments")
 
 class DocumentAnalysis(BaseModel):
-    """Structured analysis of medical document matching database schema"""
+    """Structured analysis of medical document matching database schema (enhanced)"""
     patient_name: str = Field(..., description="Full name of the patient")
     claim_number: str = Field(..., description="Claim number. Use 'Not specified' if not found")
     dob: str = Field(..., description="Date of birth in YYYY-MM-DD format")
@@ -32,9 +32,13 @@ class DocumentAnalysis(BaseModel):
     rd: str = Field(..., description="Report date in YYYY-MM-DD format")
     diagnosis: str = Field(..., description="Primary diagnosis and key findings (comma-separated if multiple, 5-10 words total)")
     key_concern: str = Field(..., description="Main clinical concern in 2-3 words")
-    next_step: str = Field(..., description="Recommended next steps in 2-3 words")
+    extracted_recommendation: str = Field(..., description="Extracted key recommendation keywords/phrases directly from the document (comma-separated, e.g., 'PT twice weekly, follow-up 4 weeks'). Use 'Not specified' if none found.")
+    extracted_decision: str = Field(..., description="Extracted key decision/judgment keywords/phrases directly from the document using medical terms (comma-separated, e.g., 'conservative management, no surgery'). Use 'Not specified' if none found.")
+    ur_decision: str = Field(..., description="Extracted UR (Utilization Review) decision keywords/phrases directly from the document (comma-separated, e.g., 'approved PT sessions, denied MRI'). Scan for UR/prior auth terms. Use 'Not specified' if none found.")
     adls_affected: str = Field(..., description="Activities affected in 2-3 words")
     work_restrictions: str = Field(..., description="Work restrictions in 2-3 words")
+    consulting_doctors: List[str] = Field(default_factory=list, description="Names of consultant doctors extracted from the document (e.g., primary physician, specialists). Extract full names where possible. List unique names.")
+    ai_outcome: str = Field(..., description="AI-generated key outcome prediction keywords/phrases based on deep analysis (comma-separated, e.g., 'full recovery 6 weeks, monitor pain'). Straightforward for doctor, no sentences.")
     document_type: str = Field(..., description="Type of document")
     summary_points: List[str] = Field(..., description="3-5 key points, each 2-3 words")
     date_reasoning: Optional[DateReasoning] = Field(None, description="Reasoning behind date assignments")
@@ -61,7 +65,7 @@ class ReasoningState(TypedDict, total=False):
     validated_date_assignments: dict
 
 class EnhancedReportAnalyzer(ReportAnalyzer):
-    """Enhanced analyzer with comprehensive document reasoning (optimized to single LLM call)"""
+    """Enhanced analyzer with comprehensive document reasoning, extracted keywords for recommendations/decision/outcome, consulting doctors (optimized to single LLM call)"""
     
     def __init__(self):
         super().__init__()
@@ -70,7 +74,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
     
     def create_enhanced_extraction_prompt(self) -> PromptTemplate:
         template = """
-        You are a medical document analysis expert. Perform a SINGLE, DEEP, COMPREHENSIVE analysis of this medical document. Analyze the entire text holistically for structure, patterns, clinical context, patient info, urgency, workers comp indicators, dates, and extractions. Do not make separate calls—reason step-by-step internally and output everything in one structured JSON.
+        You are a medical document analysis expert. Perform a SINGLE, DEEP, COMPREHENSIVE analysis of this medical document. Analyze the entire text holistically for structure, patterns, clinical context, patient info, urgency, workers comp indicators, dates, consulting doctors, extracted recommendation/decision/outcome keywords. Extract ONLY from document text if present; otherwise use 'Not specified'. Do not make separate calls—reason step-by-step internally and output everything in one structured JSON.
 
         DOCUMENT TEXT:
         {document_text}
@@ -86,40 +90,64 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
            - Assess urgency: Pain scales (7+/10=urgent), symptoms (severe/acute), findings (fracture/infection= critical). Levels: normal, elevated, urgent, critical.
            - Functional impact: ADLs (sitting/standing/walking limits), work restrictions (light duty/no lifting).
         
-        2. PATIENT & CLAIM EXTRACTION (DEEP FOCUS ON CLAIM):
-           - Patient Name: Full name from demographics (e.g., "Patient: John Doe" → "John Doe"). Avoid non-names.
-           - DOB: Explicit "DOB:", "Date of Birth:", birth patterns (e.g., "Born 01/01/1980").
+        2. PATIENT & CLAIM EXTRACTION (DEEP FOCUS ON CLAIM - EXTRACT IF PRESENT):
+           - Patient Name: Full name from demographics (e.g., "Patient: John Doe" → "John Doe"). If not present, "Not specified".
+           - DOB: Explicit "DOB:", "Date of Birth:", birth patterns (e.g., "Born 01/01/1980"). If not present, "Not specified".
            - CLAIM NUMBER (CRITICAL RULE): Deeply scan for keywords like "CLAIM", "Claim #", "Claim Number", "CL#" exactly near a number (e.g., "Claim #12345" → "12345"). If keyword present + number follows/nearby (within 20 chars), extract as claim_number. If no keyword, use "Not specified" even if numbers exist. Prioritize this pattern over assumptions.
-           - DOI: Injury/event dates in history/workers comp context.
+           - DOI: Injury/event dates in history/workers comp context. If not present, "Not specified".
         
-        3. CLINICAL & FUNCTIONAL EXTRACTION:
-           - Status: From urgency analysis (e.g., high pain → "urgent").
-           - Diagnosis: Primary condition + 2-3 key objective findings (5-10 words total).
-           - Key Concern: Main issue in 2-3 words (e.g., "Chronic back pain").
-           - Next Steps: Recommendations in 2-3 words (e.g., "Follow-up in 2 weeks").
-           - ADLs Affected: Limited activities in 2-3 words (e.g., "Prolonged sitting").
-           - Work Restrictions: Limitations in 2-3 words (e.g., "No heavy lifting").
+        3. CLINICAL & FUNCTIONAL EXTRACTION (EXTRACT IF PRESENT):
+           - Status: From urgency analysis (e.g., high pain → "urgent"). If not inferable, "Not specified".
+           - Diagnosis: Primary condition + 2-3 key objective findings (5-10 words total). If not present, "Not specified".
+           - Key Concern: Main issue in 2-3 words (e.g., "Chronic back pain"). If not present, "Not specified".
+           - ADLs Affected: Limited activities in 2-3 words (e.g., "Prolonged sitting"). If not present, "Not specified".
+           - Work Restrictions: Limitations in 2-3 words (e.g., "No heavy lifting"). If not present, "Not specified".
         
-        4. DEEP DATE ANALYSIS & REASONING (Integrated):
-           - Extract ALL dates: Convert MM/DD/YYYY etc. to YYYY-MM-DD. Ignore non-dates (ages, IDs).
+        4. EXTRACTED RECOMMENDATION KEYWORDS (STRICT KEYWORD-BASED EXTRACTION IF PRESENT):
+           - STRICTLY keyword-based: Scan the entire document text for presence of recommendation-related keywords such as 'recommend', 'recommended', 'recommendation', 'plan', 'plans', 'follow-up', 'follow up', 'therapy', 'PT', 'medication', 'surgery', 'consult', 'referral', or similar clinical action terms in Plan/Assessment/Follow-up sections.
+           - ONLY if one or more of these keywords are found in the document text: Extract the immediate key keywords/phrases directly following or around them (comma-separated, e.g., 'PT twice weekly, follow-up 4 weeks, surgical consult'). No full sentences—just core terms. Keep concise.
+           - If NONE of these keywords are present anywhere in the document text after a thorough scan, set to 'Not specified'. Do not infer or generate if keywords absent.
+        
+        5. EXTRACTED DECISION KEYWORDS (DIRECT EXTRACTION USING MEDICAL TERMS IF PRESENT):
+           - Deeply scan for decisions or clinical judgments in Assessment/Plan/Impressions sections: Extract key keywords/phrases only using medical terms (comma-separated, e.g., "conservative management, no surgery, initiate meds"). Look for "Decision:", "Plan:", "Judgment:", "Proceed with", etc. No full sentences—just core medical terms. If multiple, list concisely. If none found after thorough scan, "Not specified".
+        
+        6. CONSULTING DOCTORS EXTRACTION (DEEP SCAN IF PRESENT):
+           - Deeply scan entire document for consultant doctor names: Look in signatures (e.g., "Consulting MD: Dr. Jane Smith"), consultations (e.g., "Consulted with Dr. Robert Lee for orthopedics"), referrals (e.g., "Referred to consultant Dr. Emily Chen"), or explicit mentions of consultants/specialists. Extract full names (first + last) where possible. Prioritize 'consultant' or specialist roles. List unique names. If none, empty list.
+        
+        6.5. EXTRACTED UR DECISION KEYWORDS (STRICT KEYWORD-BASED EXTRACTION IF PRESENT):
+            - STRICTLY keyword-based: Deeply scan the entire document text for UR (Utilization Review) or prior authorization-related keywords such as 'Utilization Review', 'UR', 'prior authorization', 'prior auth', 'PA', 'approved', 'denied', 'coverage decision', 'authorization status', 'insurance review' in Plan/Assessment/Billing/Authorization sections.
+            - ONLY if one or more of these keywords are found in the document text: Extract the immediate key keywords/phrases directly following or around them (comma-separated, e.g., 'approved 12 PT sessions, denied surgical intervention, PA required for MRI'). No full sentences—just core terms. Keep concise.
+            - If NONE of these keywords are present anywhere in the document text after a thorough scan, set to 'Not specified'. Do not infer or generate if keywords absent.
+        
+        7. AI OUTCOME KEYWORDS (GENERATED BASED ON ANALYSIS):
+           - Based on deep analysis of diagnosis, status, key_concern, extracted_recommendation, extracted_decision, ur_decision, and consulting_doctors: Generate key outcome prediction keywords/phrases only (comma-separated, e.g., "full recovery 6 weeks, monitor pain, low risk"). Straightforward for doctor, no sentences—just core terms tied to evidence.
+        
+        8. DEEP DATE ANALYSIS & REASONING (Integrated - EXTRACT IF PRESENT):
+           - Extract ALL dates: Convert MM/DD/YYYY etc. to YYYY-MM-DD. Ignore non-dates (ages, IDs). If no dates, empty lists and note in reasoning.
            - Contexts: 50-100 chars around each.
            - Reasoning: Step-by-step—classify as DOB (birth context), DOI (injury), RD (report/signature/end). Use document flow (early=DOB/DOI, late=RD). Handle relatives (e.g., "2 weeks ago" → subtract from current_date).
            - Confidence: High (labeled), Medium (contextual), Low (ambiguous). Scores 0.0-1.0.
            - Assignments: Predict DOB/DOI/RD based on norms; set rd to latest/most recent if unclear.
            - If no dates: Empty lists, note in reasoning.
         
-        5. DOCUMENT OVERVIEW:
-           - Document Type: From structure/patterns.
-           - Summary Points: 3-5 key points, each 2-3 words (e.g., "Lumbar strain diagnosed", "Pain reduced to 4/10").
+        9. DOCUMENT OVERVIEW (EXTRACT IF PRESENT):
+           - Document Type: From structure/patterns. If unclear, "medical_document".
+           - Summary Points: 3-5 key points, each 2-3 words (e.g., "Lumbar strain diagnosed", "Pain reduced to 4/10"). If none, ["Not specified"].
         
-        RULES FOR ACCURACY:
-        - REAL medical docs: Chronological flow, standard patterns. Missing = "Not specified" after deep search.
+        RULES FOR ACCURACY & PRECISION:
+        - Extract EVERYTHING directly from document text if present; otherwise "Not specified" or empty. No assumptions or generations except for AI outcome.
         - Workers Comp: Claim only if keyword + number; prioritize injury/DOI context.
-        - Holistic: Cross-reference (e.g., claim near DOI → workers comp).
-        - Output ONLY valid JSON matching the schema. Include date_reasoning fully.
+        - Holistic: Cross-reference (e.g., claim near DOI → workers comp; consulting_doctors with extracted keywords → inform AI outcome; ur_decision with extracted_recommendation → flag coverage issues).
+        - Keywords: Extract/list as comma-separated terms only—strictly no full sentences or narratives.
+        - Consultants: Focus on consultant/specialist roles; extract verifiable names from context; no assumptions.
+        - AI Outcome Keywords: Always generate—concise terms only, straight to doctor, base on evidence from extracted data.
+        - Recommendation Keywords: STRICTLY only if specified keywords present; else 'Not specified'.
+        - UR Decision Keywords: STRICTLY only if specified UR keywords present; else 'Not specified'.
+        - Output ONLY valid JSON matching the schema. Include date_reasoning and all fields fully.
 
         {format_instructions}
         """
+        
         return PromptTemplate(
             template=template,
             input_variables=["document_text", "current_date"],
@@ -127,13 +155,13 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
         )
     
     def extract_document_data_with_reasoning(self, document_text: str) -> DocumentAnalysis:
-        """Enhanced extraction with comprehensive document reasoning (optimized to single LLM call)"""
+        """Enhanced extraction with comprehensive document reasoning, extracted keyword recs/decision/outcome, consulting doctors (optimized to single LLM call)"""
         try:
             logger.info(f"🔍 Starting enhanced deep document analysis (single LLM call)...")
             
             current_date = datetime.now().strftime("%Y-%m-%d")
             
-            # SINGLE comprehensive chain: Handles patterns, extraction, dates in one prompt/output
+            # SINGLE comprehensive chain: Handles patterns, extraction, dates, doctors, extracted keywords in one prompt/output
             prompt = self.create_enhanced_extraction_prompt()
             chain = prompt | self.llm | self.parser
             
@@ -146,6 +174,16 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
             logger.info(f"🔍 LLM extraction result keys: {list(result.keys())}")
             if 'date_reasoning' in result and result['date_reasoning']:
                 logger.info(f"✅ Date reasoning integrated: {len(result['date_reasoning']['extracted_dates'])} dates found")
+            if 'consulting_doctors' in result:
+                logger.info(f"✅ Consulting doctors extracted: {len(result['consulting_doctors'])} names")
+            if 'extracted_recommendation' in result:
+                logger.info(f"✅ Extracted recommendation keywords: {result['extracted_recommendation'][:50]}...")
+            if 'extracted_decision' in result:
+                logger.info(f"✅ Extracted decision keywords: {result['extracted_decision'][:50]}...")
+            if 'ur_decision' in result:
+                logger.info(f"✅ Extracted UR decision keywords: {result['ur_decision'][:50]}...")
+            if 'ai_outcome' in result:
+                logger.info(f"✅ AI outcome keywords generated: {result['ai_outcome'][:50]}...")
             
             final_analysis = DocumentAnalysis(**result)
             
@@ -155,6 +193,11 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
             logger.info(f"   - Claim: {final_analysis.claim_number}")
             logger.info(f"   - Diagnosis: {final_analysis.diagnosis}")
             logger.info(f"   - Status: {final_analysis.status}")
+            logger.info(f"   - Extracted Recommendation: {final_analysis.extracted_recommendation}")
+            logger.info(f"   - Extracted Decision: {final_analysis.extracted_decision}")
+            logger.info(f"   - Extracted UR Decision: {final_analysis.ur_decision}")
+            logger.info(f"   - Consulting Doctors: {', '.join(final_analysis.consulting_doctors) if final_analysis.consulting_doctors else 'None'}")
+            logger.info(f"   - AI Outcome: {final_analysis.ai_outcome}")
             logger.info(f"   - Document Type: {final_analysis.document_type}")
             
             return final_analysis
@@ -204,15 +247,19 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
             claim_number="Not specified",
             dob=timestamp,
             doi=timestamp,
-            status="normal",
+            status="Not specified",
             rd=timestamp,
             diagnosis="Not specified",
             key_concern="Not specified",
-            next_step="Not specified",
+            extracted_recommendation="Not specified",
+            extracted_decision="Not specified",
+            ur_decision="Not specified",
             adls_affected="Not specified",
             work_restrictions="Not specified",
-            document_type="Medical Document",
-            summary_points=["Processing completed", "Analysis unavailable"],
+            consulting_doctors=[],
+            ai_outcome="Insufficient data; full evaluation needed",
+            document_type="medical_document",
+            summary_points=["Not specified"],
             date_reasoning=None
         )
     

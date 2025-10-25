@@ -22,7 +22,7 @@ from services.webhook_service import WebhookService
 from services.document_route_services import DocumentExtractorService
 from services.get_document_services import DocumentAggregationService
 import os
-
+from fastapi import Form
 
 
 router = APIRouter()
@@ -137,30 +137,143 @@ def compute_file_hash(content: bytes) -> str:
 
 
 
+from fastapi import Depends, HTTPException, UploadFile, File, Form, Query
+from typing import Dict, Any, List
+from prisma import Prisma
+import traceback
+
+# Create Prisma client instance
+db = Prisma()
+
+async def check_subscription(
+    documents: List[UploadFile] = File(...),
+    physicianId: str = Query(None),
+    userId: str = Query(None)
+):
+    """Dependency to check subscription before processing documents"""
+    
+    try:
+        # Ensure database is connected
+        if not db.is_connected():
+            await db.connect()
+            print("✅ Database connected in subscription check")
+
+        # Count documents
+        document_count = len(documents)
+        print(f"📄 Documents to process: {document_count}")
+        
+        # Use physicianId for subscription check (as per your schema)
+        subscription_id = physicianId
+        if not subscription_id:
+            raise HTTPException(status_code=400, detail="physicianId is required for subscription check")
+        
+        print(f"🔍 Checking subscription for physicianId: {subscription_id}")
+
+        # Query DB for active subscription using physicianId
+        sub = await db.subscription.find_first(
+            where={
+                "physicianId": subscription_id,
+                "status": "active"
+            }
+        )
+        
+        print(f"📊 Database query completed. Found subscription: {sub is not None}")
+        
+        if not sub:
+            print("❌ No active subscription found")
+            raise HTTPException(
+                status_code=400,
+                detail="No active subscription found. Please upgrade your plan."
+            )
+        
+        # Get documentParse from subscription (as per your schema)
+        remaining_parses = sub.documentParse
+        print(f"📊 Subscription ID: {sub.id}, Remaining parses: {remaining_parses}")
+        print(f"📄 Requested documents: {document_count}")
+        
+        if document_count > remaining_parses:
+            print(f"❌ Document count ({document_count}) exceeds remaining parses ({remaining_parses})")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Not enough remaining parses. You requested {document_count} documents, but only {remaining_parses} parses available. Please upgrade your plan."
+            )
+        
+        if remaining_parses <= 0:
+            print("❌ Document parse limit exceeded")
+            raise HTTPException(
+                status_code=400,
+                detail="Document parse limit exceeded. Please upgrade your plan."
+            )
+        
+        print("✅ Subscription check passed")
+        return {
+            "subscription": sub,
+            "document_count": document_count,
+            "physician_id": subscription_id,
+            "remaining_parses": remaining_parses
+        }
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        print(f"❌ Subscription check error: {e}")
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Internal server error during subscription check")
+
+
 @router.post("/extract-documents", response_model=Dict[str, Any])
 async def extract_documents(
+    subscription_data: dict = Depends(check_subscription),
     documents: List[UploadFile] = File(...),
-    physicianId: str = Query(None, description="Optional physician ID for associating documents"),
-    userId: str = Query(None, description="Optional user ID for associating documents")
+    mode: str = Form(..., description="Mode: wc for Workers' Comp or gm for General Medicine"),
+    physicianId: str = Query(None, description="Physician ID for subscription check"),
+    userId: str = Query(None, description="Optional user ID for associating documents"),
 ):
     """
     Upload multiple documents: parse/validate synchronously, then queue for finalization.
     All documents with extracted text are sent to webhook for processing.
     """
-    if not documents:
-        raise HTTPException(status_code=400, detail="No documents provided")
-
-    service = DocumentExtractorService()
-    successful_uploads = []  # Track for cleanup
-
     try:
+        # Extract subscription info from dependency
+        subscription = subscription_data["subscription"]
+        document_count = subscription_data["document_count"]
+        physician_id = subscription_data["physician_id"]
+        remaining_parses = subscription_data["remaining_parses"]
+        
+        print(f"🎯 Starting document processing for physician: {physician_id}")
+        print(f"📊 Initial - Documents: {document_count}, Remaining parses: {remaining_parses}")
+
+        service = DocumentExtractorService()
+        successful_uploads = []
+
         # Process batch
-        batch_result = await service.process_documents_batch(documents, physicianId, userId)
+        batch_result = await service.process_documents_batch(documents, physicianId, userId, mode)
         payloads = batch_result["payloads"]
         ignored = batch_result["ignored"]
 
-        # For each successful payload, track GCS upload (assuming blob_path indicates upload)
+        # For each successful payload, track GCS upload
         successful_uploads = [p["blob_path"] for p in payloads if p.get("blob_path")]
+
+        # 🔥 DECREMENT SUBSCRIPTION PARSE COUNT
+        successful_count = len(payloads)
+        if successful_count > 0:
+            try:
+                # Ensure database is connected for update
+                if not db.is_connected():
+                    await db.connect()
+
+                # Update subscription with decrement
+                updated_sub = await db.subscription.update(
+                    where={"id": subscription.id},
+                    data={"documentParse": {"decrement": successful_count}}
+                )
+                print(f"📉 Decremented {successful_count} parses for subscription {subscription.id}")
+                print(f"📊 Updated - Remaining parses: {updated_sub.documentParse}")
+                
+            except Exception as e:
+                print(f"⚠️ Failed to decrement parse count: {e}")
+                # Don't fail the request, just log the error
 
         # Queue batch if payloads exist
         task_id = await service.queue_batch_and_track_progress(payloads, userId)
@@ -172,7 +285,8 @@ async def extract_documents(
             "task_id": task_id,
             "payload_count": len(payloads),
             "ignored": ignored,
-            "ignored_count": len(ignored)
+            "ignored_count": len(ignored),
+            "remaining_parses": remaining_parses - successful_count
         }
 
     except Exception as global_exc:
@@ -181,7 +295,8 @@ async def extract_documents(
         logger.debug(f"Traceback: {traceback.format_exc()}")
 
         # Cleanup successful uploads
-        await service.cleanup_on_error(successful_uploads)
+        if 'service' in locals():
+            await service.cleanup_on_error(successful_uploads)
 
         raise HTTPException(status_code=500, detail=f"Global processing failed: {str(global_exc)}")
 @router.get("/progress/{task_id}")
