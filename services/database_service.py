@@ -961,6 +961,7 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"❌ Decryption failed: {str(e)}")
             raise ValueError("Invalid or expired token")
+    
     async def delete_fail_doc(
         self,
         fail_doc_id: str
@@ -1033,6 +1034,46 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"❌ Error retrieving PatientQuiz: {str(e)}")
             return None
+        
+
+# services/database_service.py
+
+    async def decrement_parse_count(self, physician_id: str) -> bool:
+        """
+        Decrement the documentParse count for a physician's subscription
+        Returns True if successful, False if no subscription found or count already 0
+        """
+        try:
+            prisma = Prisma()
+            await prisma.connect()
+            
+            # Find the active subscription for the physician
+            subscription = await prisma.subscription.find_first(
+                where={
+                    "physicianId": physician_id,
+                    "status": "active",
+                    "documentParse": {"gt": 0}  # Only update if count > 0
+                }
+            )
+            
+            if not subscription:
+                logger.warning(f"No active subscription with parse count found for physician: {physician_id}")
+                return False
+            
+            # Decrement the parse count
+            updated_subscription = await prisma.subscription.update(
+                where={"id": subscription.id},
+                data={"documentParse": {"decrement": 1}}
+            )
+            
+            logger.info(f"✅ Decremented parse count for physician {physician_id}. New count: {updated_subscription.documentParse}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to decrement parse count for physician {physician_id}: {e}")
+            return False
+        finally:
+            await prisma.disconnect()
 _db_service = None
 
 async def get_database_service() -> DatabaseService:

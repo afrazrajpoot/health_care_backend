@@ -299,6 +299,8 @@ async def extract_documents(
             await service.cleanup_on_error(successful_uploads)
 
         raise HTTPException(status_code=500, detail=f"Global processing failed: {str(global_exc)}")
+
+
 @router.get("/progress/{task_id}")
 async def get_progress(task_id: str):
     """Get current progress for a task"""

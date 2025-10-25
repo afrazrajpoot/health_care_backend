@@ -376,7 +376,7 @@ class WebhookService:
         document_status = status_result["document_status"]
         pending_reason = status_result["pending_reason"]
         is_first_time_claim_only = status_result.get("is_first_time_claim_only", False)
-        mode = status_result.get("mode")  # Extract mode
+        mode = status_result.get("mode")
 
         # Check for existing document first
         file_exists = await db_service.document_exists(
@@ -412,7 +412,7 @@ class WebhookService:
 
             await db_service.save_fail_doc(
                 reason=fail_reason,
-                db=processed_data["dob"],  # Original dob string
+                db=processed_data["dob"],
                 doi=processed_data["doi"],
                 claim_number=status_result["claim_to_save"],
                 patient_name=status_result["patient_name_to_use"],
@@ -422,7 +422,7 @@ class WebhookService:
                 file_name=processed_data["filename"],
                 file_hash=processed_data["file_hash"],
                 blob_path=processed_data["blob_path"],
-                mode=mode  # Save mode to failed docs if applicable (assuming save_fail_doc supports it)
+                mode=mode
             )
 
             # Emit failed event
@@ -493,7 +493,7 @@ class WebhookService:
             gcs_file_link=processed_data["gcs_url"],
             patient_name=status_result["patient_name_to_use"],
             claim_number=status_result["claim_to_save"],
-            dob=processed_data["dob"],  # Updated dob string
+            dob=processed_data["dob"],
             doi=processed_data["doi"],
             status=document_status,
             brief_summary=processed_data["brief_summary"],
@@ -503,8 +503,13 @@ class WebhookService:
             document_summary=status_result["document_summary"],
             rd=processed_data["rd_for_db"],
             physician_id=physician_id,
-            mode=mode  # Save mode to the document
+            mode=mode
         )
+
+        # ✅ DECREMENT PARSE COUNT AFTER SUCCESSFUL DOCUMENT SAVE
+        parse_decremented = await db_service.decrement_parse_count(physician_id)
+        if not parse_decremented:
+            logger.warning(f"⚠️ Could not decrement parse count for physician {physician_id}")
 
         # AI Task Creation
         task_creator = TaskCreator()
@@ -555,17 +560,16 @@ class WebhookService:
             not status_result["has_conflicting_claims"] and
             status_result["patient_name_to_use"] != "Not specified" and
             updated_dob_for_query is not None and
-            not is_first_time_claim_only  # Don't update previous for first-time claims
+            not is_first_time_claim_only
         )
 
         if should_update_previous:
             updated_count = await db_service.update_previous_fields(
                 patient_name=status_result["patient_name_to_use"],
-                dob=dob_str,  # String format for DB
+                dob=dob_str,
                 physician_id=physician_id,
                 claim_number=status_result["claim_to_save"],
                 doi=document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else None
-                # mode not passed here
             )
             logger.info(f"🔄 Updated {updated_count} previous documents' fields for patient '{status_result['patient_name_to_use']}' using new data")
         else:
@@ -573,7 +577,7 @@ class WebhookService:
 
         logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}")
 
-        # Emit success event
+        # Emit success event - include parse count info
         emit_data = {
             'document_id': document_id,
             'filename': processed_data["filename"],
@@ -584,8 +588,9 @@ class WebhookService:
             'extracted_dates_count': len(processed_data["date_reasoning_data"]["extracted_dates"]),
             'lookup_used': status_result["lookup_data"].get("total_documents", 0) > 0,
             'fields_overridden_from_lookup': len(status_result['updated_missing_fields']) < len(processed_data.get("initial_missing_fields", [])),
-            'is_first_time_claim_only': is_first_time_claim_only,  # Include this in emission
-            'mode': mode  # Include mode in emission
+            'is_first_time_claim_only': is_first_time_claim_only,
+            'mode': mode,
+            'parse_count_decremented': parse_decremented  # Add this field
         }
         if user_id:
             await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
@@ -600,6 +605,7 @@ class WebhookService:
             "missing_fields": status_result['updated_missing_fields'] if status_result['has_missing_required_fields'] else None,
             "pending_reason": pending_reason,
             "is_first_time_claim_only": is_first_time_claim_only,
+            "parse_count_decremented": parse_decremented,  # Add this field
             "date_reasoning_summary": {
                 "used_reasoning": has_date_reasoning,
                 "confidence_scores": processed_data["date_reasoning_data"]["confidence_scores"],
@@ -616,9 +622,8 @@ class WebhookService:
                     "claim_number": bool(status_result["lookup_data"].get("claim_number"))
                 }
             },
-            "mode": mode  # Include mode in return
+            "mode": mode
         }
-    
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
         Orchestrates the full webhook processing pipeline using the 4 steps.
