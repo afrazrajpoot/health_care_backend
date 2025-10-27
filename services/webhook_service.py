@@ -335,7 +335,8 @@ class WebhookService:
             "ur-decision": document_analysis.ur_decision or 'Not Specified',
             "recommended": document_analysis.extracted_recommendation or 'Not Specified',
             "ai_outcome": document_analysis.ai_outcome or 'Not Specified'   ,
-            "consulting_doctors": document_analysis.consulting_doctors or []
+            "consulting_doctors": document_analysis.consulting_doctors or [],
+            "ur_denial_reason": document_analysis.ur_denial_reason or None
         }
         adl_data = {
             "adlsAffected": document_analysis.adls_affected,
@@ -503,7 +504,8 @@ class WebhookService:
             document_summary=status_result["document_summary"],
             rd=processed_data["rd_for_db"],
             physician_id=physician_id,
-            mode=mode
+            mode=mode,
+            ur_denial_reason=document_analysis.ur_denial_reason
         )
 
         # ✅ DECREMENT PARSE COUNT AFTER SUCCESSFUL DOCUMENT SAVE
@@ -590,7 +592,8 @@ class WebhookService:
             'fields_overridden_from_lookup': len(status_result['updated_missing_fields']) < len(processed_data.get("initial_missing_fields", [])),
             'is_first_time_claim_only': is_first_time_claim_only,
             'mode': mode,
-            'parse_count_decremented': parse_decremented  # Add this field
+            'parse_count_decremented': parse_decremented,  # Add this field
+            'ur_denial_reason': document_analysis.ur_denial_reason or None
         }
         if user_id:
             await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
@@ -622,8 +625,10 @@ class WebhookService:
                     "claim_number": bool(status_result["lookup_data"].get("claim_number"))
                 }
             },
-            "mode": mode
+            "mode": mode,
+            "ur_denial_reason": document_analysis.ur_denial_reason or None
         }
+    
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
         Orchestrates the full webhook processing pipeline using the 4 steps.

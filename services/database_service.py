@@ -843,7 +843,8 @@ class DatabaseService:
         physician_id: Optional[str] = None,
         blob_path: Optional[str] = None,
         file_hash: Optional[str] = None,
-        mode: Optional[str] = None
+        mode: Optional[str] = None,
+        ur_denial_reason: Optional[str] = None
     ) -> str:
         """
         Save document analysis results to the database.
@@ -890,6 +891,7 @@ class DatabaseService:
                     "blobPath": blob_path,
                     "fileName": file_name,
                     "mode": mode,
+                    "ur_denial_reason": ur_denial_reason,
                     **({"fileHash": file_hash} if file_hash else {}),
 
                     # ✅ Enhanced Summary Snapshot
@@ -937,12 +939,13 @@ class DatabaseService:
             logger.info(f"✅ Document saved with ID: {document.id}")
             if whats_new_json:
                 logger.info(f"📊 WhatsNew JSON: {whats_new_json[:100]}...")
+            if summary_snapshot.get("ur_denial_reason"):
+                logger.info(f"📋 UR Denial Reason saved: {summary_snapshot.get('ur_denial_reason')[:100]}...")
             return document.id
 
         except Exception as e:
             logger.error(f"❌ Error saving document analysis: {str(e)}")
             raise
-
     def decrypt_patient_token(self, token: str) -> Dict[str, Any]:
         """
         Decrypts the token and returns patient data.

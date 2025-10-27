@@ -78,7 +78,7 @@ model Document {
   physicianId String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
-
+ur_denial_reason String?
   // Relations
   summarySnapshot SummarySnapshot?
   adl             ADL?
@@ -203,6 +203,7 @@ model Task {
   status         String    @default("Pending")
   dueDate        DateTime?
   patient        String
+  reason         String?
   actions        String[]  @default(["Claim", "Complete"])
   sourceDocument String?
 

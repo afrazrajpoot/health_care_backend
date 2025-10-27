@@ -35,6 +35,7 @@ class DocumentAnalysis(BaseModel):
     extracted_recommendation: str = Field(..., description="Extracted key recommendation keywords/phrases directly from the document (comma-separated, e.g., 'PT twice weekly, follow-up 4 weeks'). Use 'Not specified' if none found.")
     extracted_decision: str = Field(..., description="Extracted key decision/judgment keywords/phrases directly from the document using medical terms (comma-separated, e.g., 'conservative management, no surgery'). Use 'Not specified' if none found.")
     ur_decision: str = Field(..., description="Extracted UR (Utilization Review) decision keywords/phrases directly from the document (comma-separated, e.g., 'approved PT sessions, denied MRI'). Scan for UR/prior auth terms. Use 'Not specified' if none found.")
+    ur_denial_reason: Optional[str] = Field(None, description="If the UR decision indicates a denial (e.g., 'denied', 'not approved'), extract the specific reason for the denial directly from the document text (concise, 1-2 sentences or key phrases). If no denial or no reason found, None.")
     adls_affected: str = Field(..., description="Activities affected in 2-3 words")
     work_restrictions: str = Field(..., description="Work restrictions in 2-3 words")
     consulting_doctors: List[str] = Field(default_factory=list, description="Names of consultant doctors extracted from the document (e.g., primary physician, specialists). Extract full names where possible. List unique names.")
@@ -114,13 +115,14 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
         6. CONSULTING DOCTORS EXTRACTION (DEEP SCAN IF PRESENT):
            - Deeply scan entire document for consultant doctor names: Look in signatures (e.g., "Consulting MD: Dr. Jane Smith"), consultations (e.g., "Consulted with Dr. Robert Lee for orthopedics"), referrals (e.g., "Referred to consultant Dr. Emily Chen"), or explicit mentions of consultants/specialists. Extract full names (first + last) where possible. Prioritize 'consultant' or specialist roles. List unique names. If none, empty list.
         
-        6.5. EXTRACTED UR DECISION KEYWORDS (STRICT KEYWORD-BASED EXTRACTION IF PRESENT):
+        6.5. EXTRACTED UR DECISION KEYWORDS & DENIAL REASON (STRICT KEYWORD-BASED EXTRACTION IF PRESENT):
             - STRICTLY keyword-based: Deeply scan the entire document text for UR (Utilization Review) or prior authorization-related keywords such as 'Utilization Review', 'UR', 'prior authorization', 'prior auth', 'PA', 'approved', 'denied', 'coverage decision', 'authorization status', 'insurance review' in Plan/Assessment/Billing/Authorization sections.
             - ONLY if one or more of these keywords are found in the document text: Extract the immediate key keywords/phrases directly following or around them (comma-separated, e.g., 'approved 12 PT sessions, denied surgical intervention, PA required for MRI'). No full sentences—just core terms. Keep concise.
-            - If NONE of these keywords are present anywhere in the document text after a thorough scan, set to 'Not specified'. Do not infer or generate if keywords absent.
+            - If the extraction includes denial-related terms ('denied', 'not approved', 'rejected', etc.), also extract the specific denial reason: Look for phrases explaining why (e.g., 'denied due to lack of medical necessity', 'not covered under policy'). Set ur_denial_reason to a concise summary of the reason (1-2 sentences or key phrases). If no clear reason or not a denial, set to None.
+            - If NONE of these keywords are present anywhere in the document text after a thorough scan, set ur_decision to 'Not specified' and ur_denial_reason to None. Do not infer or generate if keywords absent.
         
         7. AI OUTCOME KEYWORDS (GENERATED BASED ON ANALYSIS):
-           - Based on deep analysis of diagnosis, status, key_concern, extracted_recommendation, extracted_decision, ur_decision, and consulting_doctors: Generate key outcome prediction keywords/phrases only (comma-separated, e.g., "full recovery 6 weeks, monitor pain, low risk"). Straightforward for doctor, no sentences—just core terms tied to evidence.
+           - Based on deep analysis of diagnosis, status, key_concern, extracted_recommendation, extracted_decision, ur_decision, ur_denial_reason, and consulting_doctors: Generate key outcome prediction keywords/phrases only (comma-separated, e.g., "full recovery 6 weeks, monitor pain, low risk"). Straightforward for doctor, no sentences—just core terms tied to evidence.
         
         8. DEEP DATE ANALYSIS & REASONING (Integrated - EXTRACT IF PRESENT):
            - Extract ALL dates: Convert MM/DD/YYYY etc. to YYYY-MM-DD. Ignore non-dates (ages, IDs). If no dates, empty lists and note in reasoning.
@@ -137,12 +139,13 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
         RULES FOR ACCURACY & PRECISION:
         - Extract EVERYTHING directly from document text if present; otherwise "Not specified" or empty. No assumptions or generations except for AI outcome.
         - Workers Comp: Claim only if keyword + number; prioritize injury/DOI context.
-        - Holistic: Cross-reference (e.g., claim near DOI → workers comp; consulting_doctors with extracted keywords → inform AI outcome; ur_decision with extracted_recommendation → flag coverage issues).
+        - Holistic: Cross-reference (e.g., claim near DOI → workers comp; consulting_doctors with extracted keywords → inform AI outcome; ur_decision with extracted_recommendation → flag coverage issues; ur_denial_reason with ur_decision → highlight denial impacts).
         - Keywords: Extract/list as comma-separated terms only—strictly no full sentences or narratives.
         - Consultants: Focus on consultant/specialist roles; extract verifiable names from context; no assumptions.
         - AI Outcome Keywords: Always generate—concise terms only, straight to doctor, base on evidence from extracted data.
         - Recommendation Keywords: STRICTLY only if specified keywords present; else 'Not specified'.
         - UR Decision Keywords: STRICTLY only if specified UR keywords present; else 'Not specified'.
+        - Denial Reason: ONLY if denial indicated in ur_decision; extract concisely from text; else None.
         - Output ONLY valid JSON matching the schema. Include date_reasoning and all fields fully.
 
         {format_instructions}
@@ -182,6 +185,8 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
                 logger.info(f"✅ Extracted decision keywords: {result['extracted_decision'][:50]}...")
             if 'ur_decision' in result:
                 logger.info(f"✅ Extracted UR decision keywords: {result['ur_decision'][:50]}...")
+            if 'ur_denial_reason' in result and result['ur_denial_reason']:
+                logger.info(f"✅ UR denial reason extracted: {result['ur_denial_reason'][:50]}...")
             if 'ai_outcome' in result:
                 logger.info(f"✅ AI outcome keywords generated: {result['ai_outcome'][:50]}...")
             
@@ -196,6 +201,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
             logger.info(f"   - Extracted Recommendation: {final_analysis.extracted_recommendation}")
             logger.info(f"   - Extracted Decision: {final_analysis.extracted_decision}")
             logger.info(f"   - Extracted UR Decision: {final_analysis.ur_decision}")
+            logger.info(f"   - UR Denial Reason: {final_analysis.ur_denial_reason}")
             logger.info(f"   - Consulting Doctors: {', '.join(final_analysis.consulting_doctors) if final_analysis.consulting_doctors else 'None'}")
             logger.info(f"   - AI Outcome: {final_analysis.ai_outcome}")
             logger.info(f"   - Document Type: {final_analysis.document_type}")
@@ -254,6 +260,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
             extracted_recommendation="Not specified",
             extracted_decision="Not specified",
             ur_decision="Not specified",
+            ur_denial_reason=None,
             adls_affected="Not specified",
             work_restrictions="Not specified",
             consulting_doctors=[],
