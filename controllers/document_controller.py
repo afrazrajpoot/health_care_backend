@@ -224,7 +224,7 @@ async def check_subscription(
 
 @router.post("/extract-documents", response_model=Dict[str, Any])
 async def extract_documents(
-    # subscription_data: dict = Depends(check_subscription),  # 🔒 Temporarily disabled
+    subscription_data: dict = Depends(check_subscription),
     documents: List[UploadFile] = File(...),
     mode: str = Form(..., description="Mode: wc for Workers' Comp or gm for General Medicine"),
     physicianId: str = Query(None, description="Physician ID for subscription check"),
@@ -232,23 +232,15 @@ async def extract_documents(
 ):
     """
     Upload multiple documents: parse/validate synchronously, then queue for finalization.
-    Subscription check temporarily disabled for testing.
+    All documents with extracted text are sent to webhook for processing.
     """
     try:
-        # 🧩 Temporary mock data (bypasses subscription)
-        subscription_data = {
-            "subscription": {"id": "temp-subscription-id"},
-            "document_count": len(documents),
-            "physician_id": physicianId or "temp-physician-id",
-            "remaining_parses": 9999  # unlimited for now
-        }
-
-        # Extract mock subscription info
+        # Extract subscription info from dependency
         subscription = subscription_data["subscription"]
         document_count = subscription_data["document_count"]
         physician_id = subscription_data["physician_id"]
         remaining_parses = subscription_data["remaining_parses"]
-
+        
         print(f"🎯 Starting document processing for physician: {physician_id}")
         print(f"📊 Initial - Documents: {document_count}, Remaining parses: {remaining_parses}")
 
@@ -260,22 +252,41 @@ async def extract_documents(
         payloads = batch_result["payloads"]
         ignored = batch_result["ignored"]
 
+        # For each successful payload, track GCS upload
         successful_uploads = [p["blob_path"] for p in payloads if p.get("blob_path")]
 
-        # ⚠️ Skip subscription decrement (since validation disabled)
-        print("⚠️ Subscription decrement skipped (testing mode)")
+        # 🔥 DECREMENT SUBSCRIPTION PARSE COUNT
+        successful_count = len(payloads)
+        if successful_count > 0:
+            try:
+                # Ensure database is connected for update
+                if not db.is_connected():
+                    await db.connect()
+
+                # Update subscription with decrement
+                updated_sub = await db.subscription.update(
+                    where={"id": subscription.id},
+                    data={"documentParse": {"decrement": successful_count}}
+                )
+                print(f"📉 Decremented {successful_count} parses for subscription {subscription.id}")
+                print(f"📊 Updated - Remaining parses: {updated_sub.documentParse}")
+                
+            except Exception as e:
+                print(f"⚠️ Failed to decrement parse count: {e}")
+                # Don't fail the request, just log the error
 
         # Queue batch if payloads exist
         task_id = await service.queue_batch_and_track_progress(payloads, userId)
 
-        print("✅ === END MULTI-DOCUMENT REQUEST (Subscription Disabled) ===")
+        end_msg = "✅ === END MULTI-DOCUMENT REQUEST ===\n"
+        logger.info(end_msg)
 
         return {
             "task_id": task_id,
             "payload_count": len(payloads),
             "ignored": ignored,
             "ignored_count": len(ignored),
-            "remaining_parses": remaining_parses
+            "remaining_parses": remaining_parses - successful_count
         }
 
     except Exception as global_exc:
@@ -283,6 +294,7 @@ async def extract_documents(
         logger.error(global_error)
         logger.debug(f"Traceback: {traceback.format_exc()}")
 
+        # Cleanup successful uploads
         if 'service' in locals():
             await service.cleanup_on_error(successful_uploads)
 
