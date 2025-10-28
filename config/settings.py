@@ -21,6 +21,7 @@ class Settings:
         self.azure_openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION")
         # self.api_base_url = os.getenv("API_BASE_URL", "https://api.kebilo.com")
         self.api_base_url = os.getenv("API_BASE_URL", "http://localhost:8000")
+        self.tavily_api_key = os.getenv("TAVILY_API_KEY")
         
         # Validate credentials file
         if not os.path.exists(self.credentials_path):

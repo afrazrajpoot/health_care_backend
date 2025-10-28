@@ -1,4 +1,3 @@
-
 from langchain_openai import AzureChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
@@ -31,7 +30,7 @@ class AITask(BaseModel):
     source_document: str = ""
 
 class TaskCreationResult(BaseModel):
-    tasks: List[AITask]
+    task: AITask  # Changed from tasks: List[AITask] to task: AITask
 
 # ------------------ TASK CREATOR ------------------
 class TaskCreator:
@@ -171,8 +170,7 @@ class TaskCreator:
 
             ```json
             {{
-            "tasks": [
-                {{
+            "task": {{
                 "description": "Specific task based on deep document analysis",
                 "department": "One of the four core departments",
                 "status": "Pending",
@@ -184,20 +182,20 @@ class TaskCreator:
                     "details": "Brief context explaining WHY this task is needed based on document content",
                     "one_line_note": "Concise summary for dashboard display"
                 }}
-                }}
-            ]
+            }}
             }}
             ```
 
             **GENERATION RULES:**
-            - Generate 1-3 tasks MAXIMUM
-            - Focus on MOST CRITICAL next steps identified through deep analysis
-            - Each task must be directly supported by document content
-            - Use specific details from the document in task descriptions
+            - Generate ONLY ONE task - the most critical and actionable next step
+            - Focus on the SINGLE MOST CRITICAL next step identified through deep analysis
+            - The task must be directly supported by document content
+            - Use specific details from the document in task description
             - Ensure department assignment aligns with workflow ownership
 
             **REMEMBER: Your tasks should reflect a DEEP UNDERSTANDING of the document content, not just superficial categorization.**
             """
+
     def create_prompt(self, patient_name: str, source_document: str) -> ChatPromptTemplate:
         user_template = """
         DOCUMENT TYPE: {document_type}
@@ -208,10 +206,10 @@ class TaskCreator:
         TODAY'S DATE: {current_date}
         PATIENT: {patient_name}
 
-        Analyze this document and generate 1-3 specific, actionable tasks routed to the appropriate department.
+        Analyze this document and generate THE SINGLE MOST IMPORTANT actionable task routed to the appropriate department.
 
         Key considerations:
-        - What is the most critical next step for patient care?
+        - What is the single most critical next step for patient care?
         - Which department is best equipped to handle this task?
         - What is the appropriate timeframe for completion?
         - How can we ensure consistent task descriptions for similar documents?
@@ -225,14 +223,14 @@ class TaskCreator:
         ])
 
     async def generate_tasks(self, document_analysis: dict, source_document: str = "") -> list[dict]:
-        """Generate AI-driven tasks based on document analysis using only the four core departments."""
+        """Generate AI-driven task based on document analysis using only the four core departments."""
         try:
             print(document_analysis,'document_analysis')
             current_date = datetime.now()
             patient_name = document_analysis.get("patient_name", "Unknown")
             document_type = document_analysis.get("document_type", "Unknown")
             
-            print(f"📝 Creating AI-driven tasks for document: {source_document} ({document_type})")
+            print(f"📝 Creating AI-driven task for document: {source_document} ({document_type})")
 
             # Create and run the chain - let LLM handle all routing decisions
             prompt = self.create_prompt(patient_name, source_document)
@@ -257,10 +255,15 @@ class TaskCreator:
                     try:
                         tasks_data = dict(result)
                     except Exception:
-                        tasks_data = {"tasks": []}
+                        tasks_data = {"task": {}}
 
-            tasks = tasks_data.get("tasks", [])
+            # Extract the single task
+            task = tasks_data.get("task", {})
             
+            if not task:
+                # Fallback if no task generated
+                return await self._create_fallback_task(document_analysis, source_document)
+
             # Validate department routing
             valid_departments = [
                 "Medical/Clinical", 
@@ -269,16 +272,14 @@ class TaskCreator:
                 "Authorizations & Denials"
             ]
             
-            validated_tasks = []
-            for task in tasks:
-                # Ensure department is one of the four core departments
-                if task.get("department") not in valid_departments:
-                    # Let LLM re-route if invalid department
-                    task["department"] = await self._determine_correct_department(task, document_analysis)
-                
-                validated_tasks.append(task)
+            # Ensure department is one of the four core departments
+            if task.get("department") not in valid_departments:
+                # Let LLM re-route if invalid department
+                task["department"] = await self._determine_correct_department(task, document_analysis)
 
-            logger.info(f"✅ Generated {len(validated_tasks)} AI-driven tasks for patient: {patient_name}")
+            validated_tasks = [task]  # Return as list with single task
+
+            logger.info(f"✅ Generated 1 AI-driven task for patient: {patient_name}")
 
             # Database operations for analytics
             await self._update_workflow_analytics(validated_tasks)
@@ -289,22 +290,28 @@ class TaskCreator:
             logger.error(f"❌ AI task creation failed: {str(e)}")
             
             # Fallback to basic task with Medical/Clinical as default
-            current_date = datetime.now()
-            due_date = (current_date + timedelta(days=2)).strftime("%Y-%m-%d")
-            
-            return [{
-                "description": f"Review {document_analysis.get('document_type', 'document')} and determine appropriate action",
-                "department": "Medical/Clinical",
-                "status": "Pending",
-                "due_date": due_date,
-                "patient": document_analysis.get("patient_name", "Unknown"),
-                "actions": ["Claim", "Complete"],
-                "source_document": source_document or "Unknown",
-                "quickNotes": {
-                    "details": "Fallback task after system error",
-                    "one_line_note": "Review document and route appropriately"
-                }
-            }]
+            return await self._create_fallback_task(document_analysis, source_document)
+
+    async def _create_fallback_task(self, document_analysis: dict, source_document: str) -> list[dict]:
+        """Create a fallback task when main generation fails."""
+        current_date = datetime.now()
+        due_date = (current_date + timedelta(days=2)).strftime("%Y-%m-%d")
+        
+        fallback_task = {
+            "description": f"Review {document_analysis.get('document_type', 'document')} and determine appropriate action",
+            "department": "Medical/Clinical",
+            "status": "Pending",
+            "due_date": due_date,
+            "patient": document_analysis.get("patient_name", "Unknown"),
+            "actions": ["Claim", "Complete"],
+            "source_document": source_document or "Unknown",
+            "quickNotes": {
+                "details": "Fallback task after system error",
+                "one_line_note": "Review document and route appropriately"
+            }
+        }
+        
+        return [fallback_task]
 
     async def _determine_correct_department(self, task: dict, document_analysis: dict) -> str:
         """Use LLM to determine correct department for misrouted tasks."""
