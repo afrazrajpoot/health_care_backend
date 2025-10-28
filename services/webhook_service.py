@@ -812,6 +812,21 @@ class WebhookService:
             "rd_for_db": rd_for_db
         })
 
+        # Ensure lookup-related processed fields reflect any overrides provided in updated_fields
+        # so that perform_patient_lookup uses the new claim/patient values
+        processed_data["claim_number_for_query"] = (
+            document_analysis.claim_number
+            if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified"
+            else None
+        )
+        processed_data["has_claim_number"] = bool(processed_data["claim_number_for_query"])
+        processed_data["patient_name_for_query"] = (
+            document_analysis.patient_name
+            if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified"
+            else None
+        )
+        processed_data["has_patient_name"] = bool(processed_data["patient_name_for_query"])
+
         # Step 2: Perform patient lookup
         lookup_result = await self.perform_patient_lookup(db_service, processed_data, physician_id)
 
@@ -859,7 +874,12 @@ class WebhookService:
         else:
             status_result["claim_to_save"] = claim_to_use
             # Override to success if claim resolved, unless other issues
-            if status_result["document_status"] == "failed" and status_result["pending_reason"] in ["Missing required fields after lookup", "Multiple conflicting claim numbers found"]:
+            pr = status_result.get("pending_reason") or ""
+            if status_result.get("document_status") == "failed" and (
+                "Missing required fields" in pr or
+                "Multiple conflicting claim numbers" in pr
+            ):
+                # If the pending_reason is a textual match (even with appended lists), accept the provided claim
                 status_result["document_status"] = "success"
                 status_result["pending_reason"] = None
 
