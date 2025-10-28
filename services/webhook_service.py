@@ -448,7 +448,7 @@ class WebhookService:
                 await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
             else:
                 await sio.emit('task_complete', emit_data)
-            return {"status": "skipped", "reason": "Document already processed", "blob_path": processed_data["blob_path"]}
+            return {"status": "skipped", "document_id": processed_data.get('document_id'), "reason": "Document already processed", "blob_path": processed_data["blob_path"]}
 
         # UPDATED FAILURE LOGIC: Allow first-time claim-only documents to pass
         if document_status == "failed" and not is_first_time_claim_only:
@@ -488,6 +488,7 @@ class WebhookService:
 
             return {
                 "status": "failed",
+                "document_id": processed_data.get('document_id'),
                 "reason": fail_reason,
                 "missing_fields": status_result['updated_missing_fields'] if status_result['has_missing_required_fields'] else None,
                 "pending_reason": pending_reason
@@ -882,6 +883,7 @@ class WebhookService:
             logger.info(f"📡 Emitted 'task_complete' failed event from update: {emit_data}")
             return {
                 "status": "failed",
+                "document_id": str(fail_doc.id),
                 "reason": pending_reason,
                 "pending_reason": pending_reason
             }

@@ -105,7 +105,18 @@ async def update_fail_document(request: Request):
         service = WebhookService()
         result = await service.update_fail_document(fail_doc, updated_fields, data.get("user_id"), db_service)
 
-        logger.info(f"💾 Fail document updated and saved via route with ID: {result['document_id']}, status: {result['status']}")
+        # Defensive logging: avoid KeyError if result doesn't include expected keys
+        if not isinstance(result, dict):
+            logger.warning(f"⚠️ update_fail_document returned non-dict result: {result}")
+            return result
+
+        doc_id = result.get("document_id") or result.get("id") or result.get("fail_doc_id")
+        status = result.get("status") or result.get("result_status") or "unknown"
+
+        if doc_id is None:
+            logger.warning(f"⚠️ update_fail_document result missing document id. Full result: {json.dumps(result, default=str)[:1000]}")
+        else:
+            logger.info(f"💾 Fail document updated and saved via route with ID: {doc_id}, status: {status}")
 
         return result
 
