@@ -1,7 +1,10 @@
 
+
 import asyncio
 from datetime import datetime
 from prisma import Prisma
+import bcrypt
+
 
 USERS = [
     {
@@ -10,7 +13,7 @@ USERS = [
         "lastName": "User",
         "phoneNumber": "+1 (953) 739-7046",
         "email": "admin@kebilo.com",
-        "password": "Pa$$w0rd!",  # Example hashed password
+        "password": "Pa$$w0rd!",  # Plaintext, will be hashed
         "role": "Physician",
         "createdAt": datetime.fromisoformat("2025-10-23 07:39:21.254"),
         "updatedAt": datetime.fromisoformat("2025-10-23 07:39:21.254"),
@@ -24,7 +27,7 @@ USERS = [
         "lastName": "User",
         "phoneNumber": "+1 (252) 379-8018",
         "email": "staff@kebilo.com",
-        "password": "Pa$$w0rd!",  # Example hashed password
+        "password": "Pa$$w0rd!",  # Plaintext, will be hashed
         "role": "Staff",
         "createdAt": datetime.fromisoformat("2025-10-23 07:40:25.734"),
         "updatedAt": datetime.fromisoformat("2025-10-23 07:40:25.734"),
@@ -38,9 +41,13 @@ async def main():
     prisma = Prisma()
     await prisma.connect()
     for user in USERS:
-        # Try to create, skip if already exists
+        # Hash the password before saving
+        password = user["password"]
+        hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+        user_to_save = user.copy()
+        user_to_save["password"] = hashed.decode("utf-8")
         try:
-            await prisma.user.create(data=user)
+            await prisma.user.create(data=user_to_save)
             print(f"✅ Created user: {user['email']}")
         except Exception as e:
             print(f"⚠️  Could not create user {user['email']}: {e}")
