@@ -97,10 +97,11 @@ model SummarySnapshot {
   dx                String
   keyConcern        String
   nextStep          String
+  bodyPart          String
   urDecision        String?   // corresponds to 'ur-decision'
   recommended       String?   // recommended treatment plan
   aiOutcome         String?   // AI-generated follow-up or summary
-  consultingDoctors String[]  // list of consulting doctors' names
+  consultingDoctor String?  // list of consulting doctor' names
 
   // Relation back to Document
   document   Document @relation(fields: [documentId], references: [id])

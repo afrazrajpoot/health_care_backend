@@ -857,7 +857,7 @@ class DatabaseService:
         - Checks for duplicate documents based on file name.
         """
         try:
-            print(summary_snapshot, 'summary_snapshot')
+            print(summary_snapshot, 'summary_snapshot', summary_snapshot.get('consulting_doctor'))
 
             # ✅ Step 1: Check if document already exists (using filename)
             if await self.document_exists(file_name, file_size):
@@ -904,14 +904,13 @@ class DatabaseService:
                             "dx": summary_snapshot.get("dx", ""),
                             "keyConcern": summary_snapshot.get("keyConcern", ""),
                             "nextStep": summary_snapshot.get("nextStep", ""),
+                            "bodyPart": summary_snapshot.get("body_part", ""),
                             "urDecision": summary_snapshot.get("ur-decision")
                             or summary_snapshot.get("urDecision", None),
                             "recommended": summary_snapshot.get("recommended", None),
                             "aiOutcome": summary_snapshot.get("ai_outcome")
                             or summary_snapshot.get("aiOutcome", None),
-                            "consultingDoctors": summary_snapshot.get("consulting_doctors", [])
-                            if isinstance(summary_snapshot.get("consulting_doctors", []), list)
-                            else []
+                            "consultingDoctor": summary_snapshot.get("consulting_doctor", "")
                         }
                     },
 

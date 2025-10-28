@@ -331,11 +331,12 @@ class WebhookService:
         summary_snapshot = {
             "dx": document_analysis.diagnosis,
             "keyConcern": document_analysis.key_concern,
+            "body_part": document_analysis.body_part,
             "nextStep": document_analysis.extracted_recommendation,
             "ur-decision": document_analysis.ur_decision or 'Not Specified',
             "recommended": document_analysis.extracted_recommendation or 'Not Specified',
             "ai_outcome": document_analysis.ai_outcome or 'Not Specified'   ,
-            "consulting_doctors": document_analysis.consulting_doctors or [],
+            "consulting_doctor": document_analysis.consulting_doctor or [],
             "ur_denial_reason": document_analysis.ur_denial_reason or None
         }
         adl_data = {

@@ -33,7 +33,8 @@ class DocumentAnalysis(BaseModel):
     extracted_recommendation: Optional[str] = Field(default=None, description="Extracted recommendations")
     extracted_decision: Optional[str] = Field(default=None, description="Extracted decisions")
     ur_decision: Optional[str] = Field(default=None, description="UR decision")
-    consulting_doctors: Optional[List[str]] = Field(default=None, description="Consulting doctors")
+    body_part: Optional[str] = Field(default=None, description="Body part involved")
+    consulting_doctor: Optional[str] = Field(default=None, description="Consulting doctor (single relevant doctor/consultant name, not a list)")
     ai_outcome: Optional[str] = Field(default=None, description="AI outcome prediction")
 
 class BriefSummary(BaseModel):
@@ -88,11 +89,17 @@ class ReportAnalyzer:
             rd=datetime.now().strftime("%Y-%m-%d"),
             diagnosis="Not specified",
             key_concern="Not specified",
+            body_part="Not specified",
             next_step="Not specified",
             adls_affected="Not specified",
             work_restrictions="Not specified",
             document_type="Medical Document",
-            summary_points=["Processing completed", "Analysis unavailable"]
+            summary_points=["Processing completed", "Analysis unavailable"],
+            extracted_recommendation=None,
+            extracted_decision=None,
+            ur_decision=None,
+            consulting_doctor=None,
+            ai_outcome=None
         )
     
     def compare_with_previous_documents(
@@ -176,6 +183,7 @@ class ReportAnalyzer:
         - Key Concerns: {current_analysis.key_concern}
         - Work Restrictions: {current_analysis.work_restrictions}
         - Next Steps: {current_analysis.next_step}
+        - Body Part: {current_analysis.body_part}
         - Claim Number: {current_analysis.claim_number}
         - Status: {current_analysis.status}
         - ADLs Affected: {current_analysis.adls_affected}
@@ -261,20 +269,16 @@ class ReportAnalyzer:
             'key_concern': data_dict.get('key_concern', 'Not specified'),
             'document_type': data_dict.get('document_type', 'Medical Document'),
             'summary_points': data_dict.get('summary_points', ['Processing completed']),
-            
-            # ✅ Provide defaults for required fields that might be missing
             'next_step': data_dict.get('next_step', data_dict.get('extracted_recommendation', 'Not specified')),
             'adls_affected': data_dict.get('adls_affected', 'Not specified'),
             'work_restrictions': data_dict.get('work_restrictions', 'Not specified'),
-            
-            # ✅ Include optional fields from your actual data
             'extracted_recommendation': data_dict.get('extracted_recommendation'),
             'extracted_decision': data_dict.get('extracted_decision'),
             'ur_decision': data_dict.get('ur_decision'),
-            'consulting_doctors': data_dict.get('consulting_doctors'),
+            'body_part': data_dict.get('body_part', 'Not specified'),
+            'consulting_doctor': data_dict.get('consulting_doctor'),
             'ai_outcome': data_dict.get('ai_outcome'),
         }
-        
         return DocumentAnalysis(**mapped_data)
 
     def _generate_whats_new_from_current(self, current_analysis: DocumentAnalysis, mm_dd: str) -> Dict[str, str]:
