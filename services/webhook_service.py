@@ -194,7 +194,7 @@ class WebhookService:
             conflicting_claims_reason = f"Multiple conflicting claim numbers found: {lookup_data.get('unique_valid_claims', [])}"
             logger.warning(f"⚠️ {conflicting_claims_reason}")
 
-        # Override missing fields
+        # Override missing fields only if missing in document analysis; log mismatches if present
         document_analysis = processed_data["document_analysis"]
         if lookup_data and lookup_data.get("total_documents", 0) > 0 and (not has_conflicting_claims or is_first_time_claim_only):
             fetched_patient_name = lookup_data.get("patient_name")
@@ -202,21 +202,65 @@ class WebhookService:
             fetched_doi = lookup_data.get("doi")
             fetched_claim_number = lookup_data.get("claim_number")
 
-            if not document_analysis.patient_name or str(document_analysis.patient_name).lower() == "not specified":
-                document_analysis.patient_name = fetched_patient_name
-                logger.info(f"🔄 Overrode patient_name from lookup: {fetched_patient_name}")
+            # Patient name: Override only if missing
+            doc_patient_name = document_analysis.patient_name
+            doc_name_missing = not doc_patient_name or str(doc_patient_name).lower() == "not specified"
+            if doc_name_missing:
+                if fetched_patient_name:
+                    document_analysis.patient_name = fetched_patient_name
+                    logger.info(f"🔄 Overrode patient_name from previous data: {fetched_patient_name}")
+            else:
+                # If present, check for match and log if mismatch (no override)
+                if fetched_patient_name:
+                    doc_name_norm = str(doc_patient_name).strip().lower()
+                    fetched_name_norm = str(fetched_patient_name).strip().lower()
+                    if doc_name_norm != fetched_name_norm:
+                        logger.warning(f"⚠️ Patient name mismatch - document: '{doc_patient_name}', previous: '{fetched_patient_name}' (keeping document value)")
 
-            if not document_analysis.dob or str(document_analysis.dob).lower() == "not specified":
-                document_analysis.dob = fetched_dob
-                logger.info(f"🔄 Overrode DOB from lookup: {fetched_dob}")
+            # DOB: Override only if missing
+            doc_dob = document_analysis.dob
+            doc_dob_missing = not doc_dob or str(doc_dob).lower() == "not specified"
+            if doc_dob_missing:
+                if fetched_dob:
+                    document_analysis.dob = fetched_dob
+                    logger.info(f"🔄 Overrode DOB from previous data: {fetched_dob}")
+            else:
+                # If present, check for match and log if mismatch (no override)
+                if fetched_dob:
+                    doc_dob_norm = str(doc_dob).strip().lower()
+                    fetched_dob_norm = str(fetched_dob).strip().lower()
+                    if doc_dob_norm != fetched_dob_norm:
+                        logger.warning(f"⚠️ DOB mismatch - document: '{doc_dob}', previous: '{fetched_dob}' (keeping document value)")
 
-            if not document_analysis.doi or str(document_analysis.doi).lower() == "not specified":
-                document_analysis.doi = fetched_doi
-                logger.info(f"🔄 Overrode DOI from lookup: {fetched_doi}")
+            # DOI: Override only if missing
+            doc_doi = document_analysis.doi
+            doc_doi_missing = not doc_doi or str(doc_doi).lower() == "not specified"
+            if doc_doi_missing:
+                if fetched_doi:
+                    document_analysis.doi = fetched_doi
+                    logger.info(f"🔄 Overrode DOI from previous data: {fetched_doi}")
+            else:
+                # If present, check for match and log if mismatch (no override)
+                if fetched_doi:
+                    doc_doi_str = str(doc_doi).strip()
+                    fetched_doi_str = str(fetched_doi).strip()
+                    if doc_doi_str != fetched_doi_str:
+                        logger.warning(f"⚠️ DOI mismatch - document: '{doc_doi}', previous: '{fetched_doi}' (keeping document value)")
 
-            if not processed_data["has_claim_number"] and fetched_claim_number:
-                document_analysis.claim_number = fetched_claim_number
-                logger.info(f"🔄 Overrode claim_number from lookup: {fetched_claim_number}")
+            # Claim number: Override only if missing
+            doc_claim_number = document_analysis.claim_number
+            doc_claim_missing = not doc_claim_number or str(doc_claim_number).lower() == "not specified"
+            if doc_claim_missing:
+                if fetched_claim_number:
+                    document_analysis.claim_number = fetched_claim_number
+                    logger.info(f"🔄 Overrode claim_number from previous data: {fetched_claim_number}")
+            else:
+                # If present, check for match and log if mismatch (no override)
+                if fetched_claim_number:
+                    doc_claim_norm = str(doc_claim_number).strip().lower()
+                    fetched_claim_norm = str(fetched_claim_number).strip().lower()
+                    if doc_claim_norm != fetched_claim_norm:
+                        logger.warning(f"⚠️ Claim number mismatch - document: '{doc_claim_number}', previous: '{fetched_claim_number}' (keeping document value)")
 
         updated_claim_number_for_query = (
             document_analysis.claim_number
@@ -257,7 +301,7 @@ class WebhookService:
             "is_first_time_claim_only": is_first_time_claim_only,
             "mode": processed_data.get("mode")  # Propagate mode
         }
-
+    
     async def compare_and_determine_status(self, processed_data: dict, lookup_result: dict, db_service, physician_id: str) -> dict:
         """
         Step 3: Fetch previous documents, compare, and determine final status/reason.
@@ -557,9 +601,12 @@ class WebhookService:
         logger.info(f"✅ {created_tasks} / {len(tasks)} tasks created for document {processed_data['filename']}")
 
         # Update previous documents' fields (skip for first-time claim-only as there are no previous)
+        # FIXED: Only update if lookup found previous documents for this specific patient/claim (total_documents > 0)
+        # This prevents updating docs for other patients when has_claim_number=True but no match
+        total_previous_docs = status_result["lookup_data"].get("total_documents", 0) if status_result["lookup_data"] else 0
         should_update_previous = (
             document_status not in ["failed"] and
-            (processed_data["has_claim_number"] or status_result["lookup_data"].get("total_documents", 0) > 0) and
+            total_previous_docs > 0 and  # Require confirmed previous docs for this patient
             not status_result["has_conflicting_claims"] and
             status_result["patient_name_to_use"] != "Not specified" and
             updated_dob_for_query is not None and
@@ -576,7 +623,7 @@ class WebhookService:
             )
             logger.info(f"🔄 Updated {updated_count} previous documents' fields for patient '{status_result['patient_name_to_use']}' using new data")
         else:
-            logger.info(f"ℹ️ Skipping previous update: status={document_status}, has_claim_or_lookup={processed_data['has_claim_number'] or status_result['lookup_data'].get('total_documents', 0) > 0}, has_conflicts={status_result['has_conflicting_claims']}, patient={status_result['patient_name_to_use']}, has_dob={updated_dob_for_query is not None}, is_first_time_claim_only={is_first_time_claim_only}")
+            logger.info(f"ℹ️ Skipping previous update: status={document_status}, total_previous={total_previous_docs}, has_conflicts={status_result['has_conflicting_claims']}, patient={status_result['patient_name_to_use']}, has_dob={updated_dob_for_query is not None}, is_first_time_claim_only={is_first_time_claim_only}")
 
         logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}")
 
@@ -651,7 +698,6 @@ class WebhookService:
 
         return result
 # Add this method to the WebhookService class
-
     async def update_fail_document(self, fail_doc: Any, updated_fields: dict, user_id: str = None, db_service: Any = None) -> dict:
         """
         Handles updating and processing a failed document using webhook-like logic.
