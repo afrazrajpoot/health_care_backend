@@ -73,12 +73,12 @@ model Document {
   blobPath     String?
   fileName     String?
   fileHash     String? @db.VarChar(64) // ✅ new column for content hash
-
+  mode         String? @default("wc")
   reportDate  DateTime?
   physicianId String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
-
+ur_denial_reason String?
   // Relations
   summarySnapshot SummarySnapshot?
   adl             ADL?
@@ -93,15 +93,20 @@ model Document {
 }
 
 model SummarySnapshot {
-  id         String @id @default(cuid())
-  dx         String
-  keyConcern String
-  nextStep   String
+  id                String   @id @default(cuid())
+  dx                String
+  keyConcern        String
+  nextStep          String
+  urDecision        String?   // corresponds to 'ur-decision'
+  recommended       String?   // recommended treatment plan
+  aiOutcome         String?   // AI-generated follow-up or summary
+  consultingDoctors String[]  // list of consulting doctors' names
 
   // Relation back to Document
   document   Document @relation(fields: [documentId], references: [id])
   documentId String   @unique
 }
+
 
 model ADL {
   id               String @id @default(cuid())
@@ -198,6 +203,7 @@ model Task {
   status         String    @default("Pending")
   dueDate        DateTime?
   patient        String
+  reason         String?
   actions        String[]  @default(["Claim", "Complete"])
   sourceDocument String?
 
@@ -225,4 +231,35 @@ model WorkflowStats {
   intakes_created    Int      @default(0)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+}
+
+
+model Subscription {
+  id           String   @id @default(cuid())
+  physicianId  String
+  plan         String   // 'basic', 'pro', 'premium'
+  amountTotal  Int      // Amount in cents
+  status       String   // 'active', 'canceled', 'past_due'
+  stripeCustomerId String?
+  stripeSubscriptionId String? // For recurring subscriptions
+  documentParse    Int
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("subscriptions")
+}
+
+model CheckoutSession {
+  id              String   @id @default(uuid())
+  stripeSessionId String   @unique
+  physicianId     String
+  plan            String
+  amount          Int
+  status          String
+  expiresAt       DateTime
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([stripeSessionId])
+  @@index([physicianId])
 }

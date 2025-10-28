@@ -1,6 +1,4 @@
-
-
-# services/document_extractor_service.py
+# services/document_extractor_service.py (updated: pass mode to process_single_document and include in webhook_payload)
 import traceback
 from datetime import datetime
 from typing import Dict, Any, List
@@ -38,7 +36,8 @@ class DocumentExtractorService:
         self,
         document: UploadFile,
         physician_id: str = None,
-        user_id: str = None
+        user_id: str = None,
+        mode: str = None
     ) -> Dict[str, Any]:
         """
         Process a single document: validate, convert, analyze, upload to GCS, and prepare webhook payload.
@@ -173,7 +172,8 @@ class DocumentExtractorService:
                 "file_hash": file_hash,
                 "document_id": result.document_id,
                 "physician_id": physician_id,
-                "user_id": user_id
+                "user_id": user_id,
+                "mode": mode  # Include the mode in the webhook payload
             }
 
             return {
@@ -206,7 +206,8 @@ class DocumentExtractorService:
         self,
         documents: List[UploadFile],
         physician_id: str = None,
-        user_id: str = None
+        user_id: str = None,
+        mode: str = None
     ) -> Dict[str, Any]:
         """
         Process a batch of documents and return payloads and ignored files.
@@ -221,7 +222,7 @@ class DocumentExtractorService:
             logger.info(f"👨‍⚕️ Physician ID provided: {physician_id}")
 
         for document in documents:
-            result = await self.process_single_document(document, physician_id, user_id)
+            result = await self.process_single_document(document, physician_id, user_id, mode)  # Pass mode to single document processing
             if result["success"]:
                 payloads.append(result["payload"])
             else:

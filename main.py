@@ -1,14 +1,13 @@
-# main.py
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import os
 from prisma import Prisma
 from controllers.document_controller import router as document_router
+from controllers.agent_controller import router as agent_router  # 🧠 Added agent route
 from config.settings import CONFIG
 from utils.logger import setup_logging
 
 # 👇 Import socket manager
-# from socket_manager import sio
 from utils.socket_manager import sio
 import socketio
 
@@ -16,14 +15,14 @@ setup_logging()
 
 app = FastAPI(
     title="Document AI Extraction API",
-    description="Extract text, entities, tables, and form fields from documents",
-    version="1.0.0"
+    description="Extract text, entities, tables, and form fields from documents + Kebilo AI Agent",
+    version="1.0.1"
 )
 
 # Prisma
 db = Prisma()
 
-# CORS
+# 🌐 CORS setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,15 +31,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Routers
+# 📦 Routers
 app.include_router(document_router, prefix="/api", tags=["document"])
+app.include_router(agent_router, prefix="/api", tags=["agent"])  # 🧠 Added here
 
-# Health check
+# 🩺 Health check route
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "processor": CONFIG["processor_id"]}
 
-# Connect DB
+# ⚙️ Database connect/disconnect
 @app.on_event("startup")
 async def startup():
     await db.connect()
@@ -51,7 +51,7 @@ async def shutdown():
     await db.disconnect()
     print("🔌 Disconnected from DB")
 
-# Middleware (Audit log)
+# 🧾 Middleware (Audit log)
 @app.middleware("http")
 async def audit_middleware(request: Request, call_next):
     try:
@@ -71,17 +71,14 @@ async def audit_middleware(request: Request, call_next):
 
     return await call_next(request)
 
-# 📁 Ensure upload directory
+# 📁 Ensure upload directory exists
 os.makedirs(CONFIG["upload_dir"], exist_ok=True)
 
-# 🚀 Mount Socket.IO ASGI app on top of FastAPI
-# socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
-# main.py
+# 🚀 Mount Socket.IO ASGI app
 socket_app = socketio.ASGIApp(
     sio,
-    other_asgi_app=app  # ✅ keep only this
+    other_asgi_app=app
 )
-
 
 if __name__ == "__main__":
     import uvicorn

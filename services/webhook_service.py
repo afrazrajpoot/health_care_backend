@@ -1,34 +1,14 @@
-
-# controllers/document_controller.py (updated: check for existing document before GCS upload and handle like ignored/required field issue)
-
-from fastapi import APIRouter, HTTPException
-
+# services/webhook_service.py
+from fastapi import HTTPException
 from datetime import datetime, timedelta
-from typing import Any
-from prisma import Prisma
+from typing import Dict, Any, Optional
 from models.schemas import ExtractionResult
-
-
-from utils.logger import logger
-
-from utils.socket_manager import sio
-
-
+from services.database_service import get_database_service
 from services.task_creation import TaskCreator
 from services.resoning_agent import EnhancedReportAnalyzer
-
-
-router = APIRouter()
-from datetime import datetime, timedelta
-
-# Assuming necessary imports and classes are already defined elsewhere:
-# - EnhancedReportAnalyzer
-# - ExtractionResult
-# - TaskCreator
-# - Prisma
-# - get_database_service
-# - sio (socket.io)
-# - extract_blob_path_from_gcs_url
+from utils.socket_manager import sio
+from utils.logger import logger
+from prisma import Prisma
 
 class WebhookService:
     """
@@ -48,6 +28,10 @@ class WebhookService:
 
         result_data = data["result"]
         text = result_data.get("text", "")
+
+        # Extract mode from payload (default to "wc")
+        mode = data.get("mode", "wc")
+        logger.info(f"📋 Document mode: {mode}")
 
         # Skip DLP de-identification; use text directly (note: ensure HIPAA compliance via other means)
         deidentified_text = text
@@ -168,8 +152,10 @@ class WebhookService:
             "file_hash": data.get("file_hash"),
             "result_data": result_data,
             "user_id": data.get("user_id"),
-            "document_id": data.get("document_id", "unknown")
+            "document_id": data.get("document_id", "unknown"),
+            "mode": mode  # Include mode in processed data
         }
+
     async def perform_patient_lookup(self, db_service, processed_data: dict, physician_id: str) -> dict:
         """
         Step 2: Perform patient/claim lookup, handle conflicts, and override missing fields.
@@ -269,6 +255,7 @@ class WebhookService:
             "updated_patient_name_for_query": updated_patient_name_for_query,
             "document_analysis": document_analysis,
             "is_first_time_claim_only": is_first_time_claim_only,
+            "mode": processed_data.get("mode")  # Propagate mode
         }
 
     async def compare_and_determine_status(self, processed_data: dict, lookup_result: dict, db_service, physician_id: str) -> dict:
@@ -280,6 +267,7 @@ class WebhookService:
         print(document_analysis,'document_analysis in compare and determine status')
         lookup_data = lookup_result["lookup_data"]
         is_first_time_claim_only = lookup_result.get("is_first_time_claim_only", False)
+        mode = lookup_result.get("mode")  # Extract mode
 
         # Always fetch all previous unverified documents for the patient (using updated fields)
         db_response = await db_service.get_all_unverified_documents(
@@ -343,7 +331,12 @@ class WebhookService:
         summary_snapshot = {
             "dx": document_analysis.diagnosis,
             "keyConcern": document_analysis.key_concern,
-            "nextStep": document_analysis.next_step
+            "nextStep": document_analysis.extracted_recommendation,
+            "ur-decision": document_analysis.ur_decision or 'Not Specified',
+            "recommended": document_analysis.extracted_recommendation or 'Not Specified',
+            "ai_outcome": document_analysis.ai_outcome or 'Not Specified'   ,
+            "consulting_doctors": document_analysis.consulting_doctors or [],
+            "ur_denial_reason": document_analysis.ur_denial_reason or None
         }
         adl_data = {
             "adlsAffected": document_analysis.adls_affected,
@@ -372,10 +365,11 @@ class WebhookService:
             "lookup_data": lookup_data,
             "previous_documents": previous_documents,
             "document_analysis": document_analysis,  # Final updated
-            "is_first_time_claim_only": is_first_time_claim_only  # Pass through
+            "is_first_time_claim_only": is_first_time_claim_only,  # Pass through
+            "mode": mode  # Propagate mode
         }
+
     async def save_and_process_document(self, processed_data: dict, status_result: dict, data: dict, db_service) -> dict:
-        print(processed_data,'processed_data')
         document_analysis = status_result["document_analysis"]
         has_date_reasoning = processed_data["has_date_reasoning"]
         physician_id = processed_data["physician_id"]
@@ -383,6 +377,7 @@ class WebhookService:
         document_status = status_result["document_status"]
         pending_reason = status_result["pending_reason"]
         is_first_time_claim_only = status_result.get("is_first_time_claim_only", False)
+        mode = status_result.get("mode")
 
         # Check for existing document first
         file_exists = await db_service.document_exists(
@@ -418,7 +413,7 @@ class WebhookService:
 
             await db_service.save_fail_doc(
                 reason=fail_reason,
-                db=processed_data["dob"],  # Original dob string
+                db=processed_data["dob"],
                 doi=processed_data["doi"],
                 claim_number=status_result["claim_to_save"],
                 patient_name=status_result["patient_name_to_use"],
@@ -427,7 +422,8 @@ class WebhookService:
                 gcs_file_link=processed_data["gcs_url"],
                 file_name=processed_data["filename"],
                 file_hash=processed_data["file_hash"],
-                blob_path=processed_data["blob_path"]
+                blob_path=processed_data["blob_path"],
+                mode=mode
             )
 
             # Emit failed event
@@ -498,7 +494,7 @@ class WebhookService:
             gcs_file_link=processed_data["gcs_url"],
             patient_name=status_result["patient_name_to_use"],
             claim_number=status_result["claim_to_save"],
-            dob=processed_data["dob"],  # Updated dob string
+            dob=processed_data["dob"],
             doi=processed_data["doi"],
             status=document_status,
             brief_summary=processed_data["brief_summary"],
@@ -507,8 +503,15 @@ class WebhookService:
             adl_data=status_result["adl_data"],
             document_summary=status_result["document_summary"],
             rd=processed_data["rd_for_db"],
-            physician_id=physician_id
+            physician_id=physician_id,
+            mode=mode,
+            ur_denial_reason=document_analysis.ur_denial_reason
         )
+
+        # ✅ DECREMENT PARSE COUNT AFTER SUCCESSFUL DOCUMENT SAVE
+        parse_decremented = await db_service.decrement_parse_count(physician_id)
+        if not parse_decremented:
+            logger.warning(f"⚠️ Could not decrement parse count for physician {physician_id}")
 
         # AI Task Creation
         task_creator = TaskCreator()
@@ -559,13 +562,13 @@ class WebhookService:
             not status_result["has_conflicting_claims"] and
             status_result["patient_name_to_use"] != "Not specified" and
             updated_dob_for_query is not None and
-            not is_first_time_claim_only  # Don't update previous for first-time claims
+            not is_first_time_claim_only
         )
 
         if should_update_previous:
             updated_count = await db_service.update_previous_fields(
                 patient_name=status_result["patient_name_to_use"],
-                dob=dob_str,  # String format for DB
+                dob=dob_str,
                 physician_id=physician_id,
                 claim_number=status_result["claim_to_save"],
                 doi=document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else None
@@ -576,7 +579,7 @@ class WebhookService:
 
         logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}")
 
-        # Emit success event
+        # Emit success event - include parse count info
         emit_data = {
             'document_id': document_id,
             'filename': processed_data["filename"],
@@ -587,7 +590,10 @@ class WebhookService:
             'extracted_dates_count': len(processed_data["date_reasoning_data"]["extracted_dates"]),
             'lookup_used': status_result["lookup_data"].get("total_documents", 0) > 0,
             'fields_overridden_from_lookup': len(status_result['updated_missing_fields']) < len(processed_data.get("initial_missing_fields", [])),
-            'is_first_time_claim_only': is_first_time_claim_only  # Include this in emission
+            'is_first_time_claim_only': is_first_time_claim_only,
+            'mode': mode,
+            'parse_count_decremented': parse_decremented,  # Add this field
+            'ur_denial_reason': document_analysis.ur_denial_reason or None
         }
         if user_id:
             await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
@@ -602,6 +608,7 @@ class WebhookService:
             "missing_fields": status_result['updated_missing_fields'] if status_result['has_missing_required_fields'] else None,
             "pending_reason": pending_reason,
             "is_first_time_claim_only": is_first_time_claim_only,
+            "parse_count_decremented": parse_decremented,  # Add this field
             "date_reasoning_summary": {
                 "used_reasoning": has_date_reasoning,
                 "confidence_scores": processed_data["date_reasoning_data"]["confidence_scores"],
@@ -617,9 +624,10 @@ class WebhookService:
                     "doi": bool(status_result["lookup_data"].get("doi")),
                     "claim_number": bool(status_result["lookup_data"].get("claim_number"))
                 }
-            }
+            },
+            "mode": mode,
+            "ur_denial_reason": document_analysis.ur_denial_reason or None
         }
-    
     
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
@@ -641,7 +649,6 @@ class WebhookService:
         result = await self.save_and_process_document(processed_data, status_result, data, db_service)
 
         return result
-    
 # Add this method to the WebhookService class
 
     async def update_fail_document(self, fail_doc: Any, updated_fields: dict, user_id: str = None, db_service: Any = None) -> dict:
