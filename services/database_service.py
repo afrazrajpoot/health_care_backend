@@ -196,7 +196,8 @@ class DatabaseService:
             gcs_file_link: Optional[str] = None,
             file_name: Optional[str] = None,
             file_hash: Optional[str] = None,
-            blob_path: Optional[str] = None
+            blob_path: Optional[str] = None,
+            mode : Optional[str] = None
         ) -> str:
             """Save a failed document record to the FailDocs table."""
             try:
@@ -223,6 +224,8 @@ class DatabaseService:
                     data["fileHash"] = file_hash
                 if blob_path is not None:
                     data["blobPath"] = blob_path
+                # if mode is not None:
+                #     data["mode"] = mode
                 
                 fail_doc = await self.prisma.faildocs.create(
                     data=data
