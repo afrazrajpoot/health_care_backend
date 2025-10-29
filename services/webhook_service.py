@@ -325,10 +325,9 @@ class WebhookService:
         # Compare with previous documents using LLM
         analyzer = EnhancedReportAnalyzer()
         whats_new_data = analyzer.compare_with_previous_documents(
-            document_analysis,
-            previous_documents
-        )
-
+        document_analysis,
+        previous_documents={}
+    )
         if whats_new_data is None or not isinstance(whats_new_data, dict):
             logger.warning(f"⚠️ Invalid whats_new data; using empty dict")
             whats_new_data = {}

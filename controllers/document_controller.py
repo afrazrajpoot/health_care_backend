@@ -23,7 +23,7 @@ from services.document_route_services import DocumentExtractorService
 from services.get_document_services import DocumentAggregationService
 import os
 from fastapi import Form
-
+import json
 
 router = APIRouter()
 
