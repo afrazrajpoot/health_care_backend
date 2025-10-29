@@ -1,4 +1,3 @@
-
 import traceback
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
@@ -38,7 +37,7 @@ class DocumentAggregationService:
         # Parse date strings using helper
         dob_date = self._parse_date(dob, "Date of Birth")
 
-        # Get all documents
+        # Get all documents (includes bodyPartSnapshots via relation, matched by patient details)
         document_data = await self.db_service.get_document_by_patient_details(
             patient_name=patient_name,
             physicianId=physician_id,
@@ -62,8 +61,13 @@ class DocumentAggregationService:
             physician_id=physician_id
         )
         print(tasks,'taks')
-        # Create a mapping of document_id to full task
-        tasks_dict = {task["documentId"]: task for task in tasks}
+        # Create a mapping of document_id to list of tasks (to handle multiple tasks per document)
+        tasks_dict = {}
+        for task in tasks:
+            doc_id = task["documentId"]
+            if doc_id not in tasks_dict:
+                tasks_dict[doc_id] = []
+            tasks_dict[doc_id].append(task)
 
         response = await self._format_aggregated_document_response(
             all_documents_data=document_data,
@@ -106,123 +110,145 @@ class DocumentAggregationService:
                 "is_multiple_documents": False
             }
 
-        # Sort documents by reportDate ascending (oldest first)
-        sorted_documents = sorted(documents, key=self._parse_report_date)
+        # Sort documents by reportDate descending (latest first)
+        sorted_documents = sorted(documents, key=self._parse_report_date, reverse=True)
 
-        # Find the latest document based on reportDate
-        latest_doc = max(documents, key=self._parse_report_date)
+        # Grouped data by document_id
+        whats_new_by_document = {}
+        body_part_by_document = {}
+        brief_summary_by_document = {}
+        document_summary_by_document = {}
+        adl_by_document = {}
 
-        # Find the last saved document based on createdAt for full whats_new chain
-        last_saved_doc = max(documents, key=self._parse_created_at)
-
-        # Use the latest document for base info
-        base_response = await self._format_single_document_base(latest_doc)
-
-        # ✅ CHANGED: Collect all bodyPartSnapshots in chronological order, reverse to latest first
-        all_body_part_snapshots = []
         for doc in sorted_documents:
-            body_part_snapshots = doc.get("bodyPartSnapshots", [])
-            if body_part_snapshots:
-                # Add document context to each body part snapshot
-                for snapshot in body_part_snapshots:
-                    snapshot_with_context = snapshot.copy()
-                    snapshot_with_context["document_id"] = doc["id"]
-                    snapshot_with_context["document_created_at"] = self._format_date_field(doc.get("createdAt"))
-                    snapshot_with_context["document_report_date"] = self._format_date_field(doc.get("reportDate"))
-                    all_body_part_snapshots.append(snapshot_with_context)
-        
-        # Reverse to show latest first
-        body_part_snapshots = all_body_part_snapshots[::-1]
-
-        # ADL from latest document
-        adl = await self._format_adl(latest_doc)
-
-        # ✅ CHANGED: Collect all whats_new and quick_note items in chronological order, reverse to latest first
-        all_whats_new_items: List[Tuple[datetime, Dict[str, Any]]] = []
-        for doc in sorted_documents:
-            report_dt = self._parse_report_date(doc)
             doc_id = doc["id"]
             created_at = self._format_date_field(doc.get("createdAt"))
             report_date = self._format_date_field(doc.get("reportDate"))
 
-            # Add whats_new if present
+            # Group body_part_snapshots by document (already matched via patient data in document fetch; append if same id)
+            body_part_snapshots = doc.get("bodyPartSnapshots", [])
+            grouped_body_parts = []
+            for snapshot in body_part_snapshots:
+                snapshot_with_context = snapshot.copy()
+                snapshot_with_context["document_created_at"] = created_at
+                snapshot_with_context["document_report_date"] = report_date
+                grouped_body_parts.append(snapshot_with_context)
+            if doc_id not in body_part_by_document:
+                body_part_by_document[doc_id] = []
+            body_part_by_document[doc_id].extend(grouped_body_parts)
+
+            # Group whats_new as a dict {category: {content, [description for quick_note], dates}} by document
+            grouped_whats_new = {}
             if whats_new := doc.get("whatsNew", {}):
-                if diagnosis := whats_new.get("diagnosis"):
-                    item = {
-                        "type": "diagnosis",
-                        "content": diagnosis,
-                        "document_id": doc_id,
-                        "document_created_at": created_at,
-                        "document_report_date": report_date
-                    }
-                    all_whats_new_items.append((report_dt, item))
+                for category, value in whats_new.items():
+                    if value and isinstance(value, str) and value.strip() and value.lower() != 'none':
+                        whats_new_entry = {
+                            "content": value,
+                            "document_created_at": created_at,
+                            "document_report_date": report_date
+                        }
+                        grouped_whats_new[category] = whats_new_entry
 
-            # Add quick_note if present and has content
+            # Add all quick_notes from all tasks for this document as a list
+            quick_notes_list = []
             if doc_id in tasks_dict:
-                task = tasks_dict[doc_id]
-                quick_notes_data = task.get("quickNotes", {})
-                content = quick_notes_data.get("one_line_note") or quick_notes_data.get("status_update")
-                description = task.get("description", "")
-                if content:
-                    item = {
-                        "type": "quick_note",
-                        "content": content,
-                        "description": description,
-                        "document_id": doc_id,
-                        "document_created_at": created_at,
-                        "document_report_date": report_date
-                    }
-                    all_whats_new_items.append((report_dt, item))
+                for task in tasks_dict[doc_id]:
+                    quick_notes_data = task.get("quickNotes", {})
+                    content = quick_notes_data.get("one_line_note") or quick_notes_data.get("status_update")
+                    description = task.get("description", "")
+                    if content:
+                        quick_notes_list.append({
+                            "content": content,
+                            "description": description,
+                            "document_created_at": created_at,
+                            "document_report_date": report_date
+                        })
 
-        # Sort by report_dt descending (latest first)
-        whats_new_snapshots = [item for _, item in sorted(all_whats_new_items, key=lambda x: x[0], reverse=True)]
+            # If there are quick notes, add them as a list under "quick_note"
+            if quick_notes_list:
+                grouped_whats_new["quick_note"] = quick_notes_list
 
-        # Status from the last saved document
-        status = last_saved_doc.get("status")
+            # Group whats_new entries by document_id (merge if same ID)
+            if doc_id not in whats_new_by_document:
+                whats_new_by_document[doc_id] = {}
+            # Merge dicts (overwrite if duplicate category)
+            whats_new_by_document[doc_id].update(grouped_whats_new)
 
-        # Document_summary: group by type (chronological reportDate order)
-        grouped_summaries = {}
-        grouped_brief_summaries = {}
-        for doc in sorted_documents:
-            # Group brief_summary by type
-            doc_summary = doc.get("documentSummary")
-            doc_type = doc_summary.get("type", "unknown") if doc_summary else "unknown"
-
+            # Group brief_summary by document (take latest or merge, here overwrite)
             brief_summary = doc.get("briefSummary")
             if brief_summary:
-                if doc_type not in grouped_brief_summaries:
-                    grouped_brief_summaries[doc_type] = []
-                grouped_brief_summaries[doc_type].append(brief_summary)
+                brief_summary_by_document[doc_id] = brief_summary
 
-            # Group document_summary
+            # Group document_summary by document (take latest)
+            doc_summary = doc.get("documentSummary")
             if doc_summary:
-                if doc_type not in grouped_summaries:
-                    grouped_summaries[doc_type] = []
                 summary_entry = {
                     "date": self._format_date_field(doc_summary.get("date")),
-                    "summary": doc_summary.get("summary")
+                    "summary": doc_summary.get("summary"),
+                    "type": doc_summary.get("type", "unknown")
                 }
-                grouped_summaries[doc_type].append(summary_entry)
+                document_summary_by_document[doc_id] = summary_entry
 
-        base_response.update({
-            "body_part_snapshots": body_part_snapshots,  # ✅ CHANGED: Now using body_part_snapshots
-            "whats_new_snapshots": whats_new_snapshots,  # ✅ CHANGED: Now includes quick notes as unified items with description, latest first
-            "adl": adl,
-            "document_summary": grouped_summaries,
-            "brief_summary": grouped_brief_summaries,
-            "document_index": 1,
-            "is_latest": True,
-            "status": status  # Override from last saved doc
-        })
+            # Group ADL by document (merge or overwrite, here merge)
+            adl_data = doc.get("adl")
+            if adl_data:
+                if doc_id not in adl_by_document:
+                    adl_by_document[doc_id] = {
+                        "adls_affected": [],
+                        "work_restrictions": []
+                    }
+                if "adls_affected" not in adl_by_document[doc_id]:
+                    adl_by_document[doc_id]["adls_affected"] = []
+                if adls_affected := adl_data.get("adlsAffected"):
+                    if isinstance(adl_by_document[doc_id]["adls_affected"], list):
+                        adl_by_document[doc_id]["adls_affected"].append(adls_affected)
+                    else:
+                        adl_by_document[doc_id]["adls_affected"] = [adl_by_document[doc_id]["adls_affected"], adls_affected]
+                # Similar for work_restrictions
+                if "work_restrictions" not in adl_by_document[doc_id]:
+                    adl_by_document[doc_id]["work_restrictions"] = []
+                if work_restrictions := adl_data.get("workRestrictions"):
+                    if isinstance(adl_by_document[doc_id]["work_restrictions"], list):
+                        adl_by_document[doc_id]["work_restrictions"].append(work_restrictions)
+                    else:
+                        adl_by_document[doc_id]["work_restrictions"] = [adl_by_document[doc_id]["work_restrictions"], work_restrictions]
 
-        # Wrap in single document structure
+        # Get unique document IDs, sorted by latest report date
+        unique_doc_ids = list(dict.fromkeys([doc["id"] for doc in sorted_documents]))  # Preserves order
+        # For each unique id, pick the latest doc for base info
+        id_to_latest_doc = {doc["id"]: doc for doc in sorted_documents}
+        latest_docs = [id_to_latest_doc[doc_id] for doc_id in unique_doc_ids]
+
+        # Create list of per-document responses, sorted latest first, one per unique ID
+        per_document_responses = []
+        for latest_doc in latest_docs:
+            doc_id = latest_doc["id"]
+            base_doc = await self._format_single_document_base(latest_doc)
+            base_doc.update({
+                "body_part_snapshots": body_part_by_document.get(doc_id, []),
+                "whats_new": [whats_new_by_document.get(doc_id, {})],  # Wrap merged dict in array for grouping format
+                "brief_summary": brief_summary_by_document.get(doc_id),
+                "document_summary": document_summary_by_document.get(doc_id),
+                "adl": adl_by_document.get(doc_id, {"adls_affected": [], "work_restrictions": []}),
+                "document_index": latest_docs.index(latest_doc) + 1,  # 1-based index, latest first
+                "is_latest": doc_id == latest_docs[0]["id"]
+            })
+            per_document_responses.append(base_doc)
+
+        # Top-level aggregations (e.g., total body parts across all docs)
+        total_body_parts = sum(len(snapshots) for snapshots in body_part_by_document.values())
+
+        # Update total_documents to unique count
+        unique_total = len(unique_doc_ids)
+
+        # Wrap in response structure
         return {
             "patient_name": all_documents_data["patient_name"],
-            "total_documents": all_documents_data["total_documents"],
-            "documents": [base_response],
+            "total_documents": unique_total,
+            "documents": per_document_responses,  # List of grouped per-unique-document objects
             "patient_quiz": None,  # Commented out in original
-            "is_multiple_documents": len(documents) > 1,
-            "total_body_parts": len(body_part_snapshots)  # ✅ ADDED: Total body parts count
+            "is_multiple_documents": unique_total > 1,
+            "total_body_parts": total_body_parts  # Total across all documents
         }
 
     def _parse_report_date(self, doc: Dict[str, Any]) -> datetime:
@@ -285,4 +311,4 @@ class DocumentAggregationService:
             return field_value.isoformat()
         if isinstance(field_value, str):
             return field_value
-        return None
+        return None 

@@ -339,7 +339,6 @@ def parse_date(date_str: Optional[str], field_name: str) -> datetime:
     )
 
 
-
 @router.get('/document')
 async def get_document(
     patient_name: str,

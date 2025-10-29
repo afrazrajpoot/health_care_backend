@@ -322,12 +322,12 @@ class WebhookService:
 
         previous_documents = db_response.get('documents', []) if db_response else []
 
-        # Compare with previous documents using LLM
+        # Compare with previous documents using LLM - UPDATED: Pass raw deidentified_text instead of document_analysis
         analyzer = EnhancedReportAnalyzer()
         whats_new_data = analyzer.compare_with_previous_documents(
-        document_analysis,
-        previous_documents={}
-    )
+            processed_data["deidentified_text"],
+            previous_documents
+        )
         if whats_new_data is None or not isinstance(whats_new_data, dict):
             logger.warning(f"⚠️ Invalid whats_new data; using empty dict")
             whats_new_data = {}
@@ -736,7 +736,6 @@ class WebhookService:
         result = await self.save_and_process_document(processed_data, status_result, data, db_service)
 
         return result
-
 
     async def update_fail_document(self, fail_doc: Any, updated_fields: dict, user_id: str = None, db_service: Any = None) -> dict:
         """
