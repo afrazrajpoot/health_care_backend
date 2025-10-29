@@ -249,10 +249,15 @@ class DocumentAIProcessor:
 
             # Enable imageless mode if more than 15 pages (up to 30 allowed)
             if page_count is not None and page_count > 15:
-                logger.info("⚙️ Enabling imageless mode for Document AI (pages > 15)")
+                logger.info("⚙️ Large document detected, running OCR with optimized settings")
                 request["process_options"] = {
-                    "ocr_config": {"enable_imageless_ocr": True}
+                    "ocr_config": {
+                        "enable_native_pdf_parsing": True,  # keep OCR enabled
+                        "hinted_languages": ["en"],
+                        "enable_image_quality_scores": False
+                    }
                 }
+
 
             logger.info(f"🚀 Sending request to Document AI...")
             logger.info(f"📍 Processor path: {self.processor_path}")
