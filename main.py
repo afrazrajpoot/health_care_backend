@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 from prisma import Prisma
 from controllers.document_controller import router as document_router
-from controllers.agent_controller import router as agent_router  # 🧠 Added agent route
+from controllers.rebutle_controller import router as agent_router  # 🧠 Added agent route
 from config.settings import CONFIG
 from utils.logger import setup_logging
 

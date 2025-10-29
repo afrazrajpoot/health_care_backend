@@ -84,9 +84,17 @@ async def generate_rebuttal_node(state: AgentState) -> AgentState:
     body_part = input_data.get("body_part", "")
     modality = input_data.get("modality", "")
     diagnosis = input_data.get("diagnosis", "")
+    patient_name = input_data.get("patient_name", "")
+    patient_dob = input_data.get("patient_dob", "")
+    patient_claim_number = input_data.get("patient_claim_number", "")
     
     # Structured prompt based on sample framework
     prompt = f"""Based on {guideline_source} and/or current clinical guidelines from the provided search results, write a concise justification for using {modality} to treat {diagnosis} in the {body_part}.
+
+Patient Information:
+- Name: {patient_name}
+- Date of Birth: {patient_dob}
+- Claim Number: {patient_claim_number}
 
 Key details from request:
 - Reason for denial: {reason_for_denial}
@@ -100,6 +108,7 @@ Instructions:
 - Include references to physical exam findings, treatment duration, response to prior therapies, and impact on ADLs where applicable and supported by summaries.
 - Cite sources briefly (e.g., "Per Aetna Clinical Policy Bulletin, 2024" or "Per UHC Policies, Section X") without quoting blocks of text.
 - Format as a professional rebuttal letter with markdown headings for structure:
+  - Patient Header (include name, DOB, claim number)
   - ## Clinical Summary (brief overview of diagnosis and requested modality)
   - ## Justification for Medical Necessity (explain why it's needed, addressing denial reason)
   - ## Supporting Evidence from Guidelines (key points from searches with citations)
@@ -138,7 +147,10 @@ async def generate_rebuttal(data: dict = Body(...)):
       "diagnosis": "chronic shoulder pain",
       "guideline_source": "MTUS",
       "reason_for_denial": "lack of physical exam findings",
-      "previous_response": "Patient reports decreased pain and improved ADLs"
+      "previous_response": "Patient reports decreased pain and improved ADLs",
+      "patient_name": "John Doe",
+      "patient_dob": "01/01/1980",
+      "patient_claim_number": "CLAIM123"
     }
     """
     try:
