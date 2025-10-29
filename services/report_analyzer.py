@@ -104,53 +104,63 @@ class ReportAnalyzer:
     def create_whats_new_prompt(self) -> PromptTemplate:
         template = """
         You are a medical document analysis expert. Analyze the raw document text and generate key findings in a historical progression format for this single document.
-        
+
         CURRENT DOCUMENT RAW TEXT (extract report date from text, fallback to provided {current_date} if missing):
         {current_raw_text}
-        
+
         CRITICAL INSTRUCTIONS:
-        - EXTRACT report date MM/DD from {current_raw_text} (e.g., from 'Report Date:', 'Date:', 'RD:', or any date field; fallback to {current_date} only if no date found).
-        - Show all pure findings WITHOUT arrows since this is a single document.
-        - Include EVERY diagnosis, treatment, finding, recommendation, outcome, etc., from the text.
-        - If multiple diagnoses, include ALL of them.
-        - Categorize ALL items into these specific categories:
-        * diagnosis: Diagnosis changes, medical findings (include outcomes if mentioned)
-        * qme: Qualified Medical Evaluator reports, independent medical exams (include recommendations)
-        * raf: Risk Adjustment Factor reports, claim adjustments
-        * ur_decision: Utilization Review decisions, work restrictions, treatment approvals/denials (include outcomes)
-        * legal: Legal developments, attorney letters, claim updates, whether approved or denied along with reason.
-        * recommendations: Next steps, treatments, or extracted recommendations from the document
-        * outcome: Predicted or actual outcomes, resolutions from the document
-        
-        - For EACH category, provide a concise description (3-5 words) with date in MM/DD format: STRICTLY use EXTRACTED report date (do NOT use {current_date} unless extraction fails).
-        - Include SPECIFIC FINDINGS like all diagnoses, test results, restrictions, recommendations, outcomes - list multiples separated by commas.
-        - Include ALL categories with data from the document, especially recommendations and outcomes.
-        - Only include categories that have actual data. Do not include entries with 'None' or empty.
-        - Use format: "Item (MM/DD)" for standalone items, where MM/DD is EXTRACTED from the document.
-        - Focus on key elements: diagnosis, recommendations, outcome, work restrictions, etc.
-        - OUTPUT MUST BE A FLAT JSON OBJECT: {{"category": "description string", ...}}. Do NOT nest values as objects or arrays—keep all values as simple strings.
-        
-        IMPORTANT: Extract and use date from the raw text first—ignore {current_date} unless no date in text. Focus on current document findings, with recommendations, outcomes, and dates matching the document-specific date.
-        
-        EXAMPLES FOR SINGLE DOCUMENT (using extracted report date):
-        - MRI report (text has "Report Date: 10/02"): {{"diagnosis": "Normal MRI, no mass lesion, clear sinuses, stable outcome (10/02)", "recommendations": "Follow-up in 6 months (10/02)"}}
-        - QME report (text has "Date: 10/02"): {{"qme": "QME evaluation, restrictions, recommended PT (10/02)", "outcome": "Improved mobility (10/02)"}}
-        - Legal document: {{"legal": "Claim QM12345 approved, positive outcome (10/02)"}}
-        - UR decision: {{"ur_decision": "Light duty approved, no heavy lifting (10/02)", "recommendations": "PT and meds (10/02)"}}
-        
-        EXAMPLES OF WHAT TO INCLUDE:
-        - ✅ DO: List multiples: "PT, meds, restrictions, positive outcome (10/02)"
-        - ✅ DO: Always include recommendations and outcomes where present in raw text.
-        
+        - First, EXTRACT the report date (MM/DD) from {current_raw_text}. Look for patterns like:
+        'Report Date:', 'Date of Service:', 'Exam Date:', 'Evaluation Date:', or 'Dated:'
+        → If no date found, fallback to {current_date}.
+        - Output pure findings only for THIS document (no historical arrows or comparisons).
+        - Include EVERY diagnosis, treatment, finding, recommendation, and outcome mentioned.
+        - Only include categories that are RELEVANT (i.e., mentioned in the text).
+
+        ✅ ALWAYS INCLUDE if found:
+        * diagnosis — medical findings, conditions, or changes in condition.
+        * treatment_plan — therapy, medications, surgeries, injections, follow-ups, PT, etc.
+
+        ✅ INCLUDE THESE ONLY IF RELEVANT / MENTIONED IN THE DOCUMENT:
+        * qme — if the document mentions Qualified Medical Evaluator (QME), Independent Medical Exam (IME), or similar.
+        * ur_decision — if the document includes Utilization Review (UR), authorization, denial, approval, or work restrictions.
+        * legal — if the document discusses attorney letters, legal claim updates, approvals/denials.
+        * raf — if the document mentions Risk Adjustment Factor, claim scoring, or rating.
+        * recommendations — if there are any explicit or implicit next steps, follow-ups, or instructions.
+        * outcome — if there is any result, improvement, worsening, or resolution mentioned.
+
+        ✅ FORMATTING RULES:
+        - Use the extracted report date (MM/DD) after each finding.
+        - Output a **flat JSON object** — e.g.:
+        {{"diagnosis": "Lumbar strain, persistent pain (10/02)", "treatment_plan": "Continue PT, use NSAIDs (10/02)", "qme": "Independent medical evaluation scheduled (10/02)"}}
+        - If a category isn’t mentioned in the document, OMIT it completely (do not include empty or None values).
+        - Each value should be a short but information-rich description (5–15 words).
+        - Use simple language, no lists or arrays.
+        - Maintain the date reference consistently across all entries.
+
+        EXAMPLES:
+        - If the document is a UR Denial: 
+        {{"ur_decision": "Denied for lack of clinical justification (10/07)", "recommendations": "Consider alternative conservative management (10/07)"}}
+        - If the document is a QME report:
+        {{"qme": "QME evaluation performed, work restrictions applied (10/12)", "outcome": "Partial improvement (10/12)"}}
+        - If it's a treatment note:
+        {{"diagnosis": "Chronic lumbar pain (10/05)", "treatment_plan": "Continue PT twice weekly (10/05)", "recommendations": "Re-evaluate in 2 weeks (10/05)"}}
+
+        OUTPUT REQUIREMENTS:
+        - Use extracted report date.
+        - Output ONLY valid JSON — no commentary or explanation.
+        - Include diagnosis and treatment_plan whenever available.
+        - Include other categories ONLY IF the document text explicitly or contextually contains relevant information.
+
         {format_instructions}
-        
-        Return ONLY valid JSON. No additional text.
         """
         return PromptTemplate(
             template=template,
             input_variables=["current_raw_text", "current_date"],
-            partial_variables={"format_instructions": self.whats_new_parser.get_format_instructions()},
+            partial_variables={
+                "format_instructions": self.whats_new_parser.get_format_instructions()
+            },
         )
+
 
     def format_whats_new_as_highlights(self, whats_new_dict: Dict[str, str], current_date: str) -> List[str]:
         """
