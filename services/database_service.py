@@ -274,16 +274,13 @@ class DatabaseService:
             logger.error(f"❌ Error fetching fail docs for physician {physician_id}: {str(e)}")
             raise
     
-    async def document_exists(self, filename: str, file_size: int) -> bool:
+    async def document_exists(self, filename: str, file_size: int, physician_id: Optional[str] = None) -> bool:
         """Check if document already exists by filename and size (adjust where clause if needed)"""
         try:
-            count = await self.prisma.document.count(
-                where={
-                    # "gcsFileLink": {"contains": filename},
-                    "fileName": filename,
-                    # Add "fileSize": file_size if you add that field to schema
-                }
-            )
+            count = await self.prisma.document.count(where={
+                "fileName": filename,
+                "physicianId": physician_id
+            })
             return count > 0
         except Exception as e:
             logger.error(f"❌ Error checking document existence: {str(e)}")
@@ -847,9 +844,10 @@ class DatabaseService:
             print(f"📊 Saving {len(summary_snapshots)} summary snapshots for document")
 
             # ✅ Step 1: Check if document already exists (using filename)
-            if await self.document_exists(file_name, file_size):
+            if await self.document_exists(file_name, file_size, physician_id):
                 existing_doc = await self.prisma.document.find_first(
-                    where={"gcsFileLink": {"contains": file_name}},
+                    # we also need to check both fileName and physicianId to avoid cross-physician duplicates
+                    where={"gcsFileLink": {"contains": file_name}, "physicianId": physician_id},
                     order={"createdAt": "desc"}
                 )
                 logger.warning(

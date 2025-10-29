@@ -59,16 +59,18 @@ class DocumentExtractorService:
             logger.info(f"📏 File size: {file_size} bytes ({file_size/(1024*1024):.2f} MB)")
             logger.info(f"📋 MIME type: {document.content_type}")
 
-            # Early check for existing document
+            # Early check for existing document: only skip if both filename and physicianId match
             file_hash = self._compute_file_hash(content)
-            file_exists = await self.db_service.document_exists_by_hash(
-                file_hash=file_hash,
-                user_id=user_id,
-                physician_id=physician_id
+            # Find document with same filename and physicianId
+            existing_doc = await self.db_service.prisma.document.find_first(
+                where={
+                    "fileName": document.filename,
+                    "physicianId": physician_id
+                }
             )
 
-            if file_exists:
-                logger.warning(f"⚠️ Document already exists: {document.filename}")
+            if existing_doc:
+                logger.warning(f"⚠️ Document already exists for this physician: {document.filename}")
                 # Emit skipped event
                 emit_data = {
                     'document_id': 'unknown',

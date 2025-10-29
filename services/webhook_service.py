@@ -458,6 +458,7 @@ class WebhookService:
         # Check for existing document first
         file_exists = await db_service.document_exists(
             processed_data["filename"],
+            processed_data["physician_id"],
             processed_data["file_size"]
         )
 
