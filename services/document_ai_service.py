@@ -251,7 +251,7 @@ class DocumentAIProcessor:
             if page_count is not None and page_count > 15:
                 logger.info("⚙️ Enabling imageless mode for Document AI (pages > 15)")
                 request["process_options"] = {
-                    "ocr_config": {"enable_imageless_mode": True}
+                    "ocr_config": {"enable_imageless_ocr": True}
                 }
 
             logger.info(f"🚀 Sending request to Document AI...")
