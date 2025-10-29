@@ -9,6 +9,8 @@ import logging
 
 from models.schemas import ExtractionResult, FileInfo
 from config.settings import CONFIG
+from PyPDF2 import PdfReader
+
 
 logger = logging.getLogger("document_ai")
 
@@ -206,26 +208,36 @@ class DocumentAIProcessor:
         return total_confidence / count if count > 0 else 0.0
     
     def process_document(self, file_path: str) -> ExtractionResult:
-        """Process document with Document AI"""
+        """Process document with Document AI, enabling imageless mode for >15 pages"""
         try:
             mime_type = self.get_mime_type(file_path)
             logger.info(f"📄 Processing document: {file_path}")
             logger.info(f"📋 MIME type: {mime_type}")
-            
+
             # Check file exists and get size
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"File not found: {file_path}")
-            
+
             file_size = os.path.getsize(file_path)
             logger.info(f"📊 File size: {file_size} bytes")
-            
+
             # Read and encode file
             with open(file_path, "rb") as file:
                 file_content = file.read()
-            
+
             encoded_content = base64.b64encode(file_content).decode('utf-8')
             logger.info(f"🔢 Content encoded, length: {len(encoded_content)} characters")
-            
+
+            # Try to count PDF pages (only for PDFs)
+            page_count = None
+            if file_path.lower().endswith('.pdf'):
+                try:
+                    reader = PdfReader(file_path)
+                    page_count = len(reader.pages)
+                    logger.info(f"📄 PDF page count: {page_count}")
+                except Exception as e:
+                    logger.warning(f"Could not count PDF pages: {e}")
+
             # Create request
             request = {
                 "name": self.processor_path,
@@ -234,23 +246,30 @@ class DocumentAIProcessor:
                     "mime_type": mime_type,
                 },
             }
-            
+
+            # Enable imageless mode if more than 15 pages (up to 30 allowed)
+            if page_count is not None and page_count > 15:
+                logger.info("⚙️ Enabling imageless mode for Document AI (pages > 15)")
+                request["process_options"] = {
+                    "ocr_config": {"enable_imageless_mode": True}
+                }
+
             logger.info(f"🚀 Sending request to Document AI...")
             logger.info(f"📍 Processor path: {self.processor_path}")
-            
+
             # Process document
             response = self.client.process_document(request=request)
             result = response.document
-            
+
             logger.info("✅ Document processed successfully!")
             logger.info(f"📝 Extracted text length: {len(result.text) if result.text else 0} characters")
             logger.info(f"📄 Pages found: {len(result.pages) if result.pages else 0}")
-            
+
             # Log text preview
             if result.text:
                 preview = result.text[:200] + "..." if len(result.text) > 200 else result.text
                 logger.info(f"📖 Text preview: \"{preview}\"")
-            
+
             # Build result
             processed_result = ExtractionResult(
                 text=result.text or "",
@@ -261,7 +280,7 @@ class DocumentAIProcessor:
                 confidence=self.calculate_overall_confidence(result),
                 success=True
             )
-            
+
             logger.info("📊 Extraction summary:")
             logger.info(f"   - Text characters: {len(processed_result.text)}")
             logger.info(f"   - Pages: {processed_result.pages}")
@@ -269,12 +288,12 @@ class DocumentAIProcessor:
             logger.info(f"   - Tables: {len(processed_result.tables)}")
             logger.info(f"   - Form fields: {len(processed_result.formFields)}")
             logger.info(f"   - Overall confidence: {(processed_result.confidence * 100):.2f}%")
-            
+
             return processed_result
-            
+
         except Exception as e:
             logger.error(f"❌ Error processing document: {str(e)}")
-            
+
             # Specific error handling
             if "permission" in str(e).lower():
                 logger.error("🚫 Permission error - check service account roles")
@@ -282,7 +301,7 @@ class DocumentAIProcessor:
                 logger.error("🔑 Credentials error - check JSON file path")
             elif "processor" in str(e).lower():
                 logger.error("⚙️ Processor error - check processor ID and location")
-            
+
             return ExtractionResult(
                 success=False,
                 error=str(e)
