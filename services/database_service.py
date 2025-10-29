@@ -15,6 +15,7 @@ from cryptography.fernet import Fernet
 from cryptography.exceptions import InvalidKey
 import base64
 from datetime import datetime, timedelta
+
 load_dotenv()
 logger = logging.getLogger("document_ai")
 
@@ -432,7 +433,7 @@ class DatabaseService:
                     "documents": []
                 }
     async def get_tasks_by_document_ids(self, document_ids: list[str], physician_id: Optional[str] = None) -> list[dict]:
-        """Fetch tasks (with quickNotes) by document IDs, optionally filtered by physician_id"""
+        """Fetch tasks (with quickNotes and description) by document IDs, optionally filtered by physician_id"""
         where_clause = {
             "documentId": {"in": document_ids},
             "status": "Pending"  # ✅ Only fetch Pending status tasks
@@ -450,12 +451,85 @@ class DatabaseService:
             {
                 "id": t.id,
                 "documentId": t.documentId,
+                "description": t.description,
                 "quickNotes": getattr(t, "quickNotes", None)
             }
             for t in tasks
         ]
         return tasks_data
 
+
+
+
+    async def get_tasks_by_patient_details(
+        self, 
+        patient_name: str, 
+        dob: Optional[str] = None, 
+        claim_number: Optional[str] = None, 
+        physician_id: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Fetch all tasks (with quickNotes and description) by patient details (name, dob, claim_number),
+        optionally filtered by physician_id. Includes all statuses (not just Pending).
+        """
+        # await self.initialize_db()  # This initializes DocumentAggregationService's db_service
+
+        # ✅ Handle DOB (accept both date strings or keep as-is if parsing fails)
+        dob_value = None
+        if dob:
+            # Use the same logic as _parse_date to handle datetime objects
+            if isinstance(dob, datetime):
+                dob_value = dob
+            else:
+                try:
+                    dob_value = datetime.strptime(dob, "%Y-%m-%d")
+                except ValueError:
+                    try:
+                        dob_value = datetime.strptime(dob, "%m/%d/%Y")
+                    except ValueError:
+                        dob_value = dob  # keep string if parsing fails
+
+        # ✅ Fetch related documents first
+        document_data = await self.get_document_by_patient_details(
+            patient_name=patient_name,
+            physicianId=physician_id,
+            dob=dob_value,
+            claim_number=claim_number
+        )
+
+        # ✅ If no documents found, return empty list
+        if not document_data or document_data.get("total_documents", 0) == 0:
+            return []
+
+        # ✅ Collect all document IDs
+        documents = document_data["documents"]
+        document_ids = [doc["id"] for doc in documents]
+
+        # ✅ Build query for Prisma - FIXED: access prisma through db_service
+        where_clause = {
+            "documentId": {"in": document_ids}
+        }
+        if physician_id:
+            where_clause["physicianId"] = physician_id
+
+        # ✅ Fetch all tasks linked to those documents - FIXED: use db_service.prisma
+        tasks = await self.prisma.task.find_many(
+            where=where_clause,
+            order={"createdAt": "asc"}
+        )
+
+        # ✅ Format output
+        tasks_data = [
+            {
+                "id": t.id,
+                "documentId": t.documentId,
+                "description": t.description,
+                "quickNotes": getattr(t, "quickNotes", None)
+            }
+            for t in tasks
+        ]
+
+        return tasks_data
     # async def get_all_unverified_documents(
     #     self, 
     #     patient_name: str, 
@@ -1113,3 +1187,5 @@ async def cleanup_database_service():
     if _db_service:
         await _db_service.disconnect()
         _db_service = None
+
+# services/document_aggregation_service.py

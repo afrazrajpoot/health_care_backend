@@ -1,7 +1,7 @@
-# services/document_aggregation_service.py
+
 import traceback
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from fastapi import HTTPException
 
 from services.database_service import get_database_service
@@ -55,12 +55,15 @@ class DocumentAggregationService:
         # Fetch tasks for the document IDs, filtered by physicianId if provided
         documents = document_data["documents"]
         document_ids = [doc["id"] for doc in documents]
-        tasks = await self.db_service.get_tasks_by_document_ids(
-            document_ids=document_ids,
-            physician_id=physician_id  # Optional filter
+        tasks = await self.db_service.get_tasks_by_patient_details(
+            patient_name=patient_name,
+            dob=dob_date,
+            claim_number=claim_number,
+            physician_id=physician_id
         )
-        # Create a mapping of document_id to quickNotes
-        tasks_dict = {task["documentId"]: task["quickNotes"] for task in tasks}
+        print(tasks,'taks')
+        # Create a mapping of document_id to full task
+        tasks_dict = {task["documentId"]: task for task in tasks}
 
         response = await self._format_aggregated_document_response(
             all_documents_data=document_data,
@@ -131,20 +134,48 @@ class DocumentAggregationService:
         # Reverse to show latest first
         body_part_snapshots = all_body_part_snapshots[::-1]
 
-        # Collect quick notes snapshots in chronological order, reverse to latest first, filter out None/null
-        quick_notes_snapshots_list = [
-            tasks_dict.get(doc["id"]) if tasks_dict else None
-            for doc in sorted_documents
-        ]
-        # Filter out None/null values
-        quick_notes_snapshots_filtered = [note for note in quick_notes_snapshots_list if note is not None]
-        quick_notes_snapshots = quick_notes_snapshots_filtered[::-1]
-
         # ADL from latest document
         adl = await self._format_adl(latest_doc)
 
-        # whats_new from the last saved document (most recent comparison, full chain)
-        whats_new = last_saved_doc.get("whatsNew", {})
+        # ✅ CHANGED: Collect all whats_new and quick_note items in chronological order, reverse to latest first
+        all_whats_new_items: List[Tuple[datetime, Dict[str, Any]]] = []
+        for doc in sorted_documents:
+            report_dt = self._parse_report_date(doc)
+            doc_id = doc["id"]
+            created_at = self._format_date_field(doc.get("createdAt"))
+            report_date = self._format_date_field(doc.get("reportDate"))
+
+            # Add whats_new if present
+            if whats_new := doc.get("whatsNew", {}):
+                if diagnosis := whats_new.get("diagnosis"):
+                    item = {
+                        "type": "diagnosis",
+                        "content": diagnosis,
+                        "document_id": doc_id,
+                        "document_created_at": created_at,
+                        "document_report_date": report_date
+                    }
+                    all_whats_new_items.append((report_dt, item))
+
+            # Add quick_note if present and has content
+            if doc_id in tasks_dict:
+                task = tasks_dict[doc_id]
+                quick_notes_data = task.get("quickNotes", {})
+                content = quick_notes_data.get("one_line_note") or quick_notes_data.get("status_update")
+                description = task.get("description", "")
+                if content:
+                    item = {
+                        "type": "quick_note",
+                        "content": content,
+                        "description": description,
+                        "document_id": doc_id,
+                        "document_created_at": created_at,
+                        "document_report_date": report_date
+                    }
+                    all_whats_new_items.append((report_dt, item))
+
+        # Sort by report_dt descending (latest first)
+        whats_new_snapshots = [item for _, item in sorted(all_whats_new_items, key=lambda x: x[0], reverse=True)]
 
         # Status from the last saved document
         status = last_saved_doc.get("status")
@@ -175,8 +206,7 @@ class DocumentAggregationService:
 
         base_response.update({
             "body_part_snapshots": body_part_snapshots,  # ✅ CHANGED: Now using body_part_snapshots
-            "quick_notes_snapshots": quick_notes_snapshots,  # Filtered, no nulls
-            "whats_new": whats_new,
+            "whats_new_snapshots": whats_new_snapshots,  # ✅ CHANGED: Now includes quick notes as unified items with description, latest first
             "adl": adl,
             "document_summary": grouped_summaries,
             "brief_summary": grouped_brief_summaries,
