@@ -1,3 +1,4 @@
+
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
@@ -22,6 +23,15 @@ class DateReasoning(BaseModel):
     confidence_scores: Dict[str, float] = Field(..., description="Confidence scores for each date assignment (0.0-1.0)")
     predicted_assignments: Dict[str, str] = Field(..., description="Predicted date assignments")
 
+class BodyPartAnalysis(BaseModel):
+    """Analysis for a specific body part"""
+    body_part: str = Field(..., description="Specific body part involved")
+    diagnosis: str = Field(..., description="Diagnosis for this body part")
+    key_concern: str = Field(..., description="Key concern for this body part")
+    extracted_recommendation: str = Field(..., description="Recommendations for this body part")
+    adls_affected: str = Field(..., description="ADLs affected for this body part")
+    work_restrictions: str = Field(..., description="Work restrictions for this body part")
+
 class DocumentAnalysis(BaseModel):
     """Structured analysis of medical document matching database schema (enhanced)"""
     patient_name: str = Field(..., description="Full name of the patient")
@@ -30,17 +40,21 @@ class DocumentAnalysis(BaseModel):
     doi: str = Field(..., description="Date of injury in YYYY-MM-DD format")
     status: str = Field(..., description="Current status: normal, urgent, critical, etc.")
     rd: str = Field(..., description="Report date in YYYY-MM-DD format")
-    diagnosis: str = Field(..., description="Primary diagnosis and key findings (comma-separated if multiple, 5-10 words total)")
+    
+    # Single body part (backward compatibility) or multiple body parts
+    body_part: str = Field(..., description="Primary body part involved")
+    body_parts_analysis: List[BodyPartAnalysis] = Field(default=[], description="Detailed analysis for each body part")
+    
+    diagnosis: str = Field(..., description="Primary diagnosis and key findings")
     key_concern: str = Field(..., description="Main clinical concern in 2-3 words")
-    extracted_recommendation: str = Field(..., description="Extracted key recommendation keywords/phrases directly from the document (comma-separated, e.g., 'PT twice weekly, follow-up 4 weeks'). Use 'Not specified' if none found.")
-    extracted_decision: str = Field(..., description="Extracted key decision/judgment keywords/phrases directly from the document using medical terms (comma-separated, e.g., 'conservative management, no surgery'). Use 'Not specified' if none found.")
-    ur_decision: str = Field(..., description="Extracted UR (Utilization Review) decision keywords/phrases directly from the document (comma-separated, e.g., 'approved PT sessions, denied MRI'). Scan for UR/prior auth terms. Use 'Not specified' if none found.")
-    ur_denial_reason: Optional[str] = Field(None, description="If the UR decision indicates a denial (e.g., 'denied', 'not approved'), extract the specific reason for the denial directly from the document text (concise, 1-2 sentences or key phrases). If no denial or no reason found, None.")
+    extracted_recommendation: str = Field(..., description="Extracted key recommendation keywords/phrases")
+    extracted_decision: str = Field(..., description="Extracted key decision/judgment keywords/phrases")
+    ur_decision: str = Field(..., description="Extracted UR decision keywords/phrases")
+    ur_denial_reason: Optional[str] = Field(None, description="UR denial reason if applicable")
     adls_affected: str = Field(..., description="Activities affected in 2-3 words")
-    body_part: str = Field(..., description="Body part involved")
     work_restrictions: str = Field(..., description="Work restrictions in 2-3 words")
-    consulting_doctor: str = Field(default="Not specified", description="Name of consultant doctor extracted from the document (e.g., primary physician, specialists). Extract only the name of the main doctor/physician/specialist/surgeon/consultant (e.g., 'Dr. Smith').")
-    ai_outcome: str = Field(..., description="AI-generated key outcome prediction keywords/phrases based on deep analysis (comma-separated, e.g., 'full recovery 6 weeks, monitor pain'). Straightforward for doctor, no sentences.")
+    consulting_doctor: str = Field(default="Not specified", description="Name of consultant doctor")
+    ai_outcome: str = Field(..., description="AI-generated key outcome prediction keywords/phrases")
     document_type: str = Field(..., description="Type of document")
     summary_points: List[str] = Field(..., description="3-5 key points, each 2-3 words")
     date_reasoning: Optional[DateReasoning] = Field(None, description="Reasoning behind date assignments")
@@ -102,7 +116,17 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
            - Status: From urgency analysis (e.g., high pain → "urgent"). If not inferable, "Not specified".
            - Diagnosis: Primary condition + 2-3 key objective findings (5-10 words total). If not present, "Not specified".
            - Key Concern: Main issue in 2-3 words (e.g., "Chronic back pain"). If not present, "Not specified".
-           - Body Part: Extract body part involved (e.g., "lumbar spine", "right knee"). If not present, "Not specified".
+           
+           - BODY PART ANALYSIS (MULTIPLE SUPPORT):
+             * Primary Body Part: Extract the main body part involved (e.g., "lumbar spine", "right knee"). If not present, "Not specified".
+             * Multiple Body Parts: If document mentions multiple distinct body parts (e.g., "right shoulder and left knee", "cervical and lumbar spine"), analyze EACH separately in body_parts_analysis array. For each body part include:
+               - body_part: Specific body part name
+               - diagnosis: Diagnosis specific to this body part
+               - key_concern: Key concern for this body part  
+               - extracted_recommendation: Recommendations specific to this body part
+               - adls_affected: ADLs affected by this body part
+               - work_restrictions: Work restrictions for this body part
+           
            - ADLs Affected: Limited activities in 2-3 words (e.g., "Prolonged sitting"). If not present, "Not specified".
            - Work Restrictions: Limitations in 2-3 words (e.g., "No heavy lifting"). If not present, "Not specified".
         
@@ -148,7 +172,14 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
         - Recommendation Keywords: STRICTLY only if specified keywords present; else 'Not specified'.
         - UR Decision Keywords: STRICTLY only if specified UR keywords present; else 'Not specified'.
         - Denial Reason: ONLY if denial indicated in ur_decision; extract concisely from text; else None.
+        - Body Parts: If multiple body parts mentioned, analyze each separately in body_parts_analysis array.
         - Output ONLY valid JSON matching the schema. Include date_reasoning and all fields fully.
+
+        OUTPUT FORMAT:
+        - body_part: Always include the primary body part
+        - body_parts_analysis: Array of detailed analysis for each distinct body part mentioned
+        - If only one body part: body_parts_analysis should contain one entry matching the primary body_part
+        - If multiple body parts: body_parts_analysis should contain entries for each, and body_part should be the primary/most significant one
 
         {format_instructions}
         """
@@ -191,6 +222,8 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
                 logger.info(f"✅ UR denial reason extracted: {result['ur_denial_reason'][:50]}...")
             if 'ai_outcome' in result:
                 logger.info(f"✅ AI outcome keywords generated: {result['ai_outcome'][:50]}...")
+            if 'body_parts_analysis' in result:
+                logger.info(f"✅ Body parts analysis: {len(result['body_parts_analysis'])} body parts found")
             
             final_analysis = DocumentAnalysis(**result)
             
@@ -200,6 +233,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
             logger.info(f"   - Claim: {final_analysis.claim_number}")
             logger.info(f"   - Diagnosis: {final_analysis.diagnosis}")
             logger.info(f"   - Status: {final_analysis.status}")
+            logger.info(f"   - Body Parts: {len(final_analysis.body_parts_analysis)} analyzed")
             logger.info(f"   - Extracted Recommendation: {final_analysis.extracted_recommendation}")
             logger.info(f"   - Extracted Decision: {final_analysis.extracted_decision}")
             logger.info(f"   - Extracted UR Decision: {final_analysis.ur_decision}")
@@ -258,6 +292,8 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
             doi=timestamp,
             status="Not specified",
             rd=timestamp,
+            body_part="Not specified",
+            body_parts_analysis=[],
             diagnosis="Not specified",
             key_concern="Not specified",
             extracted_recommendation="Not specified",
@@ -268,7 +304,6 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
             work_restrictions="Not specified",
             consulting_doctor=None,
             ai_outcome="Insufficient data; full evaluation needed",
-            body_part="Not specified",
             document_type="medical_document",
             summary_points=["Not specified"],
             date_reasoning=None

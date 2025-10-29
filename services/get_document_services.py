@@ -115,9 +115,21 @@ class DocumentAggregationService:
         # Use the latest document for base info
         base_response = await self._format_single_document_base(latest_doc)
 
-        # Collect all full summarySnapshot objects in chronological order, reverse to latest first
-        summary_snapshots_list = [doc.get("summarySnapshot") for doc in sorted_documents]
-        summary_snapshots = summary_snapshots_list[::-1]  # Latest first
+        # ✅ CHANGED: Collect all bodyPartSnapshots in chronological order, reverse to latest first
+        all_body_part_snapshots = []
+        for doc in sorted_documents:
+            body_part_snapshots = doc.get("bodyPartSnapshots", [])
+            if body_part_snapshots:
+                # Add document context to each body part snapshot
+                for snapshot in body_part_snapshots:
+                    snapshot_with_context = snapshot.copy()
+                    snapshot_with_context["document_id"] = doc["id"]
+                    snapshot_with_context["document_created_at"] = self._format_date_field(doc.get("createdAt"))
+                    snapshot_with_context["document_report_date"] = self._format_date_field(doc.get("reportDate"))
+                    all_body_part_snapshots.append(snapshot_with_context)
+        
+        # Reverse to show latest first
+        body_part_snapshots = all_body_part_snapshots[::-1]
 
         # Collect quick notes snapshots in chronological order, reverse to latest first, filter out None/null
         quick_notes_snapshots_list = [
@@ -162,7 +174,7 @@ class DocumentAggregationService:
                 grouped_summaries[doc_type].append(summary_entry)
 
         base_response.update({
-            "summary_snapshots": summary_snapshots,
+            "body_part_snapshots": body_part_snapshots,  # ✅ CHANGED: Now using body_part_snapshots
             "quick_notes_snapshots": quick_notes_snapshots,  # Filtered, no nulls
             "whats_new": whats_new,
             "adl": adl,
@@ -179,7 +191,8 @@ class DocumentAggregationService:
             "total_documents": all_documents_data["total_documents"],
             "documents": [base_response],
             "patient_quiz": None,  # Commented out in original
-            "is_multiple_documents": len(documents) > 1
+            "is_multiple_documents": len(documents) > 1,
+            "total_body_parts": len(body_part_snapshots)  # ✅ ADDED: Total body parts count
         }
 
     def _parse_report_date(self, doc: Dict[str, Any]) -> datetime:
@@ -243,6 +256,3 @@ class DocumentAggregationService:
         if isinstance(field_value, str):
             return field_value
         return None
-
-
-

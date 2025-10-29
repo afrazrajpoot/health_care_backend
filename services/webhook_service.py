@@ -1,7 +1,7 @@
 # services/webhook_service.py
 from fastapi import HTTPException
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from models.schemas import ExtractionResult
 from services.database_service import get_database_service
 from services.task_creation import TaskCreator
@@ -305,15 +305,14 @@ class WebhookService:
     async def compare_and_determine_status(self, processed_data: dict, lookup_result: dict, db_service, physician_id: str) -> dict:
         """
         Step 3: Fetch previous documents, compare, and determine final status/reason.
+        Now supports multiple body parts with separate summary snapshots.
         """
         document_analysis = lookup_result["document_analysis"]
-        print(lookup_result,'lookup_result in compare and determine status')
-        print(document_analysis,'document_analysis in compare and determine status')
         lookup_data = lookup_result["lookup_data"]
         is_first_time_claim_only = lookup_result.get("is_first_time_claim_only", False)
-        mode = lookup_result.get("mode")  # Extract mode
+        mode = lookup_result.get("mode")
 
-        # Always fetch all previous unverified documents for the patient (using updated fields)
+        # Always fetch all previous unverified documents for the patient
         db_response = await db_service.get_all_unverified_documents(
             patient_name=lookup_result["updated_patient_name_for_query"],
             physicianId=physician_id,
@@ -321,23 +320,20 @@ class WebhookService:
             dob=processed_data["dob_for_query"]
         )
 
-        # Extract documents list from database response
         previous_documents = db_response.get('documents', []) if db_response else []
 
         # Compare with previous documents using LLM
-        analyzer = EnhancedReportAnalyzer()  # Re-instantiate if needed
+        analyzer = EnhancedReportAnalyzer()
         whats_new_data = analyzer.compare_with_previous_documents(
             document_analysis,
             previous_documents
         )
-        print(whats_new_data,'whats_new_data my wat new data')
 
-        # Ensure whats_new_data is always a dict
         if whats_new_data is None or not isinstance(whats_new_data, dict):
             logger.warning(f"⚠️ Invalid whats_new data; using empty dict")
             whats_new_data = {}
 
-        # Simplified claim logic: Use updated values
+        # Simplified claim logic
         claim_to_use = document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else "Not specified"
         pending_reason = None
 
@@ -345,13 +341,12 @@ class WebhookService:
         if lookup_data and lookup_data.get("total_documents", 0) > 1:
             logger.warning(f"⚠️ Multiple documents found via lookup ({lookup_data['total_documents']}); using primary values")
 
-        # Determine status: ALLOW first-time claim-only documents to pass through
+        # Determine status
         base_status = document_analysis.status
         
-        # If it's first time claim-only document, override missing fields check
         if is_first_time_claim_only:
             logger.info("✅ First-time claim-only document - allowing despite missing patient name")
-            document_status = base_status  # Use the original status (typically "pending")
+            document_status = base_status
             pending_reason = "First-time document with claim number only"
         elif lookup_result["has_missing_required_fields"]:
             document_status = "failed"
@@ -371,22 +366,53 @@ class WebhookService:
             patient_name_to_use = f"Claim_{claim_to_save}_Patient"
             logger.info(f"🔄 Using placeholder patient name for first-time claim: {patient_name_to_use}")
 
-        # Prepare summary data
-        summary_snapshot = {
-            "dx": document_analysis.diagnosis,
-            "keyConcern": document_analysis.key_concern,
-            "body_part": document_analysis.body_part,
-            "nextStep": document_analysis.extracted_recommendation,
-            "ur-decision": document_analysis.ur_decision or 'Not Specified',
-            "recommended": document_analysis.extracted_recommendation or 'Not Specified',
-            "ai_outcome": document_analysis.ai_outcome or 'Not Specified'   ,
-            "consulting_doctor": document_analysis.consulting_doctor or [],
-            "ur_denial_reason": document_analysis.ur_denial_reason or None
-        }
+        # CREATE MULTIPLE SUMMARY SNAPSHOTS FOR EACH BODY PART
+        summary_snapshots = []
+        
+        # If we have detailed body parts analysis, create snapshot for each
+        if hasattr(document_analysis, 'body_parts_analysis') and document_analysis.body_parts_analysis:
+            logger.info(f"📊 Creating {len(document_analysis.body_parts_analysis)} summary snapshots for multiple body parts")
+            
+            for body_part_analysis in document_analysis.body_parts_analysis:
+                snapshot = {
+                    "body_part": body_part_analysis.body_part,
+                    "dx": body_part_analysis.diagnosis,
+                    "keyConcern": body_part_analysis.key_concern,
+                    "nextStep": body_part_analysis.extracted_recommendation,
+                    "ur-decision": document_analysis.ur_decision or 'Not Specified',
+                    "recommended": body_part_analysis.extracted_recommendation or 'Not Specified',
+                    "ai_outcome": document_analysis.ai_outcome or 'Not Specified',
+                    "consulting_doctor": document_analysis.consulting_doctor or [],
+                    "ur_denial_reason": document_analysis.ur_denial_reason or None
+                }
+                summary_snapshots.append(snapshot)
+        else:
+            # Fallback to single snapshot using primary body part
+            logger.info("📊 Creating single summary snapshot (no multiple body parts analysis)")
+            snapshot = {
+                "body_part": document_analysis.body_part,
+                "dx": document_analysis.diagnosis,
+                "keyConcern": document_analysis.key_concern,
+                "nextStep": document_analysis.extracted_recommendation,
+                "ur-decision": document_analysis.ur_decision or 'Not Specified',
+                "recommended": document_analysis.extracted_recommendation or 'Not Specified',
+                "ai_outcome": document_analysis.ai_outcome or 'Not Specified',
+                "consulting_doctor": document_analysis.consulting_doctor or [],
+                "ur_denial_reason": document_analysis.ur_denial_reason or None
+            }
+            summary_snapshots.append(snapshot)
+
+        # ADL data (can be shared across body parts or customized per body part)
         adl_data = {
             "adlsAffected": document_analysis.adls_affected,
             "workRestrictions": document_analysis.work_restrictions
         }
+        
+        # For multiple body parts, you might want to customize ADL data per body part
+        if len(summary_snapshots) > 1:
+            logger.info("🔄 Multiple body parts detected - using shared ADL data")
+            # You could enhance this to have body-part-specific ADL data if needed
+
         summary_text = " | ".join(document_analysis.summary_points) if document_analysis.summary_points else "No summary"
         document_summary = {
             "type": document_analysis.document_type,
@@ -400,7 +426,7 @@ class WebhookService:
             "patient_name_to_use": patient_name_to_use,
             "claim_to_save": claim_to_save,
             "whats_new_data": whats_new_data,
-            "summary_snapshot": summary_snapshot,
+            "summary_snapshots": summary_snapshots,  # Changed from summary_snapshot to summary_snapshots (list)
             "adl_data": adl_data,
             "document_summary": document_summary,
             "updated_missing_fields": lookup_result["updated_missing_fields"],
@@ -409,9 +435,10 @@ class WebhookService:
             "conflicting_claims_reason": lookup_result["conflicting_claims_reason"],
             "lookup_data": lookup_data,
             "previous_documents": previous_documents,
-            "document_analysis": document_analysis,  # Final updated
-            "is_first_time_claim_only": is_first_time_claim_only,  # Pass through
-            "mode": mode  # Propagate mode
+            "document_analysis": document_analysis,
+            "is_first_time_claim_only": is_first_time_claim_only,
+            "mode": mode,
+            "has_multiple_body_parts": len(summary_snapshots) > 1  # Flag for multiple body parts
         }
 
     async def save_and_process_document(self, processed_data: dict, status_result: dict, data: dict, db_service) -> dict:
@@ -423,6 +450,10 @@ class WebhookService:
         pending_reason = status_result["pending_reason"]
         is_first_time_claim_only = status_result.get("is_first_time_claim_only", False)
         mode = status_result.get("mode")
+        has_multiple_body_parts = status_result.get("has_multiple_body_parts", False)
+        
+        # Get summary snapshots (now a list)
+        summary_snapshots = status_result["summary_snapshots"]
 
         # Check for existing document first
         file_exists = await db_service.document_exists(
@@ -496,8 +527,8 @@ class WebhookService:
 
         # Success: Proceed with saving (including first-time claim-only documents)
         logger.info(f"💾 Proceeding to save document {processed_data['filename']} - status: {document_status}")
-        if is_first_time_claim_only:
-            logger.info("✅ First-time claim-only document - saving to main documents")
+        if has_multiple_body_parts:
+            logger.info(f"📊 Saving {len(summary_snapshots)} body part snapshots")
 
         # Prepare dob_str for update
         dob_str = None
@@ -529,6 +560,7 @@ class WebhookService:
         )
 
         # Save the document to get the document_id
+        # MODIFIED: Pass summary_snapshots (list) instead of summary_snapshot (single)
         document_id = await db_service.save_document_analysis(
             extraction_result=extraction_result,
             file_name=processed_data["filename"],
@@ -544,7 +576,7 @@ class WebhookService:
             doi=processed_data["doi"],
             status=document_status,
             brief_summary=processed_data["brief_summary"],
-            summary_snapshot=status_result["summary_snapshot"],
+            summary_snapshots=summary_snapshots,  # Changed to plural
             whats_new=status_result["whats_new_data"],
             adl_data=status_result["adl_data"],
             document_summary=status_result["document_summary"],
@@ -642,7 +674,9 @@ class WebhookService:
             'is_first_time_claim_only': is_first_time_claim_only,
             'mode': mode,
             'parse_count_decremented': parse_decremented,  # Add this field
-            'ur_denial_reason': document_analysis.ur_denial_reason or None
+            'ur_denial_reason': document_analysis.ur_denial_reason or None,
+            'body_parts_count': len(summary_snapshots),  # Add body parts count
+            'has_multiple_body_parts': has_multiple_body_parts  # Add multiple body parts flag
         }
         if user_id:
             await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
@@ -675,7 +709,12 @@ class WebhookService:
                 }
             },
             "mode": mode,
-            "ur_denial_reason": document_analysis.ur_denial_reason or None
+            "ur_denial_reason": document_analysis.ur_denial_reason or None,
+            "body_parts_analysis": {
+                "total_body_parts": len(summary_snapshots),
+                "has_multiple_body_parts": has_multiple_body_parts,
+                "body_parts": [snapshot["body_part"] for snapshot in summary_snapshots]
+            }
         }
     
     async def handle_webhook(self, data: dict, db_service) -> dict:
@@ -698,7 +737,8 @@ class WebhookService:
         result = await self.save_and_process_document(processed_data, status_result, data, db_service)
 
         return result
-# Add this method to the WebhookService class
+
+
     async def update_fail_document(self, fail_doc: Any, updated_fields: dict, user_id: str = None, db_service: Any = None) -> dict:
         """
         Handles updating and processing a failed document using webhook-like logic.

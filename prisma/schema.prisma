@@ -84,12 +84,29 @@ ur_denial_reason String?
   adl             ADL?
   documentSummary DocumentSummary?
   tasks           Task[]
-
+  bodyPartSnapshots BodyPartSnapshot[]
   // Optional: If you have users table
   userId String? // link to the uploader / owner
   user   User?   @relation(fields: [userId], references: [id])
 
   @@unique([fileHash, userId]) // ✅ prevent duplicate uploads per user
+}
+model BodyPartSnapshot {
+  id              String   @id @default(cuid())
+  document        Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentId      String
+  
+  bodyPart        String
+  dx              String
+  keyConcern      String
+  nextStep        String?
+  urDecision      String?
+  recommended     String?
+  aiOutcome       String?
+  consultingDoctor String?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 }
 
 model SummarySnapshot {
