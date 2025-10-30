@@ -69,22 +69,28 @@ class DocumentExtractorService:
                 }
             )
 
+           # In your process_single_document method, update the skipped document section:
+
             if existing_doc:
                 logger.warning(f"⚠️ Document already exists for this physician: {document.filename}")
-                # Emit skipped event
+                # Emit skipped event with proper structure
                 emit_data = {
-                    'document_id': 'unknown',
+                    'document_id': existing_doc.id or 'unknown',
                     'filename': document.filename,
                     'status': 'skipped',
                     'reason': 'Document already processed',
                     'user_id': user_id,
                     'blob_path': blob_path,
-                    'physician_id': physician_id
+                    'physician_id': physician_id,
+                    'message': f'Document "{document.filename}" was already processed and will be skipped'
                 }
+                
+                # Use task_id format for consistency
                 if user_id:
-                    await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
+                    await sio.emit('document_skipped', emit_data, room=f"user_{user_id}")
                 else:
-                    await sio.emit('task_complete', emit_data)
+                    await sio.emit('document_skipped', emit_data)
+                
                 return {
                     "success": False,
                     "reason": "Document already processed",

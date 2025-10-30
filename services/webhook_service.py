@@ -6,7 +6,6 @@ from models.schemas import ExtractionResult
 from services.database_service import get_database_service
 from services.task_creation import TaskCreator
 from services.resoning_agent import EnhancedReportAnalyzer
-from utils.socket_manager import sio
 from utils.logger import logger
 from prisma import Prisma
 
@@ -510,20 +509,7 @@ class WebhookService:
                 mode=mode
             )
 
-            # Emit failed event
-            emit_data = {
-                'document_id': processed_data['document_id'],
-                'filename': processed_data["filename"],
-                'status': 'failed',
-                'missing_fields': status_result['updated_missing_fields'] if status_result['has_missing_required_fields'] else None,
-                'pending_reason': pending_reason
-            }
-            if user_id:
-                await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
-            else:
-                await sio.emit('task_complete', emit_data)
-
-            logger.info(f"📡 Emitted 'task_complete' failed event: {emit_data}")
+            logger.info(f"📡 Failed event processed for document: {processed_data['document_id']}")
 
             return {
                 "status": "failed",
@@ -668,30 +654,7 @@ class WebhookService:
 
         logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}")
 
-        # Emit success event - include parse count info
-        emit_data = {
-            'document_id': document_id,
-            'filename': processed_data["filename"],
-            'status': document_status,
-            'missing_fields': status_result['updated_missing_fields'] if status_result['has_missing_required_fields'] else None,
-            'pending_reason': pending_reason,
-            'date_reasoning_confidence': processed_data["date_reasoning_data"]["confidence_scores"],
-            'extracted_dates_count': len(processed_data["date_reasoning_data"]["extracted_dates"]),
-            'lookup_used': status_result["lookup_data"].get("total_documents", 0) > 0,
-            'fields_overridden_from_lookup': len(status_result['updated_missing_fields']) < len(processed_data.get("initial_missing_fields", [])),
-            'is_first_time_claim_only': is_first_time_claim_only,
-            'mode': mode,
-            'parse_count_decremented': parse_decremented,  # Add this field
-            'ur_denial_reason': document_analysis.ur_denial_reason or None,
-            'body_parts_count': len(summary_snapshots),  # Add body parts count
-            'has_multiple_body_parts': has_multiple_body_parts  # Add multiple body parts flag
-        }
-        if user_id:
-            await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
-        else:
-            await sio.emit('task_complete', emit_data)
-
-        logger.info(f"📡 Emitted 'task_complete' event: {emit_data}")
+        logger.info(f"📡 Success event processed for document: {document_id}")
 
         return {
             "status": document_status,
@@ -744,8 +707,8 @@ class WebhookService:
         # Step 4: Save and process
         result = await self.save_and_process_document(processed_data, status_result, data, db_service)
 
-        return result
-
+        return result   
+    
     async def update_fail_document(self, fail_doc: Any, updated_fields: dict, user_id: str = None, db_service: Any = None) -> dict:
         """
         Handles updating and processing a failed document using webhook-like logic.
@@ -935,19 +898,8 @@ class WebhookService:
 
         # Early return on failure
         if document_status == "failed":
-            # Emit failed event
-            emit_data = {
-                'document_id': str(fail_doc.id),
-                'filename': filename,
-                'status': 'failed',
-                'pending_reason': pending_reason
-            }
-            if user_id:
-                await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
-            else:
-                await sio.emit('task_complete', emit_data)
+            logger.info(f"📡 Failed event processed for document: {fail_doc.id}")
 
-            logger.info(f"📡 Emitted 'task_complete' failed event from update: {emit_data}")
             return {
                 "status": "failed",
                 "document_id": str(fail_doc.id),
@@ -1000,18 +952,6 @@ class WebhookService:
         await db_service.delete_fail_doc(fail_doc.id)
         logger.info(f"🗑️ Deleted fail doc {fail_doc.id} after successful update")
 
-        # Emit success event (service already emits, but ensure)
-        emit_data = {
-            'document_id': save_result['document_id'],
-            'filename': filename,
-            'status': document_status,
-            'pending_reason': pending_reason
-        }
-        if user_id:
-            await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
-        else:
-            await sio.emit('task_complete', emit_data)
-
-        logger.info(f"📡 Emitted 'task_complete' event from update: {emit_data}")
+        logger.info(f"📡 Success event processed for document: {save_result['document_id']}")
 
         return save_result
