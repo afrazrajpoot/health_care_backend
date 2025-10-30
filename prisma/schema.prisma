@@ -105,8 +105,16 @@ model BodyPartSnapshot {
   aiOutcome       String?
   consultingDoctor String?
   
+  // New fields from BodyPartSnapshot model
+  keyFindings     String?  // Important clinical findings for this body part
+  treatmentApproach String? // Treatment approach mentioned for this body part
+  clinicalSummary String?  // One-line summary of key content about this body part
+  referralDoctor  String?  // Referral doctor for this body part if mentioned
+  
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+
+  @@map("body_part_snapshots")
 }
 
 model SummarySnapshot {
@@ -119,7 +127,10 @@ model SummarySnapshot {
   recommended       String?   // recommended treatment plan
   aiOutcome         String?   // AI-generated follow-up or summary
   consultingDoctor String?  // list of consulting doctor' names
-
+  keyFindings     String?  // Important clinical findings for this body part
+  treatmentApproach String? // Treatment approach mentioned for this body part
+  clinicalSummary String?  // One-line summary of key content about this body part
+  referralDoctor  String?  // Referral doctor for this body part if mentioned
   // Relation back to Document
   document   Document @relation(fields: [documentId], references: [id])
   documentId String   @unique

@@ -64,6 +64,7 @@ class DocumentExtractorService:
             # Find document with same filename and physicianId
             existing_doc = await self.db_service.prisma.document.find_first(
                 where={
+                    "physicianId": physician_id,
                     "fileName": document.filename,
                 }
             )

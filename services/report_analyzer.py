@@ -27,7 +27,7 @@ class ReportAnalyzer:
     def compare_with_previous_documents(
         self, 
         current_raw_text: str,
-        previous_documents: List[Dict[str, Any]] = None  # Optional, ignored for current-only generation
+        previous_documents: List[Dict[str, Any]] = None
     ) -> Dict[str, str]:
         """
         Use LLM to analyze raw current text and generate 'What's New' from current document only.
@@ -69,29 +69,38 @@ class ReportAnalyzer:
                 logger.error(f"❌ AI returned non-dict result: {result}")
                 return self._fallback_whats_new(mm_dd)
             
-            # Flatten any nested dicts/strings
-            flattened_result = {}
-            for category, value in result.items():
-                if isinstance(value, dict):
-                    nested_str = None
-                    for k, v in value.items():
-                        if isinstance(v, str):
-                            nested_str = v
-                            break
-                    if nested_str:
-                        flattened_result[category] = nested_str
-                    else:
-                        flattened_result[category] = str(value)
-                elif isinstance(value, str) and value.strip().lower() != 'none':
-                    flattened_result[category] = value
+            # Ensure ALL categories are present with "not specified" for missing ones
+            required_categories = [
+                "diagnosis", "treatment_plan", "qme", "ur_decision", 
+                "legal", "raf", "recommendations", "outcome"
+            ]
             
-            logger.info(f"✅ Parsed LLM result (flattened): {flattened_result}")
+            final_result = {}
+            for category in required_categories:
+                if category in result:
+                    value = result[category]
+                    if isinstance(value, dict):
+                        # Extract first non-empty string value from nested dict
+                        nested_str = None
+                        for k, v in value.items():
+                            if isinstance(v, str) and v.strip() and v.strip().lower() not in ['none', 'n/a', 'not mentioned', 'not applicable', 'not specified']:
+                                nested_str = v
+                                break
+                        final_result[category] = nested_str if nested_str else "not specified"
+                    elif isinstance(value, str) and value.strip() and value.strip().lower() not in ['none', 'n/a', 'not mentioned', 'not applicable', 'not specified']:
+                        final_result[category] = value
+                    else:
+                        final_result[category] = "not specified"
+                else:
+                    final_result[category] = "not specified"
+            
+            logger.info(f"✅ Parsed LLM result (with not specified): {final_result}")
             
             # Final safety check: Ensure result is never empty
-            if not flattened_result:
-                flattened_result = self._fallback_whats_new(mm_dd)
-            logger.info(f"✅ Generated 'What's New' from current: {flattened_result}")
-            return flattened_result
+            if not final_result or all(v == "not specified" for v in final_result.values()):
+                final_result = self._fallback_whats_new(mm_dd)
+            logger.info(f"✅ Generated 'What's New' from current: {final_result}")
+            return final_result
             
         except Exception as e:
             logger.error(f"❌ AI generation failed: {str(e)}")
@@ -99,60 +108,115 @@ class ReportAnalyzer:
 
     def _fallback_whats_new(self, mm_dd: str) -> Dict[str, str]:
         """Simple fallback without LLM."""
-        return {'initial': f"Document processed ({mm_dd})"}
+        return {
+            'diagnosis': 'not specified',
+            'treatment_plan': 'not specified', 
+            'qme': 'not specified',
+            'ur_decision': 'not specified',
+            'legal': 'not specified',
+            'raf': 'not specified',
+            'recommendations': 'not specified',
+            'outcome': 'not specified'
+        }
 
     def create_whats_new_prompt(self) -> PromptTemplate:
         template = """
-        You are a medical document analysis expert. Analyze the raw document text and generate key findings in a historical progression format for this single document.
+You are a medical document analysis expert. Your task is to READ the document text carefully and EXTRACT ONLY the information that is EXPLICITLY MENTIONED in the text.
 
-        CURRENT DOCUMENT RAW TEXT (extract report date from text, fallback to provided {current_date} if missing):
-        {current_raw_text}
+DOCUMENT TEXT TO ANALYZE:
+{current_raw_text}
 
-        CRITICAL INSTRUCTIONS:
-        - First, EXTRACT the report date (MM/DD) from {current_raw_text}. Look for patterns like:
-        'Report Date:', 'Date of Service:', 'Exam Date:', 'Evaluation Date:', or 'Dated:'
-        → If no date found, fallback to {current_date}.
-        - Output pure findings only for THIS document (no historical arrows or comparisons).
-        - Include EVERY diagnosis, treatment, finding, recommendation, and outcome mentioned.
-        - Only include categories that are RELEVANT (i.e., mentioned in the text).
+CRITICAL RULES - READ CAREFULLY:
+1. **ONLY extract information that is ACTUALLY PRESENT in the document text above**
+2. **DO NOT add categories or information that is NOT mentioned in the text**
+3. **DO NOT make assumptions or infer information**
+4. **If something is not mentioned, use "not specified" for that category**
+5. **You MUST include ALL categories in the output, using "not specified" for missing information**
 
-        ✅ ALWAYS INCLUDE if found:
-        * diagnosis — medical findings, conditions, or changes in condition.
-        * treatment_plan — therapy, medications, surgeries, injections, follow-ups, PT, etc.
+STEP-BY-STEP PROCESS:
+1. First, extract the report date from the document text:
+   - Look for: "Report Date:", "Date of Service:", "Exam Date:", "Date:", etc.
+   - Format as MM/DD (e.g., 10/15)
+   - If no date found, use: {current_date} formatted as MM/DD
 
-        ✅ INCLUDE THESE ONLY IF RELEVANT / MENTIONED IN THE DOCUMENT:
-        * qme — if the document mentions Qualified Medical Evaluator (QME), Independent Medical Exam (IME), or similar.
-        * ur_decision — if the document includes Utilization Review (UR), authorization, denial, approval, or work restrictions.
-        * legal — if the document discusses attorney letters, legal claim updates, approvals/denials.
-        * raf — if the document mentions Risk Adjustment Factor, claim scoring, or rating.
-        * recommendations — if there are any explicit or implicit next steps, follow-ups, or instructions.
-        * outcome — if there is any result, improvement, worsening, or resolution mentioned.
+2. Read the ENTIRE document and identify what information is ACTUALLY present:
+   - Is there a diagnosis or medical condition mentioned? → Extract it
+   - Is there a treatment plan or medication mentioned? → Extract it
+   - Is there a QME/IME evaluation mentioned? → Extract it
+   - Is there a UR decision/authorization/denial mentioned? → Extract it
+   - Is there legal information mentioned? → Extract it
+   - Are there recommendations mentioned? → Extract it
+   - Is there an outcome or result mentioned? → Extract it
 
-        ✅ FORMATTING RULES:
-        - Use the extracted report date (MM/DD) after each finding.
-        - Output a **flat JSON object** — e.g.:
-        {{"diagnosis": "Lumbar strain, persistent pain (10/02)", "treatment_plan": "Continue PT, use NSAIDs (10/02)", "qme": "Independent medical evaluation scheduled (10/02)"}}
-        - If a category isn’t mentioned in the document, OMIT it completely (do not include empty or None values).
-        - Each value should be a short but information-rich description (5–15 words).
-        - Use simple language, no lists or arrays.
-        - Maintain the date reference consistently across all entries.
+3. For EACH category below, provide the information if found in text, otherwise use "not specified"
 
-        EXAMPLES:
-        - If the document is a UR Denial: 
-        {{"ur_decision": "Denied for lack of clinical justification (10/07)", "recommendations": "Consider alternative conservative management (10/07)"}}
-        - If the document is a QME report:
-        {{"qme": "QME evaluation performed, work restrictions applied (10/12)", "outcome": "Partial improvement (10/12)"}}
-        - If it's a treatment note:
-        {{"diagnosis": "Chronic lumbar pain (10/05)", "treatment_plan": "Continue PT twice weekly (10/05)", "recommendations": "Re-evaluate in 2 weeks (10/05)"}}
+REQUIRED CATEGORIES (you MUST include all of these):
+- **diagnosis**: Medical conditions, symptoms, findings, changes in health status. If none mentioned: "not specified"
+- **treatment_plan**: Medications, therapies, surgeries, procedures, PT, follow-ups. If none mentioned: "not specified"  
+- **qme**: QME evaluations, IME exams, independent assessments. If none mentioned: "not specified"
+- **ur_decision**: Utilization Review decisions, authorizations, denials, approvals. If none mentioned: "not specified"
+- **legal**: Legal matters, attorney communications, claim updates. If none mentioned: "not specified"
+- **raf**: Risk adjustment factors, claim scoring, ratings. If none mentioned: "not specified"
+- **recommendations**: Next steps, follow-up instructions, suggestions. If none mentioned: "not specified"
+- **outcome**: Results, improvements, deterioration, resolution. If none mentioned: "not specified"
 
-        OUTPUT REQUIREMENTS:
-        - Use extracted report date.
-        - Output ONLY valid JSON — no commentary or explanation.
-        - Include diagnosis and treatment_plan whenever available.
-        - Include other categories ONLY IF the document text explicitly or contextually contains relevant information.
+OUTPUT FORMAT:
+- Return a JSON object with ALL categories listed above
+- For categories with information: "Brief summary of finding (MM/DD)"
+- For categories without information: "not specified"
+- Example: {{"diagnosis": "Chronic lower back pain, radiculopathy (10/15)", "treatment_plan": "Continue physical therapy 3x weekly (10/15)", "qme": "not specified", "ur_decision": "not specified", "legal": "not specified", "raf": "not specified", "recommendations": "Follow up in 4 weeks (10/15)", "outcome": "not specified"}}
 
-        {format_instructions}
-        """
+EXAMPLES OF CORRECT BEHAVIOR:
+
+Example 1 - Document mentions diagnosis and treatment only:
+Input: "Patient diagnosed with lumbar strain. Prescribed ibuprofen 600mg TID. Report date 10/05/2024"
+Output: {{
+  "diagnosis": "Lumbar strain diagnosed (10/05)",
+  "treatment_plan": "Ibuprofen 600mg three times daily (10/05)", 
+  "qme": "not specified",
+  "ur_decision": "not specified",
+  "legal": "not specified",
+  "raf": "not specified",
+  "recommendations": "not specified",
+  "outcome": "not specified"
+}}
+
+Example 2 - Document mentions UR decision only:
+Input: "UR Decision: Request for MRI denied due to insufficient medical necessity. Date 10/12/2024"
+Output: {{
+  "diagnosis": "not specified",
+  "treatment_plan": "not specified",
+  "qme": "not specified", 
+  "ur_decision": "MRI request denied, insufficient medical necessity (10/12)",
+  "legal": "not specified",
+  "raf": "not specified",
+  "recommendations": "not specified",
+  "outcome": "not specified"
+}}
+
+Example 3 - Document with multiple findings:
+Input: "Patient seen for follow-up. Lower back pain improving with PT. Continue current treatment plan. Recommend MRI if no improvement. Date 10/20/2024"
+Output: {{
+  "diagnosis": "Lower back pain improving (10/20)",
+  "treatment_plan": "Continue physical therapy (10/20)",
+  "qme": "not specified",
+  "ur_decision": "not specified",
+  "legal": "not specified", 
+  "raf": "not specified",
+  "recommendations": "MRI recommended if no improvement (10/20)",
+  "outcome": "Patient showing improvement (10/20)"
+}}
+
+REMEMBER:
+- You MUST include ALL 8 categories in the output
+- Use "not specified" for any category not mentioned in the document
+- Only include what is ACTUALLY WRITTEN in the document text
+- Be accurate and truthful - no hallucinations!
+
+Now analyze the document above and extract information for ALL categories.
+
+{format_instructions}
+"""
         return PromptTemplate(
             template=template,
             input_variables=["current_raw_text", "current_date"],
@@ -161,15 +225,16 @@ class ReportAnalyzer:
             },
         )
 
-
     def format_whats_new_as_highlights(self, whats_new_dict: Dict[str, str], current_date: str) -> List[str]:
         """
         Formats the 'whats_new' dict into bullet-point highlights.
         Maps internal keys to user-friendly categories.
+        Only includes categories that are not "not specified".
         """
         mm_dd = datetime.strptime(current_date, "%Y-%m-%d").strftime("%m/%d")
         category_mapping = {
             "diagnosis": "New diagnosis",
+            "treatment_plan": "New treatment",
             "qme": "New consults",
             "raf": "New authorizations/denials",
             "ur_decision": "New authorizations/denials",
@@ -180,18 +245,15 @@ class ReportAnalyzer:
         
         highlights = []
         for internal_key, value in whats_new_dict.items():
-            if not value.strip():
+            if not value or value.strip().lower() == "not specified":
                 continue
             user_friendly_key = category_mapping.get(internal_key, "Other")
             # Ensure date is appended if missing
-            if not any(d in value for d in ['(', '[']):  # Simple check for date pattern
+            if not any(d in value for d in ['(', '[']):
                 value += f" ({mm_dd})"
             highlights.append(f"• **{user_friendly_key}**: {value}")
         
         if not highlights:
-            highlights = ["• No new changes since last visit."]
+            highlights = ["• No new changes detected in this document."]
         
         return highlights
-
-# ✅ USAGE: No change needed in calling code - still call compare_with_previous_documents(raw_text, previous_documents=[])
-# It ignores previous_documents and generates from current only.

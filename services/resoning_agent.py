@@ -1,4 +1,3 @@
-
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
@@ -28,6 +27,8 @@ class BodyPartAnalysis(BaseModel):
     body_part: str = Field(..., description="Specific body part involved")
     diagnosis: str = Field(..., description="Diagnosis for this body part")
     key_concern: str = Field(..., description="Key concern for this body part")
+    clinical_summary: str = Field(..., description="Clinical summary of important findings for this body part")
+    treatment_plan: str = Field(..., description="Treatment plan specific to this body part")
     extracted_recommendation: str = Field(..., description="Recommendations for this body part")
     adls_affected: str = Field(..., description="ADLs affected for this body part")
     work_restrictions: str = Field(..., description="Work restrictions for this body part")
@@ -54,6 +55,7 @@ class DocumentAnalysis(BaseModel):
     adls_affected: str = Field(..., description="Activities affected in 2-3 words")
     work_restrictions: str = Field(..., description="Work restrictions in 2-3 words")
     consulting_doctor: str = Field(default="Not specified", description="Name of consultant doctor")
+    referral_doctor: str = Field(default="Not specified", description="Name of referral doctor if available")
     ai_outcome: str = Field(..., description="AI-generated key outcome prediction keywords/phrases")
     document_type: str = Field(..., description="Type of document")
     summary_points: List[str] = Field(..., description="3-5 key points, each 2-3 words")
@@ -90,7 +92,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
     
     def create_enhanced_extraction_prompt(self) -> PromptTemplate:
         template = """
-        You are a medical document analysis expert. Perform a SINGLE, DEEP, COMPREHENSIVE analysis of this medical document. Analyze the entire text holistically for structure, patterns, clinical context, patient info, urgency, workers comp indicators, dates, consulting doctor, extracted recommendation/decision/outcome keywords. Extract ONLY from document text if present; otherwise use 'Not specified'. Do not make separate calls—reason step-by-step internally and output everything in one structured JSON.
+        You are a medical document analysis expert. Perform a SINGLE, DEEP, COMPREHENSIVE analysis of this medical document. Analyze the entire text holistically for structure, patterns, clinical context, patient info, urgency, workers comp indicators, dates, consulting doctor, referral doctor, extracted recommendation/decision/outcome keywords. Extract ONLY from document text if present; otherwise use 'Not specified'. Do not make separate calls—reason step-by-step internally and output everything in one structured JSON.
 
         DOCUMENT TEXT:
         {document_text}
@@ -117,12 +119,14 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
            - Diagnosis: Primary condition + 2-3 key objective findings (5-10 words total). If not present, "Not specified".
            - Key Concern: Main issue in 2-3 words (e.g., "Chronic back pain"). If not present, "Not specified".
            
-           - BODY PART ANALYSIS (MULTIPLE SUPPORT):
+           - BODY PART ANALYSIS (MULTIPLE SUPPORT WITH CLINICAL SUMMARY & TREATMENT PLAN):
              * Primary Body Part: Extract the main body part involved (e.g., "lumbar spine", "right knee"). If not present, "Not specified".
              * Multiple Body Parts: If document mentions multiple distinct body parts (e.g., "right shoulder and left knee", "cervical and lumbar spine"), analyze EACH separately in body_parts_analysis array. For each body part include:
                - body_part: Specific body part name
                - diagnosis: Diagnosis specific to this body part
                - key_concern: Key concern for this body part  
+               - clinical_summary: Clinical summary of important findings, symptoms, and observations for this body part (2-3 sentences)
+               - treatment_plan: Specific treatment plan, therapies, medications, or procedures for this body part (2-3 sentences)
                - extracted_recommendation: Recommendations specific to this body part
                - adls_affected: ADLs affected by this body part
                - work_restrictions: Work restrictions for this body part
@@ -138,8 +142,9 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
         5. EXTRACTED DECISION KEYWORDS (DIRECT EXTRACTION USING MEDICAL TERMS IF PRESENT):
            - Deeply scan for decisions or clinical judgments in Assessment/Plan/Impressions sections: Extract key keywords/phrases only using medical terms (comma-separated, e.g., "conservative management, no surgery, initiate meds"). Look for "Decision:", "Plan:", "Judgment:", "Proceed with", etc. No full sentences—just core medical terms. If multiple, list concisely. If none found after thorough scan, "Not specified".
         
-        6. CONSULTING DOCTOR EXTRACTION (DEEP SCAN IF PRESENT):
-           - Deeply scan entire document for consultant doctor name: Look in signatures (e.g., "Consulting MD: Dr. Jane Smith"), consultations (e.g., "Consulted with Dr. Robert Lee for orthopedics"), referrals (e.g., "Referred to consultant Dr. Emily Chen"), or explicit mentions of consultants/specialists. Extract full names (first + last) where possible. Prioritize 'consultant' or specialist roles. List unique name. If none, empty list.
+        6. DOCTOR EXTRACTION (DEEP SCAN IF PRESENT):
+           - CONSULTING DOCTOR: Deeply scan entire document for consultant doctor name: Look in signatures (e.g., "Consulting MD: Dr. Jane Smith"), consultations (e.g., "Consulted with Dr. Robert Lee for orthopedics"), or explicit mentions of consultants/specialists. Extract full names (first + last) where possible. If none, "Not specified".
+           - REFERRAL DOCTOR: Deeply scan for referral doctor names: Look for "Referred to", "Referral to", "Referred by", "PCP", "Primary Care", "Specialist", "Orthopedist", etc. followed by doctor names. Extract full names. If none, "Not specified".
         
         6.5. EXTRACTED UR DECISION KEYWORDS & DENIAL REASON (STRICT KEYWORD-BASED EXTRACTION IF PRESENT):
             - STRICTLY keyword-based: Deeply scan the entire document text for UR (Utilization Review) or prior authorization-related keywords such as 'Utilization Review', 'UR', 'prior authorization', 'prior auth', 'PA', 'approved', 'denied', 'coverage decision', 'authorization status', 'insurance review' in Plan/Assessment/Billing/Authorization sections.
@@ -148,7 +153,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
             - If NONE of these keywords are present anywhere in the document text after a thorough scan, set ur_decision to 'Not specified' and ur_denial_reason to None. Do not infer or generate if keywords absent.
         
         7. AI OUTCOME KEYWORDS (GENERATED BASED ON ANALYSIS):
-           - Based on deep analysis of diagnosis, status, key_concern, extracted_recommendation, extracted_decision, ur_decision, ur_denial_reason, and consulting_doctor: Generate key outcome prediction keywords/phrases only (comma-separated, e.g., "full recovery 6 weeks, monitor pain, low risk"). Straightforward for doctor, no sentences—just core terms tied to evidence.
+           - Based on deep analysis of diagnosis, status, key_concern, extracted_recommendation, extracted_decision, ur_decision, ur_denial_reason, consulting_doctor, and referral_doctor: Generate key outcome prediction keywords/phrases only (comma-separated, e.g., "full recovery 6 weeks, monitor pain, low risk"). Straightforward for doctor, no sentences—just core terms tied to evidence.
         
         8. DEEP DATE ANALYSIS & REASONING (Integrated - EXTRACT IF PRESENT):
            - Extract ALL dates: Convert MM/DD/YYYY etc. to YYYY-MM-DD. Ignore non-dates (ages, IDs). If no dates, empty lists and note in reasoning.
@@ -165,14 +170,16 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
         RULES FOR ACCURACY & PRECISION:
         - Extract EVERYTHING directly from document text if present; otherwise "Not specified" or empty. No assumptions or generations except for AI outcome.
         - Workers Comp: Claim only if keyword + number; prioritize injury/DOI context.
-        - Holistic: Cross-reference (e.g., claim near DOI → workers comp; consulting_doctor with extracted keywords → inform AI outcome; ur_decision with extracted_recommendation → flag coverage issues; ur_denial_reason with ur_decision → highlight denial impacts).
+        - Holistic: Cross-reference (e.g., claim near DOI → workers comp; consulting_doctor/referral_doctor with extracted keywords → inform AI outcome; ur_decision with extracted_recommendation → flag coverage issues; ur_denial_reason with ur_decision → highlight denial impacts).
         - Keywords: Extract/list as comma-separated terms only—strictly no full sentences or narratives.
-        - Consultants: Focus on consultant/specialist roles; extract verifiable names from context; no assumptions.
+        - Doctors: Focus on consultant/specialist roles for consulting_doctor; referral patterns for referral_doctor; extract verifiable names from context; no assumptions.
         - AI Outcome Keywords: Always generate—concise terms only, straight to doctor, base on evidence from extracted data.
         - Recommendation Keywords: STRICTLY only if specified keywords present; else 'Not specified'.
         - UR Decision Keywords: STRICTLY only if specified UR keywords present; else 'Not specified'.
         - Denial Reason: ONLY if denial indicated in ur_decision; extract concisely from text; else None.
-        - Body Parts: If multiple body parts mentioned, analyze each separately in body_parts_analysis array.
+        - Body Parts: If multiple body parts mentioned, analyze each separately in body_parts_analysis array with clinical_summary and treatment_plan.
+        - Clinical Summary: Summarize important clinical findings, symptoms, observations for each body part.
+        - Treatment Plan: Extract specific treatments, therapies, medications, procedures planned for each body part.
         - Output ONLY valid JSON matching the schema. Include date_reasoning and all fields fully.
 
         OUTPUT FORMAT:
@@ -191,7 +198,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
         )
     
     def extract_document_data_with_reasoning(self, document_text: str) -> DocumentAnalysis:
-        """Enhanced extraction with comprehensive document reasoning, extracted keyword recs/decision/outcome, consulting doctor (optimized to single LLM call)"""
+        """Enhanced extraction with comprehensive document reasoning, extracted keyword recs/decision/outcome, consulting doctor, referral doctor (optimized to single LLM call)"""
         try:
             logger.info(f"🔍 Starting enhanced deep document analysis (single LLM call)...")
             
@@ -212,6 +219,8 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
                 logger.info(f"✅ Date reasoning integrated: {len(result['date_reasoning']['extracted_dates'])} dates found")
             if 'consulting_doctor' in result:
                 logger.info(f"✅ Consulting doctor extracted: {result['consulting_doctor']}")
+            if 'referral_doctor' in result:
+                logger.info(f"✅ Referral doctor extracted: {result['referral_doctor']}")
             if 'extracted_recommendation' in result:
                 logger.info(f"✅ Extracted recommendation keywords: {result['extracted_recommendation'][:50]}...")
             if 'extracted_decision' in result:
@@ -224,6 +233,8 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
                 logger.info(f"✅ AI outcome keywords generated: {result['ai_outcome'][:50]}...")
             if 'body_parts_analysis' in result:
                 logger.info(f"✅ Body parts analysis: {len(result['body_parts_analysis'])} body parts found")
+                for bp in result['body_parts_analysis']:
+                    logger.info(f"   - {bp['body_part']}: Clinical summary available, Treatment plan available")
             
             final_analysis = DocumentAnalysis(**result)
             
@@ -239,6 +250,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
             logger.info(f"   - Extracted UR Decision: {final_analysis.ur_decision}")
             logger.info(f"   - UR Denial Reason: {final_analysis.ur_denial_reason}")
             logger.info(f"   - Consulting Doctor: {final_analysis.consulting_doctor}")
+            logger.info(f"   - Referral Doctor: {final_analysis.referral_doctor}")
             logger.info(f"   - Body Part: {final_analysis.body_part}")
             logger.info(f"   - AI Outcome: {final_analysis.ai_outcome}")
             logger.info(f"   - Document Type: {final_analysis.document_type}")
@@ -302,7 +314,8 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
             ur_denial_reason=None,
             adls_affected="Not specified",
             work_restrictions="Not specified",
-            consulting_doctor=None,
+            consulting_doctor="Not specified",
+            referral_doctor="Not specified",
             ai_outcome="Insufficient data; full evaluation needed",
             document_type="medical_document",
             summary_points=["Not specified"],

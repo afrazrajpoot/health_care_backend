@@ -374,15 +374,21 @@ class WebhookService:
             
             for body_part_analysis in document_analysis.body_parts_analysis:
                 snapshot = {
-                    "body_part": body_part_analysis.body_part,
+                    # Use snake_case for the application code (will be converted to camelCase for DB later)
+                    "body_part": body_part_analysis.body_part,  # Keep snake_case for application code
                     "dx": body_part_analysis.diagnosis,
-                    "keyConcern": body_part_analysis.key_concern,
-                    "nextStep": body_part_analysis.extracted_recommendation,
-                    "ur-decision": document_analysis.ur_decision or 'Not Specified',
-                    "recommended": body_part_analysis.extracted_recommendation or 'Not Specified',
-                    "ai_outcome": document_analysis.ai_outcome or 'Not Specified',
-                    "consulting_doctor": document_analysis.consulting_doctor or [],
-                    "ur_denial_reason": document_analysis.ur_denial_reason or None
+                    "key_concern": body_part_analysis.key_concern,
+                    "next_step": body_part_analysis.extracted_recommendation or None,
+                    "ur_decision": document_analysis.ur_decision or None,
+                    "recommended": body_part_analysis.extracted_recommendation or None,
+                    "ai_outcome": document_analysis.ai_outcome or None,
+                    "consulting_doctor": document_analysis.consulting_doctor or None,
+                    
+                    # New fields
+                    "key_findings": body_part_analysis.clinical_summary or None,
+                    "treatment_approach": body_part_analysis.treatment_plan or None,
+                    "clinical_summary": body_part_analysis.clinical_summary or None,
+                    "referral_doctor": document_analysis.referral_doctor or None,
                 }
                 summary_snapshots.append(snapshot)
         else:
@@ -391,31 +397,35 @@ class WebhookService:
             snapshot = {
                 "body_part": document_analysis.body_part,
                 "dx": document_analysis.diagnosis,
-                "keyConcern": document_analysis.key_concern,
-                "nextStep": document_analysis.extracted_recommendation,
-                "ur-decision": document_analysis.ur_decision or 'Not Specified',
-                "recommended": document_analysis.extracted_recommendation or 'Not Specified',
-                "ai_outcome": document_analysis.ai_outcome or 'Not Specified',
-                "consulting_doctor": document_analysis.consulting_doctor or [],
-                "ur_denial_reason": document_analysis.ur_denial_reason or None
+                "key_concern": document_analysis.key_concern,
+                "next_step": document_analysis.extracted_recommendation or None,
+                "ur_decision": document_analysis.ur_decision or None,
+                "recommended": document_analysis.extracted_recommendation or None,
+                "ai_outcome": document_analysis.ai_outcome or None,
+                "consulting_doctor": document_analysis.consulting_doctor or None,
+                
+                # New fields
+                "key_findings": document_analysis.diagnosis or None,
+                "treatment_approach": document_analysis.extracted_recommendation or None,
+                "clinical_summary": f"{document_analysis.diagnosis} - {document_analysis.key_concern}" or None,
+                "referral_doctor": document_analysis.referral_doctor or None,
             }
             summary_snapshots.append(snapshot)
 
         # ADL data (can be shared across body parts or customized per body part)
         adl_data = {
-            "adlsAffected": document_analysis.adls_affected,
-            "workRestrictions": document_analysis.work_restrictions
+            "adls_affected": document_analysis.adls_affected,
+            "work_restrictions": document_analysis.work_restrictions
         }
         
         # For multiple body parts, you might want to customize ADL data per body part
         if len(summary_snapshots) > 1:
             logger.info("🔄 Multiple body parts detected - using shared ADL data")
-            # You could enhance this to have body-part-specific ADL data if needed
 
         summary_text = " | ".join(document_analysis.summary_points) if document_analysis.summary_points else "No summary"
         document_summary = {
             "type": document_analysis.document_type,
-            "createdAt": datetime.now(),
+            "created_at": datetime.now(),
             "summary": summary_text
         }
 
@@ -425,7 +435,7 @@ class WebhookService:
             "patient_name_to_use": patient_name_to_use,
             "claim_to_save": claim_to_save,
             "whats_new_data": whats_new_data,
-            "summary_snapshots": summary_snapshots,  # Changed from summary_snapshot to summary_snapshots (list)
+            "summary_snapshots": summary_snapshots,
             "adl_data": adl_data,
             "document_summary": document_summary,
             "updated_missing_fields": lookup_result["updated_missing_fields"],
@@ -437,9 +447,8 @@ class WebhookService:
             "document_analysis": document_analysis,
             "is_first_time_claim_only": is_first_time_claim_only,
             "mode": mode,
-            "has_multiple_body_parts": len(summary_snapshots) > 1  # Flag for multiple body parts
+            "has_multiple_body_parts": len(summary_snapshots) > 1
         }
-
     async def save_and_process_document(self, processed_data: dict, status_result: dict, data: dict, db_service) -> dict:
         document_analysis = status_result["document_analysis"]
         has_date_reasoning = processed_data["has_date_reasoning"]
@@ -455,30 +464,30 @@ class WebhookService:
         summary_snapshots = status_result["summary_snapshots"]
 
         # Check for existing document first
-        file_exists = await db_service.document_exists(
-            processed_data["filename"],
-            processed_data["file_size"]
-        )
+        # file_exists = await db_service.document_exists(
+        #     processed_data["filename"],
+        #     processed_data["file_size"]
+        # )
 
-        if file_exists:
-            logger.warning(f"⚠️ Document already exists: {processed_data['filename']}")
-            user_friendly_msg = "Document already processed"
+        # if file_exists:
+        #     logger.warning(f"⚠️ Document already exists: {processed_data['filename']}")
+        #     user_friendly_msg = "Document already processed"
 
-            # Emit skipped event
-            emit_data = {
-                'document_id': processed_data['document_id'],
-                'filename': processed_data["filename"],
-                'status': 'skipped',
-                'reason': user_friendly_msg,
-                "user_id": user_id,
-                'blob_path': processed_data["blob_path"],
-                'physician_id': physician_id
-            }
-            if user_id:
-                await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
-            else:
-                await sio.emit('task_complete', emit_data)
-            return {"status": "skipped", "document_id": processed_data.get('document_id'), "reason": "Document already processed", "blob_path": processed_data["blob_path"]}
+        #     # Emit skipped event
+        #     emit_data = {
+        #         'document_id': processed_data['document_id'],
+        #         'filename': processed_data["filename"],
+        #         'status': 'skipped',
+        #         'reason': user_friendly_msg,
+        #         "user_id": user_id,
+        #         'blob_path': processed_data["blob_path"],
+        #         'physician_id': physician_id
+        #     }
+        #     if user_id:
+        #         await sio.emit('task_complete', emit_data, room=f"user_{user_id}")
+        #     else:
+        #         await sio.emit('task_complete', emit_data)
+        #     return {"status": "skipped", "document_id": processed_data.get('document_id'), "reason": "Document already processed", "blob_path": processed_data["blob_path"]}
 
         # UPDATED FAILURE LOGIC: Allow first-time claim-only documents to pass
         if document_status == "failed" and not is_first_time_claim_only:
