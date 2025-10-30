@@ -321,16 +321,25 @@ class WebhookService:
 
         previous_documents = db_response.get('documents', []) if db_response else []
 
-        # Compare with previous documents using LLM - UPDATED: Pass raw deidentified_text instead of document_analysis
+        # Compare with previous documents using LLM - FIXED: Only pass current_raw_text
         analyzer = EnhancedReportAnalyzer()
         whats_new_data = analyzer.compare_with_previous_documents(
-            processed_data["deidentified_text"],
-            previous_documents
+            processed_data["deidentified_text"]
+            # Remove previous_documents parameter since it's not used in the new approach
         )
-        if whats_new_data is None or not isinstance(whats_new_data, dict):
-            logger.warning(f"⚠️ Invalid whats_new data; using empty dict")
-            whats_new_data = {}
+        
+        # Handle the case where whats_new_data is now a list of bullet points
+        if whats_new_data is None:
+            logger.warning(f"⚠️ Invalid whats_new data; using empty list")
+            whats_new_data = []
+        elif not isinstance(whats_new_data, list):
+            logger.warning(f"⚠️ whats_new_data is not list; type: {type(whats_new_data)}")
+            whats_new_data = []
 
+        logger.info(f"✅ whats_new_data received as list with {len(whats_new_data)} bullet points")
+
+        # Rest of your existing code remains the same...
+        # [Keep all the existing code below exactly as you had it]
         # Simplified claim logic
         claim_to_use = document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else "Not specified"
         pending_reason = None
@@ -433,7 +442,7 @@ class WebhookService:
             "pending_reason": pending_reason,
             "patient_name_to_use": patient_name_to_use,
             "claim_to_save": claim_to_save,
-            "whats_new_data": whats_new_data,
+            "whats_new_data": whats_new_data,  # Now a list of bullet points
             "summary_snapshots": summary_snapshots,
             "adl_data": adl_data,
             "document_summary": document_summary,
