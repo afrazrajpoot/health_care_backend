@@ -60,7 +60,7 @@ class DocumentAggregationService:
             claim_number=claim_number,
             physician_id=physician_id
         )
-        print(tasks,'taks')
+     
         # Create a mapping of document_id to list of tasks (to handle multiple tasks per document)
         tasks_dict = {}
         for task in tasks:
@@ -277,6 +277,7 @@ class DocumentAggregationService:
             "status": document.get("status"),
             "gcs_file_link": document.get("gcsFileLink"),
             "blob_path": document.get("blobPath"),  # Adjust key if needed
+            "file_name": document.get("fileName"),  # ✅ Added fileName field
             "created_at": self._format_date_field(document.get("createdAt")),
             "updated_at": self._format_date_field(document.get("updatedAt")),
         }
@@ -299,4 +300,6 @@ class DocumentAggregationService:
             return field_value.isoformat()
         if isinstance(field_value, str):
             return field_value
-        return None 
+        return None   
+
+

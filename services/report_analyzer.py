@@ -91,89 +91,40 @@ class ReportAnalyzer:
 
     def create_extraction_prompt(self) -> PromptTemplate:
         template = """
-    You are a medical document analyst. Your task is to EXTRACT key medical information using KEYWORDS and SHORT PHRASES from the document text.
+    You are a medical document analyst. Your task is to ANALYZE the entire document text and generate a PRECISE SUMMARY in exactly 3 bullet points of NEW CHANGES SINCE LAST VISIT. Extract and summarize ONLY medical information explicitly present in the text—do not include any patient personal details (e.g., names, IDs, DOB, contact info) or non-medical data. Focus strictly on medical facts: diagnoses, symptoms, treatments, findings, progress, or decisions indicating changes.
 
     DOCUMENT TEXT TO ANALYZE:
     {current_raw_text}
 
     CRITICAL RULES - READ CAREFULLY:
-    1. **EXTRACT ONLY** information that is ACTUALLY PRESENT in the document text
-    2. **USE KEYWORDS AND SHORT PHRASES** - no full sentences
-    3. **BE CONCISE** - maximum 5-7 words per bullet point
-    4. **USE MEDICAL TERMINOLOGY** found in the document
-    5. **FOCUS ON NEW/CHANGED INFORMATION** since last visit
-
-    KEY CATEGORIES TO EXTRACT (IF PRESENT):
-    - **Diagnosis**: Conditions, findings, test results
-    - **Symptoms**: Pain, limitations, functional issues  
-    - **Treatment**: Medications, therapies, procedures
-    - **Imaging**: MRI, X-ray, CT findings
-    - **Recommendations**: Next steps, referrals, follow-ups
-    - **Work Status**: Disability, restrictions, modifications
-    - **UR Decisions**: Approvals, denials, authorizations
-    - **Progress**: Improvements, deteriorations, changes
+    1. **EXCLUDE PERSONAL DATA**: No patient names, demographics, identifiers—only pure medical content
+    2. **FOCUS ON NEW CHANGES**: Look for phrases like "since last visit", "improved", "worsened", "new", "continued", "updated"—summarize only what's changed or newly noted
+    3. **ANALYZE ALL PARTS** of the document: Cover the whole document by grouping into 3 major medical changes or themes
+    4. **SUMMARIZE PRECISELY** using keywords and short phrases—no full sentences, max 10-15 words per bullet
+    5. **BE CONCISE AND CLINICAL**: Use medical terminology from the text; group related changes with semicolons if needed
+    6. **INCLUDE DATES/LOCATIONS** only if they relate to medical changes (e.g., MM/DD/YY for test dates)
+    7. **EXACTLY 3 BULLETS**: One bullet per major change/theme; prioritize most relevant new medical info to fit exactly 3 total
+    8. Each bullet starts with "•"
+    9. If no new changes since last visit: ["• No significant new changes since last visit"]
 
     OUTPUT REQUIREMENTS:
-    - Return JSON with "bullet_points" array
-    - Each bullet point should start with "•"
-    - Use keyword format: "• Category: keyword1, keyword2, keyword3 ({mm_dd})"
-    - Maximum 6-8 bullet points, focus on most clinically relevant
-    - If no significant findings: ["• No significant new findings"]
+    - Return ONLY JSON with "bullet_points" array (exactly 3 items)
+    - Bullets should capture the essence of each new medical change concisely, covering the whole document
 
-    EXAMPLES OF KEYWORD FORMAT:
-
-    Example 1 - Document with findings:
-    Document: "Patient diagnosed with lumbar radiculopathy. MRI shows L4-L5 disc herniation. Prescribed physical therapy 3x weekly and naproxen 500mg BID. Follow up in 6 weeks."
-    Output: {{
+    EXAMPLE OF SUMMARY STYLE (for format only—do NOT use this content; derive solely from {current_raw_text}):
+    {{
     "bullet_points": [
-        "• Diagnosis: Lumbar radiculopathy, L4-L5 disc herniation ({mm_dd})",
-        "• Treatment: Physical therapy 3x/week, naproxen 500mg BID ({mm_dd})",
-        "• Follow-up: 6 weeks ({mm_dd})"
+        "• Symptoms: mild improvement in low back pain since last visit",
+        "• Treatment: added naproxen 500mg BID; continued PT",
+        "• Findings: MRI shows reduced inflammation; follow-up advanced to 4 weeks"
     ]
     }}
 
-    Example 2 - Document with symptoms and imaging:
-    Document: "Patient reports severe low back pain radiating to left leg, numbness in left foot. MRI shows L4-L5 disc protrusion compressing L5 nerve root."
-    Output: {{
-    "bullet_points": [
-        "• Symptoms: Severe LBP, left leg radiation, left foot numbness ({mm_dd})",
-        "• Imaging: L4-L5 disc protrusion, L5 nerve root compression ({mm_dd})"
-    ]
-    }}
-
-    Example 3 - Treatment authorization:
-    Document: "UR Decision: Request for epidural steroid injection approved. Physical therapy authorized for 12 visits."
-    Output: {{
-    "bullet_points": [
-        "• UR Approved: Epidural steroid injection ({mm_dd})",
-        "• Treatment: Physical therapy - 12 visits ({mm_dd})"
-    ]
-    }}
-
-    Example 4 - Work status update:
-    Document: "Work status: Temporary Partial Disability. Restrictions: no lifting >10 lbs, avoid repetitive bending."
-    Output: {{
-    "bullet_points": [
-        "• Work Status: TPD ({mm_dd})",
-        "• Restrictions: No lifting >10 lbs, avoid bending ({mm_dd})"
-    ]
-    }}
-
-    Example 5 - Minimal findings:
-    Document: "Routine follow-up. Mild improvement in symptoms. Continue current treatment."
-    Output: {{
-    "bullet_points": [
-        "• Status: Mild symptomatic improvement ({mm_dd})",
-        "• Plan: Continue current treatment ({mm_dd})"
-    ]
-    }}
-
-    NOW EXTRACT FROM THE PROVIDED DOCUMENT:
-    - Scan the document for key medical information
-    - Extract using keywords and short phrases only
-    - Group related information together
-    - Focus on what's new or changed
-    - Be concise and clinical
+    NOW ANALYZE AND SUMMARIZE THE PROVIDED DOCUMENT:
+    - Read the full text carefully, ignoring non-medical parts
+    - Break down the entire document into exactly 3 key new medical changes
+    - Generate precise bullet points covering all major aspects
+    - Ensure everything is directly from the text and medical-only
 
     {format_instructions}
     """

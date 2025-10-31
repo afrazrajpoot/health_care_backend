@@ -78,6 +78,8 @@ model Document {
   physicianId String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+
+
 ur_denial_reason String?
   // Relations
   summarySnapshot SummarySnapshot?

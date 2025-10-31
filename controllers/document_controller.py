@@ -366,7 +366,6 @@ async def get_document(
         logger.error(f"❌ Error fetching document: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-
 @router.post("/proxy-decrypt")
 async def proxy_decrypt(request: Request):
     """
