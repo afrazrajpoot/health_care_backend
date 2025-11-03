@@ -17,7 +17,7 @@ from pathlib import Path
 from fastapi import Path as FastAPIPath
 
 from services.document_converter import DocumentConverter
-
+from datetime import timezone
 from services.webhook_service import WebhookService
 from services.document_route_services import DocumentExtractorService
 from services.get_document_services import DocumentAggregationService
@@ -518,9 +518,220 @@ async def delete_fail_document(
 
 
 @router.get("/workflow-stats")
-async def get_workflow_stats():
-    db = DatabaseService()
-    await db.prisma.connect()
-    stats = await db.prisma.workFlowStats.find_first(order={"date": "desc"})
-    await db.prisma.disconnect()
-    return stats or {}
+async def get_workflow_stats(
+    date: Optional[str] = Query(None, description="Optional date filter in YYYY-MM-DD format")
+):
+    """
+    Fetch workflow statistics for a specific date or today by default.
+    Returns stats with labels and values for dashboard visualization.
+    Matches Next.js /api/workflow-stats functionality.
+    """
+    try:
+        db_service = await get_database_service()
+        
+        # Ensure database is connected
+        await db_service.connect()
+        
+        # Determine date range for query
+        if date:
+            # Parse the provided date
+            try:
+                filter_date = datetime.strptime(date, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid date format. Expected YYYY-MM-DD"
+                )
+            
+            # Set to start of day
+            filter_date = filter_date.replace(hour=0, minute=0, second=0, microsecond=0)
+            from datetime import timedelta
+            next_day = filter_date + timedelta(days=1)
+        else:
+            # Default: get today's stats
+            today = datetime.now()
+            filter_date = today.replace(hour=0, minute=0, second=0, microsecond=0)
+            from datetime import timedelta
+            next_day = filter_date + timedelta(days=1)
+        
+        # Fetch WorkflowStats from database
+        workflow_stats = await db_service.prisma.workflowstats.find_first(
+            where={
+                "date": {
+                    "gte": filter_date,
+                    "lt": next_day
+                }
+            },
+            order={"createdAt": "desc"}
+        )
+        
+        # If no stats found, return zeros with default structure
+        if not workflow_stats:
+            stats = {
+                "id": None,
+                "date": filter_date.isoformat(),
+                "referralsProcessed": 0,
+                "rfasMonitored": 0,
+                "qmeUpcoming": 0,
+                "payerDisputes": 0,
+                "externalDocs": 0,
+                "intakes_created": 0,
+                "createdAt": filter_date.isoformat(),
+                "updatedAt": filter_date.isoformat()
+            }
+            has_data = False
+        else:
+            stats = {
+                "id": workflow_stats.id,
+                "date": workflow_stats.date.isoformat() if workflow_stats.date else filter_date.isoformat(),
+                "referralsProcessed": workflow_stats.referralsProcessed or 0,
+                "rfasMonitored": workflow_stats.rfasMonitored or 0,
+                "qmeUpcoming": workflow_stats.qmeUpcoming or 0,
+                "payerDisputes": workflow_stats.payerDisputes or 0,
+                "externalDocs": workflow_stats.externalDocs or 0,
+                "intakes_created": workflow_stats.intakes_created or 0,
+                "createdAt": workflow_stats.createdAt.isoformat() if workflow_stats.createdAt else filter_date.isoformat(),
+                "updatedAt": workflow_stats.updatedAt.isoformat() if workflow_stats.updatedAt else filter_date.isoformat()
+            }
+            has_data = True
+        
+        # Format response to match Next.js structure
+        response = {
+            "success": True,
+            "data": {
+                "stats": stats,
+                "labels": [
+                    "Referrals Processed",
+                    "RFAs Monitored",
+                    "QME Upcoming",
+                    "Payer Disputes",
+                    "External Docs",
+                    "Intakes Created"
+                ],
+                "vals": [
+                    stats["referralsProcessed"],
+                    stats["rfasMonitored"],
+                    stats["qmeUpcoming"],
+                    stats["payerDisputes"],
+                    stats["externalDocs"],
+                    stats["intakes_created"]
+                ],
+                "date": stats["date"],
+                "hasData": has_data
+            }
+        }
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error fetching workflow stats: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/office-pulse")
+async def get_tasks_pulse():
+    """
+    Fetch all tasks with department statistics (pulse).
+    Returns tasks list and aggregated department stats (open, overdue, unclaimed).
+    Matches Next.js /api/tasks functionality.
+    """
+    try:
+        db_service = await get_database_service()
+        
+        # Ensure database is connected
+        await db_service.connect()
+        
+        # Use timezone-aware datetime for comparison
+        now = datetime.now(timezone.utc)
+        
+        # Fetch all tasks with document relation
+        tasks = await db_service.prisma.task.find_many(
+            include={"document": True},
+            order={"createdAt": "desc"}
+        )
+        
+        # Aggregate statistics by department
+        dept_stats = {}
+        
+        for task in tasks:
+            dept = task.department or "Unknown"
+            if dept not in dept_stats:
+                dept_stats[dept] = {
+                    "open": 0,
+                    "overdue": 0,
+                    "unclaim": 0
+                }
+            
+            # Count open tasks (status != "Done")
+            is_open = task.status != "Done"
+            if is_open:
+                dept_stats[dept]["open"] += 1
+                # Count overdue tasks - handle both timezone-aware and naive datetimes
+                if task.dueDate:
+                    due_date = task.dueDate
+                    # Make due_date timezone-aware if it's naive
+                    if due_date.tzinfo is None:
+                        due_date = due_date.replace(tzinfo=timezone.utc)
+                    if due_date < now:
+                        dept_stats[dept]["overdue"] += 1
+            
+            # Count unclaimed tasks (actions doesn't include "Claimed")
+            actions = task.actions or []
+            if "Claimed" not in actions:
+                dept_stats[dept]["unclaim"] += 1
+        
+        # Calculate totals
+        total_open = sum(stats["open"] for stats in dept_stats.values())
+        total_overdue = sum(stats["overdue"] for stats in dept_stats.values())
+        total_unclaim = sum(stats["unclaim"] for stats in dept_stats.values())
+        
+        # Format pulse data
+        pulse = {
+            "depts": [
+                {
+                    "department": department,
+                    "open": stats["open"],
+                    "overdue": stats["overdue"],
+                    "unclaimed": stats["unclaim"]
+                }
+                for department, stats in dept_stats.items()
+            ],
+            "labels": ["Total Open", "Total Overdue", "Total Unclaimed"],
+            "vals": [total_open, total_overdue, total_unclaim]
+        }
+        
+        # Convert tasks to dict format
+        tasks_data = [
+            {
+                "id": task.id,
+                "description": task.description,
+                "department": task.department,
+                "status": task.status,
+                "dueDate": task.dueDate.isoformat() if task.dueDate else None,
+                "patient": task.patient,
+                "actions": task.actions or [],
+                "sourceDocument": task.sourceDocument,
+                "documentId": task.documentId,
+                "physicianId": task.physicianId,
+                "createdAt": task.createdAt.isoformat() if task.createdAt else None,
+                "updatedAt": task.updatedAt.isoformat() if task.updatedAt else None,
+                "document": {
+                    "id": task.document.id,
+                    "patientName": task.document.patientName,
+                    "claimNumber": task.document.claimNumber,
+                    "status": task.document.status
+                } if task.document else None
+            }
+            for task in tasks
+        ]
+        
+        return {
+            "tasks": tasks_data,
+            "pulse": pulse
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error fetching tasks pulse: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch tasks")
