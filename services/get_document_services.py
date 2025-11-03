@@ -1,3 +1,4 @@
+
 import traceback
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
@@ -280,6 +281,7 @@ class DocumentAggregationService:
             "file_name": document.get("fileName"),  # ✅ Added fileName field
             "created_at": self._format_date_field(document.get("createdAt")),
             "updated_at": self._format_date_field(document.get("updatedAt")),
+            "report_date": self._format_date_field(document.get("reportDate")),  # ✅ Added reportDate field
         }
 
     async def _format_adl(self, document: Dict[str, Any]) -> Dict[str, Any]:
@@ -301,5 +303,3 @@ class DocumentAggregationService:
         if isinstance(field_value, str):
             return field_value
         return None   
-
-
