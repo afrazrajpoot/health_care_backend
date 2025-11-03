@@ -91,43 +91,110 @@ class ReportAnalyzer:
 
     def create_extraction_prompt(self) -> PromptTemplate:
         template = """
-    You are a medical document analyst. Your task is to ANALYZE the entire document text and generate a PRECISE SUMMARY in exactly 3 bullet points of NEW CHANGES SINCE LAST VISIT. Extract and summarize ONLY medical information explicitly present in the text—do not include any patient personal details (e.g., names, IDs, DOB, contact info) or non-medical data. Focus strictly on medical facts: diagnoses, symptoms, treatments, findings, progress, or decisions indicating changes.
+            You are a medical document extractor for our AI Healthcare Platform. 
+            Your job is to extract ONLY the explicitly mentioned key information from the text below 
+            and summarize it into concise one-line or two-line bullet summaries following the Kebilo Categorization Map (v2).
 
-    DOCUMENT TEXT TO ANALYZE:
-    {current_raw_text}
+            🧠 GOAL:
+            Identify the document type and extract ONLY the required fields per its category.
+            Each output must be a short, data-rich summary (≤15 words) following this pattern:
 
-    CRITICAL RULES - READ CAREFULLY:
-    1. **EXCLUDE PERSONAL DATA**: No patient names, demographics, identifiers—only pure medical content
-    2. **FOCUS ON NEW CHANGES**: Look for phrases like "since last visit", "improved", "worsened", "new", "continued", "updated"—summarize only what's changed or newly noted
-    3. **ANALYZE ALL PARTS** of the document: Cover the whole document by grouping into 3 major medical changes or themes
-    4. **SUMMARIZE PRECISELY** using keywords and short phrases—no full sentences, max 10-15 words per bullet
-    5. **BE CONCISE AND CLINICAL**: Use medical terminology from the text; group related changes with semicolons if needed
-    6. **INCLUDE DATES/LOCATIONS** only if they relate to medical changes (e.g., MM/DD/YY for test dates)
-    7. **EXACTLY 3 BULLETS**: One bullet per major change/theme; prioritize most relevant new medical info to fit exactly 3 total
-    8. Each bullet starts with "•"
-    9. If no new changes since last visit: ["• No significant new changes since last visit"]
+            [DOCUMENT TYPE or PHYSICIAN/SENDER] [BODY PART or TOPIC] [DATE] = [KEY FINDING, ACTION, or DECISION]
 
-    OUTPUT REQUIREMENTS:
-    - Return ONLY JSON with "bullet_points" array (exactly 3 items)
-    - Bullets should capture the essence of each new medical change concisely, covering the whole document
+            ---
 
-    EXAMPLE OF SUMMARY STYLE (for format only—do NOT use this content; derive solely from {current_raw_text}):
-    {{
-    "bullet_points": [
-        "• Symptoms: mild improvement in low back pain since last visit",
-        "• Treatment: added naproxen 500mg BID; continued PT",
-        "• Findings: MRI shows reduced inflammation; follow-up advanced to 4 weeks"
-    ]
-    }}
+            📄 DOCUMENT TEXT:
+            {current_raw_text}
 
-    NOW ANALYZE AND SUMMARIZE THE PROVIDED DOCUMENT:
-    - Read the full text carefully, ignoring non-medical parts
-    - Break down the entire document into exactly 3 key new medical changes
-    - Generate precise bullet points covering all major aspects
-    - Ensure everything is directly from the text and medical-only
+            ---
 
-    {format_instructions}
-    """
+            ⚙️ EXTRACTION RULES (STRICT):
+
+            1️⃣ Detect document type:
+            - Clinical: MRI, CT, X-ray, Ultrasound, EMG, Labs  
+            - Progress/Follow-up: PR-2  
+            - Consult/Specialist: Consult, Ortho, Neuro, Pain Mgmt  
+            - Initial Evaluation: DFR  
+            - Final/Impairment: PR-4  
+            - Authorization Workflow: RFA, UR, Authorization, Peer-to-Peer, IMR  
+            - Administrative: Adjuster, Attorney, NCM, Signature/Fax requests  
+            - Med-Legal: QME, AME, IME  
+            - General Medicine: Office/PCP visit, New/Annual/Wellness, Specialist Consult (non-WC), ED/Urgent Care, Hospital Discharge, Imaging, Labs/Path/Screening, Pharmacy/PA, External Facility/Home Health/DME, Care Manager/CCM, Patient Message, or Referral
+
+
+            2️⃣ Extract ONLY the following fields depending on document type:
+
+            - **Clinical** → body part, date, key finding/severity  
+            Example: MRI R shoulder 5/10/25 = partial rotator cuff tear  
+
+            - **PR-2** → date, physician, body part, status, next plan  
+            Example: Dr Calhoun PR-2 11/1/25 = R knee improved; continue PT; RFA pending  
+
+            - **Consult** → date, physician, specialty, plan/recommendation  
+            Example: Dr Johnson Ortho 9/12/25 = PT + ESI plan; f/u 6w  
+
+            - **DFR** → DOI, diagnosis, plan/work status  
+            Example: DFR 8/3/25 = DOI 7/30/25; R ankle sprain; PT + brace  
+
+            - **PR-4** → date, MMI status, plan  
+            Example: PR-4 10/5/25 = MMI; ongoing PT  
+
+            - **RFA** → date, service requested, body part  
+            Example: RFA 9/1/25 = PT 6v R knee requested  
+
+            - **UR** → date, service denied, reason  
+            Example: UR 9/8/25 = PT denied; no functional improvement  
+
+            - **Authorization** → date, service approved, body part  
+            Example: Auth 9/25/25 = MRI L shoulder approved  
+
+            - **Administrative Letters** → date, sender or side, core request/issue  
+            Example: Adjuster 9/10/25 = request latest PR-2 + MRI report  
+
+            - **QME / IME / AME** → date, physician/specialty, recommendations or plan  
+            Example: Dr Smith Ortho QME 9/10/25 = PT + ortho f/u; meds PRN  
+
+            - **General Medicine** → date, purpose or issue  
+            Example: Referral 10/1/25 = ortho eval for R knee pain  
+
+            3️⃣ Do NOT infer, guess, or expand missing information.
+            Only extract what is **explicitly stated**.
+
+            4️⃣ Use date format MM/DD.  
+            If no explicit date exists, use: {mm_dd}
+
+            5️⃣ Ignore:
+            - Patient names, ages, vitals, complaints, ROS, disclaimers, signatures, addresses, greetings.  
+            - Historical narrative or unrelated paragraphs.
+
+            6️⃣ OUTPUT FORMAT:
+            Return ONLY JSON:
+            {{
+            "bullet_points": [
+                "• [concise summary 1]",
+                "• [concise summary 2]",
+                "• [concise summary 3]"
+            ]
+            }}
+
+            ❌ DO NOT:
+            - Add explanations, section names, or headings
+            - Include inferred or assumed data
+            - Write paragraphs or multi-line sentences
+
+            ✅ EXAMPLES OF CORRECT OUTPUT:
+            {{
+            "bullet_points": [
+                "• MRI L knee 5/10/25 = medial meniscus tear",
+                "• Dr Johnson Ortho 9/12/25 = PT + ESI plan; f/u 6w",
+                "• UR 9/8/25 = PT denied; no functional improvement"
+            ]
+            }}
+
+            Now extract and summarize according to the Kebilo v2 categorization.
+
+            {format_instructions}
+        """
         return PromptTemplate(
             template=template,
             input_variables=["current_raw_text", "mm_dd"],
@@ -135,6 +202,7 @@ class ReportAnalyzer:
                 "format_instructions": self.bullet_parser.get_format_instructions()
             },
         )
+ 
     def format_whats_new_as_highlights(self, bullet_points: List[str]) -> List[str]:
         """
         Formats the bullet points for display (minimal processing since LLM already formatted them).
