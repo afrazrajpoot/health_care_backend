@@ -237,7 +237,7 @@ model Task {
   reason         String?
   actions        String[]  @default(["Claim", "Complete"])
   sourceDocument String?
-
+  claimNumber    String?
   // Quick notes as a nested JSON field
   quickNotes Json? @default("{\"status_update\": \"\", \"details\": \"\", \"one_line_note\": \"\"}")
 
