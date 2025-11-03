@@ -24,7 +24,7 @@ class DateReasoning(BaseModel):
 
 class BodyPartAnalysis(BaseModel):
     """Analysis for a specific body part"""
-    body_part: str = Field(..., description="Specific body part involved")
+    body_part: str = Field(..., description="Specific body part involved if it's a workers comp report else disease/condition")
     diagnosis: str = Field(..., description="Diagnosis for this body part")
     key_concern: str = Field(..., description="Key concern for this body part")
     clinical_summary: str = Field(..., description="Clinical summary of important findings for this body part")
@@ -43,7 +43,7 @@ class DocumentAnalysis(BaseModel):
     rd: str = Field(..., description="Report date in YYYY-MM-DD format")
     
     # Single body part (backward compatibility) or multiple body parts
-    body_part: str = Field(..., description="Primary body part involved")
+    body_part: str = Field(..., description="Primary body part involved if it's a workers comp report else disease/condition")
     body_parts_analysis: List[BodyPartAnalysis] = Field(default=[], description="Detailed analysis for each body part")
     
     diagnosis: str = Field(..., description="Primary diagnosis and key findings")
@@ -122,7 +122,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
            - BODY PART ANALYSIS (MULTIPLE SUPPORT WITH CLINICAL SUMMARY & TREATMENT PLAN):
              * Primary Body Part: Extract the main body part involved (e.g., "lumbar spine", "right knee"). If not present, "Not specified".
              * Multiple Body Parts: If document mentions multiple distinct body parts (e.g., "right shoulder and left knee", "cervical and lumbar spine"), analyze EACH separately in body_parts_analysis array. For each body part include:
-               - body_part: Specific body part name
+               - body_part: Specific body part name (e.g., "right shoulder", "left knee") if it's a workers comp report else disease/condition but make sure if it's a workers comp report to extract the body part involved
                - diagnosis: Diagnosis specific to this body part
                - key_concern: Key concern for this body part  
                - clinical_summary: Clinical summary of important findings, symptoms, and observations for this body part (2-3 sentences)
@@ -183,7 +183,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
         - Output ONLY valid JSON matching the schema. Include date_reasoning and all fields fully.
 
         OUTPUT FORMAT:
-        - body_part: Always include the primary body part
+        - body_part: Always include the primary body part involved if it's a workers comp report else disease/condition 
         - body_parts_analysis: Array of detailed analysis for each distinct body part mentioned
         - If only one body part: body_parts_analysis should contain one entry matching the primary body_part
         - If multiple body parts: body_parts_analysis should contain entries for each, and body_part should be the primary/most significant one
