@@ -1,4 +1,4 @@
-# celery_config.py
+# celery_config.py (updated)
 from celery import Celery
 import os
 import logging
@@ -27,12 +27,12 @@ app.conf.update(
     broker_connection_retry_on_startup=True,
     result_expires=86400,
     
-    # Simplified - use default queue
+    # Updated for parallelism: Allow prefetching multiple tasks
     task_acks_late=True,
-    worker_prefetch_multiplier=1,
+    worker_prefetch_multiplier=4,  # Increase this (e.g., 4-16) based on your worker concurrency and task size
 )
 
-# Test Redis connection
+# Test Redis connection (unchanged)
 from redis import Redis
 
 def test_broker_connection():

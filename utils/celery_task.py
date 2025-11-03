@@ -1,5 +1,5 @@
-
 from config.celery_config import app as celery_app
+from celery import group  # Added for parallel task execution
 from datetime import datetime
 import traceback
 import requests
@@ -41,6 +41,9 @@ def finalize_document_task(self, webhook_payload: dict, batch_task_id: str = Non
         # Fallback: generate a unique ID
         current_task_id = str(uuid.uuid4())
         logger.warning(f"⚠️ Using fallback task ID: {current_task_id}")
+    
+    # Added for visibility in parallel runs
+    logger.info(f"🎯 Sub-task {current_task_id} started for file {file_index}: {filename} in batch {batch_task_id}")
     
     process_msg = f"🔄 Processing file {file_num}: {filename}"
     logger.info(process_msg)
@@ -213,9 +216,10 @@ def process_batch_documents(self, payloads: list[dict]):
     """
     Master batch processing task with queue tracking and deduplication
     Handles both batches and single documents (as a batch of 1).
+    Now dispatches file tasks in parallel using Celery group.
     """
     try:
-        file_service = FileService()
+        file_service = FileService()  # Kept for compatibility; unused in current logic
         results = []
         
         # FIX: Get batch task ID safely
@@ -257,52 +261,55 @@ def process_batch_documents(self, payloads: list[dict]):
             file_progress=0
         )
         
-        # ===== PROCESS EACH FILE WITH DEDUPLICATION =====
-        for i, payload in enumerate(payloads):
-            filename = payload.get('filename', 'unknown')
-            seq_msg = f"🔄 Batch file {i+1}/{len(payloads)}: {filename}"
-            logger.info(seq_msg)
-            print(seq_msg)
-            
-            # Start file processing (0% file progress, but service will calculate overall)
-            progress_service.update_progress(
-                task_id=batch_task_id,
-                current_step=i + 1,
-                current_file=filename,
-                status='processing'
-            )
-            
-            # Process individual file with queue tracking
-            payload = serialize_payload(payload)
-            
-            # FIX: Generate individual file task ID
-            file_task_id = f"{batch_task_id}_{i}"
-            
-            # Call the task function directly (not as Celery task) to avoid the issue
-            result = finalize_document_task_worker(
-                webhook_payload=payload,
-                batch_task_id=batch_task_id,
-                file_index=i,
-                queue_id=queue_id,
-                file_task_id=file_task_id
-            )
-            results.append(result)
-            
-            # Log result
-            if result["status"] == "success":
-                success_msg = f"✅ Batch file {i+1} success: {filename}"
-                logger.info(success_msg)
-                print(success_msg)
-            elif result["status"] == "skipped":
-                skip_msg = f"⏭️ Batch file {i+1} skipped: {filename} - {result.get('reason', 'Unknown')}"
-                logger.warning(skip_msg)
-                print(skip_msg)
-            else:
-                fail_msg = f"❌ Batch file {i+1} failed: {filename} - {result.get('error', 'Unknown')}"
-                logger.error(fail_msg)
-                print(fail_msg)
+        # ===== PARALLEL PROCESSING: Create group of async tasks =====
+        # Serialize payloads upfront for consistency
+        serialized_payloads = [serialize_payload(p) for p in payloads]
         
-        # Final batch complete update
+        # Build the group: Each sub-task gets its own args (payload, batch_task_id, index, queue_id)
+        # Use .s() for signature (immutable task args)
+        task_group = group(
+            finalize_document_task.s(payload, batch_task_id, i, queue_id)
+            for i, payload in enumerate(serialized_payloads)
+        )
+        
+        # Dispatch the group asynchronously and wait for all results
+        # This blocks the batch task until all sub-tasks complete (but sub-tasks run parallel)
+        group_results = task_group.apply_async().get(timeout=3600)  # 1-hour timeout for entire batch; adjust as needed
+        
+        # Collect results from the group (list of AsyncResult objects)
+        for i, async_result in enumerate(group_results):
+            try:
+                # Get the actual result (dict from finalize_document_task)
+                result = async_result.get(timeout=60)  # Per-result timeout
+                results.append(result)
+                
+                filename = payloads[i].get('filename', 'unknown')
+                if result["status"] == "success":
+                    success_msg = f"✅ Batch file {i+1} success: {filename}"
+                    logger.info(success_msg)
+                    print(success_msg)
+                elif result["status"] == "skipped":
+                    skip_msg = f"⏭️ Batch file {i+1} skipped: {filename} - {result.get('reason', 'Unknown')}"
+                    logger.warning(skip_msg)
+                    print(skip_msg)
+                else:
+                    fail_msg = f"❌ Batch file {i+1} failed: {filename} - {result.get('error', 'Unknown')}"
+                    logger.error(fail_msg)
+                    print(fail_msg)
+            except Exception as sub_err:
+                # Handle any sub-task timeout/failure
+                error_msg = f"❌ Sub-task {i+1} retrieval failed: {str(sub_err)}"
+                logger.error(error_msg)
+                print(error_msg)
+                results.append({
+                    "status": "failed",
+                    "error": str(sub_err),
+                    "filename": payloads[i].get('filename', 'unknown'),
+                    "file_index": i,
+                    "queue_id": queue_id
+                })
+        
+        # Final batch complete update (progress_service should auto-calculate based on sub-updates)
         final_progress = progress_service.update_progress(
             task_id=batch_task_id,
             current_step=len(payloads),
@@ -349,7 +356,7 @@ def process_batch_documents(self, payloads: list[dict]):
 def finalize_document_task_worker(webhook_payload: dict, batch_task_id: str = None, file_index: int = None, queue_id: str = None, file_task_id: str = None):
     """
     Worker function for finalize_document_task that can be called directly
-    This avoids the Celery task context issue
+    This avoids the Celery task context issue (kept for potential synchronous use elsewhere)
     """
     start_time = datetime.now()
     filename = webhook_payload.get('filename', 'unknown')
