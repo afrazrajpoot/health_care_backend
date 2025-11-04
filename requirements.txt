@@ -68,3 +68,5 @@ Celery
 google-cloud-storage
 python-jose
 jose
+apscheduler
+PyJWT

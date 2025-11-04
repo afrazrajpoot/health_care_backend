@@ -60,6 +60,9 @@ class DocumentAnalysis(BaseModel):
     document_type: str = Field(..., description="Type of document")
     summary_points: List[str] = Field(..., description="3-5 key points, each 2-3 words")
     date_reasoning: Optional[DateReasoning] = Field(None, description="Reasoning behind date assignments")
+    
+    # Enhanced field: Task need analysis for EVERY document
+    is_task_needed: bool = Field(default=False, description="If analysis determines any tasks are needed based on pending actions")
 
 class BriefSummary(BaseModel):
     """Structured brief summary of the report"""
@@ -155,7 +158,28 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
         7. AI OUTCOME KEYWORDS (GENERATED BASED ON ANALYSIS):
            - Based on deep analysis of diagnosis, status, key_concern, extracted_recommendation, extracted_decision, ur_decision, ur_denial_reason, consulting_doctor, and referral_doctor: Generate key outcome prediction keywords/phrases only (comma-separated, e.g., "full recovery 6 weeks, monitor pain, low risk"). Straightforward for doctor, no sentences—just core terms tied to evidence.
         
-        8. DEEP DATE ANALYSIS & REASONING (Integrated - EXTRACT IF PRESENT):
+        8. TASK NEED ANALYSIS (CRITICAL - CHECK EVERY DOCUMENT):
+           - Analyze the ENTIRE document text to determine if any tasks need to be created
+           - Set is_task_needed to TRUE ONLY if the document indicates:
+             * PENDING actions, treatments, or procedures that are NOT YET COMPLETED
+             * FUTURE appointments, follow-ups, or consultations that need scheduling
+             * NEW recommendations that require implementation
+             * AUTHORIZATIONS needed for treatments/procedures
+             * REFERRALS that need to be processed
+             * Any other actionable items that are NOT marked as completed
+           
+           - Set is_task_needed to FALSE if:
+             * Document describes only COMPLETED procedures/treatments
+             * Everything mentioned is already DONE or FINISHED
+             * No pending actions, future plans, or unmet recommendations
+             * Document is purely historical/descriptive with no forward-looking actions
+             * All follow-ups, treatments, and recommendations are marked as completed
+           
+           - KEY INDICATORS FOR TASK NEEDED:
+             ✅ TRUE: "Schedule follow-up", "Needs PT authorization", "Refer to specialist", "Pending MRI approval", "Will start new medication", "Plan for surgery next month"
+             ❌ FALSE: "PT completed", "Follow-up done", "Medication started", "All treatments finished", "No further action needed", "Case closed"
+        
+        9. DEEP DATE ANALYSIS & REASONING (Integrated - EXTRACT IF PRESENT):
            - Extract ALL dates: Convert MM/DD/YYYY etc. to YYYY-MM-DD. Ignore non-dates (ages, IDs). If no dates, empty lists and note in reasoning.
            - Contexts: 50-100 chars around each.
            - Reasoning: Step-by-step—classify as DOB (birth context), DOI (injury), RD (report/signature/end). Use document flow (early=DOB/DOI, late=RD). Handle relatives (e.g., "2 weeks ago" → subtract from current_date).
@@ -163,7 +187,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
            - Assignments: Predict DOB/DOI/RD based on norms; set rd to latest/most recent if unclear.
            - If no dates: Empty lists, note in reasoning.
         
-        9. DOCUMENT OVERVIEW (EXTRACT IF PRESENT):
+        10. DOCUMENT OVERVIEW (EXTRACT IF PRESENT):
            - Document Type: From structure/patterns. If unclear, "medical_document".
            - Summary Points: 3-5 key points, each 2-3 words (e.g., "Lumbar strain diagnosed", "Pain reduced to 4/10"). If none, ["Not specified"].
         
@@ -180,6 +204,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
         - Body Parts: If multiple body parts mentioned, analyze each separately in body_parts_analysis array with clinical_summary and treatment_plan.
         - Clinical Summary: Summarize important clinical findings, symptoms, observations for each body part.
         - Treatment Plan: Extract specific treatments, therapies, medications, procedures planned for each body part.
+        - TASK NEED ANALYSIS: Check EVERY document thoroughly. Set TRUE only for pending/future actions. Set FALSE for completed/historical documents.
         - Output ONLY valid JSON matching the schema. Include date_reasoning and all fields fully.
 
         OUTPUT FORMAT:
@@ -187,6 +212,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
         - body_parts_analysis: Array of detailed analysis for each distinct body part mentioned
         - If only one body part: body_parts_analysis should contain one entry matching the primary body_part
         - If multiple body parts: body_parts_analysis should contain entries for each, and body_part should be the primary/most significant one
+        - is_task_needed: Boolean indicating if any tasks need to be created (TRUE for pending actions, FALSE for completed/historical)
 
         {format_instructions}
         """
@@ -235,6 +261,8 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
                 logger.info(f"✅ Body parts analysis: {len(result['body_parts_analysis'])} body parts found")
                 for bp in result['body_parts_analysis']:
                     logger.info(f"   - {bp['body_part']}: Clinical summary available, Treatment plan available")
+            if 'is_task_needed' in result:
+                logger.info(f"✅ Task Need Analysis: {result['is_task_needed']}")
             
             final_analysis = DocumentAnalysis(**result)
             
@@ -254,6 +282,7 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
             logger.info(f"   - Body Part: {final_analysis.body_part}")
             logger.info(f"   - AI Outcome: {final_analysis.ai_outcome}")
             logger.info(f"   - Document Type: {final_analysis.document_type}")
+            logger.info(f"   - Task Needed: {final_analysis.is_task_needed}")
             
             return final_analysis
             
@@ -319,7 +348,8 @@ class EnhancedReportAnalyzer(ReportAnalyzer):
             ai_outcome="Insufficient data; full evaluation needed",
             document_type="medical_document",
             summary_points=["Not specified"],
-            date_reasoning=None
+            date_reasoning=None,
+            is_task_needed=False  # Default to False in fallback
         )
     
     def get_date_reasoning(self, document_text: str) -> Dict[str, Any]:

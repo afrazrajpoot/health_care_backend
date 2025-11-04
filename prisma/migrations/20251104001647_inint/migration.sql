@@ -66,13 +66,37 @@ CREATE TABLE "Document" (
     "blobPath" TEXT,
     "fileName" TEXT,
     "fileHash" VARCHAR(64),
+    "mode" TEXT DEFAULT 'wc',
     "reportDate" TIMESTAMP(3),
     "physicianId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "ur_denial_reason" TEXT,
     "userId" TEXT,
 
     CONSTRAINT "Document_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "body_part_snapshots" (
+    "id" TEXT NOT NULL,
+    "documentId" TEXT NOT NULL,
+    "bodyPart" TEXT NOT NULL,
+    "dx" TEXT NOT NULL,
+    "keyConcern" TEXT NOT NULL,
+    "nextStep" TEXT,
+    "urDecision" TEXT,
+    "recommended" TEXT,
+    "aiOutcome" TEXT,
+    "consultingDoctor" TEXT,
+    "keyFindings" TEXT,
+    "treatmentApproach" TEXT,
+    "clinicalSummary" TEXT,
+    "referralDoctor" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "body_part_snapshots_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -81,6 +105,15 @@ CREATE TABLE "SummarySnapshot" (
     "dx" TEXT NOT NULL,
     "keyConcern" TEXT NOT NULL,
     "nextStep" TEXT NOT NULL,
+    "bodyPart" TEXT NOT NULL,
+    "urDecision" TEXT,
+    "recommended" TEXT,
+    "aiOutcome" TEXT,
+    "consultingDoctor" TEXT,
+    "keyFindings" TEXT,
+    "treatmentApproach" TEXT,
+    "clinicalSummary" TEXT,
+    "referralDoctor" TEXT,
     "documentId" TEXT NOT NULL,
 
     CONSTRAINT "SummarySnapshot_pkey" PRIMARY KEY ("id")
@@ -187,8 +220,10 @@ CREATE TABLE "Task" (
     "status" TEXT NOT NULL DEFAULT 'Pending',
     "dueDate" TIMESTAMP(3),
     "patient" TEXT NOT NULL,
+    "reason" TEXT,
     "actions" TEXT[] DEFAULT ARRAY['Claim', 'Complete']::TEXT[],
     "sourceDocument" TEXT,
+    "claimNumber" TEXT,
     "quickNotes" JSONB DEFAULT '{"status_update": "", "details": "", "one_line_note": ""}',
     "documentId" TEXT,
     "physicianId" TEXT,
@@ -212,6 +247,37 @@ CREATE TABLE "WorkflowStats" (
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "WorkflowStats_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "subscriptions" (
+    "id" TEXT NOT NULL,
+    "physicianId" TEXT NOT NULL,
+    "plan" TEXT NOT NULL,
+    "amountTotal" INTEGER NOT NULL,
+    "status" TEXT NOT NULL,
+    "stripeCustomerId" TEXT,
+    "stripeSubscriptionId" TEXT,
+    "documentParse" INTEGER NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "subscriptions_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "CheckoutSession" (
+    "id" TEXT NOT NULL,
+    "stripeSessionId" TEXT NOT NULL,
+    "physicianId" TEXT NOT NULL,
+    "plan" TEXT NOT NULL,
+    "amount" INTEGER NOT NULL,
+    "status" TEXT NOT NULL,
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "CheckoutSession_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateIndex
@@ -244,6 +310,15 @@ CREATE UNIQUE INDEX "DocumentSummary_documentId_key" ON "DocumentSummary"("docum
 -- CreateIndex
 CREATE UNIQUE INDEX "intake_links_token_key" ON "intake_links"("token");
 
+-- CreateIndex
+CREATE UNIQUE INDEX "CheckoutSession_stripeSessionId_key" ON "CheckoutSession"("stripeSessionId");
+
+-- CreateIndex
+CREATE INDEX "CheckoutSession_stripeSessionId_idx" ON "CheckoutSession"("stripeSessionId");
+
+-- CreateIndex
+CREATE INDEX "CheckoutSession_physicianId_idx" ON "CheckoutSession"("physicianId");
+
 -- AddForeignKey
 ALTER TABLE "Account" ADD CONSTRAINT "Account_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
@@ -252,6 +327,9 @@ ALTER TABLE "Session" ADD CONSTRAINT "Session_userId_fkey" FOREIGN KEY ("userId"
 
 -- AddForeignKey
 ALTER TABLE "Document" ADD CONSTRAINT "Document_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "body_part_snapshots" ADD CONSTRAINT "body_part_snapshots_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "Document"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "SummarySnapshot" ADD CONSTRAINT "SummarySnapshot_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "Document"("id") ON DELETE RESTRICT ON UPDATE CASCADE;

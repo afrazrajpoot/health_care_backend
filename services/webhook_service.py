@@ -169,7 +169,7 @@ class WebhookService:
         )
         logger.info(f"Lookup data: {lookup_data}")
 
-        # Check if this is first time document with only claim number (no previous documents found)
+    # Check if this is first time document with only claim number (no previous documents found)
         is_first_time_claim_only = (
             processed_data["has_claim_number"]
             and not processed_data["has_patient_name"]
@@ -594,47 +594,68 @@ class WebhookService:
         if not parse_decremented:
             logger.warning(f"⚠️ Could not decrement parse count for physician {physician_id}")
 
-        # AI Task Creation
-        task_creator = TaskCreator()
-        tasks = await task_creator.generate_tasks(document_analysis.dict(), processed_data["filename"])
-
-        # Save tasks to DB
-        prisma = Prisma()
-        await prisma.connect()
+        # ✅ ENHANCED TASK CREATION - Check is_task_needed for EVERY document
         created_tasks = 0
-        for task in tasks:
+        if document_analysis.is_task_needed:  # Changed from is_rfa_task_needed to is_task_needed
+            logger.info(f"🔧 Task needed - generating tasks for document {processed_data['filename']}")
+            task_creator = TaskCreator()
+            
             try:
-                # Map task fields
-                mapped_task = {
-                    "description": task.get("description"),
-                    "department": task.get("department"),
-                    "status": task.get("status", "Pending"),
-                    "dueDate": None,
-                    "patient": task.get("patient", "Unknown"),
-                    "actions": task.get("actions") if isinstance(task.get("actions"), list) else [],
-                    "sourceDocument": task.get("source_document") or task.get("sourceDocument") or processed_data.get("filename"),
-                    "documentId": document_id,
-                    "physicianId": physician_id,
-                }
+                # Prepare document data for task generation
+                document_data = document_analysis.dict()
+                document_data["filename"] = processed_data["filename"]
+                document_data["document_id"] = document_id
+                document_data["physician_id"] = physician_id
+                
+                # Generate tasks based on document analysis
+                tasks = await task_creator.generate_tasks(document_data, processed_data["filename"])
+                logger.info(f"📋 Generated {len(tasks)} tasks for document {processed_data['filename']}")
 
-                # Normalize due date
-                due_raw = task.get("due_date") or task.get("dueDate")
-                if due_raw:
-                    if isinstance(due_raw, str):
-                        try:
-                            mapped_task["dueDate"] = datetime.strptime(due_raw, "%Y-%m-%d")
-                        except Exception:
-                            mapped_task["dueDate"] = datetime.now() + timedelta(days=3)
-                    else:
-                        mapped_task["dueDate"] = due_raw
+                # Save tasks to DB
+                prisma = Prisma()
+                await prisma.connect()
+                
+                for task in tasks:
+                    try:
+                        # Map task fields
+                        mapped_task = {
+                            "description": task.get("description"),
+                            "department": task.get("department"),
+                            "status":"Open",
+                            "dueDate": None,
+                            "patient": task.get("patient", "Unknown"),
+                            "actions": task.get("actions") if isinstance(task.get("actions"), list) else [],
+                            "sourceDocument": task.get("source_document") or task.get("sourceDocument") or processed_data.get("filename"),
+                            "documentId": document_id,
+                            "physicianId": physician_id,
+                        }
 
-                await prisma.task.create(data=mapped_task)
-                created_tasks += 1
-            except Exception as task_err:
-                logger.error(f"❌ Failed to create task for document {processed_data['filename']}: {task_err}", exc_info=True)
-                continue
+                        # Normalize due date
+                        due_raw = task.get("due_date") or task.get("dueDate")
+                        if due_raw:
+                            if isinstance(due_raw, str):
+                                try:
+                                    mapped_task["dueDate"] = datetime.strptime(due_raw, "%Y-%m-%d")
+                                except Exception:
+                                    mapped_task["dueDate"] = datetime.now() + timedelta(days=3)
+                            else:
+                                mapped_task["dueDate"] = due_raw
 
-        logger.info(f"✅ {created_tasks} / {len(tasks)} tasks created for document {processed_data['filename']}")
+                        await prisma.task.create(data=mapped_task)
+                        created_tasks += 1
+                        logger.info(f"✅ Created task: {task.get('description', 'Unknown task')}")
+                        
+                    except Exception as task_err:
+                        logger.error(f"❌ Failed to create task for document {processed_data['filename']}: {task_err}", exc_info=True)
+                        continue
+
+                await prisma.disconnect()
+                logger.info(f"✅ {created_tasks} / {len(tasks)} tasks created for document {processed_data['filename']}")
+                
+            except Exception as e:
+                logger.error(f"❌ Task generation failed for document {processed_data['filename']}: {str(e)}", exc_info=True)
+        else:
+            logger.info(f"ℹ️ No tasks needed for document {processed_data['filename']} - skipping task creation")
 
         # Update previous documents' fields (skip for first-time claim-only as there are no previous)
         # FIXED: Only update if lookup found previous documents for this specific patient/claim (total_documents > 0)
@@ -694,9 +715,12 @@ class WebhookService:
                 "total_body_parts": len(summary_snapshots),
                 "has_multiple_body_parts": has_multiple_body_parts,
                 "body_parts": [snapshot["body_part"] for snapshot in summary_snapshots]
+            },
+            "task_analysis": {  # Changed from rfa_task_analysis to task_analysis
+                "is_task_needed": document_analysis.is_task_needed,  # Changed from is_rfa_task_needed
+                "tasks_created": created_tasks
             }
         }
-    
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
         Orchestrates the full webhook processing pipeline using the 4 steps.

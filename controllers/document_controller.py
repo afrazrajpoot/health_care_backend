@@ -38,46 +38,8 @@ from datetime import datetime
 PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT', 'your-gcp-project-id')
 
 
-@router.post("/webhook/save-document")
-async def save_document_webhook(request: Request):
-    """
-    Main webhook handler: Uses WebhookService to process the request.
-    """
-    try:
-        data = await request.json()
-        logger.info(f"📥 Webhook received for document save: {data.get('document_id', 'unknown')}")
 
-        db_service = await get_database_service()
-        service = WebhookService()
-        result = await service.handle_webhook(data, db_service)
 
-        return result
-
-    except HTTPException:
-        raise  # Re-raise HTTP exceptions
-    except Exception as e:
-        logger.error(f"❌ Webhook save failed: {str(e)}", exc_info=True)
-
-        # Save to FailDocs on general exception
-        if 'data' in locals():
-            blob_path = data.get("blob_path", "") ,
-            physician_id = data.get("physician_id")
-            reason = f"Webhook processing failed: {str(e)}"
-
-            # Emit error event
-            try:
-                await sio.emit('task_error', {
-                    'document_id': data.get('document_id', 'unknown'),
-                    'filename': data.get('filename', 'unknown'),
-                    'error': str(e),
-                    'gcs_url': data.get('gcs_url', 'unknown'),
-                    'physician_id': physician_id,
-                    'blob_path': blob_path
-                })
-            except:
-                pass  # Ignore emit failure
-
-        raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
 @router.post("/update-fail-document")
 async def update_fail_document(request: Request):
     try:
@@ -300,19 +262,8 @@ async def extract_documents(
         raise HTTPException(status_code=500, detail=f"Global processing failed: {str(global_exc)}")
 
 
-@router.get("/progress/{task_id}")
-async def get_progress(task_id: str):
-    """Get current progress for a task"""
-    try:
-        progress = await progress_service.get_progress(task_id)
-        if not progress:
-            raise HTTPException(status_code=404, detail="Task progress not found")
-        return progress
-    except Exception as e:
-        error_msg = f"❌ Error getting progress for task {task_id}: {str(e)}"
-        logger.error(error_msg)
-        print(error_msg)  # DEBUG PRINT
-        raise HTTPException(status_code=500, detail=f"Error retrieving progress: {str(e)}")
+
+
 
 from typing import Optional
 
