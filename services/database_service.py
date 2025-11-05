@@ -881,182 +881,186 @@ class DatabaseService:
             logger.error(f"❌ Error retrieving document for {patient_name}: {str(e)}")
             raise
     async def save_document_analysis(
-            self,
-            extraction_result: ExtractionResult,
-            file_name: str,
-            file_size: int,
-            mime_type: str,
-            processing_time_ms: int,
-            gcs_file_link: str,
-            patient_name: str,
-            claim_number: str,
-            dob: str,
-            doi: str,
-            rd: datetime,
-            status: str,
-            brief_summary: str,
-            summary_snapshots: List[Dict[str, Any]],  # ✅ Now accepts list of snapshots
-            whats_new: Dict[str, Any],
-            adl_data: Dict[str, Any],
-            document_summary: Dict[str, Any],
-            physician_id: Optional[str] = None,
-            blob_path: Optional[str] = None,
-            file_hash: Optional[str] = None,
-            mode: Optional[str] = None,
-            ur_denial_reason: Optional[str] = None
-        ) -> str:
-            """
-            Save document analysis results to the database.
-            Now supports multiple summary snapshots for multiple body parts using bodyPartSnapshots relation.
+        self,
+        extraction_result: ExtractionResult,
+        file_name: str,
+        file_size: int,
+        mime_type: str,
+        processing_time_ms: int,
+        gcs_file_link: str,
+        patient_name: str,
+        claim_number: str,
+        dob: str,
+        doi: str,
+        rd: datetime,
+        status: str,
+        brief_summary: str,
+        summary_snapshots: List[Dict[str, Any]],  # ✅ Now accepts list of snapshots
+        whats_new: Dict[str, Any],
+        adl_data: Dict[str, Any],
+        document_summary: Dict[str, Any],
+        physician_id: Optional[str] = None,
+        blob_path: Optional[str] = None,
+        file_hash: Optional[str] = None,
+        mode: Optional[str] = None,
+        ur_denial_reason: Optional[str] = None,
+        original_name: Optional[str] = None  # ✅ New parameter for original filename
+    ) -> str:
+        """
+        Save document analysis results to the database.
+        Now supports multiple summary snapshots for multiple body parts using bodyPartSnapshots relation.
 
-            - Stores extracted metadata and relationships in Prisma models.
-            - Handles JSON fields and optional relations.
-            - Checks for duplicate documents based on file name.
-            """
-            try:
-                print(f"📊 Saving {len(summary_snapshots)} summary snapshots for document")
+        - Stores extracted metadata and relationships in Prisma models.
+        - Handles JSON fields and optional relations.
+        - Checks for duplicate documents based on file name.
+        """
+        try:
+            print(f"📊 Saving {len(summary_snapshots)} summary snapshots for document")
 
-                # ✅ Step 1: Check if document already exists (using filename)
-                # if await self.document_exists(file_name, file_size):
-                #     existing_doc = await self.prisma.document.find_first(
-                #         where={"gcsFileLink": {"contains": file_name}},
-                #         order={"createdAt": "desc"}
-                #     )
-                #     logger.warning(
-                #         f"⚠️ Document already exists: {file_name} "
-                #         f"(ID: {existing_doc.id if existing_doc else 'N/A'}). Skipping save."
-                #     )
-                #     return existing_doc.id if existing_doc else "unknown"
+            # ✅ Step 1: Check if document already exists (using filename)
+            # if await self.document_exists(file_name, file_size):
+            #     existing_doc = await self.prisma.document.find_first(
+            #         where={"gcsFileLink": {"contains": file_name}},
+            #         order={"createdAt": "desc"}
+            #     )
+            #     logger.warning(
+            #         f"⚠️ Document already exists: {file_name} "
+            #         f"(ID: {existing_doc.id if existing_doc else 'N/A'}). Skipping save."
+            #     )
+            #     return existing_doc.id if existing_doc else "unknown"
 
-                # ✅ Step 2: Ensure document_summary has 'date'
-                if "createdAt" in document_summary and "date" not in document_summary:
-                    document_summary["date"] = document_summary["createdAt"]
+            # ✅ Step 2: Ensure document_summary has 'date'
+            if "createdAt" in document_summary and "date" not in document_summary:
+                document_summary["date"] = document_summary["createdAt"]
 
-                # ✅ Step 3: Handle whatsNew as JSON string (for scalar Json field)
-                whats_new_json = json.dumps(whats_new) if whats_new else None
+            # ✅ Step 3: Handle whatsNew as JSON string (for scalar Json field)
+            whats_new_json = json.dumps(whats_new) if whats_new else None
 
-                # ✅ Step 4: Use the FIRST snapshot as primary summarySnapshot (for backward compatibility)
-                primary_snapshot = summary_snapshots[0] if summary_snapshots else {}
-                
-                # ✅ Step 5: Create Document with nested relations including bodyPartSnapshots
-                document_data = {
-                    "patientName": patient_name,
-                    "claimNumber": claim_number,
-                    "dob": dob,
-                    "doi": doi,
-                    "status": status,
-                    "gcsFileLink": gcs_file_link,
-                    "briefSummary": brief_summary,
-                    "whatsNew": whats_new_json,
-                    "physicianId": physician_id,
-                    "reportDate": rd if rd else datetime.now(),
-                    "blobPath": blob_path,
-                    "fileName": file_name,
-                    "mode": mode,
-                    "ur_denial_reason": ur_denial_reason,
-                    **({"fileHash": file_hash} if file_hash else {}),
+            # ✅ Step 4: Use the FIRST snapshot as primary summarySnapshot (for backward compatibility)
+            primary_snapshot = summary_snapshots[0] if summary_snapshots else {}
+            
+            # ✅ Step 5: Create Document with nested relations including bodyPartSnapshots
+            document_data = {
+                "patientName": patient_name,
+                "claimNumber": claim_number,
+                "dob": dob,
+                "doi": doi,
+                "status": status,
+                "gcsFileLink": gcs_file_link,
+                "briefSummary": brief_summary,
+                "whatsNew": whats_new_json,
+                "physicianId": physician_id,
+                "reportDate": rd if rd else datetime.now(),
+                "blobPath": blob_path,
+                "fileName": file_name,
+                "originalName": original_name,  # ✅ Save the original name
+                "mode": mode,
+                "ur_denial_reason": ur_denial_reason,
+                **({"fileHash": file_hash} if file_hash else {}),
+            }
+
+            # ✅ Primary summary snapshot (for backward compatibility)
+            if summary_snapshots:
+                document_data["summarySnapshot"] = {
+                    "create": {
+                        "dx": primary_snapshot.get("dx", ""),
+                        "keyConcern": primary_snapshot.get("key_concern", ""),
+                        "nextStep": primary_snapshot.get("next_step", ""),
+                        "bodyPart": primary_snapshot.get("body_part", ""),
+                        "urDecision": primary_snapshot.get("ur_decision", None),
+                        "recommended": primary_snapshot.get("recommended", None),
+                        "aiOutcome": primary_snapshot.get("ai_outcome", None),
+                        "consultingDoctor": primary_snapshot.get("consulting_doctor", ""),
+                        # New fields for BodyPartSnapshot schema
+                        "keyFindings": primary_snapshot.get("key_findings", None),
+                        "treatmentApproach": primary_snapshot.get("treatment_approach", None),
+                        "clinicalSummary": primary_snapshot.get("clinical_summary", None),
+                        "referralDoctor": primary_snapshot.get("referral_doctor", None)
+                    }
                 }
 
-                # ✅ Primary summary snapshot (for backward compatibility)
-                if summary_snapshots:
-                    document_data["summarySnapshot"] = {
-                        "create": {
-                            "dx": primary_snapshot.get("dx", ""),
-                            "keyConcern": primary_snapshot.get("key_concern", ""),
-                            "nextStep": primary_snapshot.get("next_step", ""),
-                            "bodyPart": primary_snapshot.get("body_part", ""),
-                            "urDecision": primary_snapshot.get("ur_decision", None),
-                            "recommended": primary_snapshot.get("recommended", None),
-                            "aiOutcome": primary_snapshot.get("ai_outcome", None),
-                            "consultingDoctor": primary_snapshot.get("consulting_doctor", ""),
+            # ✅ Multiple body part snapshots using the bodyPartSnapshots relation
+            if summary_snapshots:
+                document_data["bodyPartSnapshots"] = {
+                    "create": [
+                        {
+                            "bodyPart": snapshot.get("body_part", ""),
+                            "dx": snapshot.get("dx", ""),
+                            "keyConcern": snapshot.get("key_concern", ""),
+                            "nextStep": snapshot.get("next_step", ""),
+                            "urDecision": snapshot.get("ur_decision", None),
+                            "recommended": snapshot.get("recommended", None),
+                            "aiOutcome": snapshot.get("ai_outcome", None),
+                            "consultingDoctor": snapshot.get("consulting_doctor", ""),
                             # New fields for BodyPartSnapshot schema
-                            "keyFindings": primary_snapshot.get("key_findings", None),
-                            "treatmentApproach": primary_snapshot.get("treatment_approach", None),
-                            "clinicalSummary": primary_snapshot.get("clinical_summary", None),
-                            "referralDoctor": primary_snapshot.get("referral_doctor", None)
+                            "keyFindings": snapshot.get("key_findings", None),
+                            "treatmentApproach": snapshot.get("treatment_approach", None),
+                            "clinicalSummary": snapshot.get("clinical_summary", None),
+                            "referralDoctor": snapshot.get("referral_doctor", None)
                         }
-                    }
-
-                # ✅ Multiple body part snapshots using the bodyPartSnapshots relation
-                if summary_snapshots:
-                    document_data["bodyPartSnapshots"] = {
-                        "create": [
-                            {
-                                "bodyPart": snapshot.get("body_part", ""),
-                                "dx": snapshot.get("dx", ""),
-                                "keyConcern": snapshot.get("key_concern", ""),
-                                "nextStep": snapshot.get("next_step", ""),
-                                "urDecision": snapshot.get("ur_decision", None),
-                                "recommended": snapshot.get("recommended", None),
-                                "aiOutcome": snapshot.get("ai_outcome", None),
-                                "consultingDoctor": snapshot.get("consulting_doctor", ""),
-                                # New fields for BodyPartSnapshot schema
-                                "keyFindings": snapshot.get("key_findings", None),
-                                "treatmentApproach": snapshot.get("treatment_approach", None),
-                                "clinicalSummary": snapshot.get("clinical_summary", None),
-                                "referralDoctor": snapshot.get("referral_doctor", None)
-                            }
-                            for snapshot in summary_snapshots
-                        ]
-                    }
-
-                # ✅ ADL (Activities of Daily Living)
-                document_data["adl"] = {
-                    "create": {
-                        "adlsAffected": adl_data.get("adls_affected", ""),
-                        "workRestrictions": adl_data.get("work_restrictions", "")
-                    }
+                        for snapshot in summary_snapshots
+                    ]
                 }
 
-                # ✅ Document Summary
-                document_data["documentSummary"] = {
-                    "create": {
-                        "type": document_summary.get("type", ""),
-                        "date": rd if rd else datetime.now(),
-                        "summary": document_summary.get("summary", "")
-                    }
+            # ✅ ADL (Activities of Daily Living)
+            document_data["adl"] = {
+                "create": {
+                    "adlsAffected": adl_data.get("adls_affected", ""),
+                    "workRestrictions": adl_data.get("work_restrictions", "")
                 }
+            }
 
-                # ✅ Step 6: Create the document with all nested relations
-                document = await self.prisma.document.create(
-                    data=document_data,
-                    include={
-                        "summarySnapshot": True,
-                        "adl": True,
-                        "documentSummary": True,
-                        "bodyPartSnapshots": True  # Include body part snapshots in response
-                    }
-                )
+            # ✅ Document Summary
+            document_data["documentSummary"] = {
+                "create": {
+                    "type": document_summary.get("type", ""),
+                    "date": rd if rd else datetime.now(),
+                    "summary": document_summary.get("summary", "")
+                }
+            }
 
-                # ✅ Step 7: Logging and response
-                logger.info(f"✅ Document saved with ID: {document.id}")
-                logger.info(f"📊 Created {len(summary_snapshots)} body part snapshots")
-                
-                if len(summary_snapshots) > 1:
-                    body_parts = [snapshot.get("body_part", "unknown") for snapshot in summary_snapshots]
-                    logger.info(f"🔍 Body parts processed: {', '.join(body_parts)}")
-                
-                # Log the new fields for verification
-                for i, snapshot in enumerate(summary_snapshots):
-                    logger.info(f"📋 Body Part {i+1}: {snapshot.get('body_part')}")
-                    if snapshot.get('clinical_summary'):
-                        logger.info(f"   Clinical Summary: {snapshot.get('clinical_summary')[:100]}...")
-                    if snapshot.get('treatment_approach'):
-                        logger.info(f"   Treatment Approach: {snapshot.get('treatment_approach')[:100]}...")
-                    if snapshot.get('referral_doctor'):
-                        logger.info(f"   Referral Doctor: {snapshot.get('referral_doctor')}")
-                        
-                if whats_new_json:
-                    logger.info(f"📊 WhatsNew JSON: {whats_new_json[:100]}...")
-                if ur_denial_reason:
-                    logger.info(f"📋 UR Denial Reason saved: {ur_denial_reason[:100]}...")
+            # ✅ Step 6: Create the document with all nested relations
+            document = await self.prisma.document.create(
+                data=document_data,
+                include={
+                    "summarySnapshot": True,
+                    "adl": True,
+                    "documentSummary": True,
+                    "bodyPartSnapshots": True  # Include body part snapshots in response
+                }
+            )
+
+            # ✅ Step 7: Logging and response
+            logger.info(f"✅ Document saved with ID: {document.id}")
+            logger.info(f"📊 Created {len(summary_snapshots)} body part snapshots")
+            
+            if len(summary_snapshots) > 1:
+                body_parts = [snapshot.get("body_part", "unknown") for snapshot in summary_snapshots]
+                logger.info(f"🔍 Body parts processed: {', '.join(body_parts)}")
+            
+            # Log the new fields for verification
+            for i, snapshot in enumerate(summary_snapshots):
+                logger.info(f"📋 Body Part {i+1}: {snapshot.get('body_part')}")
+                if snapshot.get('clinical_summary'):
+                    logger.info(f"   Clinical Summary: {snapshot.get('clinical_summary')[:100]}...")
+                if snapshot.get('treatment_approach'):
+                    logger.info(f"   Treatment Approach: {snapshot.get('treatment_approach')[:100]}...")
+                if snapshot.get('referral_doctor'):
+                    logger.info(f"   Referral Doctor: {snapshot.get('referral_doctor')}")
                     
-                return document.id
+            if whats_new_json:
+                logger.info(f"📊 WhatsNew JSON: {whats_new_json[:100]}...")
+            if ur_denial_reason:
+                logger.info(f"📋 UR Denial Reason saved: {ur_denial_reason[:100]}...")
+            if original_name:
+                logger.info(f"📁 Original name saved: {original_name}")
+                
+            return document.id
 
-            except Exception as e:
-                logger.error(f"❌ Error saving document analysis: {str(e)}")
-                raise
-    
+        except Exception as e:
+            logger.error(f"❌ Error saving document analysis: {str(e)}")
+            raise
+
     def decrypt_patient_token(self, token: str) -> Dict[str, Any]:
         """
         Decrypts the token and returns patient data.

@@ -680,7 +680,8 @@ class WebhookService:
             rd=processed_data["rd_for_db"],
             physician_id=physician_id,
             mode=mode,
-            ur_denial_reason=document_analysis.ur_denial_reason
+            ur_denial_reason=document_analysis.ur_denial_reason,
+            original_name=old_filename  # Pass the original filename
         )
 
         # ✅ DECREMENT PARSE COUNT AFTER SUCCESSFUL DOCUMENT SAVE
@@ -819,6 +820,7 @@ class WebhookService:
                 "tasks_created": created_tasks
             }
         }
+
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
         Orchestrates the full webhook processing pipeline using the 4 steps.

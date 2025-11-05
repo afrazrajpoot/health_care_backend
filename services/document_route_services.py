@@ -51,7 +51,7 @@ class DocumentExtractorService:
         temp_path = None
         was_converted = False
         converted_path = None
-
+        print(document,'curretn document')
         try:
             # Validate file
             self.file_service.validate_file(document, CONFIG["max_file_size"])
@@ -65,7 +65,7 @@ class DocumentExtractorService:
             existing_doc = await self.db_service.prisma.document.find_first(
                 where={
                     "physicianId": physician_id,
-                    "fileName": document.filename,
+                    "originalName": document.filename,
                 }
             )
 
