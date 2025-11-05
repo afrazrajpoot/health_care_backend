@@ -17,7 +17,13 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from langchain_openai import AzureChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from typing import Optional
-from services.followup_service import check_all_overdue_tasks  # 🆕 Imported from separate service
+from services.followup_service import check_all_overdue_tasks
+from services.webhook_service import WebhookService
+from services.database_service import get_database_service
+from services.progress_service import ProgressService
+import logging
+
+logger = logging.getLogger("document_ai")
 
 # 🧠 Setup logging
 setup_logging()
@@ -59,26 +65,26 @@ async def authenticate_request(
         "/api/auth/sync-login",
         "/api/auth/refresh",
         "/redoc",
-        "/api/agent/progress/",  # 🆕 ADDED PUBLIC PROGRESS ROUTE
-"/webhook/save-document"  # 🆕 FULL PATH WITH PREFIX
+        "/api/agent/progress/",
+        "/webhook/save-document"  # ✅ Public webhook
     ]
-   
+    
     # Check if path is public (enhanced pattern matching)
     is_public = any(
         request.url.path == path or 
-        request.url.path.startswith(path)  # Handles /api/agent/progress/123
+        request.url.path.startswith(path)
         for path in public_paths
     )
-   
+    
     if is_public:
         return None
-   
+    
     if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required. Please create Bearer token."
         )
-   
+    
     try:
         # ✅ Use the pure function without Depends for manual invocation
         user = await verify_token(credentials.credentials, db)
@@ -94,6 +100,7 @@ async def authenticate_request(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication failed"
         )
+
 
 # 📦 Include routers
 app.include_router(
@@ -120,12 +127,6 @@ app.include_router(
 # 📁 Ensure upload directory exists
 os.makedirs(CONFIG["upload_dir"], exist_ok=True)
 
-# 🚀 Mount Socket.IO ASGI app
-socket_app = socketio.ASGIApp(
-    sio,
-    other_asgi_app=app
-)
-
 # ⚙️ Azure OpenAI LLM setup (global, but used in service)
 llm = AzureChatOpenAI(
     azure_deployment=CONFIG["azure_openai_deployment"],
@@ -136,11 +137,10 @@ llm = AzureChatOpenAI(
     model_name="gpt-4o-mini"
 )
 
-# 🆕 PUBLIC Progress Route (No Authentication)
-
-from services.progress_service import ProgressService
+# Initialize services
 progress_service = ProgressService()
 
+# 🆕 PUBLIC Progress Route (No Authentication)
 @app.get("/api/agent/progress/{task_id}")
 async def get_progress(task_id: str):
     """Get current progress for a task"""
@@ -151,21 +151,16 @@ async def get_progress(task_id: str):
         return progress
     except Exception as e:
         error_msg = f"❌ Error getting progress for task {task_id}: {str(e)}"
-        # logger.error(error_msg)
         print(error_msg)  # DEBUG PRINT
         raise HTTPException(status_code=500, detail=f"Error retrieving progress: {str(e)}")
-# 🩺 Health check (public)
 
 
-
-from services.webhook_service import WebhookService
-from services.database_service import get_database_service
-import logging
-logger = logging.getLogger("document_ai")
+# ✅ WEBHOOK ROUTE - Register on FastAPI app BEFORE Socket.IO wrapping
 @app.post("/webhook/save-document")
 async def save_document_webhook(request: Request):
     """
     Main webhook handler: Uses WebhookService to process the request.
+    ✅ Registered on FastAPI app (not socket_app)
     """
     try:
         data = await request.json()
@@ -184,7 +179,7 @@ async def save_document_webhook(request: Request):
 
         # Save to FailDocs on general exception
         if 'data' in locals():
-            blob_path = data.get("blob_path", "") ,
+            blob_path = data.get("blob_path", "")
             physician_id = data.get("physician_id")
             reason = f"Webhook processing failed: {str(e)}"
 
@@ -203,9 +198,12 @@ async def save_document_webhook(request: Request):
 
         raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
 
+
+# 🩺 Health check (public)
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "processor": CONFIG["processor_id"]}
+
 
 # 🔐 SECURED Protected API routes
 @app.get("/api/user/tasks")
@@ -215,6 +213,7 @@ async def get_user_tasks(current_user = Depends(authenticate_request)):
         tasks = await db.task.find_many(
             where={"physicianId": current_user.physicianId}
         )
+        
         return {
             "user": {
                 "id": current_user.id,
@@ -223,8 +222,10 @@ async def get_user_tasks(current_user = Depends(authenticate_request)):
             },
             "tasks": tasks
         }
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/user/documents")
 async def get_user_documents(current_user = Depends(authenticate_request)):
@@ -233,6 +234,7 @@ async def get_user_documents(current_user = Depends(authenticate_request)):
         documents = await db.document.find_many(
             where={"userId": current_user.id}
         )
+        
         return {
             "user": {
                 "id": current_user.id,
@@ -240,8 +242,10 @@ async def get_user_documents(current_user = Depends(authenticate_request)):
             },
             "documents": documents
         }
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/user/profile")
 async def get_user_profile(current_user = Depends(authenticate_request)):
@@ -252,19 +256,19 @@ async def get_user_profile(current_user = Depends(authenticate_request)):
         "timestamp": datetime.now().isoformat()
     }
 
+
 @app.get("/api/admin/overdue-stats")
 async def get_overdue_stats(current_user = Depends(authenticate_request)):
     """Get overdue tasks statistics - REQUIRES AUTHENTICATION"""
     try:
         now = datetime.now(timezone.utc)
-       
         total_overdue = await db.task.count(
             where={
                 "dueDate": {"lt": now},
                 "status": {"not": "Completed"}
             }
         )
-       
+        
         physician_overdue = await db.task.count(
             where={
                 "dueDate": {"lt": now},
@@ -272,20 +276,30 @@ async def get_overdue_stats(current_user = Depends(authenticate_request)):
                 "physicianId": current_user.physicianId
             }
         )
-       
+        
         return {
             "total_overdue_tasks": total_overdue,
             "your_overdue_tasks": physician_overdue,
             "user": current_user.email
         }
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# 🚀 Mount Socket.IO ASGI app AFTER all routes are registered
+socket_app = socketio.ASGIApp(
+    sio,
+    other_asgi_app=app
+)
+
 
 # ⚙️ Database lifecycle
 @app.on_event("startup")
 async def startup():
     await db.connect()
     print("✅ Connected to PostgreSQL")
+    
     # 🕓 Start enhanced cron scheduler - runs every 1 minute FOR TESTING
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_all_overdue_tasks, "interval", minutes=1)
@@ -294,10 +308,12 @@ async def startup():
     print("🔒 All API routes are secured with JWT authentication")
     print("🌐 Public route available: /api/agent/progress/{task_id}")
 
+
 @app.on_event("shutdown")
 async def shutdown():
     await db.disconnect()
     print("🔌 Disconnected from DB")
+
 
 # 🧾 Enhanced Audit middleware
 @app.middleware("http")
@@ -306,11 +322,11 @@ async def audit_middleware(request: Request, call_next):
     email = None
     user_agent = request.headers.get("user-agent", "Unknown")
     ip_address = request.client.host if request.client else "Unknown"
-   
+    
     # Skip audit for health checks
     if request.url.path == "/health":
         return await call_next(request)
-   
+    
     try:
         # Try to get user from JWT token
         auth_header = request.headers.get("authorization")
@@ -321,11 +337,11 @@ async def audit_middleware(request: Request, call_next):
                 user_id = current_user.id
                 email = current_user.email
     except:
-        pass # Silent fail for audit logging
-   
+        pass  # Silent fail for audit logging
+    
     # Log the request
     print(f"📝 Audit: {request.method} {request.url.path} - User: {email or 'Anonymous'} - IP: {ip_address}")
-   
+    
     try:
         await db.auditlog.create(
             data={
@@ -340,10 +356,12 @@ async def audit_middleware(request: Request, call_next):
         )
     except Exception as e:
         print("⚠️ Failed to save audit log:", e)
+    
     response = await call_next(request)
     return response
+
 
 # ▶️ Run app
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(socket_app, host=CONFIG["host"], port=CONFIG["port"])    
+    uvicorn.run(socket_app, host=CONFIG["host"], port=CONFIG["port"])
