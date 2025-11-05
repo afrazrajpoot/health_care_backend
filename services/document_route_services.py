@@ -148,15 +148,15 @@ class DocumentExtractorService:
                     "filename": document.filename
                 }
 
-            # Analysis
-            analyzer = ReportAnalyzer()
-            try:
-                detected_type = analyzer.detect_document_type_preview(result.text)
-                logger.info(f"🔍 Detected type: {detected_type}")
-            except AttributeError:
-                logger.warning("⚠️ Document type detection unavailable—skipping")
-                detected_type = "unknown"
-            result.summary = f"Document Type: {detected_type} - Processed successfully"
+            # # Analysis
+            # analyzer = ReportAnalyzer()
+            # try:
+            #     detected_type = analyzer.detect_document_type_preview(result.text)
+            #     logger.info(f"🔍 Detected type: {detected_type}")
+            # except AttributeError:
+            #     logger.warning("⚠️ Document type detection unavailable—skipping")
+            #     detected_type = "unknown"
+            # result.summary = f"Document Type: {detected_type} - Processed successfully"
 
             logger.info(f"✅ Document analysis completed for {document.filename}")
 
