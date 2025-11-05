@@ -15,7 +15,7 @@ from utils.socket_manager import sio
 import socketio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from langchain_openai import AzureChatOpenAI
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from typing import Optional
 from services.followup_service import check_all_overdue_tasks  # 🆕 Imported from separate service
 

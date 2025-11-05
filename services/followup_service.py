@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timezone, timedelta
 from prisma import Prisma
 from langchain_openai import AzureChatOpenAI
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from config.settings import CONFIG
 
 # 🧩 Use main app's Prisma instance through dependency injection

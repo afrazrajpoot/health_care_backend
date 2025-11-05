@@ -437,7 +437,7 @@ def finalize_document_task_worker(webhook_payload: dict, batch_task_id: str = No
                 )
         
         # Webhook call - the actual work (increased timeout for long-running reasoning)
-        webhook_url = CONFIG.get("api_base_url", "http://localhost:8000") + "/api/webhook/save-document"
+        webhook_url = CONFIG.get("api_base_url", "http://localhost:8000") + "/webhook/save-document"
         response = requests.post(webhook_url, json=webhook_payload, timeout=300)  # Increased to 5 minutes
         
         if response.status_code != 200:
