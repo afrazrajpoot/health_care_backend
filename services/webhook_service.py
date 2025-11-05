@@ -8,6 +8,10 @@ from services.task_creation import TaskCreator
 from services.resoning_agent import EnhancedReportAnalyzer
 from utils.logger import logger
 from prisma import Prisma
+import os
+from google.cloud import storage
+
+BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")  # Remove default to force setting env var; set it properly!
 
 class WebhookService:
     """
@@ -15,6 +19,59 @@ class WebhookService:
     Handles document processing, lookup, status determination, and saving.
     """
 
+    async def rename_gcs_file(self, old_blob_path: str, new_filename: str, old_gcs_url: str) -> tuple[str, str]:
+        """
+        Renames a file in Google Cloud Storage by copying to new name and deleting the old one.
+        Returns the new blob_path and new gcs_url.
+        """
+        if not old_blob_path:
+            logger.warning(f"⚠️ Skipping GCS rename: missing blob_path")
+            return old_blob_path, old_gcs_url
+
+        if not BUCKET_NAME:
+            logger.error(f"❌ GCS_BUCKET_NAME environment variable not set; skipping rename")
+            return old_blob_path, old_gcs_url
+
+        try:
+            client = storage.Client()
+            bucket = client.bucket(BUCKET_NAME)
+
+            # Determine directory path (if any)
+            if '/' in old_blob_path:
+                dir_path, old_file = old_blob_path.rsplit('/', 1)
+                if dir_path and not dir_path.endswith('/'):
+                    dir_path += '/'
+                new_blob_path = f"{dir_path}{new_filename}"
+            else:
+                new_blob_path = new_filename
+
+            # Check if source exists
+            source_blob = bucket.blob(old_blob_path)
+            if not source_blob.exists():
+                logger.warning(f"⚠️ Source blob {old_blob_path} does not exist in bucket {BUCKET_NAME}; skipping rename")
+                return old_blob_path, old_gcs_url
+
+            # Copy to new location
+            new_blob = bucket.blob(new_blob_path)
+            
+            # Use rewrite instead of copy_blob for better reliability
+            token = None
+            while True:
+                token, bytes_rewritten, total_bytes = new_blob.rewrite(source_blob, token=token)
+                if token is None:
+                    break
+
+            # Delete the old blob
+            source_blob.delete()
+
+            new_gcs_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{new_blob_path}"
+
+            logger.info(f"✅ Renamed GCS file: {old_blob_path} -> {new_blob_path}")
+            return new_blob_path, new_gcs_url
+
+        except Exception as gcs_err:
+            logger.error(f"❌ Failed to rename GCS file {old_blob_path}: {gcs_err}")
+            return old_blob_path, old_gcs_url  # Fallback to original on error
     async def process_document_data(self, data: dict) -> dict:
         """
         Step 1: Extract, de-identify, analyze, and prepare initial document data.
@@ -545,6 +602,42 @@ class WebhookService:
                 if updated_dob_for_query:
                     dob_str = updated_dob_for_query.strftime("%Y-%m-%d")
 
+        # RENAME GCS FILE BEFORE SAVING
+        old_filename = processed_data["filename"]
+        old_blob_path = processed_data["blob_path"]
+        old_gcs_url = processed_data["gcs_url"]
+
+        # Prepare components for new filename
+        patient_name_safe = "not_specified" if status_result["patient_name_to_use"] == "Not specified" else status_result["patient_name_to_use"].replace(" ", "_").replace("/", "_").replace("\\", "_")
+        dob_safe = dob_str if dob_str else "not_specified"
+        claim_safe = "not_specified" if status_result["claim_to_save"] == "Not specified" else status_result["claim_to_save"].replace(" ", "_").replace("/", "_").replace("\\", "_")
+        document_type = document_analysis.document_type.replace(" ", "_").replace("/", "_").replace("\\", "_") if document_analysis.document_type else "document"
+        # Extract file extension
+        ext = "." + old_filename.split(".")[-1] if "." in old_filename and len(old_filename.split(".")) > 1 else ""
+
+        new_filename = f"{patient_name_safe}_{dob_safe}_{claim_safe}_{document_type}{ext}"
+        logger.info(f"🔄 Preparing to rename file to: {new_filename} (old: {old_filename})")
+
+        # Perform rename if blob_path exists
+        renamed = False
+        if old_blob_path:
+            new_blob_path, new_gcs_url = await self.rename_gcs_file(old_blob_path, new_filename, old_gcs_url)
+            if new_blob_path != old_blob_path:
+                processed_data["blob_path"] = new_blob_path
+                processed_data["gcs_url"] = new_gcs_url
+                processed_data["filename"] = new_filename
+                renamed = True
+                logger.info(f"✅ GCS file renamed successfully to {new_filename} (new path: {new_blob_path}, new URL: {new_gcs_url})")
+            else:
+                logger.warning(f"⚠️ GCS rename attempted but no change detected (using original: {old_filename})")
+        else:
+            # If no blob_path, just update local filename (though unlikely for GCS upload)
+            processed_data["filename"] = new_filename
+            renamed = True
+            logger.info(f"ℹ️ No blob_path provided; updated local filename only to {new_filename}")
+
+        logger.info(f"📁 Final filename for DB: {processed_data['filename']}, GCS URL: {processed_data['gcs_url']}")
+
         # Mock ExtractionResult
         extraction_result = ExtractionResult(
             text=processed_data["result_data"].get("text", ""),
@@ -566,13 +659,13 @@ class WebhookService:
         # MODIFIED: Pass summary_snapshots (list) instead of summary_snapshot (single)
         document_id = await db_service.save_document_analysis(
             extraction_result=extraction_result,
-            file_name=processed_data["filename"],
+            file_name=processed_data["filename"],  # Now uses new filename
             file_size=processed_data["file_size"],
             mime_type=processed_data["mime_type"],
             processing_time_ms=processed_data["processing_time_ms"],
-            blob_path=processed_data["blob_path"],
+            blob_path=processed_data["blob_path"],  # Updated if renamed
             file_hash=processed_data["file_hash"],
-            gcs_file_link=processed_data["gcs_url"],
+            gcs_file_link=processed_data["gcs_url"],  # Updated if renamed
             patient_name=status_result["patient_name_to_use"],
             claim_number=status_result["claim_to_save"],
             dob=processed_data["dob"],
@@ -682,7 +775,7 @@ class WebhookService:
         else:
             logger.info(f"ℹ️ Skipping previous update: status={document_status}, total_previous={total_previous_docs}, has_conflicts={status_result['has_conflicting_claims']}, patient={status_result['patient_name_to_use']}, has_dob={updated_dob_for_query is not None}, is_first_time_claim_only={is_first_time_claim_only}")
 
-        logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}")
+        logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}, filename: {processed_data['filename']}")
 
         logger.info(f"📡 Success event processed for document: {document_id}")
 
@@ -693,6 +786,10 @@ class WebhookService:
             "pending_reason": pending_reason,
             "is_first_time_claim_only": is_first_time_claim_only,
             "parse_count_decremented": parse_decremented,  # Add this field
+            "filename": processed_data["filename"],  # Include the (possibly new) filename
+            "gcs_url": processed_data["gcs_url"],  # Updated if renamed
+            "blob_path": processed_data["blob_path"],  # Updated if renamed
+            "file_renamed": renamed,
             "date_reasoning_summary": {
                 "used_reasoning": has_date_reasoning,
                 "confidence_scores": processed_data["date_reasoning_data"]["confidence_scores"],
@@ -741,6 +838,7 @@ class WebhookService:
         result = await self.save_and_process_document(processed_data, status_result, data, db_service)
 
         return result   
+    
     
     async def update_fail_document(self, fail_doc: Any, updated_fields: dict, user_id: str = None, db_service: Any = None) -> dict:
         """

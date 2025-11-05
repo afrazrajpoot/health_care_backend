@@ -17,6 +17,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from langchain_openai import AzureChatOpenAI
 from langchain.prompts import PromptTemplate
 from typing import Optional
+from services.followup_service import check_all_overdue_tasks  # 🆕 Imported from separate service
 
 # 🧠 Setup logging
 setup_logging()
@@ -75,7 +76,7 @@ async def authenticate_request(
     if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required. Please provide Bearer token."
+            detail="Authentication required. Please create Bearer token."
         )
    
     try:
@@ -125,7 +126,7 @@ socket_app = socketio.ASGIApp(
     other_asgi_app=app
 )
 
-# ⚙️ Azure OpenAI LLM setup
+# ⚙️ Azure OpenAI LLM setup (global, but used in service)
 llm = AzureChatOpenAI(
     azure_deployment=CONFIG["azure_openai_deployment"],
     azure_endpoint=CONFIG["azure_openai_endpoint"],
@@ -134,178 +135,6 @@ llm = AzureChatOpenAI(
     temperature=0.3,
     model_name="gpt-4o-mini"
 )
-
-# 🧠 Enhanced Follow-up task generation
-followup_prompt_template = PromptTemplate.from_template("""
-You are a medical task management AI. Analyze the following overdue tasks and generate appropriate follow-up tasks.
-OVERDUE TASKS:
-{overdue_tasks}
-CRITICAL INFORMATION:
-- Current Date: {current_date}
-- Total Overdue Tasks: {total_tasks}
-INSTRUCTIONS:
-1. Analyze EACH overdue task and create ONE logical follow-up
-2. Consider medical urgency and workflow dependencies
-3. Set reasonable due dates (1-7 days from now)
-4. Assign appropriate departments based on task context
-RESPONSE FORMAT - JSON array:
-[
-  {{
-    "description": "Specific follow-up action",
-    "department": "Relevant department",
-    "reason": "Why this follow-up is needed based on the overdue task",
-    "due_in_days": 2,
-    "related_physician_id": "physician_id_if_available",
-    "priority": "High/Medium/Low",
-    "original_task_id": "reference_to_original_task"
-  }}
-]
-EXAMPLES:
-- Overdue: "Review patient lab results" → Follow-up: "Contact patient with lab results update"
-- Overdue: "Submit insurance claim" → Follow-up: "Follow up on insurance claim status"
-- Overdue: "Patient follow-up appointment" → Follow-up: "Schedule make-up appointment"
-""")
-
-async def generate_followup_tasks(overdue_tasks):
-    """Generate automatic follow-up tasks for ALL overdue items"""
-    if not overdue_tasks:
-        return []
-    formatted_tasks = "\n".join([
-        f"- Task ID: {task.id} | Description: {task.description} | "
-        f"Dept: {task.department} | Due: {task.dueDate} | "
-        f"Physician: {task.physicianId or 'Not assigned'} | Patient: {task.patient}"
-        for task in overdue_tasks
-    ])
-    try:
-        response = llm.invoke(followup_prompt_template.format(
-            overdue_tasks=formatted_tasks,
-            current_date=datetime.now().strftime("%Y-%m-%d"),
-            total_tasks=len(overdue_tasks)
-        ))
-        if hasattr(response, 'content'):
-            content = response.content.replace('```json', '').replace('```', '').strip()
-            followup_suggestions = json.loads(content)
-           
-            validated_suggestions = []
-            for suggestion in followup_suggestions:
-                if isinstance(suggestion, dict):
-                    # Find the original task for reference
-                    original_task = next((t for t in overdue_tasks if t.id == suggestion.get("original_task_id")), overdue_tasks[0])
-                   
-                    validated_suggestion = {
-                        "description": suggestion.get("description", f"Follow-up for: {original_task.description}"),
-                        "department": suggestion.get("department", original_task.department),
-                        "reason": suggestion.get("reason", f"Auto-generated follow-up for overdue task: {original_task.description}"),
-                        "due_in_days": max(1, min(7, suggestion.get("due_in_days", 2))),
-                        "related_physician_id": suggestion.get("related_physician_id", original_task.physicianId),
-                        "priority": suggestion.get("priority", "Medium"),
-                        "patient": original_task.patient,
-                        "status": "Pending",
-                        "sourceDocument": original_task.sourceDocument,
-                        "claimNumber": original_task.claimNumber
-                    }
-                    validated_suggestions.append(validated_suggestion)
-           
-            return validated_suggestions
-    except Exception as e:
-        print(f"❌ Follow-up task generation failed: {e}")
-    return []
-
-# ⏰ ENHANCED Cron job: check ALL overdue tasks
-async def check_all_overdue_tasks():
-    """Check ALL overdue tasks and generate follow-ups for EVERY overdue task"""
-    print("=" * 60)
-    print("🔄 AUTO FOLLOW-UP SCHEDULED JOB STARTED")
-    print(f" ⏰ Time: {datetime.now()}")
-    print("=" * 60)
-   
-    try:
-        now = datetime.now(timezone.utc)
-       
-        # Find ALL overdue tasks regardless of physician
-        overdue_tasks = await db.task.find_many(
-            where={
-                "dueDate": {"lt": now},
-                "status": {"not": "Completed"}
-            },
-            include={
-                "document": True
-            }
-        )
-        if not overdue_tasks:
-            print("✅ No overdue tasks found in the system.")
-            return
-
-        # Filter to only tasks with physicianId
-        tasks_with_assignee = [task for task in overdue_tasks if task.physicianId is not None]
-        if not tasks_with_assignee:
-            print("✅ No overdue tasks with assigned physician found. Skipping LLM generation.")
-            print(f" 📊 Total unassigned overdue tasks: {len(overdue_tasks)}")
-            return
-
-        print(f"⚠️ Found {len(overdue_tasks)} total overdue tasks in the system")
-        print(f"📋 Processing {len(tasks_with_assignee)} tasks with assigned physician")
-       
-        # Print overdue tasks summary (only for tasks with assignee)
-        for i, task in enumerate(tasks_with_assignee, 1):
-            overdue_days = (now - task.dueDate).days
-            print(f" {i}. [{task.patient}] {task.description} - "
-                  f"Overdue: {overdue_days} days - Physician: {task.physicianId}")
-        
-        # Generate follow-up tasks only for tasks with assignee
-        followup_suggestions = await generate_followup_tasks(tasks_with_assignee)
-       
-        if not followup_suggestions:
-            print("❌ No follow-up tasks generated")
-            return
-        created_count = 0
-        for suggestion in followup_suggestions:
-            try:
-                # Determine assigned physician ID based on role
-                original_task_id = suggestion.get("original_task_id")
-                assigned_id = suggestion.get("related_physician_id")
-                if original_task_id:
-                    original_task = next((t for t in tasks_with_assignee if t.id == original_task_id), None)
-                    if original_task and original_task.physicianId:
-                        assignee = await db.user.find_unique(where={"id": original_task.physicianId})
-                        if assignee and assignee.role != "Physician" and assignee.physicianId:
-                            assigned_id = assignee.physicianId
-                        # else keep as is (user.id if physician, or original if none)
-                suggestion["related_physician_id"] = assigned_id
-
-                due_date = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(days=suggestion["due_in_days"])
-               
-                await db.task.create(
-                    data={
-                        "description": suggestion["description"],
-                        "department": suggestion["department"],
-                        "reason": suggestion["reason"],
-                        "dueDate": due_date,
-                        "patient": suggestion["patient"],
-                        "status": "Pending",
-                        "physicianId": suggestion["related_physician_id"],
-                        "sourceDocument": suggestion["sourceDocument"],
-                        "claimNumber": suggestion["claimNumber"],
-                        "quickNotes": {
-                            "status_update": f"Auto-generated follow-up",
-                            "details": f"Priority: {suggestion['priority']} - Generated from overdue task",
-                            "one_line_note": f"Auto follow-up created on {datetime.now().strftime('%Y-%m-%d')}"
-                        }
-                    }
-                )
-                created_count += 1
-                print(f" ✅ Created: {suggestion['description']}")
-               
-            except Exception as e:
-                print(f" ❌ Failed to create follow-up task: {e}")
-        print("=" * 60)
-        print(f"✅ SCHEDULED JOB COMPLETED")
-        print(f" 📊 Created {created_count} follow-up tasks")
-        print(f" 📊 Processed {len(tasks_with_assignee)} overdue tasks with assignee")
-        print("=" * 60)
-           
-    except Exception as e:
-        print(f"❌ Error in scheduled job: {e}")
 
 # 🆕 PUBLIC Progress Route (No Authentication)
 
@@ -457,11 +286,11 @@ async def get_overdue_stats(current_user = Depends(authenticate_request)):
 async def startup():
     await db.connect()
     print("✅ Connected to PostgreSQL")
-    # 🕓 Start enhanced cron scheduler - runs every 30 minutes
+    # 🕓 Start enhanced cron scheduler - runs every 1 minute FOR TESTING
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(check_all_overdue_tasks, "interval", minutes=30)
+    scheduler.add_job(check_all_overdue_tasks, "interval", minutes=1)
     scheduler.start()
-    print("🕒 Enhanced scheduler started — runs every 30 minutes")
+    print("🕒 Enhanced scheduler started — runs every 1 minute (FOR TESTING)")
     print("🔒 All API routes are secured with JWT authentication")
     print("🌐 Public route available: /api/agent/progress/{task_id}")
 
@@ -517,4 +346,4 @@ async def audit_middleware(request: Request, call_next):
 # ▶️ Run app
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(socket_app, host=CONFIG["host"], port=CONFIG["port"])
+    uvicorn.run(socket_app, host=CONFIG["host"], port=CONFIG["port"])    
