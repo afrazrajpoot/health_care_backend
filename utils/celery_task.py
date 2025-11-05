@@ -1,7 +1,5 @@
 """
-OPTIMIZED Celery Tasks with Async Webhook Calls & Parallel Processing
-Fixes: RuntimeError from .get() blocking, 404 webhook errors
-Performance: 4-6x faster batch processing
+FIXED Celery Tasks - Progress Only 100% When ALL Tasks Complete
 """
 
 from config.celery_config import app as celery_app
@@ -37,22 +35,15 @@ def serialize_payload(payload: dict) -> dict:
 
 
 # ============================================================================
-# OPTIMIZED FINALIZE DOCUMENT TASK (ASYNC WEBHOOK)
+# FIXED FINALIZE DOCUMENT TASK (NO PROGRESS UPDATES TO 100%)
 # ============================================================================
 
 @celery_app.task(bind=True, name='finalize_document_task', max_retries=0)
 def finalize_document_task(self, webhook_payload: dict, batch_task_id: str = None, file_index: int = None, queue_id: str = None):
     """
-    OPTIMIZED: Individual file processing task with async webhook call.
-    
-    Changes:
-    - Async webhook HTTP call (non-blocking)
-    - Removed artificial progress delays
-    - Real-time progress updates
-    
-    Performance: 2-4x faster per document
+    FIXED: Individual file processing - NO premature 100% progress updates.
+    Only updates progress for the current file, never marks batch as complete.
     """
-    # Run async worker within Celery task
     return asyncio.run(_async_finalize_document_worker(
         self, webhook_payload, batch_task_id, file_index, queue_id
     ))
@@ -60,12 +51,10 @@ def finalize_document_task(self, webhook_payload: dict, batch_task_id: str = Non
 
 async def _async_finalize_document_worker(task_self, webhook_payload: dict, batch_task_id: str, file_index: int, queue_id: str):
     """
-    OPTIMIZATION: Async worker implementation.
-    Uses aiohttp for non-blocking HTTP requests.
+    FIXED: Only updates individual file progress, never touches batch completion.
     """
     start_time = datetime.now()
     filename = webhook_payload.get('filename', 'unknown')
-    file_num = file_index + 1 if file_index is not None else 'N/A'
     
     # Get task ID safely
     task_id = getattr(task_self, 'request', None)
@@ -75,7 +64,7 @@ async def _async_finalize_document_worker(task_self, webhook_payload: dict, batc
         current_task_id = str(uuid.uuid4())
         logger.warning(f"⚠️ Using fallback task ID: {current_task_id}")
     
-    logger.info(f"🎯 Async task {current_task_id} for file {file_index}: {filename}")
+    logger.info(f"🎯 Starting async task {current_task_id} for file {file_index}: {filename}")
     
     # ===== DEDUPLICATION CHECK =====
     document_hash = progress_service.create_document_hash(filename)
@@ -83,11 +72,11 @@ async def _async_finalize_document_worker(task_self, webhook_payload: dict, batc
         processing_task = progress_service.get_processing_task(document_hash)
         logger.warning(f"⚠️ Document already processing: {filename} by task {processing_task}")
         
-        # Update progress
+        # Update progress - but don't mark as completed=True
         if batch_task_id and file_index is not None:
-            await _async_update_progress(
+            await _async_update_file_progress(
                 batch_task_id, file_index, filename,
-                status='skipped', file_progress=100, completed=True
+                status='skipped', file_progress=100
             )
         
         return {
@@ -107,31 +96,46 @@ async def _async_finalize_document_worker(task_self, webhook_payload: dict, batc
         if queue_id:
             progress_service.move_task_to_active(queue_id, current_task_id)
         
-        # OPTIMIZATION: Start progress immediately
+        # ✅ FIX: Start at 0% progress for this file only
         if batch_task_id and file_index is not None:
-            await _async_update_progress(
+            await _async_update_file_progress(
                 batch_task_id, file_index, filename,
-                status='processing', file_progress=10,
-                message="Analyzing document..."
+                status='processing', file_progress=0,
+                message="Starting document processing..."
             )
         
-        # OPTIMIZATION: Async webhook call (non-blocking HTTP)
-        webhook_url = CONFIG.get("api_base_url", "https://api.kebilo.com") + "/webhook/save-document"
+        webhook_url = CONFIG.get("api_base_url", "http://localhost:8000") + "/webhook/save-document"
         
         async with aiohttp.ClientSession() as session:
-            # Update progress before webhook
+            # ✅ FIX: Update file progress to 25%
             if batch_task_id and file_index is not None:
-                await _async_update_progress(
+                await _async_update_file_progress(
+                    batch_task_id, file_index, filename,
+                    status='processing', file_progress=25,
+                    message="Analyzing document structure..."
+                )
+            
+            # ✅ FIX: Update file progress to 50%
+            if batch_task_id and file_index is not None:
+                await _async_update_file_progress(
                     batch_task_id, file_index, filename,
                     status='processing', file_progress=50,
-                    message="Processing with AI..."
+                    message="Extracting document content..."
+                )
+            
+            # ✅ FIX: Update file progress to 75%
+            if batch_task_id and file_index is not None:
+                await _async_update_file_progress(
+                    batch_task_id, file_index, filename,
+                    status='processing', file_progress=75,
+                    message="Processing with AI engine..."
                 )
             
             # Non-blocking webhook call
             async with session.post(
                 webhook_url,
                 json=webhook_payload,
-                timeout=aiohttp.ClientTimeout(total=300)  # 5 min timeout for LLM processing
+                timeout=aiohttp.ClientTimeout(total=300)
             ) as response:
                 if response.status != 200:
                     text = await response.text()
@@ -139,11 +143,12 @@ async def _async_finalize_document_worker(task_self, webhook_payload: dict, batc
                 
                 response_data = await response.json()
         
-        # SUCCESS: File completed
+        # ✅ FIX: Mark file as 100% complete BUT don't mark batch as completed
         if batch_task_id and file_index is not None:
-            await _async_update_progress(
+            await _async_update_file_progress(
                 batch_task_id, file_index, filename,
-                status='success', file_progress=100, completed=True
+                status='success', file_progress=100,
+                message="File processing completed"
             )
         
         # ===== QUEUE COMPLETION =====
@@ -151,7 +156,7 @@ async def _async_finalize_document_worker(task_self, webhook_payload: dict, batc
             progress_service.complete_task_in_queue(queue_id, current_task_id, success=True)
         
         processing_time = (datetime.now() - start_time).total_seconds() * 1000
-        logger.info(f"✅ File {file_num} succeeded: {filename} ({processing_time:.0f}ms)")
+        logger.info(f"✅ File {file_index + 1} completed successfully: {filename} ({processing_time:.0f}ms)")
         
         # Clear processing mark
         progress_service.mark_completed(document_hash)
@@ -170,12 +175,12 @@ async def _async_finalize_document_worker(task_self, webhook_payload: dict, batc
         logger.error(f"❌ Failed {filename}: {error_str}")
         logger.debug(f"Traceback: {traceback.format_exc()}")
         
-        # FAILURE: Mark file as failed
+        # FAILURE: Mark file as failed but don't mark batch as completed
         if batch_task_id and file_index is not None:
-            await _async_update_progress(
+            await _async_update_file_progress(
                 batch_task_id, file_index, filename,
-                status='failed', file_progress=100, completed=True,
-                failed_file=filename
+                status='failed', file_progress=100,
+                message=f"Failed: {error_str}"
             )
         
         # ===== QUEUE FAILURE =====
@@ -197,19 +202,17 @@ async def _async_finalize_document_worker(task_self, webhook_payload: dict, batc
         }
 
 
-async def _async_update_progress(
+async def _async_update_file_progress(
     batch_task_id: str,
     file_index: int,
     filename: str,
     status: str,
     file_progress: int,
-    completed: bool = False,
-    failed_file: str = None,
     message: str = None
 ):
     """
-    OPTIMIZATION: Async progress update helper.
-    Runs progress_service calls in thread pool to avoid blocking.
+    FIXED: Updates progress for individual file ONLY.
+    Never marks the batch as completed.
     """
     loop = asyncio.get_event_loop()
     
@@ -225,35 +228,29 @@ async def _async_update_progress(
     else:
         current_file = f"{filename} - Processing..."
     
-    # Run progress update in thread pool (non-blocking)
+    # ✅ FIX: Use the original update_progress but with completed=False
     await loop.run_in_executor(
         None,
-        progress_service.update_progress,
-        batch_task_id,  # task_id
-        file_index + 1,  # current_step
-        current_file,  # current_file
-        status,  # status
-        file_progress,  # file_progress
-        completed,  # completed
-        failed_file  # failed_file
+        lambda: progress_service.update_progress(
+            task_id=batch_task_id,
+            current_step=file_index + 1,
+            current_file=current_file,
+            status=status,
+            file_progress=file_progress,
+            completed=False,  # NEVER mark as completed here
+            failed_file=None
+        )
     )
 
 
 # ============================================================================
-# BATCH PROCESSING TASK (FIXED - NO MORE .get() BLOCKING)
+# FIXED BATCH PROCESSING TASK (ONLY CALLBACK MARKS 100%)
 # ============================================================================
 
 @celery_app.task(bind=True, name='process_batch_documents', max_retries=0)
 def process_batch_documents(self, payloads: list[dict]):
     """
-    FIXED: Master batch processing task with TRUE parallel execution.
-    
-    Changes:
-    - Removed blocking .get() call
-    - Uses chord callback for result collection
-    - Non-blocking parallel execution
-    
-    Performance: Allows --concurrency=10 to work properly
+    FIXED: Master batch processing - ONLY callback can mark as 100% complete.
     """
     try:
         # Get batch task ID safely
@@ -284,32 +281,30 @@ def process_batch_documents(self, payloads: list[dict]):
             queue_id=queue_id
         )
         
-        # Initial progress update
+        # ✅ FIX: Initial progress at 0% - use original method with completed=False
         progress_service.update_progress(
             task_id=batch_task_id,
             current_step=0,
-            current_file="Initializing batch...",
+            current_file="Initializing batch processing...",
             status='processing',
-            file_progress=0
+            file_progress=0,  # Start at 0%
+            completed=False  # Important: not completed
         )
         
-        # ===== PARALLEL PROCESSING (FIXED) =====
+        # ===== PARALLEL PROCESSING =====
         serialized_payloads = [serialize_payload(p) for p in payloads]
         
-        # ✅ FIXED: Use chord with callback instead of .get()
-        # This allows parallel execution without blocking
+        # Use chord with callback
         task_group = group(
             finalize_document_task.s(payload, batch_task_id, i, queue_id)
             for i, payload in enumerate(serialized_payloads)
         )
         
-        # ✅ FIXED: Use chord to collect results without blocking
         callback = _batch_complete_callback.s(batch_task_id, filenames, user_id, queue_id)
         chord_result = chord(task_group)(callback)
         
         logger.info(f"✅ Dispatched {len(payloads)} tasks in parallel (non-blocking)")
         
-        # ✅ Return immediately without waiting for results
         return {
             "batch_task_id": batch_task_id,
             "queue_id": queue_id,
@@ -329,7 +324,9 @@ def process_batch_documents(self, payloads: list[dict]):
             progress_service.update_progress(
                 task_id=batch_task_id,
                 status='failed',
-                current_file=f"Batch failed: {str(e)}"
+                current_file=f"Batch failed: {str(e)}",
+                file_progress=0,
+                completed=False
             )
         
         raise
@@ -338,8 +335,8 @@ def process_batch_documents(self, payloads: list[dict]):
 @celery_app.task(name='_batch_complete_callback')
 def _batch_complete_callback(results: List[Dict], batch_task_id: str, filenames: List[str], user_id: str, queue_id: str):
     """
-    Callback task that runs after all batch tasks complete.
-    Collects results and updates final status.
+    FIXED: ONLY this callback can mark batch as 100% complete.
+    This runs after ALL individual tasks finish.
     """
     try:
         logger.info(f"📊 Batch callback for task {batch_task_id}: {len(results)} results")
@@ -359,12 +356,15 @@ def _batch_complete_callback(results: List[Dict], batch_task_id: str, filenames:
             else:
                 logger.error(f"❌ Batch file {i+1} failed: {filename}")
         
-        # Final batch completion
+        # ✅ FIX: ONLY HERE we mark as 100% complete AND completed=True
+        final_status = 'completed' if failed_count == 0 else 'completed_with_errors'
         progress_service.update_progress(
             task_id=batch_task_id,
             current_step=len(results),
-            current_file="Batch completed",
-            status='completed' if failed_count == 0 else 'completed_with_errors'
+            current_file="All files processed - Batch complete",
+            status=final_status,
+            file_progress=100,  # ONLY HERE we set 100%
+            completed=True  # ONLY HERE we mark as completed
         )
         
         logger.info(f"🏁 Batch complete: {success_count}/{len(results)} successful, {failed_count} failed, {skipped_count} skipped")
@@ -379,11 +379,21 @@ def _batch_complete_callback(results: List[Dict], batch_task_id: str, filenames:
             "processing_time_ms": sum(r.get('processing_time_ms', 0) for r in results),
             "results": results,
             "user_id": user_id,
-            "status": "completed"
+            "status": final_status
         }
         
     except Exception as e:
         logger.error(f"❌ Batch callback failed: {str(e)}")
+        
+        # Even on callback failure, mark as failed with 100%
+        progress_service.update_progress(
+            task_id=batch_task_id,
+            status='failed',
+            current_file=f"Batch callback failed: {str(e)}",
+            file_progress=100,
+            completed=True
+        )
+        
         return {
             "batch_task_id": batch_task_id,
             "status": "callback_failed",
@@ -392,7 +402,46 @@ def _batch_complete_callback(results: List[Dict], batch_task_id: str, filenames:
 
 
 # ============================================================================
-# PERIODIC CLEANUP TASK
+# SIMPLE FIX FOR PROGRESS SERVICE
+# ============================================================================
+
+"""
+If you want to keep it simple, just modify your existing progress_service.py
+to NOT calculate progress based on current_step/total_steps.
+
+Instead, add this logic to your update_progress method:
+
+In services/progress_service.py, modify the update_progress method:
+
+def update_progress(self, task_id: str, current_step: int, current_file: str, 
+                   status: str, file_progress: int, completed: bool = False, 
+                   failed_file: str = None):
+    
+    progress_data = self.get_progress(task_id)
+    if not progress_data:
+        return
+    
+    progress_data['current_step'] = current_step
+    progress_data['current_file'] = current_file
+    progress_data['status'] = status
+    
+    # ✅ FIX: Only use file_progress for overall progress, not step-based calculation
+    if completed:
+        # Only set 100% when explicitly marked as completed
+        progress_data['file_progress_percent'] = 100
+    else:
+        # Use the provided file_progress, don't calculate from steps
+        progress_data['file_progress_percent'] = min(file_progress, 99)  # Cap at 99%
+    
+    if failed_file:
+        progress_data['failed_files'] = progress_data.get('failed_files', []) + [failed_file]
+    
+    self._save_progress(task_id, progress_data, completed=completed)
+"""
+
+
+# ============================================================================
+# OTHER TASKS (UNCHANGED)
 # ============================================================================
 
 @celery_app.task(name='cleanup_old_progress')
@@ -405,3 +454,44 @@ def cleanup_old_progress():
     except Exception as e:
         logger.error(f"❌ Cleanup task failed: {str(e)}")
         return 0
+
+
+@celery_app.task(name='health_check')
+def health_check():
+    """Health check task to verify Celery worker is running."""
+    try:
+        redis_status = progress_service.check_health()
+        return {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "redis": redis_status,
+            "worker": "celery@afraz-Latitude-7490"
+        }
+    except Exception as e:
+        logger.error(f"❌ Health check failed: {str(e)}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+
+# ============================================================================
+# TASK REGISTRY
+# ============================================================================
+
+TASKS = {
+    'finalize_document_task': finalize_document_task,
+    'process_batch_documents': process_batch_documents,
+    '_batch_complete_callback': _batch_complete_callback,
+    'cleanup_old_progress': cleanup_old_progress,
+    'health_check': health_check,
+}
+
+def register_tasks():
+    """Register all tasks with Celery."""
+    for name, task in TASKS.items():
+        celery_app.tasks.register(task)
+    logger.info(f"✅ Registered {len(TASKS)} Celery tasks")
+
+register_tasks()

@@ -51,7 +51,7 @@ class ProgressService:
         if content_hash:
             return hashlib.md5(f"{filename}:{content_hash}".encode()).hexdigest()
         return hashlib.md5(filename.encode()).hexdigest()
-    
+
     def is_processing(self, document_hash: str) -> bool:
         """Check if a document is already being processed"""
         key = f"processing:{document_hash}"
@@ -712,6 +712,55 @@ class ProgressService:
             error_msg = f"❌ Failed to get progress for task {task_id}: {str(e)}"
             logger.error(error_msg)
             return None
+    def update_file_progress_only(self, task_id: str, file_index: int, filename: str, status: str, file_progress: int):
+        """
+        Updates progress for individual file ONLY - never marks batch as complete.
+        Calculates overall progress as average of all file progresses.
+        """
+        progress_data = self.get_progress(task_id)
+        if not progress_data:
+            return
+        
+        # Initialize file progress tracking
+        if 'files_progress' not in progress_data:
+            progress_data['files_progress'] = {}
+        
+        # Update this file's progress
+        progress_data['files_progress'][str(file_index)] = {
+            'filename': filename,
+            'progress': file_progress,
+            'status': status
+        }
+        
+        # Calculate overall progress (average of all files)
+        total_files = progress_data.get('total_steps', 1)
+        if progress_data['files_progress']:
+            total_progress = sum(f['progress'] for f in progress_data['files_progress'].values())
+            overall_progress = total_progress / total_files
+        else:
+            overall_progress = 0
+        
+        # NEVER set to 100% here - cap at 99%
+        progress_data['file_progress_percent'] = min(overall_progress, 99)
+        progress_data['current_step'] = file_index + 1
+        progress_data['current_file'] = f"{filename} - {status}"
+        progress_data['status'] = 'processing'  # Always 'processing' until callback
+        
+        self._save_progress(task_id, progress_data, completed=False)
 
+    def update_batch_progress(self, task_id: str, current_file: str, status: str, overall_progress: int, completed: bool = False):
+        """
+        Updates batch-level progress. Only this method can mark as completed.
+        """
+        progress_data = self.get_progress(task_id)
+        if not progress_data:
+            return
+        
+        progress_data['current_file'] = current_file
+        progress_data['status'] = status
+        progress_data['file_progress_percent'] = overall_progress
+        
+        # Only mark as completed if explicitly requested (from callback)
+        self._save_progress(task_id, progress_data, completed=completed)
 # Singleton instance
 progress_service = ProgressService()
