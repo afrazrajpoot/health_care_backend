@@ -89,7 +89,7 @@ class DocumentExtractorService:
             existing_doc = await self.db_service.prisma.document.find_first(
                 where={
                     "physicianId": physician_id,
-                    "fileName": document.filename,
+                    "originalName": document.filename,
                 }
             )
             

@@ -75,6 +75,7 @@ model Document {
   fileHash     String? @db.VarChar(64) // ✅ new column for content hash
   mode         String? @default("wc")
   reportDate  DateTime?
+  originalName String?
   physicianId String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
