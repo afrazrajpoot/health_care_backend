@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 from models.schemas import ExtractionResult
 from services.database_service import get_database_service
+from services.report_analyzer import ReportAnalyzer
 from services.task_creation import TaskCreator
 from services.resoning_agent import EnhancedReportAnalyzer
 from utils.logger import logger
@@ -379,7 +380,7 @@ class WebhookService:
         previous_documents = db_response.get('documents', []) if db_response else []
 
         # Compare with previous documents using LLM - FIXED: Only pass current_raw_text
-        analyzer = EnhancedReportAnalyzer()
+        analyzer = ReportAnalyzer()
         whats_new_data = analyzer.compare_with_previous_documents(
             processed_data["deidentified_text"]
             # Remove previous_documents parameter since it's not used in the new approach
