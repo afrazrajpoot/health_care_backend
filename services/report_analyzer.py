@@ -1,19 +1,34 @@
-from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.prompts import PromptTemplate
-from langchain_openai import AzureChatOpenAI
+"""
+Main report analyzer orchestrator with LLM chaining and verification.
+Coordinates all extractors and maintains the extraction pipeline.
+"""
+import logging
 from typing import List, Dict, Any
 from datetime import datetime
-import json
-import logging
+from dataclasses import asdict
+from langchain_openai import AzureChatOpenAI
 
 from config.settings import CONFIG
+from models.data_models import DocumentType, ExtractionResult
+from utils.document_detector import DocumentTypeDetector
+from utils.extraction_verifier import ExtractionVerifier
+from extractors.qme_extractor import QMEExtractorChained
+from extractors.imaging_extractor import ImagingExtractor
+from extractors.pr2_extractor import PR2Extractor
+from extractors.consult_extractor import ConsultExtractor
+from extractors.simple_extractor import SimpleExtractor
 
 logger = logging.getLogger("document_ai")
 
+
 class ReportAnalyzer:
-    """Service for extracting structured data from medical documents"""
+    """
+    Enhanced orchestrator with LLM chaining and verification.
+    Maintains backward compatibility while adding robustness.
+    """
     
     def __init__(self):
+        """Initialize LLM and all extraction components"""
         self.llm = AzureChatOpenAI(
             azure_endpoint=CONFIG.get("azure_openai_endpoint"),
             api_key=CONFIG.get("azure_openai_api_key"),
@@ -22,192 +37,181 @@ class ReportAnalyzer:
             temperature=0.0,
             timeout=120
         )
-        self.bullet_parser = JsonOutputParser()
-
-    def compare_with_previous_documents(
-        self, 
-        current_raw_text: str,
-     
-    ) -> List[str]:
+        
+        # Initialize components
+        self.detector = DocumentTypeDetector(self.llm)
+        self.verifier = ExtractionVerifier(self.llm)
+        
+        # Initialize specialized extractors
+        self.qme_extractor = QMEExtractorChained(self.llm)
+        self.imaging_extractor = ImagingExtractor(self.llm)
+        self.pr2_extractor = PR2Extractor(self.llm)
+        self.consult_extractor = ConsultExtractor(self.llm)
+        self.simple_extractor = SimpleExtractor(self.llm)
+        
+        logger.info("✅ ReportAnalyzer initialized with all extractors")
+    
+    def compare_with_previous_documents(self, current_raw_text: str) -> List[str]:
         """
-        Use LLM to extract key findings directly from document text and format as bullet points.
-        Only extracts information explicitly mentioned in the text.
+        Main extraction pipeline - returns bullet-formatted summary.
+        Compatible with existing interface.
+        
+        Args:
+            current_raw_text: Raw document text to extract
+            
+        Returns:
+            List containing single bullet-formatted summary
         """
-        current_date = datetime.now().strftime("%Y-%m-%d")
-        mm_dd = datetime.now().strftime("%m/%d")
-        logger.info(f"DEBUG: Processing raw text length: {len(current_raw_text)}")
-          
-        # Current as raw text (truncate if too long)
-        max_text_len = 8000
-        current_raw_truncated = current_raw_text[:max_text_len] + "..." if len(current_raw_text) > max_text_len else current_raw_text
+        try:
+            result = self.extract_document(current_raw_text)
+            return [f"• {result.summary_line}"]
+        except Exception as e:
+            logger.error(f"❌ Extraction pipeline failed: {e}")
+            fallback_date = datetime.now().strftime("%m/%d/%y")
+            return [f"• {fallback_date}: Extraction failed - manual review required"]
+    
+    def extract_document(self, text: str) -> ExtractionResult:
+        """
+        Full extraction pipeline with chaining and verification.
+        
+        Pipeline stages:
+        1. Document type detection (pattern + LLM)
+        2. Specialized extraction (type-specific extractors)
+        3. Verification and correction (format validation)
+        
+        Args:
+            text: Raw document text
+            
+        Returns:
+            ExtractionResult with structured data and summary
+        """
+        fallback_date = datetime.now().strftime("%m/%d/%y")
         
         try:
-            prompt = self.create_extraction_prompt()
-            chain = prompt | self.llm | self.bullet_parser
-            raw_result = chain.invoke({
-                "current_raw_text": current_raw_truncated,
-                "mm_dd": mm_dd
-            })
+            # Stage 1: Detect document type
+            doc_type = self.detector.detect(text)
+            logger.info(f"📄 Detected document type: {doc_type.value}")
             
-            # Parse and validate result
-            if isinstance(raw_result, str):
-                try:
-                    result = json.loads(raw_result)
-                except json.JSONDecodeError as je:
-                    logger.error(f"❌ Invalid JSON from LLM: {raw_result[:200]}... Error: {str(je)}")
-                    return self._fallback_bullet_points()
-            else:
-                result = raw_result
+            # Stage 2: Route to specialized extractor
+            result = self._route_to_extractor(text, doc_type, fallback_date)
             
-            # Extract bullet points from result
-            bullet_points = self._extract_bullet_points(result)
+            # Stage 3: Verify and correct (if needed)
+            final_result = self._verify_result(result, doc_type)
             
-            logger.info(f"✅ Generated {len(bullet_points)} bullet points from document")
-            return bullet_points
+            logger.info(f"✅ Extraction complete: {final_result.summary_line}")
+            return final_result
             
         except Exception as e:
-            logger.error(f"❌ AI extraction failed: {str(e)}")
-            return self._fallback_bullet_points()
-
-    def _extract_bullet_points(self, result: Dict) -> List[str]:
-        """Extract bullet points from parsed result"""
-        bullet_points = []
-        
-        if isinstance(result, dict) and "bullet_points" in result:
-            bullets = result["bullet_points"]
-            if isinstance(bullets, list):
-                for bullet in bullets:
-                    if bullet and bullet.strip() and bullet.strip().lower() != "no significant findings":
-                        bullet_points.append(bullet.strip())
-        
-        if not bullet_points:
-            bullet_points = self._fallback_bullet_points()
-            
-        return bullet_points
-
-    def _fallback_bullet_points(self) -> List[str]:
-        """Simple fallback without LLM."""
-        return ["• No significant new findings identified in current document"]
-
-    def create_extraction_prompt(self) -> PromptTemplate:
-        template = """
-            You are a medical document extractor for our AI Healthcare Platform. 
-            Your job is to extract ONLY the explicitly mentioned key information from the text below 
-            and summarize it into concise one-line or two-line bullet summaries following the Kebilo Categorization Map (v2).
-
-            🧠 GOAL:
-            Identify the document type and extract ONLY the required fields per its category.
-            Each output must be a short, data-rich summary (≤15 words) following this pattern:
-
-            [DOCUMENT TYPE or PHYSICIAN/SENDER] [BODY PART or TOPIC] [DATE] = [KEY FINDING, ACTION, or DECISION]
-
-            ---
-
-            📄 DOCUMENT TEXT:
-            {current_raw_text}
-
-            ---
-
-            ⚙️ EXTRACTION RULES (STRICT):
-
-            1️⃣ Detect document type:
-            - Clinical: MRI, CT, X-ray, Ultrasound, EMG, Labs  
-            - Progress/Follow-up: PR-2  
-            - Consult/Specialist: Consult, Ortho, Neuro, Pain Mgmt  
-            - Initial Evaluation: DFR  
-            - Final/Impairment: PR-4  
-            - Authorization Workflow: RFA, UR, Authorization, Peer-to-Peer, IMR  
-            - Administrative: Adjuster, Attorney, NCM, Signature/Fax requests  
-            - Med-Legal: QME, AME, IME  
-            - General Medicine: Office/PCP visit, New/Annual/Wellness, Specialist Consult (non-WC), ED/Urgent Care, Hospital Discharge, Imaging, Labs/Path/Screening, Pharmacy/PA, External Facility/Home Health/DME, Care Manager/CCM, Patient Message, or Referral
-
-
-            2️⃣ Extract ONLY the following fields depending on document type:
-
-            - **Clinical** → body part, date, key finding/severity  
-            Example: MRI R shoulder 5/10/25 = partial rotator cuff tear  
-
-            - **PR-2** → date, physician, body part, status, next plan  
-            Example: Dr Calhoun PR-2 11/1/25 = R knee improved; continue PT; RFA pending  
-
-            - **Consult** → date, physician, specialty, plan/recommendation  
-            Example: Dr Johnson Ortho 9/12/25 = PT + ESI plan; f/u 6w  
-
-            - **DFR** → DOI, diagnosis, plan/work status  
-            Example: DFR 8/3/25 = DOI 7/30/25; R ankle sprain; PT + brace  
-
-            - **PR-4** → date, MMI status, plan  
-            Example: PR-4 10/5/25 = MMI; ongoing PT  
-
-            - **RFA** → date, service requested, body part  
-            Example: RFA 9/1/25 = PT 6v R knee requested  
-
-            - **UR** → date, service denied, reason  
-            Example: UR 9/8/25 = PT denied; no functional improvement  
-
-            - **Authorization** → date, service approved, body part  
-            Example: Auth 9/25/25 = MRI L shoulder approved  
-
-            - **Administrative Letters** → date, sender or side, core request/issue  
-            Example: Adjuster 9/10/25 = request latest PR-2 + MRI report  
-
-            - **QME / IME / AME** → date, physician/specialty, recommendations or plan  
-            Example: Dr Smith Ortho QME 9/10/25 = PT + ortho f/u; meds PRN  
-
-            - **General Medicine** → date, purpose or issue  
-            Example: Referral 10/1/25 = ortho eval for R knee pain  
-
-            3️⃣ Do NOT infer, guess, or expand missing information.
-            Only extract what is **explicitly stated**.
-
-            4️⃣ Use date format MM/DD.  
-            If no explicit date exists, use: {mm_dd}
-
-            5️⃣ Ignore:
-            - Patient names, ages, vitals, complaints, ROS, disclaimers, signatures, addresses, greetings.  
-            - Historical narrative or unrelated paragraphs.
-
-            6️⃣ OUTPUT FORMAT:
-            Return ONLY JSON:
-            {{
-            "bullet_points": [
-                "• [concise summary 1]",
-                "• [concise summary 2]",
-                "• [concise summary 3]"
-            ]
-            }}
-
-            ❌ DO NOT:
-            - Add explanations, section names, or headings
-            - Include inferred or assumed data
-            - Write paragraphs or multi-line sentences
-
-            ✅ EXAMPLES OF CORRECT OUTPUT:
-            {{
-            "bullet_points": [
-                "• MRI L knee 5/10/25 = medial meniscus tear",
-                "• Dr Johnson Ortho 9/12/25 = PT + ESI plan; f/u 6w",
-                "• UR 9/8/25 = PT denied; no functional improvement"
-            ]
-            }}
-
-            Now extract and summarize according to the Kebilo v2 categorization.
-
-            {format_instructions}
+            logger.error(f"❌ Extraction failed: {e}")
+            return ExtractionResult(
+                document_type="Unknown",
+                document_date=fallback_date,
+                summary_line=f"{fallback_date}: Extraction failed - manual review required",
+                raw_data={}
+            )
+    
+    def _route_to_extractor(self, text: str, doc_type: DocumentType, fallback_date: str) -> ExtractionResult:
         """
-        return PromptTemplate(
-            template=template,
-            input_variables=["current_raw_text", "mm_dd"],
-            partial_variables={
-                "format_instructions": self.bullet_parser.get_format_instructions()
-            },
-        )
- 
+        Route document to appropriate specialized extractor.
+        
+        Args:
+            text: Document text
+            doc_type: Detected document type
+            fallback_date: Fallback date if extraction fails
+            
+        Returns:
+            Initial ExtractionResult from specialized extractor
+        """
+        # Med-Legal reports (QME/AME/IME) - uses chained extractor
+        if doc_type in [DocumentType.QME, DocumentType.AME, DocumentType.IME]:
+            return self.qme_extractor.extract(text, doc_type.value, fallback_date)
+        
+        # Imaging reports
+        elif doc_type in [DocumentType.MRI, DocumentType.CT, DocumentType.XRAY,
+                         DocumentType.ULTRASOUND, DocumentType.EMG]:
+            return self.imaging_extractor.extract(text, doc_type.value, fallback_date)
+        
+        # Progress reports
+        elif doc_type == DocumentType.PR2:
+            return self.pr2_extractor.extract(text, doc_type.value, fallback_date)
+        
+        # Specialist consults
+        elif doc_type == DocumentType.CONSULT:
+            return self.consult_extractor.extract(text, doc_type.value, fallback_date)
+        
+        # All other simple document types
+        else:
+            return self.simple_extractor.extract(text, doc_type.value, fallback_date)
+    
+    def _verify_result(self, result: ExtractionResult, doc_type: DocumentType) -> ExtractionResult:
+        """
+        Verify and correct extraction result if needed.
+        
+        Note: QME extractor already includes verification in its chain,
+        so we skip re-verification for those.
+        
+        Args:
+            result: Initial extraction result
+            doc_type: Document type
+            
+        Returns:
+            Verified/corrected ExtractionResult
+        """
+        # QME/AME/IME already verified in their extractor chain
+        if doc_type in [DocumentType.QME, DocumentType.AME, DocumentType.IME]:
+            return result
+        
+        # Verify all other document types
+        return self.verifier.verify_and_fix(result)
+    
     def format_whats_new_as_highlights(self, bullet_points: List[str]) -> List[str]:
         """
-        Formats the bullet points for display (minimal processing since LLM already formatted them).
-        """
-        if not bullet_points:
-            return ["• No significant new findings identified in current document"]
+        Format bullet points as highlights (for backward compatibility).
         
-        return bullet_points
+        Args:
+            bullet_points: List of bullet-formatted summaries
+            
+        Returns:
+            Same list or default message if empty
+        """
+        return bullet_points if bullet_points else [
+            "• No significant new findings identified in current document"
+        ]
+    
+    def get_structured_extraction(self, text: str) -> Dict[str, Any]:
+        """
+        Get full structured extraction as dictionary (for API/storage).
+        
+        Args:
+            text: Document text to extract
+            
+        Returns:
+            Dictionary with all extraction fields
+        """
+        result = self.extract_document(text)
+        return asdict(result)
+    
+    def get_extraction_metadata(self, text: str) -> Dict[str, Any]:
+        """
+        Get extraction metadata without full processing (useful for validation).
+        
+        Args:
+            text: Document text
+            
+        Returns:
+            Dictionary with document type and basic metadata
+        """
+        try:
+            doc_type = self.detector.detect(text)
+            return {
+                "document_type": doc_type.value,
+                "detected_at": datetime.now().isoformat(),
+                "text_length": len(text),
+                "preview": text[:200] + "..." if len(text) > 200 else text
+            }
+        except Exception as e:
+            logger.error(f"❌ Metadata extraction failed: {e}")
+            return {
+                "document_type": "Unknown",
+                "error": str(e)
+            }
