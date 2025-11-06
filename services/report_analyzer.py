@@ -38,18 +38,28 @@ class ReportAnalyzer:
             timeout=120
         )
         
+        # Create a second LLM instance for analysis (can use same or different deployment)
+        self.analysis_llm = AzureChatOpenAI(
+            azure_endpoint=CONFIG.get("azure_openai_endpoint"),
+            api_key=CONFIG.get("azure_openai_api_key"),
+            deployment_name=CONFIG.get("azure_openai_deployment"),  # Can use same or different deployment
+            api_version=CONFIG.get("azure_openai_api_version"),
+            temperature=0.1,  # Slightly higher temperature for analysis
+            timeout=120
+        )
+        
         # Initialize components
         self.detector = DocumentTypeDetector(self.llm)
         self.verifier = ExtractionVerifier(self.llm)
         
-        # Initialize specialized extractors
+        # Initialize specialized extractors with dual LLMs
         self.qme_extractor = QMEExtractorChained(self.llm)
         self.imaging_extractor = ImagingExtractor(self.llm)
-        self.pr2_extractor = PR2Extractor(self.llm)
+        self.pr2_extractor = PR2Extractor(self.llm, self.analysis_llm)
         self.consult_extractor = ConsultExtractor(self.llm)
         self.simple_extractor = SimpleExtractor(self.llm)
         
-        logger.info("✅ ReportAnalyzer initialized with all extractors")
+        logger.info("✅ ReportAnalyzer initialized with all extractors and dual-LLM support")
     
     def compare_with_previous_documents(self, current_raw_text: str) -> List[str]:
         """

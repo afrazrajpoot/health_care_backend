@@ -4,7 +4,7 @@ QME/AME/IME specialized extractor with LLM chaining
 import logging
 from typing import Dict
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
@@ -34,61 +34,42 @@ class QMEExtractorChained:
         return final_result
 
     def _extract_raw_data(self, text: str, doc_type: str, fallback_date: str) -> Dict:
-        """Stage 1: Extract raw structured data using concise QME summary schema"""
-        prompt = PromptTemplate(
-            template="""
-You are summarizing a Qualified Medical Evaluator (QME/AME) report into a concise,
-structured, actual/actionable (that will help a physician to get all the important info) summary line for a physician dashboard and treatment timeline.
+        """Stage 1: Extract raw structured data using system and user prompts"""
+        
+        system_prompt = """You are a specialized medical document analyst that extracts key information from Qualified Medical Evaluator (QME/AME/IME) reports.
 
-INPUT:
-Full QME/AME report text.
+CRITICAL RULES FOR EXAMINER IDENTIFICATION:
+1. ONLY extract the consulting/examining physician who:
+   - Actually performed the evaluation/examination
+   - Authored/wrote the report
+   - Signed the report as the primary examiner
+2. IGNORE all other names mentioned in the report:
+   - Referring doctors
+   - Treating physicians
+   - Other consultants
+   - Medical staff (nurses, assistants)
+   - Administrative personnel
+3. Look for explicit signatures, "Respectfully submitted by", "Examined by", or similar concluding phrases
+4. The examiner name MUST include appropriate title (Dr./MD/DO) and be the full name
 
-INSTRUCTIONS:
-1. Extract the following key elements:
-   - Date of exam/report
-   - QME/AME physician full name and specialty only pick if explicitly stated (including Dr./MD/DO) else ignore
-   - Body parts evaluated
-   - Key diagnoses confirmed
-   - MMI/WPI status
-   - Apportionment (industrial vs non-industrial)
-   - Specific treatment recommendations (PT, injections, surgery, consults)
-   - Specific medication recommendations (use drug names when present)
-   - Work status AND specific functional restrictions
-     Examples:
-       * "No lifting >10 lbs"
-       * "Limit overhead reaching"
-       * "Sedentary work only"
-       * "No repetitive bending/twisting"
-       * "No pushing/pulling >5 lbs"
-   - Future medical and follow-up recommendations
+DOCUMENT ANALYSIS APPROACH:
+- Focus on factual, clinical information actually stated in the report
+- Extract explicit functional restrictions, not generic "modified duty"
+- Note diagnostic uncertainties marked with "?" with brief context
+- Be concise and use standard medical abbreviations
+- Output structured JSON according to the specified schema"""
 
-2. Output a structured summary schema — concise and factual, optimized for clinical timeline parsing.
+        user_prompt = """
+ANALYZE THIS QME/AME REPORT:
 
-3. WORK RESTRICTIONS RULE:
-   - DO NOT summarize work status as “modified work” or “restricted duty.”
-   - ALWAYS extract and list the actual functional restrictions.
-   - If restrictions are not explicitly stated, infer the most accurate
-     functional description from context (e.g., for chronic shoulder pain:
-     “avoid overhead lifting/reaching; lifting ≤10 lbs to waist height”).
-
-4. HANDLING QUESTION MARKS (“?”):
-   - If the report uses “?” to show uncertainty, clarify what is uncertain
-     using a short parenthetical (≤8 words).
-     Examples:
-       "? rotator cuff tear" → "? rotator cuff tear (diagnosis uncertain)"
-       "? repeat MRI" → "? repeat MRI (pending rationale)"
-
-5. Tone:
-   - Neutral, clinical, concise.
-   - Use standard medical abbreviations.
-   - Avoid speculation or redundant phrasing.
-
-Document text:
+DOCUMENT TEXT:
 {text}
 
-Extract these fields with precision:
+EXTRACTION INSTRUCTIONS:
+Extract the following fields with precision:
+
 - document_date: Date of exam/report (MM/DD/YY format, or use {fallback_date} if not found)
-- examiner_name: Full name of QME/AME physician (must include Dr./MD/DO) not shortened (not just last name) or not just any name without title (Dr./MD/DO)
+- examiner_name: ONLY the consulting/examining physician who wrote and signed this report (must include Dr./MD/DO title) - USE FULL NAME, DO NOT ABBREVIATE
 - specialty: Physician specialty (e.g., Orthopedic Surgery, Neurology, Pain Management)
 - body_parts_evaluated: All body parts evaluated (e.g., ["R shoulder", "L knee"])
 - diagnoses_confirmed: Key confirmed diagnoses (up to 3 most important)
@@ -100,13 +81,21 @@ Extract these fields with precision:
 - work_restrictions: Explicit functional restrictions (max 12 words)
 - future_medical_recommendations: Follow-up or future care recommendations (max 12 words)
 
-Return JSON:
+WORK RESTRICTIONS RULE:
+- DO NOT summarize as "modified work" or "restricted duty"
+- ALWAYS extract the actual functional restrictions
+- If restrictions not explicit, infer from context (e.g., "avoid overhead lifting" for shoulder pain)
+
+UNCERTAINTY HANDLING:
+- For "?" notations, add brief context: "? rotator cuff tear" → "? rotator cuff tear (diagnosis uncertain)"
+
+Return valid JSON:
 {{
   "document_date": "MM/DD/YY or {fallback_date}",
   "examiner_name": "Dr. Full Name or empty",
   "specialty": "Specialty or empty",
-  "body_parts_evaluated": ["part1", "part2", ...] or [],
-  "diagnoses_confirmed": ["diagnosis1", "diagnosis2", ...] or [],
+  "body_parts_evaluated": ["part1", "part2", ...],
+  "diagnoses_confirmed": ["diagnosis1", "diagnosis2", ...],
   "MMI_status": "status phrase or empty",
   "impairment_summary": "WPI or impairment note or empty",
   "causation_opinion": "apportionment or empty",
@@ -116,19 +105,20 @@ Return JSON:
   "future_medical_recommendations": "ongoing/follow-up plan or empty"
 }}
 
-{format_instructions}
-""",
-            input_variables=["text", "doc_type", "fallback_date"],
-            partial_variables={
-                "format_instructions": self.parser.get_format_instructions()
-            },
-        )
+{format_instructions}"""
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            ("human", user_prompt)
+        ])
 
         try:
             chain = prompt | self.llm | self.parser
-            result = chain.invoke(
-                {"text": text[:8000], "doc_type": doc_type, "fallback_date": fallback_date}
-            )
+            result = chain.invoke({
+                "text": text[:8000], 
+                "fallback_date": fallback_date,
+                "format_instructions": self.parser.get_format_instructions()
+            })
             return result
         except Exception as e:
             logger.error(f"❌ Raw extraction failed: {e}")
@@ -152,9 +142,14 @@ Return JSON:
         date = result.get("document_date", "").strip()
         cleaned["document_date"] = date if date and date != "empty" else fallback_date
 
+        # Enhanced examiner name validation
         examiner = result.get("examiner_name", "").strip()
         if examiner and any(t in examiner for t in ["Dr.", "MD", "DO"]):
-            cleaned["examiner_name"] = examiner
+            # Additional check to ensure it's not just a mentioned doctor
+            if not any(term in examiner.lower() for term in ["refer", "treat", "primary", "family", "emergency"]):
+                cleaned["examiner_name"] = examiner
+            else:
+                cleaned["examiner_name"] = ""
         else:
             cleaned["examiner_name"] = ""
 
@@ -200,9 +195,9 @@ Return JSON:
         parts = [f"{date}: {doc_type}"]
 
         if examiner:
-            last_name = examiner.replace("Dr.", "").replace("MD", "").replace("DO", "").strip().split()[-1]
-            if last_name:
-                parts.append(f"(Dr {last_name}, {self._abbreviate_specialty(specialty) if specialty else 'QME'})")
+            # Use full examiner name without abbreviating
+            specialty_abbr = self._abbreviate_specialty(specialty) if specialty else 'QME'
+            parts.append(f"({examiner}, {specialty_abbr})")
 
         if body_parts:
             body_str = ", ".join(body_parts[:3])
