@@ -27,61 +27,61 @@ class ExtractionVerifier:
     FORMAT_SPECS = {
         "QME": {
             "pattern": r"^\d{2}/\d{2}/\d{2}: QME",
-            "max_words": 35,
+            "max_words": 65,
             "required_elements": ["date", "QME/AME/IME", "body_part or diagnosis"],
             "format_template": "[DATE]: QME (Dr [LastName], [Specialty]) for [Body parts] = [Status] → [Recommendations]"
         },
         "AME": {
             "pattern": r"^\d{2}/\d{2}/\d{2}: AME",
-            "max_words": 35,
+            "max_words": 65,
             "required_elements": ["date", "QME/AME/IME", "body_part or diagnosis"],
             "format_template": "[DATE]: AME (Dr [LastName], [Specialty]) for [Body parts] = [Status] → [Recommendations]"
         },
         "IME": {
             "pattern": r"^\d{2}/\d{2}/\d{2}: IME",
-            "max_words": 35,
+            "max_words": 65,
             "required_elements": ["date", "QME/AME/IME", "body_part or diagnosis"],
             "format_template": "[DATE]: IME (Dr [LastName], [Specialty]) for [Body parts] = [Status] → [Recommendations]"
         },
         "MRI": {
             "pattern": r"^MRI .+ \d{2}/\d{2}/\d{2} =",
-            "max_words": 20,
+            "max_words": 60,
             "required_elements": ["MRI", "body_part", "date", "finding"],
             "format_template": "MRI [Body part] [DATE] = [Primary finding]"
         },
         "CT": {
             "pattern": r"^CT .+ \d{2}/\d{2}/\d{2} =",
-            "max_words": 20,
+            "max_words": 60,
             "required_elements": ["CT", "body_part", "date", "finding"],
             "format_template": "CT [Body part] [DATE] = [Primary finding]"
         },
         "X-ray": {
             "pattern": r"^X-ray .+ \d{2}/\d{2}/\d{2} =",
-            "max_words": 20,
+            "max_words": 60,
             "required_elements": ["X-ray", "body_part", "date", "finding"],
             "format_template": "X-ray [Body part] [DATE] = [Primary finding]"
         },
         "PR-2": {
             "pattern": r"^(Dr\.|MD|DO).+ PR-2 \d{2}/\d{2}/\d{2}",
-            "max_words": 25,
+            "max_words": 60,
             "required_elements": ["physician", "PR-2", "date", "status", "plan"],
             "format_template": "Dr [Name] PR-2 [DATE] [Body part] = [Status]; [Plan]"
         },
         "Consult": {
             "pattern": r"^(Dr\.|MD|DO).+ Consult \d{2}/\d{2}/\d{2}",
-            "max_words": 20,
+            "max_words": 60,
             "required_elements": ["physician", "specialty", "date", "recommendations"],
             "format_template": "Dr [Name] [Specialty] Consult [DATE] = [Recommendations]"
         },
         "RFA": {
             "pattern": r"^RFA \d{2}/\d{2}/\d{2} =",
-            "max_words": 18,
+            "max_words": 60,
             "required_elements": ["RFA", "date", "service"],
             "format_template": "RFA [DATE] = [Service] [Body part] requested"
         },
         "UR": {
             "pattern": r"^UR \d{2}/\d{2}/\d{2} =",
-            "max_words": 20,
+            "max_words": 60,
             "required_elements": ["UR", "date", "service", "reason"],
             "format_template": "UR [DATE] = [Service] denied; [Reason]"
         }
@@ -157,7 +157,7 @@ class ExtractionVerifier:
         
         prompt = PromptTemplate(
             template="""
-You are a medical document summary formatter. Fix the summary to match the exact required format.
+You are an AI Medical Assistant, that helps doctors and medical professionals by extracting actual actionalble and useful information from medical documents. Fix the summary to match the exact required format.
 
 DOCUMENT TYPE: {doc_type}
 

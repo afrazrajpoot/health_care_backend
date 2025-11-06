@@ -116,7 +116,7 @@ async def _async_finalize_document_worker(task_self, webhook_payload: dict, batc
             )
         
         # OPTIMIZATION: Async webhook call (non-blocking HTTP)
-        webhook_url = CONFIG.get("api_base_url", "https://api.kebilo.com") + "/webhook/save-document"
+        webhook_url = CONFIG.get("api_base_url", "http://localhost:8000") + "/webhook/save-document"
         
         async with aiohttp.ClientSession() as session:
             # Update progress before webhook
