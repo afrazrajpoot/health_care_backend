@@ -24,6 +24,14 @@ class ConsultExtractor:
             template="""
 You are an AI Medical Assistant, that helps doctors and medical professionals by extracting actual actionable and useful information from medical documents. You are extracting structured clinical information from a specialist consultation report
 to generate a concise, readable summary for a medical timeline card.
+━━━ STAGE : DOCTOR/Physician name EXTRACTION (CRITICAL VALIDATION) ━━━
+CONSULTING DOCTOR/Physician name EXTRACTION GUIDELINES:
+- MUST have explicit title: "Dr.", "MD", "DO", "M.D.", "D.O."
+- Look in: signatures, consultations, specialist mentions
+- Extract FULL NAME with title (e.g., "Dr. Jane Smith")
+- IF name found WITHOUT title → ADD to verification_notes: "Doctor name lacks title: [name]"
+- Do NOT extract patient names, admin names, signature without context
+- If no consultant → "Not specified"
 
 EXTRACTION RULES:
 1. Physician name: MUST include title (Dr./MD/DO). Ignore electronic signatures.
