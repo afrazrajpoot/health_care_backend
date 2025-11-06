@@ -51,7 +51,7 @@ class ProgressService:
         if content_hash:
             return hashlib.md5(f"{filename}:{content_hash}".encode()).hexdigest()
         return hashlib.md5(filename.encode()).hexdigest()
-    
+
     def is_processing(self, document_hash: str) -> bool:
         """Check if a document is already being processed"""
         key = f"processing:{document_hash}"
@@ -112,31 +112,33 @@ class ProgressService:
         logger.info(f"📊 Queue progress initialized: {queue_id} for user {user_id}")
         return queue_id
     
-    def add_task_to_queue(self, queue_id: str, task_id: str, task_type: str, filename: str) -> bool:
-        """Add a task to the queue"""
+    def add_task_to_queue(self, queue_id: str, task_id: str, task_type: str, filename: str, is_batch_subtask: bool = False) -> bool:
+        """Add a task to the queue - allow multiples for batch subtasks"""
         queue_data = self._get_queue_data(queue_id)
         if not queue_data:
             return False
         
-        task_info = {
-            'task_id': task_id,
-            'type': task_type,
-            'filename': filename,
-            'status': 'queued',
-            'added_time': datetime.now().isoformat(),
-            'progress': 0
-        }
+        # NEW: Unique key for subtasks (task_id:filename)
+        unique_key = f"{task_id}:{filename}" if is_batch_subtask else task_id
+        existing_keys = [t.get('unique_key', t['task_id']) for t in queue_data['queued_tasks']]
         
-        # Add to queued tasks if not already present
-        existing_tasks = [t['task_id'] for t in queue_data['queued_tasks']]
-        if task_id not in existing_tasks:
+        if unique_key not in existing_keys:
+            task_info = {
+                'unique_key': unique_key,
+                'task_id': task_id,
+                'type': task_type,
+                'filename': filename,
+                'status': 'queued',
+                'added_time': datetime.now().isoformat(),
+                'progress': 0
+            }
             queue_data['queued_tasks'].append(task_info)
-            queue_data['total_tasks'] += 1
+            queue_data['total_tasks'] += 1  # Always +1 per call
         
         self._save_queue_data(queue_id, queue_data)
         self._update_queue_progress(queue_id)
         
-        logger.info(f"📥 Task added to queue {queue_id}: {filename} ({task_id})")
+        logger.info(f"📥 {'Sub' if is_batch_subtask else ''}task added to queue {queue_id}: {filename} ({task_id})")
         return True
     
     def move_task_to_active(self, queue_id: str, task_id: str) -> bool:
@@ -145,11 +147,11 @@ class ProgressService:
         if not queue_data:
             return False
         
-        # Find task in queued
+        # Find task in queued (now using unique_key)
         task_index = None
         task_info = None
         for i, task in enumerate(queue_data['queued_tasks']):
-            if task['task_id'] == task_id:
+            if task['task_id'] == task_id or task['unique_key'] == task_id:  # Handle both
                 task_index = i
                 task_info = task
                 break
@@ -161,7 +163,7 @@ class ProgressService:
             task_info['start_time'] = datetime.now().isoformat()
             
             # Add to active
-            queue_data['active_tasks'][task_id] = task_info
+            queue_data['active_tasks'][task_info['unique_key']] = task_info
             
             self._save_queue_data(queue_id, queue_data)
             self._update_queue_progress(queue_id)
@@ -172,38 +174,47 @@ class ProgressService:
         return False
     
     def update_task_progress_in_queue(self, queue_id: str, task_id: str, progress: int, status: str = None) -> bool:
-        """Update progress of a specific task in the queue"""
+        """Update progress of a specific task in the queue (using unique_key or task_id)"""
         queue_data = self._get_queue_data(queue_id)
         if not queue_data:
             return False
         
-        # Update in active tasks
-        if task_id in queue_data['active_tasks']:
-            queue_data['active_tasks'][task_id]['progress'] = progress
-            if status:
-                queue_data['active_tasks'][task_id]['status'] = status
-            if progress >= 100:
-                queue_data['active_tasks'][task_id]['end_time'] = datetime.now().isoformat()
+        # Update in active tasks (check unique_key or task_id)
+        updated = False
+        for key, task_info in queue_data['active_tasks'].items():
+            if task_info['task_id'] == task_id or key == task_id:
+                task_info['progress'] = progress
+                if status:
+                    task_info['status'] = status
+                if progress >= 100:
+                    task_info['end_time'] = datetime.now().isoformat()
+                updated = True
+                break
         
-        self._save_queue_data(queue_id, queue_data)
-        self._update_queue_progress(queue_id)
+        if updated:
+            self._save_queue_data(queue_id, queue_data)
+            self._update_queue_progress(queue_id)
         
-        return True
+        return updated
     
     def complete_task_in_queue(self, queue_id: str, task_id: str, success: bool = True) -> bool:
-        """Mark a task as completed in the queue"""
+        """Mark a task as completed in the queue (using unique_key or task_id)"""
         queue_data = self._get_queue_data(queue_id)
         if not queue_data:
             return False
         
         task_info = None
+        unique_key = None
         
         # Remove from active tasks
-        if task_id in queue_data['active_tasks']:
-            task_info = queue_data['active_tasks'].pop(task_id)
+        for key, info in queue_data['active_tasks'].items():
+            if info['task_id'] == task_id or key == task_id:
+                task_info = info
+                unique_key = key
+                break
         
-        # Update counters
         if task_info:
+            # Update counters
             if success:
                 queue_data['completed_tasks'] += 1
                 task_info['status'] = 'completed'
@@ -214,7 +225,8 @@ class ProgressService:
             task_info['end_time'] = datetime.now().isoformat()
             task_info['progress'] = 100
             
-            queue_data['completed_task_ids'].append(task_id)
+            queue_data['completed_task_ids'].append(unique_key or task_id)
+            del queue_data['active_tasks'][unique_key]
         
         self._save_queue_data(queue_id, queue_data)
         self._update_queue_progress(queue_id)
@@ -334,6 +346,7 @@ class ProgressService:
                 'filenames': filenames,
                 'progress_percentage': 0,
                 'current_file_progress': 0,
+                'files_progress': [None] * total_steps,  # NEW: Per-file array
                 'user_id': user_id,
                 'queue_id': queue_id  # Store queue reference
             }
@@ -346,10 +359,10 @@ class ProgressService:
             )
             logger.info(f"📊 Progress initialized for task {task_id}: {total_steps} files, user: {user_id}, queue: {queue_id}")
             
-            # Register with queue if provided
+            # Register with queue if provided - FIXED: Use is_batch_subtask=True
             if queue_id and user_id and filenames:
                 for filename in filenames:
-                    self.add_task_to_queue(queue_id, task_id, 'batch_processing', filename)
+                    self.add_task_to_queue(queue_id, task_id, 'batch_processing', filename, is_batch_subtask=True)
             
             # Use background thread for async operations in Celery context
             self._emit_batch_started_background(task_id, filenames, total_steps, user_id)
@@ -408,7 +421,7 @@ class ProgressService:
         failed_file: Optional[str] = None,
         file_progress: Optional[int] = None
     ):
-        """Simplified progress calculation - each file contributes equally"""
+        """Simplified progress calculation - each file contributes equally (BACKWARD COMPAT, DEPRECATED - USE update_file_progress_only)"""
         try:
             progress_key = f"progress:{task_id}"
             progress_data = self.redis_client.get(progress_key)
@@ -505,6 +518,131 @@ class ProgressService:
             error_msg = f"❌ Failed to update progress for task {task_id}: {str(e)}"
             logger.error(error_msg)
             return None
+
+    def update_file_progress_only(self, task_id: str, file_index: int, filename: str, status: str, file_progress: int, message: str = None):
+        """
+        Updates progress for individual file ONLY - never marks batch as complete.
+        Calculates overall progress as average of all file progresses.
+        """
+        progress_data = self._get_progress_sync(task_id)  # Use sync helper for Celery
+        if not progress_data:
+            return
+        
+        # Initialize file progress tracking if missing
+        if 'files_progress' not in progress_data:
+            progress_data['files_progress'] = [None] * progress_data['total_steps']  # List for order
+        
+        # Update this file's progress
+        progress_data['files_progress'][file_index] = {
+            'index': file_index,
+            'filename': filename,
+            'progress': file_progress,
+            'status': status,
+            'message': message or status.capitalize()
+        }
+        
+        # Calculate completed count for display (e.g., "1/2 files")
+        completed_files = sum(1 for fp in progress_data['files_progress'] if fp and fp['progress'] == 100)
+        progress_data['completed_steps'] = completed_files  # Reuse for "X/Y files"
+        
+        # Overall progress: weighted average (completed at 100%, ongoing averaged)
+        total_files = progress_data['total_steps']
+        if total_files > 0:
+            completed_weight = completed_files * 100
+            ongoing_files = [fp['progress'] for fp in progress_data['files_progress'] if fp and fp['progress'] < 100]
+            ongoing_weight = (sum(ongoing_files) / len(ongoing_files) if ongoing_files else 0) * (total_files - completed_files)
+            overall = (completed_weight + ongoing_weight) / total_files
+            progress_data['progress_percentage'] = min(overall, 99)  # Cap until callback
+        else:
+            progress_data['progress_percentage'] = 0
+        
+        progress_data['current_step'] = file_index + 1  # For sorting/display
+        progress_data['current_file'] = f"{filename} - {message or status}"
+        progress_data['status'] = 'processing'  # Until callback
+        
+        # Update queue per-file (via unique_key)
+        queue_id = progress_data.get('queue_id')
+        if queue_id:
+            unique_key = f"{task_id}:{filename}"
+            self.update_task_progress_in_queue(queue_id, unique_key, file_progress, status)
+        
+        self._save_progress(task_id, progress_data, completed=False)
+        logger.info(f"📊 File {file_index} ({filename}): {file_progress}% | Overall: {progress_data['progress_percentage']:.1f}% | {completed_files}/{total_files} files")
+
+    def update_batch_progress(self, task_id: str, results: List[Dict], status: str = 'completed', completed: bool = True):
+        """
+        Callback-only: Final batch update with results summary.
+        """
+        progress_data = self._get_progress_sync(task_id)
+        if not progress_data:
+            return
+        
+        # Summarize from results (success/failed/skipped counts)
+        success_count = sum(1 for r in results if r.get('status') == 'success')
+        failed_count = sum(1 for r in results if r.get('status') == 'failed')
+        progress_data['processed_files'] = [r.get('filename') for r in results if r.get('status') == 'success']
+        progress_data['failed_files'] = [r.get('filename') for r in results if r.get('status') == 'failed']
+        
+        progress_data['status'] = status
+        progress_data['progress_percentage'] = 100
+        progress_data['completed_steps'] = len(results)  # All done
+        progress_data['end_time'] = datetime.now().isoformat()
+        progress_data['current_file'] = f"Batch complete: {success_count}/{len(results)} successful"
+        
+        # Complete queue task (now with subtasks, complete all matching)
+        queue_id = progress_data.get('queue_id')
+        if queue_id:
+            queue_data = self._get_queue_data(queue_id)
+            for subtask_key, subtask in list(queue_data.get('active_tasks', {}).items()):
+                if subtask['task_id'] == task_id:
+                    self.complete_task_in_queue(queue_id, subtask_key, success=failed_count == 0)
+            # Also complete any queued subtasks for safety
+            queued_to_remove = [i for i, t in enumerate(queue_data['queued_tasks']) if t['task_id'] == task_id]
+            for i in reversed(queued_to_remove):
+                del queue_data['queued_tasks'][i]
+                self.complete_task_in_queue(queue_id, queue_data['queued_tasks'][i]['unique_key'], success=failed_count == 0)
+                self._save_queue_data(queue_id, queue_data)
+        
+        self._save_progress(task_id, progress_data, completed=completed)
+        logger.info(f"🏁 Batch {task_id} complete: {success_count}/{len(results)} | Queue updated")
+
+    def _get_progress_sync(self, task_id: str) -> Optional[Dict]:
+        """SYNC helper for Celery/internal use"""
+        try:
+            progress_data = self.redis_client.get(f"progress:{task_id}")
+            if progress_data:
+                return json.loads(progress_data)
+            return None
+        except Exception as e:
+            logger.error(f"❌ Failed to get progress sync for task {task_id}: {str(e)}")
+            return None
+
+    async def get_progress(self, task_id: str) -> Optional[Dict]:
+        """Get current progress for a task - ASYNC for API/dashboard"""
+        try:
+            progress_data = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self.redis_client.get(f"progress:{task_id}")
+            )
+            if progress_data:
+                progress = json.loads(progress_data)
+                debug_msg = f"📊 Retrieved progress for task {task_id}: {progress['progress_percentage']}% | Status: {progress['status']} | File: '{progress['current_file']}' | File prog: {progress['current_file_progress']}% | Completed: {progress['completed_steps']}/{progress['total_steps']}"
+                logger.debug(debug_msg)
+                return progress
+            else:
+                warn_msg = f"📊 No progress found for task {task_id}"
+                logger.warning(warn_msg)
+                return None
+        except Exception as e:
+            error_msg = f"❌ Failed to get progress for task {task_id}: {str(e)}"
+            logger.error(error_msg)
+            return None
+
+    def _save_progress(self, task_id: str, data: Dict, completed: bool = False):
+        """Helper to save progress data to Redis"""
+        key = f"progress:{task_id}"
+        ttl = 180 if completed else 3600  # Shorter TTL for completed
+        self.redis_client.setex(key, ttl, json.dumps(data))
+        logger.debug(f"💾 Progress saved for {task_id} (completed: {completed}, TTL: {ttl}s)")
 
     def _schedule_reset_task(self, task_id: str, progress: Dict):
         """Schedule progress reset after completion"""
@@ -694,24 +832,6 @@ class ProgressService:
         except Exception as e:
             logger.error(f"❌ Failed to cleanup completed tasks: {str(e)}")
             return 0
-
-    async def get_progress(self, task_id: str) -> Optional[Dict]:
-        """Get current progress for a task - ASYNC for API"""
-        try:
-            progress_data = self.redis_client.get(f"progress:{task_id}")
-            if progress_data:
-                progress = json.loads(progress_data)
-                debug_msg = f"📊 Retrieved progress for task {task_id}: {progress['progress_percentage']}% | Status: {progress['status']} | File: '{progress['current_file']}' | File prog: {progress['current_file_progress']}% | Completed: {progress['completed_steps']}/{progress['total_steps']}"
-                logger.debug(debug_msg)
-                return progress
-            else:
-                warn_msg = f"📊 No progress found for task {task_id}"
-                logger.warning(warn_msg)
-                return None
-        except Exception as e:
-            error_msg = f"❌ Failed to get progress for task {task_id}: {str(e)}"
-            logger.error(error_msg)
-            return None
 
 # Singleton instance
 progress_service = ProgressService()
