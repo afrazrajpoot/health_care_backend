@@ -1,11 +1,10 @@
 """
 OPTIMIZED Enhanced Report Analyzer with Single-Pass LLM Extraction
-Combines document detection, extraction, and verification into ONE LLM call
-Performance: 6-10 sec → 2-3 sec per document (3-4x faster)
+Now with System/User prompts and focused consulting doctor extraction
 """
 
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
@@ -30,13 +29,8 @@ from models.data_models import DocumentAnalysis, VerificationResult, BriefSummar
 class EnhancedReportAnalyzer:
     """
     OPTIMIZED Enhanced analyzer with single-pass extraction.
-    
-    Changes from previous version:
-    - Stage 1 (Detection): Now uses fast pattern matching first, LLM fallback only if needed
-    - Stage 2 (Extraction): Combined with built-in verification (1 LLM call instead of 2)
-    - Stage 3 (Verification): Built into extraction prompt, local validation only
-    
-    Performance improvement: 6-10 sec → 2-3 sec per document (3-4x faster)
+    Now uses System/User prompts for better extraction.
+    Consulting Doctor = Report author/signer ONLY (ignore referral doctors)
     """
     
     def __init__(self):
@@ -54,17 +48,14 @@ class EnhancedReportAnalyzer:
         self.brief_summary_parser = JsonOutputParser(pydantic_object=BriefSummary)
         
         # Initialize document type detector from modular architecture
-        # OPTIMIZATION: Pattern matching is fast (20-50ms), only falls back to LLM if needed
         self.document_detector = DocumentTypeDetector(self.llm)
         
-        logger.info("✅ OPTIMIZED EnhancedReportAnalyzer initialized (single-pass extraction)")
+        logger.info("✅ OPTIMIZED EnhancedReportAnalyzer initialized (System/User prompts)")
     
     def detect_document_type(self, document_text: str) -> str:
         """
         OPTIMIZED: Fast pattern-based detection (90% of cases).
         Only uses LLM for ambiguous cases (10%).
-        
-        Performance: 20-50ms (pattern) or 1-2 sec (LLM fallback)
         """
         try:
             logger.info("🔍 Fast document type detection...")
@@ -79,9 +70,6 @@ class EnhancedReportAnalyzer:
     def validate_doctor_name_locally(self, name: str) -> Tuple[bool, str]:
         """
         OPTIMIZED: Local validation without LLM (instant).
-        Replaces LLM-based verification for doctor names.
-        
-        Performance: <1ms (instant)
         """
         if not name or name == "Not specified":
             return True, name
@@ -104,157 +92,102 @@ class EnhancedReportAnalyzer:
                 logger.warning(f"⚠️ Invalid doctor name format: {name}")
                 return False, "Not specified"
     
-    def create_optimized_extraction_prompt(self, detected_doc_type: str) -> PromptTemplate:
+    def create_optimized_extraction_prompt(self, detected_doc_type: str) -> ChatPromptTemplate:
         """
-        OPTIMIZED: Single comprehensive prompt combining:
-        - Document type guidance (from pre-detection)
-        - Data extraction
-        - Built-in self-verification
+        OPTIMIZED: System/User prompt structure for better extraction.
+        Critical: Consulting Doctor = Report author/signer ONLY
+        """
         
-        Replaces separate verification LLM call.
-        """
-        template = """
-You are an expert medical document analyzer with BUILT-IN quality assurance.
+        # SYSTEM PROMPT - Role and Instructions
+        system_template = """You are an expert medical document analyzer with BUILT-IN quality assurance.
 
-DETECTED DOCUMENT TYPE: {detected_doc_type}
-(Use this as guidance for extraction priorities and context)
+ROLE: Extract structured medical information with high accuracy and self-verification.
 
-DOCUMENT TEXT:
+CRITICAL DOCTOR EXTRACTION RULES:
+1. CONSULTING DOCTOR: ONLY the doctor who WROTE, AUTHORED, or SIGNED this specific report
+   - Look for: Signature lines, "Dictated by:", "Authored by:", "Report by:", "Electronically signed by:"
+   - Must have explicit title: "Dr.", "MD", "DO", "M.D.", "D.O."
+   - Extract FULL NAME with title (e.g., "Dr. Jane Smith")
+   - IGNORE: Referral doctors, primary care doctors, other specialists mentioned
+   - IGNORE: Administrative staff, nurses, physician assistants
+   - If no clear author/signer → "Not specified"
+
+2. REFERRAL DOCTOR: ONLY extract if explicitly mentioned as referral source
+   - Look for: "Referred by:", "Referral from:", "PCP:", "Primary Care Physician:"
+   - Must have explicit title
+   - If no referral source → "Not specified"
+
+DOCUMENT TYPE GUIDANCE: {detected_doc_type}
+- Use this to prioritize extraction fields and context
+
+QUALITY ASSURANCE:
+- Simultaneously perform self-verification during extraction
+- Flag inconsistencies in verification_notes
+- Set extraction_confidence (0.0-1.0) based on data quality
+- verified=true (since built-in verification)
+
+OUTPUT FORMAT: Strict JSON following schema"""
+        
+        # USER PROMPT - Document and Specific Instructions
+        user_template = """DOCUMENT TEXT:
 {document_text}
 
 CURRENT DATE: {current_date}
 
 ═══════════════════════════════════════════════════════════════════════
-COMPREHENSIVE ANALYSIS INSTRUCTIONS (ALL IN ONE PASS)
+COMPREHENSIVE EXTRACTION INSTRUCTIONS
 ═══════════════════════════════════════════════════════════════════════
 
-PERFORM ALL STAGES SIMULTANEOUSLY:
+PERFORM ALL STAGES IN ONE PASS:
 
-━━━ STAGE 1: DOCUMENT STRUCTURE ANALYSIS ━━━
-- Document type: {detected_doc_type} (validate and refine if needed)
-- Prioritize extraction based on type:
-  * QME/AME/IME → Focus on: impairment, apportionment, MMI, work restrictions
-  * Imaging → Focus on: findings, impressions, body part, abnormalities
-  * Progress Report → Focus on: status change, treatment updates, next steps
-  * Consult → Focus on: recommendations, specialist opinions
-- Identify workers comp indicators: "WRKCMP", "Work Comp", "industrial injury", claim references
-- Assess urgency: Pain scales (7+/10=urgent), severe symptoms, critical findings
-- Document sections: Demographics, Subjective, Objective, Assessment, Plan, Findings, Impressions
-
-━━━ STAGE 2: PATIENT & CLAIM EXTRACTION ━━━
-CRITICAL CLAIM NUMBER RULE:
-- Scan for keywords: "CLAIM", "Claim #", "Claim Number", "CL#" within 20 chars of a number
-- If keyword + number nearby → extract claim number
-- If NO keyword → "Not specified" (even if numbers exist elsewhere)
-- Examples:
-  ✅ "Claim #12345" → "12345"
-  ✅ "Claim Number: 98765" → "98765"
-  ❌ "Patient ID 12345" (no "claim" keyword) → "Not specified"
-
-Extract:
+━━━ 1. PATIENT & CLAIM DATA ━━━
 - patient_name: Full name from demographics. If not found → "Not specified"
-- claim_number: Use strict rule above
-- dob: "DOB:", "Date of Birth:", birth patterns. Format YYYY-MM-DD. If not found → "Not specified"
-- doi: Date of injury from history/workers comp context. Format YYYY-MM-DD. If not found → "Not specified"
+- claim_number: ONLY if near "CLAIM", "Claim #", "Claim Number", "CL#" keywords. Otherwise → "Not specified"
+- dob: "DOB:", "Date of Birth:" patterns. Format YYYY-MM-DD. If not found → "Not specified"  
+- doi: Date of injury from workers comp context. Format YYYY-MM-DD. If not found → "Not specified"
 
-━━━ STAGE 3: CLINICAL EXTRACTION ━━━
+━━━ 2. CLINICAL DATA ━━━
 - status: Based on urgency (normal/elevated/urgent/critical). If unclear → "Not specified"
-- diagnosis: Primary condition + 2-3 key findings (5-10 words). If not found → "Not specified"
+- diagnosis: Primary condition + key findings (5-10 words). If not found → "Not specified"
 - key_concern: Main issue in 2-3 words. If not found → "Not specified"
 
-BODY PART ANALYSIS (HANDLE MULTIPLE):
-- body_part: Primary body part (e.g., "lumbar spine", "right knee"). If not found → "Not specified"
-- body_parts_analysis: If MULTIPLE body parts mentioned, create SEPARATE analysis for EACH:
-  * body_part: Specific part
-  * diagnosis: Diagnosis for this part
-  * key_concern: Key concern for this part
-  * clinical_summary: Important findings (2-3 sentences)
-  * treatment_plan: Treatments/therapies for this part (2-3 sentences)
-  * extracted_recommendation: Recommendations for this part
-  * adls_affected: ADLs affected by this part
-  * work_restrictions: Restrictions for this part
-
+BODY PART ANALYSIS:
+- body_part: Primary body part. If not found → "Not specified"
+- body_parts_analysis: If MULTIPLE body parts, create separate analysis for EACH
 - adls_affected: Limited activities in 2-3 words. If not found → "Not specified"
 - work_restrictions: Work limitations in 2-3 words. If not found → "Not specified"
 
-━━━ STAGE 4: KEYWORD EXTRACTION (STRICT RULES) ━━━
-EXTRACTED RECOMMENDATION:
-- STRICTLY scan for keywords: 'recommend', 'recommendation', 'plan', 'follow-up', 'therapy', 'PT', 'medication', 'surgery', 'consult', 'referral'
-- ONLY if keywords present → extract comma-separated keywords (NOT sentences)
-- Example: "PT twice weekly, follow-up 4 weeks, surgical consult"
-- If NO keywords → "Not specified"
+━━━ 3. KEYWORD EXTRACTION ━━━
+- extracted_recommendation: Scan for 'recommend', 'recommendation', 'plan', 'therapy', 'PT', 'medication', 'surgery'
+- extracted_decision: Scan Assessment/Plan for "Decision:", "Plan:", "Judgment:"
+- ur_decision: ONLY if 'Utilization Review', 'UR', 'prior authorization', 'approved', 'denied' keywords present
 
-EXTRACTED DECISION:
-- Scan Assessment/Plan/Impressions for: "Decision:", "Plan:", "Judgment:", "Proceed with"
-- Extract comma-separated medical terms only
-- If not found → "Not specified"
+━━━ 4. DOCTOR EXTRACTION (CRITICAL) ━━━
+CONSULTING DOCTOR (REPORT AUTHOR/SIGNER ONLY):
+- PRIMARY FOCUS: Signature blocks, "Dictated by:", "Report by:", "Electronically signed by:"
+- MUST have title: "Dr.", "MD", "DO", "M.D.", "D.O."
+- IGNORE all other doctors mentioned in content (referrals, consults, PCPs)
+- If name found WITHOUT title → ADD to verification_notes: "Consulting doctor lacks title: [name]"
+- If no clear author/signer → "Not specified"
 
-EXTRACTED UR DECISION:
-- Scan for: 'Utilization Review', 'UR', 'prior authorization', 'PA', 'approved', 'denied'
-- ONLY if keywords present → extract decision (comma-separated)
-- If denial → extract ur_denial_reason (1-2 sentences explaining why)
-- If NO keywords → ur_decision="Not specified", ur_denial_reason=None
+REFERRAL DOCTOR (ONLY IF EXPLICIT REFERRAL SOURCE):
+- Look for: "Referred by:", "Referral from:", "PCP:", "Primary Care Physician:"
+- Must have title
+- If no explicit referral source → "Not specified"
 
-━━━ STAGE 5: DOCTOR EXTRACTION (CRITICAL VALIDATION) ━━━
-CONSULTING DOCTOR:
-- MUST have explicit title: "Dr.", "MD", "DO", "M.D.", "D.O."
-- Look in: signatures, consultations, specialist mentions
-- Extract FULL NAME with title (e.g., "Dr. Jane Smith")
-- IF name found WITHOUT title → ADD to verification_notes: "Doctor name lacks title: [name]"
-- Do NOT extract patient names, admin names, signature without context
-- If no consultant → "Not specified"
+━━━ 5. AI OUTCOME & TASK ANALYSIS ━━━
+- ai_outcome: Prediction based on diagnosis, recommendations (comma-separated keywords)
+- is_task_needed: TRUE if pending actions, future appointments, new recommendations
 
-REFERRAL DOCTOR:
-- MUST have explicit title: "Dr.", "MD", "DO", "M.D.", "D.O."
-- Look for: "Referred to", "Referral to", "Referred by", "PCP", "Primary Care"
-- Extract FULL NAME with title
-- IF name found WITHOUT title → ADD to verification_notes: "Referral doctor lacks title: [name]"
-- If no referral → "Not specified"
-
-━━━ STAGE 6: AI OUTCOME & TASK ANALYSIS ━━━
-AI OUTCOME:
-- Based on diagnosis, recommendations, decisions → generate outcome prediction (comma-separated keywords)
-- Tie to evidence in document
-- Example: "full recovery 6 weeks, monitor pain, low risk"
-
-TASK NEED ANALYSIS:
-- Set is_task_needed=TRUE if:
-  * PENDING actions not completed
-  * FUTURE appointments need scheduling
-  * NEW recommendations need implementation
-  * AUTHORIZATIONS needed
-  * REFERRALS to process
-- Set is_task_needed=FALSE if:
-  * Everything COMPLETED/DONE
-  * No pending actions
-  * Purely historical/descriptive
-
-━━━ STAGE 7: DATE REASONING ━━━
+━━━ 6. DATE REASONING ━━━
 - Extract ALL dates, convert to YYYY-MM-DD
-- Classify as DOB (birth context), DOI (injury), RD (report/signature/end)
-- Use document flow: early dates likely DOB/DOI, late dates likely RD
-- Provide reasoning, contexts, confidence scores (0.0-1.0)
+- Classify as DOB (birth), DOI (injury), RD (report/signature)
+- Provide reasoning, contexts, confidence scores
 
-━━━ STAGE 8: BUILT-IN SELF-VERIFICATION (CRITICAL) ━━━
-Simultaneously perform quality checks and set metadata:
-
-extraction_confidence (0.0-1.0):
-- 1.0: All critical fields extracted with certainty
-- 0.8: Most fields extracted, minor ambiguity
-- 0.6: Several fields uncertain
-- 0.4: Many fields missing
-- 0.2: Minimal extraction
-
-verification_notes (list of issues):
-- Add note if doctor name lacks title
-- Add note if claim number ambiguous
-- Add note if dates inconsistent
-- Add note if diagnosis doesn't match body part
-- Add note if keyword extraction unclear
-
-verified: true (always true since self-verified)
-
-━━━ STAGE 9: DOCUMENT OVERVIEW ━━━
+━━━ 7. SELF-VERIFICATION & METADATA ━━━
+- extraction_confidence: 0.0-1.0 based on data quality
+- verification_notes: List any issues (doctor titles, ambiguous data, inconsistencies)
+- verified: true
 - document_type: Confirm or refine {detected_doc_type}
 - summary_points: 3-5 key points, each 2-3 words
 
@@ -262,66 +195,51 @@ verified: true (always true since self-verified)
 CRITICAL OUTPUT RULES
 ═══════════════════════════════════════════════════════════════════════
 - Extract ONLY from document text. If not found → "Not specified"
-- Doctor names MUST include titles. Flag in verification_notes if missing
+- Consulting Doctor = Report Author/Signer ONLY (ignore all other doctors)
 - Keywords: comma-separated terms, NO full sentences
 - Dates: YYYY-MM-DD format only
 - Output valid JSON matching schema
-- Include extraction_confidence, verified=true, verification_notes
 
-{format_instructions}
-"""
+{format_instructions}"""
         
-        return PromptTemplate(
-            template=template,
-            input_variables=["document_text", "current_date", "detected_doc_type"],
-            partial_variables={"format_instructions": self.parser.get_format_instructions()},
-        )
+        system_message_prompt = SystemMessagePromptTemplate.from_template(system_template)
+        human_message_prompt = HumanMessagePromptTemplate.from_template(user_template)
+        
+        return ChatPromptTemplate.from_messages([
+            system_message_prompt,
+            human_message_prompt
+        ])
     
     def extract_document_data_with_reasoning(self, document_text: str) -> DocumentAnalysis:
         """
-        OPTIMIZED: Single-pass extraction with built-in verification.
-        
-        OLD APPROACH (3 LLM calls):
-        - Stage 1: Document type detection (1-2 sec)
-        - Stage 2: Comprehensive extraction (3-5 sec)
-        - Stage 3: Verification LLM (2-3 sec)
-        Total: 6-10 seconds
-        
-        NEW APPROACH (1 LLM call):
-        - Fast pattern-based detection (20-50ms, 90% of cases)
-        - Single comprehensive extraction with built-in verification (2-3 sec)
-        - Local doctor name validation (instant)
-        Total: 2-3 seconds
-        
-        Performance improvement: 3-4x faster
+        OPTIMIZED: Single-pass extraction with System/User prompts.
+        Consulting Doctor = Report author/signer ONLY
         """
         try:
-            logger.info("🚀 Starting OPTIMIZED single-pass extraction...")
+            logger.info("🚀 Starting OPTIMIZED extraction (System/User prompts)...")
             
             current_date = datetime.now().strftime("%Y-%m-%d")
             
-            # OPTIMIZATION 1: Fast pattern-based detection (20-50ms)
-            # Only falls back to LLM for ambiguous cases (~10%)
+            # Fast pattern-based detection
             logger.info("📄 Stage 1: Fast document type detection")
             detected_doc_type = self.detect_document_type(document_text)
             
-            # OPTIMIZATION 2: Single comprehensive extraction with built-in verification
-            # Combines old Stage 2 (extraction) + Stage 3 (verification) into ONE call
-            logger.info("🔍 Stage 2: Comprehensive extraction with built-in verification")
+            # Single comprehensive extraction with System/User prompts
+            logger.info("🔍 Stage 2: System/User prompt extraction")
             prompt = self.create_optimized_extraction_prompt(detected_doc_type)
             chain = prompt | self.llm | self.parser
             
             result = chain.invoke({
                 "document_text": document_text,
                 "current_date": current_date,
-                "detected_doc_type": detected_doc_type
+                "detected_doc_type": detected_doc_type,
+                "format_instructions": self.parser.get_format_instructions()
             })
             
             analysis = DocumentAnalysis(**result)
             
-            # OPTIMIZATION 3: Local doctor name validation (instant, no LLM)
-            # Replaces separate verification LLM call
-            logger.info("✅ Stage 3: Local validation (instant)")
+            # Local doctor name validation
+            logger.info("✅ Stage 3: Local validation")
             
             if analysis.consulting_doctor and analysis.consulting_doctor != "Not specified":
                 is_valid, corrected = self.validate_doctor_name_locally(analysis.consulting_doctor)
@@ -335,19 +253,17 @@ CRITICAL OUTPUT RULES
                     analysis.referral_doctor = corrected
                     analysis.verification_notes.append(f"Auto-corrected referral_doctor: {corrected}")
             
-            # Set verified flag (since built-in verification was performed)
+            # Set verified flag
             analysis.verified = True
             
-            # Log results
+            # Log results with focus on consulting doctor
             logger.info(f"🎉 OPTIMIZED extraction complete:")
             logger.info(f"   - Patient: {analysis.patient_name}")
             logger.info(f"   - Document Type: {analysis.document_type}")
-            logger.info(f"   - Consulting Doctor: {analysis.consulting_doctor}")
+            logger.info(f"   - CONSULTING DOCTOR (Author/Signer): {analysis.consulting_doctor}")
             logger.info(f"   - Referral Doctor: {analysis.referral_doctor}")
             logger.info(f"   - Confidence: {analysis.extraction_confidence:.2f}")
-            logger.info(f"   - Verified: {analysis.verified}")
             logger.info(f"   - Issues: {len(analysis.verification_notes)}")
-            logger.info(f"   - Performance: ~2-3 sec (3-4x faster than old approach)")
             
             return analysis
             
@@ -358,14 +274,17 @@ CRITICAL OUTPUT RULES
     def generate_brief_summary(self, document_text: str) -> str:
         """
         Generate brief summary (unchanged).
-        Used for quick progress UI updates during batch processing.
         """
         try:
             current_date = datetime.now().strftime("%Y-%m-%d")
             
-            summary_prompt = PromptTemplate(
-                template="""
-Generate a concise 1-2 sentence professional summary of this medical document.
+            # Use System/User prompts for summary too
+            system_prompt = SystemMessagePromptTemplate.from_template(
+                "You are a medical summarization expert. Generate concise 1-2 sentence professional summaries."
+            )
+            
+            human_prompt = HumanMessagePromptTemplate.from_template(
+                """Generate a concise 1-2 sentence professional summary of this medical document.
 
 DOCUMENT TEXT:
 {document_text}
@@ -374,14 +293,17 @@ CURRENT DATE: {current_date}
 
 Focus: Patient condition, key findings, recommendations. Use clinical language.
 
-{format_instructions}
-""",
-                input_variables=["document_text", "current_date"],
-                partial_variables={"format_instructions": self.brief_summary_parser.get_format_instructions()},
+{format_instructions}"""
             )
             
+            summary_prompt = ChatPromptTemplate.from_messages([system_prompt, human_prompt])
+            
             chain = summary_prompt | self.llm | self.brief_summary_parser
-            result = chain.invoke({"document_text": document_text, "current_date": current_date})
+            result = chain.invoke({
+                "document_text": document_text, 
+                "current_date": current_date,
+                "format_instructions": self.brief_summary_parser.get_format_instructions()
+            })
             
             brief_summary = result.get('brief_summary', 'Not specified')
             logger.info(f"✅ Generated summary: {brief_summary}")
@@ -392,7 +314,7 @@ Focus: Patient condition, key findings, recommendations. Use clinical language.
             return "Brief summary unavailable"
     
     def create_fallback_analysis(self) -> DocumentAnalysis:
-        """Create fallback analysis when extraction fails (unchanged)"""
+        """Create fallback analysis when extraction fails"""
         timestamp = datetime.now().strftime("%Y-%m-%d")
         return DocumentAnalysis(
             patient_name="Not specified",
@@ -411,8 +333,8 @@ Focus: Patient condition, key findings, recommendations. Use clinical language.
             ur_denial_reason=None,
             adls_affected="Not specified",
             work_restrictions="Not specified",
-            consulting_doctor="Not specified",
-            referral_doctor="Not specified",
+            consulting_doctor="Not specified",  # Focus on author/signer
+            referral_doctor="Not specified",   # Only if explicit referral
             ai_outcome="Insufficient data; full evaluation needed",
             document_type="medical_document",
             summary_points=["Not specified"],
@@ -424,7 +346,7 @@ Focus: Patient condition, key findings, recommendations. Use clinical language.
         )
     
     def get_date_reasoning(self, document_text: str) -> Dict[str, Any]:
-        """Get date reasoning results (unchanged)"""
+        """Get date reasoning results"""
         try:
             full_analysis = self.extract_document_data_with_reasoning(document_text)
             return {

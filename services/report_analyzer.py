@@ -55,7 +55,7 @@ class ReportAnalyzer:
         # Initialize specialized extractors with dual LLMs
         self.qme_extractor = QMEExtractorChained(self.llm)
         self.imaging_extractor = ImagingExtractor(self.llm)
-        self.pr2_extractor = PR2Extractor(self.llm, self.analysis_llm)
+        self.pr2_extractor = PR2Extractor(self.llm)
         self.consult_extractor = ConsultExtractor(self.llm)
         self.simple_extractor = SimpleExtractor(self.llm)
         
@@ -105,7 +105,7 @@ class ReportAnalyzer:
             # Stage 2: Route to specialized extractor
             result = self._route_to_extractor(text, doc_type, fallback_date)
             
-            # Stage 3: Verify and correct (if needed)
+            # Stage 3: Verify and correct (if needed) - SKIP for imaging reports
             final_result = self._verify_result(result, doc_type)
             
             logger.info(f"✅ Extraction complete: {final_result.summary_line}")
@@ -157,8 +157,7 @@ class ReportAnalyzer:
         """
         Verify and correct extraction result if needed.
         
-        Note: QME extractor already includes verification in its chain,
-        so we skip re-verification for those.
+        Note: Skip verification for imaging reports to preserve physician names.
         
         Args:
             result: Initial extraction result
@@ -167,11 +166,18 @@ class ReportAnalyzer:
         Returns:
             Verified/corrected ExtractionResult
         """
+        # Skip verification for imaging reports to preserve physician names
+        if doc_type in [DocumentType.MRI, DocumentType.CT, DocumentType.XRAY,
+                       DocumentType.ULTRASOUND, DocumentType.EMG]:
+            logger.info(f"🛡️ Skipping verification for {doc_type.value} to preserve physician name")
+            return result
+        
         # QME/AME/IME already verified in their extractor chain
         if doc_type in [DocumentType.QME, DocumentType.AME, DocumentType.IME]:
             return result
         
         # Verify all other document types
+        logger.info(f"🔍 Verifying extraction for {doc_type.value}")
         return self.verifier.verify_and_fix(result)
     
     def format_whats_new_as_highlights(self, bullet_points: List[str]) -> List[str]:
