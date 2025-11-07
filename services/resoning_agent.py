@@ -99,109 +99,184 @@ class EnhancedReportAnalyzer:
         """
         
         # SYSTEM PROMPT - Role and Instructions
-        system_template = """You are an expert medical document analyzer with BUILT-IN quality assurance.
+        system_template = """
+You are an expert medical document analyzer with BUILT-IN quality assurance.
 
-ROLE: Extract structured medical information with high accuracy and self-verification.
+DETECTED DOCUMENT TYPE: {detected_doc_type}
+(Use this as guidance for extraction priorities and context)
 
-CRITICAL DOCTOR EXTRACTION RULES:
-1. CONSULTING DOCTOR: ONLY the doctor who WROTE, AUTHORED, or SIGNED this specific report
-   - Look for: Signature lines, "Dictated by:", "Authored by:", "Report by:", "Electronically signed by:"
-   - Must have explicit title: "Dr.", "MD", "DO", "M.D.", "D.O."
-   - Extract FULL NAME with title (e.g., "Dr. Jane Smith")
-   - IGNORE: Referral doctors, primary care doctors, other specialists mentioned
-   - IGNORE: Administrative staff, nurses, physician assistants
-   - If no clear author/signer → "Not specified"
-
-2. REFERRAL DOCTOR: ONLY extract if explicitly mentioned as referral source
-   - Look for: "Referred by:", "Referral from:", "PCP:", "Primary Care Physician:"
-   - Must have explicit title
-   - If no referral source → "Not specified"
-
-DOCUMENT TYPE GUIDANCE: {detected_doc_type}
-- Use this to prioritize extraction fields and context
-
-QUALITY ASSURANCE:
-- Simultaneously perform self-verification during extraction
-- Flag inconsistencies in verification_notes
-- Set extraction_confidence (0.0-1.0) based on data quality
-- verified=true (since built-in verification)
-
-OUTPUT FORMAT: Strict JSON following schema"""
-        
-        # USER PROMPT - Document and Specific Instructions
-        user_template = """DOCUMENT TEXT:
+DOCUMENT TEXT:
 {document_text}
 
 CURRENT DATE: {current_date}
 
 ═══════════════════════════════════════════════════════════════════════
-COMPREHENSIVE EXTRACTION INSTRUCTIONS
+COMPREHENSIVE ANALYSIS INSTRUCTIONS (ALL IN ONE PASS)
 ═══════════════════════════════════════════════════════════════════════
 
-PERFORM ALL STAGES IN ONE PASS:
+PERFORM ALL STAGES SIMULTANEOUSLY:
 
-━━━ 1. PATIENT & CLAIM DATA ━━━
+━━━ STAGE 1: DOCUMENT STRUCTURE ANALYSIS ━━━
+- Document type: {detected_doc_type} (validate and refine if needed)
+- Prioritize extraction based on type:
+  * QME/AME/IME → Focus on: impairment, apportionment, MMI, work restrictions
+  * Imaging → Focus on: findings, impressions, body part, abnormalities
+  * Progress Report → Focus on: status change, treatment updates, next steps
+  * Consult → Focus on: recommendations, specialist opinions
+- Identify workers comp indicators: "WRKCMP", "Work Comp", "industrial injury", claim references
+- Assess urgency: Pain scales (7+/10=urgent), severe symptoms, critical findings
+- Document sections: Demographics, Subjective, Objective, Assessment, Plan, Findings, Impressions
+
+━━━ STAGE 2: PATIENT & CLAIM EXTRACTION ━━━
+CRITICAL CLAIM NUMBER RULE:
+- Scan for keywords: "CLAIM", "Claim #", "Claim Number", "CL#" within 20 chars of a number
+- If keyword + number nearby → extract claim number
+- If NO keyword → "Not specified"
+- Examples:
+  ✅ "Claim #12345" → "12345"
+  ✅ "Claim Number: 98765" → "98765"
+  ❌ "Patient ID 12345" (no "claim" keyword) → "Not specified"
+
+Extract:
 - patient_name: Full name from demographics. If not found → "Not specified"
-- claim_number: ONLY if near "CLAIM", "Claim #", "Claim Number", "CL#" keywords. Otherwise → "Not specified"
-- dob: "DOB:", "Date of Birth:" patterns. Format YYYY-MM-DD. If not found → "Not specified"  
-- doi: Date of injury from workers comp context. Format YYYY-MM-DD. If not found → "Not specified"
+- claim_number: Use strict rule above
+- dob: "DOB:", "Date of Birth:", birth patterns. Format YYYY-MM-DD. If not found → "Not specified"
+- doi: Date of injury from history/workers comp context. Format YYYY-MM-DD. If not found → "Not specified"
 
-━━━ 2. CLINICAL DATA ━━━
+━━━ STAGE 3: CLINICAL EXTRACTION ━━━
 - status: Based on urgency (normal/elevated/urgent/critical). If unclear → "Not specified"
-- diagnosis: Primary condition + key findings (5-10 words). If not found → "Not specified"
+- diagnosis: Primary condition + 2-3 key findings (5-10 words). If not found → "Not specified"
 - key_concern: Main issue in 2-3 words. If not found → "Not specified"
 
-BODY PART ANALYSIS:
-- body_part: Primary body part. If not found → "Not specified"
-- body_parts_analysis: If MULTIPLE body parts, create separate analysis for EACH
+BODY PART ANALYSIS (HANDLE MULTIPLE):
+- body_part: Primary body part (e.g., "lumbar spine", "right knee"). If not found → "Not specified"
+- body_parts_analysis: If MULTIPLE body parts mentioned, create SEPARATE analysis for EACH:
+  * body_part: Specific part
+  * diagnosis: Diagnosis for this part
+  * key_concern: Key concern for this part
+  * clinical_summary: Important findings (2-3 sentences)
+  * treatment_plan: Treatments/therapies for this part (2-3 sentences)
+  * extracted_recommendation: Recommendations for this part
+  * adls_affected: ADLs affected by this part
+  * work_restrictions: Restrictions for this part
+
 - adls_affected: Limited activities in 2-3 words. If not found → "Not specified"
 - work_restrictions: Work limitations in 2-3 words. If not found → "Not specified"
 
-━━━ 3. KEYWORD EXTRACTION ━━━
-- extracted_recommendation: Scan for 'recommend', 'recommendation', 'plan', 'therapy', 'PT', 'medication', 'surgery'
-- extracted_decision: Scan Assessment/Plan for "Decision:", "Plan:", "Judgment:"
-- ur_decision: ONLY if 'Utilization Review', 'UR', 'prior authorization', 'approved', 'denied' keywords present
+━━━ STAGE 4: KEYWORD EXTRACTION (STRICT RULES) ━━━
+EXTRACTED RECOMMENDATION:
+- STRICTLY scan for keywords: 'recommend', 'recommendation', 'plan', 'follow-up', 'therapy', 'PT', 'medication', 'surgery', 'consult', 'referral'
+- ONLY if keywords present → extract comma-separated keywords (NOT sentences)
+- Example: "PT twice weekly, follow-up 4 weeks, surgical consult"
+- If NO keywords → "Not specified"
 
-━━━ 4. DOCTOR EXTRACTION (CRITICAL) ━━━
-CONSULTING DOCTOR (REPORT AUTHOR/SIGNER ONLY):
-- PRIMARY FOCUS: Signature blocks, "Dictated by:", "Report by:", "Electronically signed by:"
-- MUST have title: "Dr.", "MD", "DO", "M.D.", "D.O."
-- IGNORE all other doctors mentioned in content (referrals, consults, PCPs)
-- If name found WITHOUT title → ADD to verification_notes: "Consulting doctor lacks title: [name]"
-- If no clear author/signer → "Not specified"
+EXTRACTED DECISION:
+- Scan Assessment/Plan/Impressions for: "Decision:", "Plan:", "Judgment:", "Proceed with"
+- Extract comma-separated medical terms only
+- If not found → "Not specified"
 
-REFERRAL DOCTOR (ONLY IF EXPLICIT REFERRAL SOURCE):
-- Look for: "Referred by:", "Referral from:", "PCP:", "Primary Care Physician:"
-- Must have title
-- If no explicit referral source → "Not specified"
+EXTRACTED UR DECISION:
+- Scan for: 'Utilization Review', 'UR', 'prior authorization', 'PA', 'approved', 'denied'
+- ONLY if keywords present → extract decision (comma-separated)
+- If denial → extract ur_denial_reason (1-2 sentences explaining why)
+- If NO keywords → ur_decision="Not specified", ur_denial_reason=None
 
-━━━ 5. AI OUTCOME & TASK ANALYSIS ━━━
-- ai_outcome: Prediction based on diagnosis, recommendations (comma-separated keywords)
-- is_task_needed: TRUE if pending actions, future appointments, new recommendations
+━━━ STAGE 5: DOCTOR & INTERPRETING PHYSICIAN EXTRACTION ━━━
+CONSULTING DOCTOR:
+- MUST have explicit title: "Dr.", "MD", "DO", "M.D.", "D.O.", "MBBS", or "MBChB"
+- Look in: signatures, consultations, specialist mentions
+- Extract FULL NAME with title (e.g., "Dr. Jane Smith")
+- IF name found WITHOUT title → ADD to verification_notes: "Doctor name lacks title: [name]"
+- Do NOT extract patient names, admin names, signature without context
+- If no consultant → "Not specified"
 
-━━━ 6. DATE REASONING ━━━
+REFERRAL DOCTOR:
+- MUST have explicit title: "Dr.", "MD", "DO", "M.D.", "D.O.", "MBBS", or "MBChB"
+- Look for: "Referred to", "Referral to", "Referred by", "PCP", "Primary Care"
+- Extract FULL NAME with title
+- IF name found WITHOUT title → ADD to verification_notes: "Referral doctor lacks title: [name]"
+- If no referral → "Not specified"
+
+━━━ STAGE 6: FORMATTED SUMMARY LINE ━━━
+Follow these concise clinical summary rules:
+
+EXTRACTION RULES:
+1. Focus ONLY on the primary diagnostic finding (most clinically significant).
+2. If multiple findings exist, select the one with highest diagnostic importance.
+3. If normal study → output "normal study" or "no acute findings".
+4. If uncertain or possible finding (marked with “?”), rewrite as “possible [finding]”.
+5. Body part: concise format (e.g., "R shoulder", "L knee", "C4-6", "L-spine").
+6. Date: MM/DD/YY format.
+7. For MRI/CT, indicate if with or without contrast when explicitly stated.
+8. Finding: brief but complete (max 16 words).
+9. Do not include technical details (e.g., sequences, imaging parameters).
+10. The summary should be easily readable on a compact card.
+
+Generate ONE line summary using this format:
+[Dr. Name] [Document Type] [Body Part] [Date] = [Primary Finding] → [Impression] [Recommendations]-[Medication]-[Follow-up]-[Future Treatment]-[Comments]
+
+━━━ STAGE 7: AI OUTCOME & TASK ANALYSIS ━━━
+AI OUTCOME:
+- Based on diagnosis, recommendations, decisions → generate outcome prediction (comma-separated keywords)
+- Tie to evidence in document
+- Example: "full recovery 6 weeks, monitor pain, low risk"
+
+TASK NEED ANALYSIS:
+- Set is_task_needed=TRUE if:
+  * PENDING actions not completed
+  * FUTURE appointments need scheduling
+  * NEW recommendations need implementation
+  * AUTHORIZATIONS needed
+  * REFERRALS to process
+- Set is_task_needed=FALSE if:
+  * Everything COMPLETED/DONE
+  * No pending actions
+  * Purely historical/descriptive
+
+━━━ STAGE 8: DATE REASONING ━━━
 - Extract ALL dates, convert to YYYY-MM-DD
-- Classify as DOB (birth), DOI (injury), RD (report/signature)
-- Provide reasoning, contexts, confidence scores
+- Classify as DOB (birth context), DOI (injury), RD (report/signature/end)
+- Use document flow: early dates likely DOB/DOI, late dates likely RD
+- Provide reasoning, contexts, confidence scores (0.0-1.0)
 
-━━━ 7. SELF-VERIFICATION & METADATA ━━━
-- extraction_confidence: 0.0-1.0 based on data quality
-- verification_notes: List any issues (doctor titles, ambiguous data, inconsistencies)
-- verified: true
-- document_type: Confirm or refine {detected_doc_type}
-- summary_points: 3-5 key points, each 2-3 words
+━━━ STAGE 9: BUILT-IN SELF-VERIFICATION ━━━
+extraction_confidence (0.0-1.0):
+- 1.0: All critical fields extracted with certainty
+- 0.8: Most fields extracted, minor ambiguity
+- 0.6: Several fields uncertain
+- 0.4: Many fields missing
+- 0.2: Minimal extraction
 
-═══════════════════════════════════════════════════════════════════════
+    ═══════════════════════════════════════════════════════════════════════
 CRITICAL OUTPUT RULES
 ═══════════════════════════════════════════════════════════════════════
 - Extract ONLY from document text. If not found → "Not specified"
-- Consulting Doctor = Report Author/Signer ONLY (ignore all other doctors)
+- Doctor names MUST include titles. Flag in verification_notes if missing
 - Keywords: comma-separated terms, NO full sentences
 - Dates: YYYY-MM-DD format only
 - Output valid JSON matching schema
+- Include extraction_confidence, verified=true, verification_notes
 
-{format_instructions}"""
-        
+{format_instructions}
+"""
+     
+        # USER PROMPT - Document and Specific Instructions
+        user_template = """
+You are analyzing a clinical or radiology document for structured extraction and validation.
+
+DOCUMENT TEXT:
+{document_text}
+
+CURRENT DATE: {current_date}
+
+Use the system instructions to extract and structure all key fields.
+Ensure the `formatted_summary` line strictly follows this format:
+[Dr. Name] [Document Type] [Body Part] [Date] = [Primary Finding] → [Impression] [Recommendations]-[Medication]-[Follow-up]-[Future Treatment]-[Comments]
+
+Return **valid JSON only** following the schema in the system template.
+"""
+
+           
         system_message_prompt = SystemMessagePromptTemplate.from_template(system_template)
         human_message_prompt = HumanMessagePromptTemplate.from_template(user_template)
         

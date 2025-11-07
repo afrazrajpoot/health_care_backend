@@ -50,88 +50,72 @@ class ImagingExtractor:
         logger.info(f"🎯 Stage 1: Raw data extraction for {doc_type}")
         
         system_template = """
-You are an AI Medical Assistant that helps doctors and medical professionals by extracting actual actionable and useful information from medical documents. You are extracting key clinical data from an imaging report ({doc_type}) to create a concise, clear summary.
+You are a precise clinical information extractor that structures radiology or medical report text into standardized JSON fields.
 
-━━━ REQUIRED SUMMARY FORMAT ━━━
-MUST use this EXACT format:
-[Physician Name] [Document Type] [Body Part] [Date] = [Primary Finding]
-
-EXAMPLES:
-- Dr. Smith (Rad) MRI L wrist 10/11/25 = Dorsal DRUJ dislocation/subluxation
-- Dr. Johnson CT Head 09/15/25 = Normal study, no acute findings
-- Dr. Lee X-ray R ankle 11/01/25 = Trimalleolar fracture with dislocation
-
-━━━ PHYSICIAN EXTRACTION (CRITICAL) ━━━
-CONSULTING/INTERPRETING PHYSICIAN EXTRACTION RULES:
-- MUST extract ONLY the physician who INTERPRETED, AUTHORED, and SIGNED the report
-- IGNORE ALL OTHER DOCTORS AND STAFF NAMES including:
-  * Referring physicians
-  * Ordering physicians  
-  * Treating doctors
-  * Primary care physicians
-  * Surgeon names in history
-  * Technologists
-  * Administrative staff
-  * Transcriptionists
-  * Any name mentioned in clinical history or prior reports
-- PRIMARY FOCUS: Signature blocks, "Dictated by:", "Report by:", "Electronically signed by:"
-- MUST have title: "Dr.", "MD", "DO", "M.D.", "D.O."
-- IGNORE all other doctors mentioned in content (referrals, consults, PCPs)
-- If name found WITHOUT title → ADD to verification_notes: "Consulting doctor lacks title: [name]"
-- If no clear author/signer → "Not specified"
-- Look ONLY for these interpreting physician indicators:
-  * "Interpreted by:", "Read by:", "Finalized by:"
-  * "Dictated by:", "Prepared by:", "Electronically signed by:"
-  * Signature blocks at report end
-  * "I, [Dr. Name], have interpreted..."
-  * "Report signed by:", "Verified by:"
-  * "Radiologist:", "Interpreting Physician:"
-
-- Extract FULL NAME with title (e.g., "Dr. Jane Smith", "John Doe, MD")
-- If multiple interpreting physicians, choose the PRIMARY one (usually first/lost mentioned)
-- If uncertain, look for the physician taking responsibility for the interpretation
-- If no clear interpreting physician found → leave physician_name EMPTY
+Follow these extraction and formatting rules strictly.
 
 EXTRACTION RULES:
 1. Focus ONLY on the primary diagnostic finding (most clinically significant).
 2. If multiple findings exist, select the one with highest diagnostic importance.
 3. If normal study → output "normal study" or "no acute findings".
-4. If uncertain or possible finding (marked with "?"), rewrite as "possible [finding]".
+4. If uncertain or possible finding (marked with “?”), rewrite as “possible [finding]”.
 5. Body part: concise format (e.g., "R shoulder", "L knee", "C4-6", "L-spine").
 6. Date: MM/DD/YY format.
 7. For MRI/CT, indicate if with or without contrast when explicitly stated.
-8. Finding: brief but complete — provide clinically relevant details.
+8. Finding: brief but complete (max 16 words) — avoid general terms like "abnormal" alone.
 9. Do not include technical details (e.g., sequences, imaging parameters).
-10. Specialty: Convert to short form if possible ("Radiology" → "Rad", "Neuroradiology" → "Neuro Rad").
-"""
+10. Extract doctor name if present — only valid if contains "Dr.", "MD", "DO", "MBBS", or "MBChB".
+11. Identify the document type (MRI, CT, X-ray, Ultrasound, etc.) from context.
+12. Create a single-line summary in this format:
+    [Dr. Name] [Document Type] [Body Part] [Date] = [Primary Finding] → [Impression] [Recommendations]-[Medication]-[Follow-up]-[Future Treatment]-[Comments]
 
-        human_template = """
-Document text:
-{text}
+Document text: {text}
 
 Extract these fields:
 - study_date: Imaging date (MM/DD/YY or {fallback_date})
-- physician_name: ONLY the CONSULTING/INTERPRETING physician who authored, signed and is responsible for this report. IGNORE referring doctors, ordering physicians, treating doctors, and all other staff names. Use only explicit interpreting indicators.
-- specialty: Medical specialty of the authoring physician (short form)
+- document_type: Type of report (e.g., MRI, CT, X-ray, Ultrasound, Consultation)
 - body_part: Anatomical area studied (abbreviated form)
 - contrast_used: "with contrast", "without contrast", or empty if not mentioned
-- primary_finding: Most important diagnostic finding with clinical context
-- clinical_summary: Use the REQUIRED format: [Physician Name] [Document Type] [Body Part] [Date] = [Primary Finding]
+- primary_finding: Most important diagnostic finding (max 16 words)
 - impression_status: "normal", "abnormal", "post-op", or "inconclusive" if applicable
+- consulting_doctor: Doctor’s name (Dr., MD, DO, MBBS, or MBChB) (Dr. Full Name) valid only if name contains title (e.g., "Dr. John Smith", "Jane Doe, MD", "Dr Jane Doe", (eg. Dr., MD, DO, M.D., D.O.))
+- formatted_summary: A one-line summary following the exact format:
+  [Dr. Name] [Document Type] [Body Part] [Date] = [Primary Finding] → [Impression] [Recommendations]-[Medication]-[Follow-up]-[Future Treatment]-[Comments]
 
-Return JSON:
-{{
+Return valid JSON:
+{
   "study_date": "MM/DD/YY or {fallback_date}",
-  "physician_name": "Dr. Full Name or empty if not found",
-  "specialty": "short form or empty",
+  "document_type": "e.g., MRI, CT, X-ray, Consultation",
   "body_part": "abbreviated part or empty",
   "contrast_used": "contrast detail or empty",
-  "primary_finding": "main finding with clinical context",
-  "clinical_summary": "MUST use format: [Physician Name] [Document Type] [Body Part] [Date] = [Primary Finding]",
-  "impression_status": "normal/abnormal/post-op/inconclusive"
-}}
+  "primary_finding": "main diagnostic finding (max 16 words)",
+  "impression_status": "normal/abnormal/post-op/inconclusive",
+  "consulting_doctor": "Dr. name if found, else empty",
+  "formatted_summary": "[Dr. Name] [Document Type] [Body Part] [Date] = [Primary Finding] → [Impression] [Recommendations]-[Medication]-[Follow-up]-[Future Treatment]-[Comments]"
+}
+"""
+        human_template = """
+You are analyzing this medical report for structured extraction.
 
-{format_instructions}
+Text:
+{text}
+
+Fallback date: {fallback_date}
+
+Follow the rules from the system prompt.
+
+Ensure each field is extracted accurately, and the `formatted_summary` strictly matches:
+[Dr. Name] [Document Type] [Body Part] [Date] = [Primary Finding] → [Impression] [Recommendations]-[Medication]-[Follow-up]-[Future Treatment]-[Comments]
+
+Return **valid JSON only** containing:
+- study_date
+- document_type
+- body_part
+- contrast_used
+- primary_finding
+- impression_status
+- consulting_doctor
+- formatted_summary
 """
 
         try:

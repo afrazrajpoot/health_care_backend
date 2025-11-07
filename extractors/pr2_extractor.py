@@ -28,149 +28,72 @@ class PR2Extractor:
     def _extract_raw_data(self, text: str, doc_type: str, fallback_date: str) -> Dict:
         """Stage 1: Extract raw structured data with deep medical analysis"""
         system_template = """
-You are an expert Medical AI Assistant specializing in workers' compensation case analysis. Your role is to help physicians by performing deep, thorough analysis of PR-2 (Progress Report) documents.
+            You are an AI Medical Assistant, that helps doctors and medical professionals by extracting actual actionable and useful information from medical documents. You are extracting concise structured data from a PR-2 (Progress Report).
 
-━━━ PHYSICIAN EXTRACTION (CRITICAL) ━━━
-CONSULTING/TREATING PHYSICIAN EXTRACTION RULES:
-- MUST extract the PRIMARY TREATING PHYSICIAN who authored and signed this PR-2 report
-- Look for these explicit indicators:
-  * "Electronically signed by:", "Signed by:", "Attestation:"
-  * Signature blocks at report end
-  * "Provider:", "Attending Physician:", "Treating Physician:"
-  * "I, [Dr. Name], have examined..."
-- IGNORE ALL OTHER DOCTORS AND STAFF NAMES including:
-  * Consulting physicians mentioned in body
-  * Referring physicians
-  * Specialists for future referrals
-  * Physicians from prior treatment history
-  * Any doctor mentioned as "referred to Dr. X"
-- Extract FULL NAME with title (e.g., "Dr. Jane Smith", "John Doe, MD")
-- If no clear treating physician found → leave physician_name EMPTY
-- PRIMARY FOCUS: Signature blocks, "Dictated by:", "Report by:", "Electronically signed by:"
-- MUST have title: "Dr.", "MD", "DO", "M.D.", "D.O."
-- IGNORE all other doctors mentioned in content (referrals, consults, PCPs)
-- If name found WITHOUT title → ADD to verification_notes: "Consulting doctor lacks title: [name]"
-- If no clear author/signer → "Not specified"
-CORE COMPETENCIES:
-- Extract ALL medically relevant information from the document
-- Identify clinical trends, improvements, or deterioration
-- Recognize treatment efficacy and response patterns
-- Flag critical information requiring physician attention
-- Understand medical terminology, abbreviations, and context
-- Synthesize complex medical data into actionable insights
+            EXTRACTION RULES (UPDATED):
+            1. Physician name MUST include title (Dr./MD/DO). Ignore electronic signatures.
+            2. Status: one word or short phrase (e.g., "improved", "unchanged", "worsened", "stable", or "uncertain").
+            3. Body part: primary area treated in this report (e.g., "R shoulder", "L knee").
+            4. Plan: clear next treatment step(s). Include follow-ups, referrals, or testing.
+            5. Treatment recommendations: include any new orders, procedures, or specific medications.
+            6. Work status: include phrases like "TTD", "modified duty", "return to full duty", or similar.
+            7. If any “?” is used (e.g., "? MMI" or "? improvement"), replace it with a brief clarification (e.g., "uncertain, pending further evaluation").
+            8. Output must be short, factual, and readable.
 
-ANALYSIS APPROACH:
-1. Read the ENTIRE document carefully, not just surface-level information
-2. Identify explicit AND implicit clinical information
-3. Connect related findings across different sections
-4. Note any discrepancies, concerns, or red flags
-5. Consider the workers' compensation context (MMI, work restrictions, causality)
-6. Extract specific details: medications with dosages, therapy frequencies, objective measurements
-7. Capture the clinical narrative and trajectory of care
+            Extract these fields:
+            - report_date: Date of report (MM/DD/YY or {fallback_date})
+            - physician_name: Treating physician with title (Dr. Full Name) valid only if name contains title (e.g., "Dr. John Smith", "Jane Doe, MD", "Dr Jane Doe", (eg. Dr., MD, DO, M.D., D.O.))
+            - body_part: Primary area addressed
+            - current_status: Patient’s current clinical status (max 5-10 words)
+            - treatment_recommendations: New or continued treatments, including medications (max 10 words)
+            - work_status: Work ability or restriction (max 16 words)
+            - next_plan: Next step / follow-up (max 16 words)
 
-OUTPUT REQUIREMENTS:
-- Be precise and specific (not vague or generic)
-- Include quantifiable data when available (ROM degrees, pain scales, visit frequencies)
-- Preserve medical accuracy and terminology
-- Prioritize actionable information for case management
-- Flag any inconsistencies or concerns
-"""
-
+            Return JSON:
+            {{
+            "report_date": "MM/DD/YY or {fallback_date}",
+            "physician_name": "Dr. Full Name or empty",
+            "body_part": "Primary part or empty",
+            "current_status": "Status term or empty",
+            "treatment_recommendations": "Treatments or meds or empty",
+            "work_status": "Work status or empty",
+            "next_plan": "Follow-up plan or empty"
+            }}
+            """
         human_template = """
-Analyze this PR-2 Progress Report and extract comprehensive medical information.
+            You are analyzing this PR-2 Progress Report for structured extraction.
 
-DOCUMENT TEXT:
-{text}
+            Document text:
+            {text}
 
-EXTRACTION FIELDS (extract ALL relevant information for each):
+            Fallback date: {fallback_date}
 
-1. **report_date**: Date of this report (format: MM/DD/YY, or use {fallback_date} if not found)
+            Use the system extraction rules and formatting to identify and extract only the following fields:
+            - report_date
+            - physician_name (Dr. Full Name) valid only if name contains title (e.g., "Dr. John Smith", "Jane Doe, MD", "Dr Jane Doe", (eg. Dr., MD, DO, M.D., D.O.))
+            - body_part
+            - current_status
+            - treatment_recommendations
+            - work_status
+            - next_plan
 
-2. **physician_name**: The PRIMARY TREATING PHYSICIAN who authored this PR-2 report (not consulting or referring physicians). Look for:
-   - Electronic signature at the END of the document (most reliable)
-   - "Electronically signed by:" or "Signed by:"
-   - Attestation sections at bottom
-   - "Provider:" or "Attending Physician:" in header
-   - Signature blocks with dates matching the report date
-   
-   CRITICAL RULES:
-   - IGNORE consulting physicians, specialists mentioned in the body
-   - IGNORE referring physicians or "referred to Dr. X"
-   - IGNORE physicians mentioned in treatment history
-   - PRIORITIZE the signature block at the document END
-   - Only return the physician who actually wrote and signed THIS report
-   - DO NOT use placeholder names like "[Name]" or "REDACTED"
-   - If the actual name is redacted/masked, return empty string ""
+            Format the JSON output in this format:
+            {{
+            "report_date": "MM/DD/YY or {fallback_date}",
+            "physician_name": "Dr. Full Name (Dr. Full Name) valid only if name contains title (e.g., "Dr. John Smith", "Jane Doe, MD", "Dr Jane Doe", (eg. Dr., MD, DO, M.D., D.O.)) or empty",
+            "body_part": "Primary part or empty",
+            "current_status": "Status term or empty",
+            "treatment_recommendations": "Treatments or meds or empty",
+            "work_status": "Work status or empty",
+            "next_plan": "Follow-up plan or empty",
+            "formatted_summary": "[Dr. Name] [Document Type] [Body Part] [Date] = [Primary Finding] → [Impression] [Recommendations]-[Medication]-[Follow-up]-[Future Treatment]-[Comments]"
 
-3. **body_part**: Primary anatomical area(s) being treated. Include laterality (R/L) and be specific (e.g., "Right shoulder rotator cuff", "Lumbar spine L4-L5", "Left knee medial meniscus").
+            }}
 
-4. **current_status**: Detailed clinical status including:
-   - Subjective complaints and pain levels
-   - Objective findings (ROM, strength, special tests)
-   - Functional limitations
-   - Comparison to previous visits (improved/unchanged/worsened)
-   - Any complications or new issues
-   
-5. **treatment_recommendations**: Comprehensive treatment plan including:
-   - Current medications (names, dosages, frequencies)
-   - Physical therapy (type, frequency, duration)
-   - Injections or procedures performed or planned
-   - Diagnostic tests ordered
-   - Modalities (ice, heat, TENS, etc.)
-   - Home exercise program details
-   - Any treatment modifications or discontinuations
+            {format_instructions}
 
-6. **work_status**: Complete work capacity assessment:
-   - Current work status (TTD, modified duty, full duty, etc.)
-   - Specific restrictions (lifting limits, positioning, repetitive activities)
-   - Duration of restrictions
-   - Anticipated changes to work status
-   - Return to work timeline if applicable
-
-7. **next_plan**: Future care plan including:
-   - Follow-up appointment timing and purpose
-   - Anticipated next steps in treatment
-   - Specialist referrals or consultations
-   - MMI considerations or timeline
-   - Any pending decisions or evaluations
-   - Goals for next visit
-
-8. **critical_flags**: Any concerning findings requiring attention:
-   - Non-compliance with treatment
-   - Unexpected deterioration
-   - Complications or adverse reactions
-   - Inconsistencies in presentation
-   - Medicolegal concerns
-   - Red flag symptoms
-
-9. **clinical_trajectory**: Overall progress assessment:
-   - Direction of clinical course (improving/plateauing/declining)
-   - Response to current treatment
-   - Likelihood of achieving MMI
-   - Estimated timeline to recovery or MMI
-
-Return ONLY valid JSON with this exact structure:
-{{
-  "report_date": "MM/DD/YY",
-  "physician_name": "Dr. Full Name or empty",
-  "body_part": "Specific anatomical area with laterality",
-  "current_status": "Detailed clinical status with objective and subjective findings",
-  "treatment_recommendations": "Complete treatment plan with specifics",
-  "work_status": "Full work capacity assessment with restrictions",
-  "next_plan": "Detailed follow-up and future care plan",
-  "critical_flags": "Any concerns or red flags, or empty string if none",
-  "clinical_trajectory": "Overall progress and prognosis assessment"
-}}
-
-IMPORTANT: 
-- Extract actual information from the document, not generic placeholders
-- Include specific numbers, dates, and measurements when available
-- If information is truly not present, use empty string ""
-- Be thorough but concise - focus on clinical relevance
-- Maintain medical accuracy and terminology
-
-{format_instructions}
-"""
+            Return valid JSON only.
+            """
 
         try:
             # Create system message prompt template
