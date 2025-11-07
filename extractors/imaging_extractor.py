@@ -58,7 +58,7 @@ EXTRACTION RULES:
 1. Focus ONLY on the primary diagnostic finding (most clinically significant).
 2. If multiple findings exist, select the one with highest diagnostic importance.
 3. If normal study → output "normal study" or "no acute findings".
-4. If uncertain or possible finding (marked with “?”), rewrite as “possible [finding]”.
+4. If uncertain or possible finding (marked with "?"), rewrite as "possible [finding]".
 5. Body part: concise format (e.g., "R shoulder", "L knee", "C4-6", "L-spine").
 6. Date: MM/DD/YY format.
 7. For MRI/CT, indicate if with or without contrast when explicitly stated.
@@ -78,12 +78,12 @@ Extract these fields:
 - contrast_used: "with contrast", "without contrast", or empty if not mentioned
 - primary_finding: Most important diagnostic finding (max 16 words)
 - impression_status: "normal", "abnormal", "post-op", or "inconclusive" if applicable
-- consulting_doctor: Doctor’s name (Dr., MD, DO, MBBS, or MBChB) (Dr. Full Name) valid only if name contains title (e.g., "Dr. John Smith", "Jane Doe, MD", "Dr Jane Doe", (eg. Dr., MD, DO, M.D., D.O.))
+- consulting_doctor: Doctor's name (Dr., MD, DO, MBBS, or MBChB) (Dr. Full Name) valid only if name contains title (e.g., "Dr. John Smith", "Jane Doe, MD", "Dr Jane Doe", (eg. Dr., MD, DO, M.D., D.O.))
 - formatted_summary: A one-line summary following the exact format:
   [Dr. Name] [Document Type] [Body Part] [Date] = [Primary Finding] → [Impression] [Recommendations]-[Medication]-[Follow-up]-[Future Treatment]-[Comments]
 
 Return valid JSON:
-{
+{{
   "study_date": "MM/DD/YY or {fallback_date}",
   "document_type": "e.g., MRI, CT, X-ray, Consultation",
   "body_part": "abbreviated part or empty",
@@ -92,7 +92,7 @@ Return valid JSON:
   "impression_status": "normal/abnormal/post-op/inconclusive",
   "consulting_doctor": "Dr. name if found, else empty",
   "formatted_summary": "[Dr. Name] [Document Type] [Body Part] [Date] = [Primary Finding] → [Impression] [Recommendations]-[Medication]-[Follow-up]-[Future Treatment]-[Comments]"
-}
+}}
 """
         human_template = """
 You are analyzing this medical report for structured extraction.
@@ -119,12 +119,13 @@ Return **valid JSON only** containing:
 """
 
         try:
-            # Create system message prompt template with doc_type variable
+            # Create system message prompt template with correct input variables
             system_prompt = SystemMessagePromptTemplate.from_template(
-                system_template, input_variables=["doc_type"]
+                system_template,
+                input_variables=["text", "fallback_date"]  # Fixed: removed doc_type, added text and fallback_date
             )
 
-            # Create human message prompt template with partial format_instructions
+            # Create human message prompt template
             human_prompt_template = PromptTemplate(
                 template=human_template,
                 input_variables=["text", "fallback_date"],
@@ -140,19 +141,19 @@ Return **valid JSON only** containing:
 
             chain = chat_prompt | self.llm | self.parser
             result = chain.invoke(
-                {"doc_type": doc_type, "text": text[:8000], "fallback_date": fallback_date}
+                {"text": text[:8000], "fallback_date": fallback_date}  # Fixed: removed doc_type
             )
             
             # LOG THE RAW EXTRACTED DATA
             logger.info("📊 RAW EXTRACTION RESULTS:")
             logger.info(f"   - study_date: {result.get('study_date', 'Not found')}")
-            logger.info(f"   - physician_name: {result.get('physician_name', 'Not found')}")
-            logger.info(f"   - specialty: {result.get('specialty', 'Not found')}")
+            logger.info(f"   - consulting_doctor: {result.get('consulting_doctor', 'Not found')}")  # Fixed: changed from physician_name to consulting_doctor
+            logger.info(f"   - document_type: {result.get('document_type', 'Not found')}")
             logger.info(f"   - body_part: {result.get('body_part', 'Not found')}")
             logger.info(f"   - contrast_used: {result.get('contrast_used', 'Not found')}")
             logger.info(f"   - primary_finding: {result.get('primary_finding', 'Not found')}")
             logger.info(f"   - impression_status: {result.get('impression_status', 'Not found')}")
-            logger.info(f"   - clinical_summary: {result.get('clinical_summary', 'Not found')}")
+            logger.info(f"   - formatted_summary: {result.get('formatted_summary', 'Not found')}")
             
             return result
         except Exception as e:
@@ -165,13 +166,13 @@ Return **valid JSON only** containing:
         
         cleaned = self._validate_and_clean(raw_data, fallback_date)
         
-        # Use the AI-generated clinical_summary if it follows the correct format
-        clinical_summary = cleaned.get("clinical_summary", "").strip()
-        physician = cleaned.get("physician_name", "").strip()
+        # Use the AI-generated formatted_summary if it follows the correct format
+        formatted_summary = cleaned.get("formatted_summary", "").strip()
+        physician = cleaned.get("consulting_doctor", "").strip()  # Fixed: changed from physician_name to consulting_doctor
         
-        # Check if the clinical_summary already includes physician name in correct format
-        if clinical_summary and physician and physician in clinical_summary:
-            summary_line = clinical_summary
+        # Check if the formatted_summary already includes physician name in correct format
+        if formatted_summary and physician and physician in formatted_summary:
+            summary_line = formatted_summary
             logger.info("✅ Using AI-generated summary with physician name")
         else:
             # Build summary manually
@@ -182,8 +183,7 @@ Return **valid JSON only** containing:
         logger.info("📊 FINAL EXTRACTION RESULT:")
         logger.info(f"   - Document Type: {doc_type}")
         logger.info(f"   - Document Date: {cleaned.get('study_date', fallback_date)}")
-        logger.info(f"   - Physician Name: {cleaned.get('physician_name', 'Not specified')}")
-        logger.info(f"   - Specialty: {cleaned.get('specialty', 'Not specified')}")
+        logger.info(f"   - Consulting Doctor: {cleaned.get('consulting_doctor', 'Not specified')}")  # Fixed: changed from physician_name to consulting_doctor
         logger.info(f"   - Body Part: {cleaned.get('body_part', 'Not specified')}")
         logger.info(f"   - Primary Finding: {cleaned.get('primary_finding', 'Not specified')}")
         logger.info(f"   - Final Summary: {summary_line}")
@@ -192,8 +192,8 @@ Return **valid JSON only** containing:
             document_type=doc_type,
             document_date=cleaned.get("study_date", fallback_date),
             summary_line=summary_line,
-            examiner_name=cleaned.get("physician_name"),
-            specialty=cleaned.get("specialty"),
+            examiner_name=cleaned.get("consulting_doctor"),  # Fixed: changed from physician_name to consulting_doctor
+            specialty=cleaned.get("specialty", ""),  # Added default empty string
             body_parts=[cleaned.get("body_part")] if cleaned.get("body_part") else [],
             raw_data=cleaned,
         )
@@ -207,8 +207,8 @@ Return **valid JSON only** containing:
         cleaned["study_date"] = date if date and date != "empty" else fallback_date
         logger.info(f"   📅 Date cleaned: {cleaned['study_date']}")
 
-        # Enhanced physician validation
-        physician = result.get("physician_name", "").strip()
+        # Enhanced physician validation - using consulting_doctor field
+        physician = result.get("consulting_doctor", "").strip()  # Fixed: changed from physician_name to consulting_doctor
         if physician and physician != "empty":
             # Ensure it contains physician indicators and doesn't look like referring doctor
             physician_upper = physician.upper()
@@ -221,15 +221,16 @@ Return **valid JSON only** containing:
             ])
             
             if has_title and not is_likely_referring:
-                cleaned["physician_name"] = physician
+                cleaned["consulting_doctor"] = physician  # Fixed: changed from physician_name to consulting_doctor
                 logger.info(f"   👨‍⚕️ Physician validated: {physician}")
             else:
                 logger.warning(f"   ⚠️ Rejected potential referring physician: {physician}")
-                cleaned["physician_name"] = ""
+                cleaned["consulting_doctor"] = ""  # Fixed: changed from physician_name to consulting_doctor
         else:
-            cleaned["physician_name"] = ""
+            cleaned["consulting_doctor"] = ""  # Fixed: changed from physician_name to consulting_doctor
             logger.info("   ❌ No physician found")
 
+        # Note: specialty field might not be extracted in current template
         specialty = result.get("specialty", "").strip()
         cleaned["specialty"] = specialty if specialty and specialty != "empty" else ""
         logger.info(f"   🎓 Specialty: {cleaned['specialty']}")
@@ -242,9 +243,9 @@ Return **valid JSON only** containing:
         cleaned["primary_finding"] = primary_finding if primary_finding and primary_finding != "empty" else ""
         logger.info(f"   🔍 Primary Finding: {cleaned['primary_finding']}")
 
-        clinical_summary = result.get("clinical_summary", "").strip()
-        cleaned["clinical_summary"] = clinical_summary if clinical_summary and clinical_summary != "empty" else ""
-        logger.info(f"   📝 Clinical Summary: {cleaned['clinical_summary'][:100]}...")
+        formatted_summary = result.get("formatted_summary", "").strip()  # Fixed: changed from clinical_summary to formatted_summary
+        cleaned["formatted_summary"] = formatted_summary if formatted_summary and formatted_summary != "empty" else ""
+        logger.info(f"   📝 Formatted Summary: {cleaned['formatted_summary'][:100]}...")
 
         contrast = result.get("contrast_used", "").strip()
         cleaned["contrast_used"] = contrast if contrast and contrast != "empty" else ""
@@ -260,7 +261,7 @@ Return **valid JSON only** containing:
         """Build detailed 3-4 line imaging summary with physician"""
         logger.info("🎯 Building DETAILED imaging summary")
         
-        physician = data.get("physician_name", "").strip()
+        physician = data.get("consulting_doctor", "").strip()  # Fixed: changed from physician_name to consulting_doctor
         body_part = data.get("body_part", "")
         finding = data.get("primary_finding", "")
         date = data.get("study_date", fallback_date)
@@ -298,6 +299,7 @@ Return **valid JSON only** containing:
         final_summary = "\n".join(summary_lines)
         logger.info(f"✅ Detailed summary:\n{final_summary}")
         return final_summary
+
     def _extract_physician_last_name(self, physician_name: str) -> str:
         """Extract last name from physician name string"""
         if not physician_name:
