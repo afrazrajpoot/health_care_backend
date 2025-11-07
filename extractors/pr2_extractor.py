@@ -1,7 +1,8 @@
 """
-PR-2 Progress Report extractor (v3.2 – Simplified to match ImagingExtractor structure)
+PR-2 Progress Report Extractor - Enhanced physician recognition with referral doctor fallback
 """
 import logging
+import re
 from typing import Dict
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate, PromptTemplate
@@ -13,226 +14,329 @@ logger = logging.getLogger("document_ai")
 
 
 class PR2Extractor:
-    """Specialized extractor for PR-2 Progress Reports with deep medical analysis."""
+    """Enhanced extractor for PR-2 Progress Reports with referral doctor fallback."""
 
     def __init__(self, llm: AzureChatOpenAI):
         self.llm = llm
         self.parser = JsonOutputParser()
+        # Pre-compile regex for efficiency
+        self.medical_credential_pattern = re.compile(
+            r'\b(dr\.?|doctor|m\.?d\.?|d\.?o\.?|mbbs|m\.?b\.?b\.?s\.?)\b',
+            re.IGNORECASE
+        )
 
     def extract(self, text: str, doc_type: str, fallback_date: str) -> ExtractionResult:
-        """Extract PR-2 report data with comprehensive medical analysis."""
-        raw_result = self._extract_raw_data(text, doc_type, fallback_date)
-        initial_result = self._build_initial_result(raw_result, doc_type, fallback_date)
-        return initial_result
+        """Extract PR-2 report with proper physician identification."""
+        raw_result = self._extract_medical_content(text, doc_type, fallback_date)
+        result = self._build_result(raw_result, doc_type, fallback_date)
+        return result
 
-    def _extract_raw_data(self, text: str, doc_type: str, fallback_date: str) -> Dict:
-        """Stage 1: Extract raw structured data with deep medical analysis"""
-        system_template = """
-            You are an AI Medical Assistant, that helps doctors and medical professionals by extracting actual actionable and useful information from medical documents. You are extracting concise structured data from a PR-2 (Progress Report).
+    def _extract_medical_content(self, text: str, doc_type: str, fallback_date: str) -> Dict:
+        """Extract progress updates and identify physicians efficiently."""
+        
+        system_template = """You are a medical data extraction specialist analyzing PR-2 Progress Reports.
 
-            EXTRACTION RULES (UPDATED):
-            1. Physician name MUST include title (Dr./MD/DO). Ignore electronic signatures.
-            2. Status: one word or short phrase (e.g., "improved", "unchanged", "worsened", "stable", or "uncertain").
-            3. Body part: primary area treated in this report (e.g., "R shoulder", "L knee").
-            4. Plan: clear next treatment step(s). Include follow-ups, referrals, or testing.
-            5. Treatment recommendations: include any new orders, procedures, or specific medications.
-            6. Work status: include phrases like "TTD", "modified duty", "return to full duty", or similar.
-            7. If any “?” is used (e.g., "? MMI" or "? improvement"), replace it with a brief clarification (e.g., "uncertain, pending further evaluation").
-            8. Output must be short, factual, and readable.
+CRITICAL PHYSICIAN IDENTIFICATION PROTOCOL:
 
-            Extract these fields:
-            - report_date: Date of report (MM/DD/YY or {fallback_date})
-            - physician_name: Treating physician with title (Dr. Full Name) valid only if name contains title (e.g., "Dr. John Smith", "Jane Doe, MD", "Dr Jane Doe", (eg. Dr., MD, DO, M.D., D.O.))
-            - body_part: Primary area addressed
-            - current_status: Patient’s current clinical status (max 5-10 words)
-            - treatment_recommendations: New or continued treatments, including medications (max 10 words)
-            - work_status: Work ability or restriction (max 16 words)
-            - next_plan: Next step / follow-up (max 16 words)
+1. PRIMARY PHYSICIAN (Treating/Signing):
+   - MUST have medical credentials: Dr., MD, M.D., DO, D.O., MBBS
+   - Look for: "Treating physician:", "Provider:", "Examined by:", "Attending:"
+   - Check signatures: "Electronically signed by:", "Dictated by:", "Signed by:"
 
-            Return JSON:
-            {{
-            "report_date": "MM/DD/YY or {fallback_date}",
-            "physician_name": "Dr. Full Name or empty",
-            "body_part": "Primary part or empty",
-            "current_status": "Status term or empty",
-            "treatment_recommendations": "Treatments or meds or empty",
-            "work_status": "Work status or empty",
-            "next_plan": "Follow-up plan or empty"
-            }}
-            """
-        human_template = """
-            You are analyzing this PR-2 Progress Report for structured extraction.
+2. REFERRAL DOCTOR FALLBACK (ONLY if no primary physician found):
+   - Use referral doctor ONLY when no treating/signing physician is identified
+   - Look for: "Referred by:", "Referral from:", "PCP:", "Primary Care:"
+   - Must have medical credentials
+   - Examples: ✓ Referred by: Dr. James Wilson
 
-            Document text:
-            {text}
+3. REJECT NON-DOCTOR SIGNATORIES:
+   - ✗ Reject names without medical credentials (e.g., "Syed Akbar")
+   - ✗ Reject administrators, case managers, coordinators
+   - ✗ Reject therapists, technicians, assistants
+   - ✗ Reject any name without proper medical credentials
 
-            Fallback date: {fallback_date}
+4. PRIORITY ORDER:
+   1. Treating Physician (with credentials)
+   2. Signing Physician (with credentials)  
+   3. Referral Doctor (with credentials, ONLY if no treating/signing physician)
+   4. "Not specified" (if no qualified doctors found)
 
-            Use the system extraction rules and formatting to identify and extract only the following fields:
-            - report_date
-            - physician_name (Dr. Full Name) valid only if name contains title (e.g., "Dr. John Smith", "Jane Doe, MD", "Dr Jane Doe", (eg. Dr., MD, DO, M.D., D.O.))
-            - body_part
-            - current_status
-            - treatment_recommendations
-            - work_status
-            - next_plan
+VALID PHYSICIAN FORMATS:
+   ✓ "Dr. Robert Chen"
+   ✓ "Lisa Martinez, MD"
+   ✓ "Dr. David Kumar, DO"
+   ✓ "Emily Thompson M.D."
 
-            Format the JSON output in this format:
-            {{
-            "report_date": "MM/DD/YY or {fallback_date}",
-            "physician_name": "Dr. Full Name (Dr. Full Name) valid only if name contains title (e.g., "Dr. John Smith", "Jane Doe, MD", "Dr Jane Doe", (eg. Dr., MD, DO, M.D., D.O.)) or empty",
-            "body_part": "Primary part or empty",
-            "current_status": "Status term or empty",
-            "treatment_recommendations": "Treatments or meds or empty",
-            "work_status": "Work status or empty",
-            "next_plan": "Follow-up plan or empty",
-            "formatted_summary": "[Dr. Name] [Document Type] [Body Part] [Date] = [Primary Finding] → [Impression] [Recommendations]-[Medication]-[Follow-up]-[Future Treatment]-[Comments]"
+IMMEDIATE REJECTION:
+   ✗ Names without medical credentials
+   ✗ "Case Manager", "Coordinator", "Administrator"
+   ✗ "Therapist", "Technician", "Assistant"
+   ✗ Isolated names: "John Doe", "Syed Akbar"
 
-            }}
+PR-2 SPECIFIC EXTRACTION:
+Focus on documenting patient progress and status changes:
+- Current clinical status and functional improvements/declines
+- Treatment modifications and medication adjustments
+- Work capacity and restrictions
+- Therapy progress and outcomes
+- Pain levels and symptom changes
+- Follow-up plans and duration of restrictions
 
-            {format_instructions}
+REQUIRED OUTPUT:
+- report_date: Date in MM/DD/YY format
+- treating_physician: Primary doctor documenting progress (MUST have credentials)
+- signing_physician: Doctor who signed/authorized (MUST have credentials)
+- referral_physician: Referral doctor if explicitly mentioned
+- clinical_progress: Current status and changes since last visit (1-2 sentences)
+- treatment_changes: New treatments, medications, or therapy modifications (1 sentence)
+- work_capacity: Current work status, restrictions, or return-to-work timeline (1 sentence)
+- recommendations: Next steps, follow-up, or ongoing care plan (1 sentence)
 
-            Return valid JSON only.
-            """
+Return clean JSON without explanations or markdown."""
 
+        human_template = """Extract information from this PR-2 Progress Report:
+
+{text}
+
+PHYSICIAN EXTRACTION PRIORITY:
+1. First: Treating/Signing physician with credentials (Dr./MD/DO/MBBS)
+2. Fallback: Referral doctor with credentials (ONLY if no treating/signing physician)
+3. Last: "Not specified" (if no qualified doctors)
+
+JSON format:
+{format_instructions}"""
+        
         try:
-            # Create system message prompt template
-            system_prompt = SystemMessagePromptTemplate.from_template(
-                system_template, input_variables=[]
-            )
-
-            # Create human message prompt template with partial format_instructions
+            system_prompt = SystemMessagePromptTemplate.from_template(system_template)
+            
             human_prompt_template = PromptTemplate(
                 template=human_template,
-                input_variables=["text", "fallback_date"],
+                input_variables=["text", "doc_type"],
                 partial_variables={"format_instructions": self.parser.get_format_instructions()}
             )
             human_prompt = HumanMessagePromptTemplate(prompt=human_prompt_template)
 
-            # Build chat prompt
-            chat_prompt = ChatPromptTemplate.from_messages([
-                system_prompt,
-                human_prompt
-            ])
-
-            # Execute extraction
+            chat_prompt = ChatPromptTemplate.from_messages([system_prompt, human_prompt])
             chain = chat_prompt | self.llm | self.parser
+            
             result = chain.invoke({
-                "text": text[:8000],
-                "fallback_date": fallback_date
+                "text": text,
+                "doc_type": doc_type
             })
-
+            
+            logger.info("📊 PR-2 Extraction Results:")
+            logger.info(f"   - Treating Physician: {result.get('treating_physician', 'Not found')}")
+            logger.info(f"   - Signing Physician: {result.get('signing_physician', 'Not found')}")
+            logger.info(f"   - Referral Physician: {result.get('referral_physician', 'Not found')}")
+            
             return result
-
+            
         except Exception as e:
-            logger.error(f"❌ PR-2 raw extraction failed: {e}")
+            logger.error(f"❌ PR-2 extraction failed: {e}")
             return {}
 
-    def _build_initial_result(self, raw_data: Dict, doc_type: str, fallback_date: str) -> ExtractionResult:
-        """Stage 2: Build initial result with validation and summary"""
-        cleaned = self._validate_and_clean(raw_data, fallback_date)
-        summary_line = self._build_pr2_summary(cleaned, doc_type, fallback_date)
+    def _build_result(self, raw_data: Dict, doc_type: str, fallback_date: str) -> ExtractionResult:
+        """Build final result with cleaned data and referral doctor fallback."""
+        
+        cleaned = self._clean_extracted_data(raw_data, fallback_date)
+        
+        # Apply referral doctor fallback logic
+        final_physician = self._apply_referral_fallback(cleaned)
+        cleaned["final_physician"] = final_physician
+        
+        summary = self._build_targeted_summary(cleaned, doc_type)
         
         return ExtractionResult(
             document_type=doc_type,
             document_date=cleaned.get("report_date", fallback_date),
-            summary_line=summary_line,
-            examiner_name=cleaned.get("physician_name"),
-            body_parts=[cleaned.get("body_part")] if cleaned.get("body_part") else [],
+            summary_line=summary,
+            examiner_name=final_physician,
+            body_parts=[],
             raw_data=cleaned,
         )
 
-    def _validate_and_clean(self, result: Dict, fallback_date: str) -> Dict:
-        """Validate and clean extracted data"""
+    def _apply_referral_fallback(self, data: Dict) -> str:
+        """
+        Apply referral doctor fallback logic:
+        - Primary: Treating physician with credentials
+        - Secondary: Signing physician with credentials  
+        - Fallback: Referral physician with credentials (ONLY if no treating/signing)
+        - Final: "Not specified"
+        """
+        treating_md = data.get("treating_physician", "")
+        signing_md = data.get("signing_physician", "")
+        referral_md = data.get("referral_physician", "")
+        
+        # Primary: Use treating physician if qualified
+        if treating_md and treating_md != "Not specified":
+            logger.info(f"✅ Using treating physician: {treating_md}")
+            return treating_md
+        
+        # Secondary: Use signing physician if qualified
+        if signing_md and signing_md != "Not specified":
+            logger.info(f"✅ Using signing physician: {signing_md}")
+            return signing_md
+        
+        # Fallback: Use referral doctor ONLY if no treating/signing found
+        if referral_md and referral_md != "Not specified":
+            logger.info(f"🔄 Using referral doctor as fallback: {referral_md}")
+            return referral_md
+        
+        # No qualified doctors found
+        logger.info("❌ No qualified doctors found")
+        return "Not specified"
+
+    def _clean_extracted_data(self, result: Dict, fallback_date: str) -> Dict:
+        """Clean and validate extracted data."""
+        
         cleaned = {}
         
-        # Date validation
+        # Date
         date = result.get("report_date", "").strip()
-        cleaned["report_date"] = date if date and date != "empty" else fallback_date
+        cleaned["report_date"] = date if date and date.lower() not in ["empty", ""] else fallback_date
 
         # Physician validation
-        physician = result.get("physician_name", "").strip()
-        if physician and physician != "empty":
-            # Ensure it contains physician indicators
-            physician_upper = physician.upper()
-            has_title = any(indicator in physician_upper for indicator in ['DR.', 'MD', 'DO', 'M.D.', 'D.O.', ', MD', ', DO'])
-            
-            if has_title:
-                cleaned["physician_name"] = physician
-            else:
-                logger.warning(f"Physician name lacks professional title: {physician}")
-                cleaned["physician_name"] = ""
-        else:
-            cleaned["physician_name"] = ""
+        treating_physician = result.get("treating_physician", "").strip()
+        signing_physician = result.get("signing_physician", "").strip()
+        referral_physician = result.get("referral_physician", "").strip()
+        
+        cleaned["treating_physician"] = self._validate_physician_name(treating_physician)
+        cleaned["signing_physician"] = self._validate_physician_name(signing_physician)
+        cleaned["referral_physician"] = self._validate_physician_name(referral_physician)
 
-        # Clean other fields
-        body_part = result.get("body_part", "").strip()
-        cleaned["body_part"] = body_part if body_part and body_part != "empty" else ""
-
-        current_status = result.get("current_status", "").strip()
-        cleaned["current_status"] = current_status if current_status and current_status != "empty" else ""
-
-        treatment_recommendations = result.get("treatment_recommendations", "").strip()
-        cleaned["treatment_recommendations"] = treatment_recommendations if treatment_recommendations and treatment_recommendations != "empty" else ""
-
-        work_status = result.get("work_status", "").strip()
-        cleaned["work_status"] = work_status if work_status and work_status != "empty" else ""
-
-        next_plan = result.get("next_plan", "").strip()
-        cleaned["next_plan"] = next_plan if next_plan and next_plan != "empty" else ""
-
-        critical_flags = result.get("critical_flags", "").strip()
-        cleaned["critical_flags"] = critical_flags if critical_flags and critical_flags != "empty" else ""
-
-        clinical_trajectory = result.get("clinical_trajectory", "").strip()
-        cleaned["clinical_trajectory"] = clinical_trajectory if clinical_trajectory and clinical_trajectory != "empty" else ""
+        # Medical content
+        cleaned["clinical_progress"] = result.get("clinical_progress", "").strip()
+        cleaned["treatment_changes"] = result.get("treatment_changes", "").strip()
+        cleaned["work_capacity"] = result.get("work_capacity", "").strip()
+        cleaned["recommendations"] = result.get("recommendations", "").strip()
 
         return cleaned
 
-    def _build_pr2_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
-        """Build concise, human-readable summary line for PR-2 report"""
-        date = data.get("report_date", fallback_date)
-        physician = data.get("physician_name", "")
-        body_part = data.get("body_part", "")
-        trajectory = data.get("clinical_trajectory", "")
-        flags = data.get("critical_flags", "")
+    def _validate_physician_name(self, name: str) -> str:
+        """Efficiently validate physician name has proper medical credentials."""
+        if not name or name.lower() in ["not specified", "not found", "none", "n/a", ""]:
+            return "Not specified"
+        
+        name_lower = name.lower()
+        
+        # Fast rejection using set membership (O(1) lookup)
+        reject_terms = {
+            "admin", "administrator", "case manager", "coordinator", "manager",
+            "therapist", "physical therapist", "pt", "ot", "technician",
+            "assistant", "technologist", "staff", "authority", "personnel",
+            "clerk", "signed by", "dictated by", "transcribed by"
+        }
+        
+        # Check if any reject term is in the name
+        if any(term in name_lower for term in reject_terms):
+            return "Not specified"
+        
+        # Use pre-compiled regex for efficiency - MUST have medical credentials
+        if self.medical_credential_pattern.search(name_lower):
+            return name
+        
+        # Reject names without credentials (including "Syed Akbar" type names)
+        return "Not specified"
 
-        # Build summary parts
-        summary_parts = [f"{date}: {doc_type}"]
+    def _build_targeted_summary(self, data: Dict, doc_type: str) -> str:
+        """Build precise 50-60 word summary of progress report."""
         
-        # Add physician if available
-        if physician:
-            last_name = (
-                physician.replace("Dr.", "")
-                .replace("MD", "")
-                .replace("DO", "")
-                .replace("M.D.", "")
-                .replace("D.O.", "")
-                .strip()
-                .split()[-1]
-            )
-            if last_name:
-                summary_parts.append(f"(Dr {last_name})")
+        physician = data.get("final_physician", "")
+        treating_physician = data.get("treating_physician", "")
+        signing_physician = data.get("signing_physician", "")
+        referral_physician = data.get("referral_physician", "")
+        clinical_progress = data.get("clinical_progress", "")
+        treatment_changes = data.get("treatment_changes", "")
+        work_capacity = data.get("work_capacity", "")
+        recommendations = data.get("recommendations", "")
         
-        # Add body part if available
-        if body_part:
-            summary_parts.append(f"- {body_part}")
+        # Build summary components
+        parts = []
         
-        # Add trajectory if available (shortened)
-        if trajectory:
-            trajectory_short = trajectory.split('.')[0][:50]
-            summary_parts.append(f"| {trajectory_short}")
+        # 1. Physician header (8-15 words)
+        physician_valid = physician and physician != "Not specified"
         
-        # Add critical flags if present
-        if flags:
-            flags_short = flags.split('.')[0][:40]
-            summary_parts.append(f"⚠️ {flags_short}")
-
-        summary = " ".join(summary_parts)
+        if physician_valid:
+            # Add context based on physician role
+            if physician == referral_physician and physician != treating_physician:
+                parts.append(f"Referral {physician} progress report")
+            elif treating_physician and signing_physician and treating_physician != signing_physician:
+                parts.append(f"{treating_physician} progress report, signed by {signing_physician}")
+            else:
+                parts.append(f"{physician} progress report")
+        else:
+            parts.append("PR-2 progress report")
         
-        # Ensure summary is readable length
-        if len(summary) > 150:
-            summary = summary[:147] + "..."
-
-        logger.info(f"✅ PR-2 Summary: {summary}")
+        # 2. Prioritize medical content by importance
+        content_segments = []
+        
+        # Priority 1: Clinical progress (most important)
+        if clinical_progress:
+            content_segments.append(clinical_progress)
+        
+        # Priority 2: Work capacity (critical for PR-2)
+        if work_capacity:
+            content_segments.append(work_capacity)
+        
+        # Priority 3: Treatment changes
+        if treatment_changes:
+            content_segments.append(treatment_changes)
+        
+        # Priority 4: Recommendations
+        if recommendations:
+            content_segments.append(recommendations)
+        
+        # Combine medical content
+        full_content = " ".join(content_segments)
+        
+        if full_content:
+            # Calculate available words
+            header = " ".join(parts)
+            current_words = len(header.split())
+            target_words = 55  # Target middle of 50-60 range
+            words_for_content = target_words - current_words
+            
+            if words_for_content > 10:  # Ensure meaningful content
+                content_words = full_content.split()
+                
+                if len(content_words) > words_for_content:
+                    # Smart truncation
+                    truncated = " ".join(content_words[:words_for_content])
+                    
+                    # Try to end at sentence boundary
+                    if '.' in truncated:
+                        sentences = truncated.split('.')
+                        # Keep complete sentences only
+                        complete_sentences = '. '.join(sentences[:-1])
+                        if complete_sentences:
+                            truncated = complete_sentences + '.'
+                        else:
+                            truncated = sentences[0] + '.'
+                    else:
+                        # End at comma or add ellipsis
+                        if ',' in truncated[-30:]:
+                            last_comma = truncated.rfind(',')
+                            truncated = truncated[:last_comma] + '.'
+                        else:
+                            truncated += '...'
+                    
+                    parts.append(truncated)
+                else:
+                    parts.append(full_content)
+        
+        # Combine all parts
+        if len(parts) > 1:
+            # Use colon for separation between header and content
+            summary = parts[0] + ": " + parts[1]
+        else:
+            summary = parts[0]
+        
+        # Ensure proper ending
+        if not summary.endswith(('.', '...')):
+            summary += '.'
+        
+        # Log word count for monitoring
+        word_count = len(summary.split())
+        logger.info(f"📝 Summary word count: {word_count}")
+        
         return summary

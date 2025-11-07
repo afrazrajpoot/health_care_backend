@@ -1,7 +1,8 @@
 """
-Specialist Consult extractor (v2.2 – refactored to match ImagingExtractor layout)
+Specialist Consult Extractor - Enhanced physician recognition with referral doctor fallback
 """
 import logging
+import re
 from typing import Dict
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate, PromptTemplate
@@ -13,220 +14,309 @@ logger = logging.getLogger("document_ai")
 
 
 class ConsultExtractor:
-    """Specialized extractor for Specialist Consultation Reports with improved clarity and completeness."""
+    """Enhanced extractor for Specialist Consultation Reports with referral doctor fallback."""
 
     def __init__(self, llm: AzureChatOpenAI):
         self.llm = llm
         self.parser = JsonOutputParser()
+        # Pre-compile regex for efficiency
+        self.medical_credential_pattern = re.compile(
+            r'\b(dr\.?|doctor|m\.?d\.?|d\.?o\.?|mbbs|m\.?b\.?b\.?s\.?)\b',
+            re.IGNORECASE
+        )
 
     def extract(self, text: str, doc_type: str, fallback_date: str) -> ExtractionResult:
-        """Extract specialist consult report and generate concise summary."""
-        raw_result = self._extract_raw_data(text, doc_type, fallback_date)
-        initial_result = self._build_initial_result(raw_result, doc_type, fallback_date)
-        return initial_result
+        """Extract consultation report with proper physician identification."""
+        raw_result = self._extract_medical_content(text, doc_type, fallback_date)
+        result = self._build_result(raw_result, doc_type, fallback_date)
+        return result
 
-    def _extract_raw_data(self, text: str, doc_type: str, fallback_date: str) -> Dict:
-        """Stage 1: Extract raw structured data using system and human templates"""
-        system_template = """
-You are an AI Medical Assistant, that helps doctors and medical professionals by extracting actual actionable and useful information from medical documents. You are extracting structured clinical information from a specialist consultation report
-to generate a concise, readable summary for a medical timeline card.
+    def _extract_medical_content(self, text: str, doc_type: str, fallback_date: str) -> Dict:
+        """Extract medical changes and identify physicians efficiently."""
+        
+        system_template = """You are a medical data extraction specialist analyzing consultation reports.
 
-━━━ STAGE : DOCTOR/Physician name EXTRACTION (CRITICAL VALIDATION) ━━━
-CONSULTING DOCTOR/Physician name EXTRACTION GUIDELINES:
-- MUST have explicit title: "Dr.", "MD", "DO", "M.D.", "D.O." (Dr. Full Name) valid only if name contains title (e.g., "Dr. John Smith", "Jane Doe, MD", "Dr Jane Doe", (eg. Dr., MD, DO, M.D., D.O.))
-- Look in: signatures, consultations, specialist mentions
-- Extract FULL NAME with title (e.g., "Dr. Jane Smith")
-- IF name found WITHOUT title → ADD to verification_notes: "Doctor name lacks title: [name]"
-- Do NOT extract patient names, admin names, signature without context
-- If no consultant → "Not specified"
+CRITICAL PHYSICIAN IDENTIFICATION PROTOCOL:
 
-EXTRACTION RULES:
-1. Physician name: MUST include title (Dr./MD/DO) (Dr. Full Name) valid only if name contains title (e.g., "Dr. John Smith", "Jane Doe, MD", "Dr Jane Doe", (eg. Dr., MD, DO, M.D., D.O.)). Ignore electronic signatures.
-2. Specialty: Convert to short form if possible ("Orthopedic Surgery" → "Ortho", "Neurology" → "Neuro", "Pain Management" → "Pain").
-3. Body part: Extract if specified (use short form: "R shoulder", "L knee", etc.).
-4. Findings: Summarize key diagnostic impression (max 16 words, e.g., "partial rotator cuff tear", "lumbar disc bulge").
-5. Recommendations: Include specific next steps or treatment plan (max 16 words, including referrals or follow-ups).
-6. Treatment recommendations: Include medications, therapies, or procedures explicitly recommended.
-7. Work status/restrictions: Include if mentioned (e.g., "modified duty", "TTD", "full duty").
-8. If any “?” uncertainty exists (e.g., "? impingement"), replace with “possible [finding]”.
-9. Maintain concise, human-readable phrasing — suitable for compact UI display.
+1. PRIMARY PHYSICIAN (Consulting/Signing):
+   - MUST have medical credentials: Dr., MD, M.D., DO, D.O., MBBS
+   - Look for: "Consulting physician:", "Examined by:", "Provider:", "Attending:"
+   - Check signatures: "Electronically signed by:", "Dictated by:", "Signed by:"
 
-Extract these fields:
-- consult_date: Date of consultation (MM/DD/YY or {fallback_date})
-- physician_name: Consulting physician (with title) (Dr. Full Name) valid only if name contains title (e.g., "Dr. John Smith", "Jane Doe, MD", "Dr Jane Doe", (eg. Dr., MD, DO, M.D., D.O.))
-- specialty: Medical specialty (short form)
-- body_part: Body part(s) evaluated (abbreviated)
-- findings: Primary impression or diagnosis (max 16 words)
-- recommendations: Overall treatment or follow-up plan (max 16 words)
-- treatment_recommendations: Specific treatments or meds (max 20 words)
-- work_status: Work ability or restrictions (max 16 words)
+2. REFERRAL DOCTOR FALLBACK (ONLY if no primary physician found):
+   - Use referral doctor ONLY when no consulting/signing physician is identified
+   - Look for: "Referred by:", "Referral from:", "PCP:", "Primary Care:"
+   - Must have medical credentials
+   - Examples: ✓ Referred by: Dr. James Wilson
 
-Return JSON:
-{{
-  "consult_date": "MM/DD/YY or {fallback_date}",
-  "physician_name": "Dr. Full Name or empty",
-  "specialty": "short form or empty",
-  "body_part": "abbreviated or empty",
-  "findings": "key finding or empty",
-  "recommendations": "primary plan or empty",
-  "treatment_recommendations": "treatments/meds or empty",
-  "work_status": "work status or empty"
-}}
-"""
+3. REJECT NON-DOCTOR SIGNATORIES:
+   - ✗ Reject names without medical credentials (e.g., "Syed Akbar")
+   - ✗ Reject administrators, technicians, coordinators
+   - ✗ Reject any name without proper medical credentials
 
-        human_template = """
-You are analyzing this specialist consultation report for structured extraction.
+4. PRIORITY ORDER:
+   1. Consulting Physician (with credentials)
+   2. Signing Physician (with credentials)  
+   3. Referral Doctor (with credentials, ONLY if no consulting/signing physician)
+   4. "Not specified" (if no qualified doctors found)
 
-Document text:
+VALID PHYSICIAN FORMATS:
+   ✓ "Dr. Sarah Johnson"
+   ✓ "Michael Brown, MD"
+   ✓ "Dr. Ahmed Khan, MBBS"
+   ✓ "Jennifer Lee M.D."
+
+IMMEDIATE REJECTION:
+   ✗ Names without medical credentials
+   ✗ "Administrator", "Manager", "Coordinator"
+   ✗ "Technician", "Assistant", "Staff"
+   ✗ Isolated names: "John Smith", "Syed Akbar"
+
+MEDICAL CONTENT EXTRACTION:
+- Focus on NEW findings, diagnoses, and clinical changes
+- Extract primary impression/assessment
+- Identify key recommendations and treatment modifications
+- Summarize in 2-3 concise sentences
+
+REQUIRED OUTPUT:
+- consult_date: Date in MM/DD/YY format
+- consulting_physician: Doctor who examined patient (MUST have credentials)
+- signing_physician: Doctor who signed report (MUST have credentials)
+- referral_physician: Referral doctor if explicitly mentioned
+- primary_assessment: Chief complaint and clinical impression (1-2 sentences)
+- key_findings: Significant clinical findings (1-2 sentences)
+- recommendations: Treatment plan and follow-up (1-2 sentences)
+
+Return clean JSON without explanations or markdown."""
+
+        human_template = """Extract information from this {doc_type} report:
+
 {text}
 
-Fallback date: {fallback_date}
+PHYSICIAN EXTRACTION PRIORITY:
+1. First: Consulting/Signing physician with credentials (Dr./MD/DO/MBBS)
+2. Fallback: Referral doctor with credentials (ONLY if no consulting/signing physician)
+3. Last: "Not specified" (if no qualified doctors)
 
-Follow the extraction and validation rules from the system prompt above.
-Return only valid JSON with the fields:
-- consult_date
-- physician_name
-- specialty
-- body_part
-- findings
-- recommendations
-- treatment_recommendations
-- work_status
-
-{format_instructions}
-
-Return JSON only.
-"""
-
+JSON format:
+{format_instructions}"""
+        
         try:
-            # Create system message prompt template
-            system_prompt = SystemMessagePromptTemplate.from_template(
-                system_template, input_variables=[]
-            )
-
-            # Create human message prompt template with partial format_instructions
+            system_prompt = SystemMessagePromptTemplate.from_template(system_template)
+            
             human_prompt_template = PromptTemplate(
                 template=human_template,
-                input_variables=["text", "fallback_date"],
+                input_variables=["text", "doc_type"],
                 partial_variables={"format_instructions": self.parser.get_format_instructions()}
             )
             human_prompt = HumanMessagePromptTemplate(prompt=human_prompt_template)
 
-            # Build chat prompt
-            chat_prompt = ChatPromptTemplate.from_messages([
-                system_prompt,
-                human_prompt
-            ])
-
+            chat_prompt = ChatPromptTemplate.from_messages([system_prompt, human_prompt])
             chain = chat_prompt | self.llm | self.parser
-            result = chain.invoke(
-                {"text": text[:5000], "fallback_date": fallback_date}
-            )
+            
+            result = chain.invoke({
+                "text": text,
+                "doc_type": doc_type
+            })
+            
+            logger.info("📊 Consult Extraction Results:")
+            logger.info(f"   - Consulting Physician: {result.get('consulting_physician', 'Not found')}")
+            logger.info(f"   - Signing Physician: {result.get('signing_physician', 'Not found')}")
+            logger.info(f"   - Referral Physician: {result.get('referral_physician', 'Not found')}")
+            
             return result
+            
         except Exception as e:
-            logger.error(f"❌ Raw extraction failed: {e}")
+            logger.error(f"❌ Consult extraction failed: {e}")
             return {}
 
-    def _build_initial_result(self, raw_data: Dict, doc_type: str, fallback_date: str) -> ExtractionResult:
-        """Stage 2: Build initial result with validation and summary"""
-        cleaned = self._validate_and_clean(raw_data, fallback_date)
-        summary_line = self._build_consult_summary(cleaned, doc_type, fallback_date)
+    def _build_result(self, raw_data: Dict, doc_type: str, fallback_date: str) -> ExtractionResult:
+        """Build final result with cleaned data and referral doctor fallback."""
+        
+        cleaned = self._clean_extracted_data(raw_data, fallback_date)
+        
+        # Apply referral doctor fallback logic
+        final_physician = self._apply_referral_fallback(cleaned)
+        cleaned["final_physician"] = final_physician
+        
+        summary = self._build_targeted_summary(cleaned, doc_type)
+        
         return ExtractionResult(
             document_type=doc_type,
             document_date=cleaned.get("consult_date", fallback_date),
-            summary_line=summary_line,
-            examiner_name=cleaned.get("physician_name"),
-            specialty=cleaned.get("specialty"),
-            body_parts=[cleaned.get("body_part")] if cleaned.get("body_part") else [],
+            summary_line=summary,
+            examiner_name=final_physician,
+            specialty="",
+            body_parts=[],
             raw_data=cleaned,
         )
 
-    def _validate_and_clean(self, result: Dict, fallback_date: str) -> Dict:
-        """Validate and clean extracted data"""
+    def _apply_referral_fallback(self, data: Dict) -> str:
+        """
+        Apply referral doctor fallback logic:
+        - Primary: Consulting physician with credentials
+        - Secondary: Signing physician with credentials  
+        - Fallback: Referral physician with credentials (ONLY if no consulting/signing)
+        - Final: "Not specified"
+        """
+        consulting_md = data.get("consulting_physician", "")
+        signing_md = data.get("signing_physician", "")
+        referral_md = data.get("referral_physician", "")
+        
+        # Primary: Use consulting physician if qualified
+        if consulting_md and consulting_md != "Not specified":
+            logger.info(f"✅ Using consulting physician: {consulting_md}")
+            return consulting_md
+        
+        # Secondary: Use signing physician if qualified
+        if signing_md and signing_md != "Not specified":
+            logger.info(f"✅ Using signing physician: {signing_md}")
+            return signing_md
+        
+        # Fallback: Use referral doctor ONLY if no consulting/signing found
+        if referral_md and referral_md != "Not specified":
+            logger.info(f"🔄 Using referral doctor as fallback: {referral_md}")
+            return referral_md
+        
+        # No qualified doctors found
+        logger.info("❌ No qualified doctors found")
+        return "Not specified"
+
+    def _clean_extracted_data(self, result: Dict, fallback_date: str) -> Dict:
+        """Clean and validate extracted data."""
+        
         cleaned = {}
+        
+        # Date
         date = result.get("consult_date", "").strip()
-        cleaned["consult_date"] = date if date and date != "empty" else fallback_date
+        cleaned["consult_date"] = date if date and date.lower() not in ["empty", ""] else fallback_date
 
-        # Validate physician name has title
-        physician = result.get("physician_name", "").strip()
-        if physician and not any(title in physician for title in ["Dr.", "MD", "DO", "M.D.", "D.O."]):
-            physician = ""
-            logger.warning("Physician name lacked required title; cleared.")
-        cleaned["physician_name"] = physician
+        # Physician validation
+        consulting_physician = result.get("consulting_physician", "").strip()
+        signing_physician = result.get("signing_physician", "").strip()
+        referral_physician = result.get("referral_physician", "").strip()
+        
+        cleaned["consulting_physician"] = self._validate_physician_name(consulting_physician)
+        cleaned["signing_physician"] = self._validate_physician_name(signing_physician)
+        cleaned["referral_physician"] = self._validate_physician_name(referral_physician)
 
-        specialty = result.get("specialty", "").strip()
-        cleaned["specialty"] = specialty if specialty and specialty != "empty" else ""
-
-        body_part = result.get("body_part", "").strip()
-        cleaned["body_part"] = body_part if body_part and body_part != "empty" else ""
-
-        findings = result.get("findings", "").strip()
-        cleaned["findings"] = findings if findings and findings != "empty" else ""
-
-        recommendations = result.get("recommendations", "").strip()
-        cleaned["recommendations"] = recommendations if recommendations and recommendations != "empty" else ""
-
-        treatment_recommendations = result.get("treatment_recommendations", "").strip()
-        cleaned["treatment_recommendations"] = treatment_recommendations if treatment_recommendations and treatment_recommendations != "empty" else ""
-
-        work_status = result.get("work_status", "").strip()
-        cleaned["work_status"] = work_status if work_status and work_status != "empty" else ""
+        # Medical content
+        cleaned["primary_assessment"] = result.get("primary_assessment", "").strip()
+        cleaned["key_findings"] = result.get("key_findings", "").strip()
+        cleaned["recommendations"] = result.get("recommendations", "").strip()
 
         return cleaned
 
-    def _build_consult_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
-        """Build concise, human-readable summary line"""
-        date = data.get("consult_date", fallback_date)
-        physician = data.get("physician_name", "")
-        specialty = data.get("specialty", "")
-        body_part = data.get("body_part", "")
-        findings = data.get("findings", "")
+    def _validate_physician_name(self, name: str) -> str:
+        """Efficiently validate physician name has proper medical credentials."""
+        if not name or name.lower() in ["not specified", "not found", "none", "n/a", ""]:
+            return "Not specified"
+        
+        name_lower = name.lower()
+        
+        # Fast rejection using set membership (O(1) lookup)
+        reject_terms = {
+            "admin", "administrator", "technician", "technologist", "tech",
+            "assistant", "coordinator", "manager", "staff", "authority",
+            "personnel", "clerk", "secretary", "signed by", "dictated by"
+        }
+        
+        # Check if any reject term is in the name
+        if any(term in name_lower for term in reject_terms):
+            return "Not specified"
+        
+        # Use pre-compiled regex for efficiency - MUST have medical credentials
+        if self.medical_credential_pattern.search(name_lower):
+            return name
+        
+        # Reject names without credentials (including "Syed Akbar" type names)
+        return "Not specified"
+
+    def _build_targeted_summary(self, data: Dict, doc_type: str) -> str:
+        """Build precise 50-60 word summary of consultation."""
+        
+        physician = data.get("final_physician", "")
+        consulting_physician = data.get("consulting_physician", "")
+        signing_physician = data.get("signing_physician", "")
+        referral_physician = data.get("referral_physician", "")
+        primary_assessment = data.get("primary_assessment", "")
+        key_findings = data.get("key_findings", "")
         recommendations = data.get("recommendations", "")
-        treatment = data.get("treatment_recommendations", "")
-        work_status = data.get("work_status", "")
-
-        # Build concise summary
-        # Example: 20/04/25: Consult (Dr Patel, Ortho) for R shoulder = partial tear; PT + NSAIDs; modified duty
-        summary_parts = []
-        summary_parts.append(f"{date}: Consult")
-
-        if physician:
-            last_name = (
-                physician.replace("Dr.", "")
-                .replace("MD", "")
-                .replace("DO", "")
-                .replace("M.D.", "")
-                .replace("D.O.", "")
-                .strip()
-                .split()[-1]
-            )
-            if last_name:
-                if specialty:
-                    summary_parts.append(f"(Dr {last_name}, {specialty})")
-                else:
-                    summary_parts.append(f"(Dr {last_name})")
-
-        if body_part:
-            summary_parts.append(f"for {body_part}")
-
-        summary_parts.append("=")
-
-        key_phrases = []
-        if findings:
-            key_phrases.append(findings)
-        if treatment:
-            key_phrases.append(treatment)
+        
+        # Build summary components
+        parts = []
+        
+        # 1. Physician header (8-15 words)
+        physician_valid = physician and physician != "Not specified"
+        
+        if physician_valid:
+            # Add context based on physician role
+            if physician == referral_physician and physician != consulting_physician:
+                parts.append(f"Referral {physician} consultation")
+            elif consulting_physician and signing_physician and consulting_physician != signing_physician:
+                parts.append(f"{consulting_physician} consultation, signed by {signing_physician}")
+            else:
+                parts.append(f"{physician} consultation")
+        else:
+            parts.append("Consultation report")
+        
+        # 2. Combine medical content for remaining words
+        medical_content = []
+        
+        if primary_assessment:
+            medical_content.append(primary_assessment)
+        
+        if key_findings:
+            medical_content.append(key_findings)
+        
         if recommendations:
-            key_phrases.append(recommendations)
-        if work_status:
-            key_phrases.append(work_status)
-
-        summary_parts.append("; ".join(key_phrases))
-        summary = " ".join(summary_parts)
-
-        # Limit to ~70 words for UI brevity
-        words = summary.split()
-        if len(words) > 70:
-            summary = " ".join(words[:70]) + "..."
-
+            medical_content.append(recommendations)
+        
+        # Join medical content
+        full_medical = " ".join(medical_content)
+        
+        if full_medical:
+            # Calculate available words
+            header = " ".join(parts)
+            current_words = len(header.split())
+            target_words = 55  # Target middle of 50-60 range
+            words_for_content = target_words - current_words
+            
+            if words_for_content > 10:  # Ensure meaningful content
+                content_words = full_medical.split()
+                
+                if len(content_words) > words_for_content:
+                    # Smart truncation
+                    truncated = " ".join(content_words[:words_for_content])
+                    
+                    # Try to end at sentence boundary
+                    if '.' in truncated:
+                        sentences = truncated.split('.')
+                        truncated = '. '.join(sentences[:-1]) + '.'
+                    else:
+                        # End at comma or natural break
+                        if ',' in truncated[-20:]:
+                            last_comma = truncated.rfind(',')
+                            truncated = truncated[:last_comma] + '.'
+                        else:
+                            truncated += '...'
+                    
+                    parts.append(truncated)
+                else:
+                    parts.append(full_medical)
+        
+        # Combine all parts
+        if len(parts) > 1:
+            summary = parts[0] + ": " + parts[1]
+        else:
+            summary = parts[0]
+        
+        # Ensure proper ending
+        if not summary.endswith(('.', '...')):
+            summary += '.'
+        
+        # Log word count for monitoring
+        word_count = len(summary.split())
+        logger.info(f"📝 Summary word count: {word_count}")
+        
         return summary
