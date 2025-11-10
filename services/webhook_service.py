@@ -889,16 +889,16 @@ class WebhookService:
             logger.info(f"ℹ️ Skipping previous update: status={document_status}, total_previous={total_previous_docs}, has_conflicts={status_result['has_conflicting_claims']}, patient={status_result['patient_name_to_use']}, has_dob={updated_dob_for_query is not None}, is_first_time_claim_only={is_first_time_claim_only}")
 
         # 🆕 FINAL SYNC: Query DB and update all documents with same patient/claim
-        # This catches documents that were saved in parallel batch processing
-        await self._sync_patient_documents(
-            db_service=db_service,
-            physician_id=physician_id,
-            patient_name=status_result["patient_name_to_use"],
-            claim_number=status_result["claim_to_save"],
-            document_status=document_status,
-            is_first_time_claim_only=is_first_time_claim_only,
-            has_conflicting_claims=status_result["has_conflicting_claims"]
-        )
+        # # This catches documents that were saved in parallel batch processing
+        # await self._sync_patient_documents(
+        #     db_service=db_service,
+        #     physician_id=physician_id,
+        #     patient_name=status_result["patient_name_to_use"],
+        #     claim_number=status_result["claim_to_save"],
+        #     document_status=document_status,
+        #     is_first_time_claim_only=is_first_time_claim_only,
+        #     has_conflicting_claims=status_result["has_conflicting_claims"]
+        # )
 
         logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}, filename: {processed_data['filename']}")
 
