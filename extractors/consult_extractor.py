@@ -275,9 +275,9 @@ Return JSON:
         doctor_section = ""
         if physician:
             if specialty:
-                doctor_section = f" by {physician} ({specialty})"
+                doctor_section = f" - {physician} | ({specialty})"
             else:
-                doctor_section = f" by {physician}"
+                doctor_section = f" - {physician}"
 
         # Compose enhanced summary prompt with explicit labeling rules
         summary_prompt = f"""You are an expert medical summarizer creating a concise Specialist Consult summary for physicians.

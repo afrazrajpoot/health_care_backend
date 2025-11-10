@@ -321,7 +321,7 @@ Return JSON:
         # Build doctor section if included
         doctor_section = ""
         if physician_name:
-            doctor_section = f" by {physician_name}"
+            doctor_section = f" - {physician_name}"
             logger.info(f"🩺 Building doctor_section for {doc_type}: '{doctor_section}'")
         else:
             logger.info(f"ℹ️ No physician name for {doc_type}, doctor_section will be empty")

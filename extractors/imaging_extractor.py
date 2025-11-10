@@ -279,7 +279,7 @@ Return JSON:
         if physician:
             last_name = self._extract_physician_last_name(physician)
             if last_name:
-                doctor_section = f" by Dr. {last_name}"
+                doctor_section = f" - {last_name}"
 
         # Compose enhanced summary prompt with explicit labeling rules
         summary_prompt = f"""You are an expert medical summarizer creating a concise imaging report summary for physicians.
