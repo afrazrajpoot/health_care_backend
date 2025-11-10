@@ -338,26 +338,51 @@ Return JSON:
         return ""
 
     def _validate_and_clean(self, result: Dict, fallback_date: str) -> Dict:
+        """Validate and clean extracted data, handling both string and list types"""
         cleaned = {}
-        date = result.get("document_date", "").strip()
+        
+        # Date validation
+        date = result.get("document_date", "")
+        date = date.strip() if isinstance(date, str) else str(date)
         cleaned["document_date"] = date if date and date != "empty" else fallback_date
 
-        # Physician validation with strict credential checking and name validation
-        examiner = result.get("examiner_name", "").strip()
-        referral_physician = result.get("referral_physician", "").strip()
+        # Physician validation with strict credential checking
+        examiner = result.get("examiner_name", "")
+        examiner = examiner.strip() if isinstance(examiner, str) else ""
+        referral_physician = result.get("referral_physician", "")
+        referral_physician = referral_physician.strip() if isinstance(referral_physician, str) else ""
         
         cleaned["examiner_name"] = self._validate_physician_full_name(examiner)
         cleaned["referral_physician"] = self._validate_physician_full_name(referral_physician)
 
-        specialty = result.get("specialty", "").strip()
+        # Specialty validation
+        specialty = result.get("specialty", "")
+        specialty = specialty.strip() if isinstance(specialty, str) else ""
         cleaned["specialty"] = specialty if specialty and specialty != "empty" else ""
 
+        # Body parts validation (always expects list)
         body_parts = result.get("body_parts_evaluated", [])
-        cleaned["body_parts_evaluated"] = [bp.strip() for bp in body_parts if bp and bp != "empty"]
+        if isinstance(body_parts, str):
+            # LLM returned string instead of list, split it
+            body_parts = [bp.strip() for bp in body_parts.split(",") if bp.strip()]
+        elif isinstance(body_parts, list):
+            body_parts = [bp.strip() for bp in body_parts if bp and isinstance(bp, str)]
+        else:
+            body_parts = []
+        cleaned["body_parts_evaluated"] = [bp for bp in body_parts if bp and bp != "empty"]
 
+        # Diagnoses validation (always expects list)
         diagnoses = result.get("diagnoses_confirmed", [])
-        cleaned["diagnoses_confirmed"] = [dx.strip() for dx in diagnoses if dx and dx != "empty"]
+        if isinstance(diagnoses, str):
+            # LLM returned string instead of list, split it
+            diagnoses = [dx.strip() for dx in diagnoses.split(",") if dx.strip()]
+        elif isinstance(diagnoses, list):
+            diagnoses = [dx.strip() for dx in diagnoses if dx and isinstance(dx, str)]
+        else:
+            diagnoses = []
+        cleaned["diagnoses_confirmed"] = [dx for dx in diagnoses if dx and dx != "empty"]
 
+        # String fields validation with list handling
         string_fields = [
             "causation_opinion",
             "impairment_summary",
@@ -366,6 +391,7 @@ Return JSON:
             "work_restrictions",
             "future_medical_recommendations",
             "treatment_recommendations",
+            "medication_recommendations",  # This is the problematic field
             "follow_up_instructions",
             "attorney_or_adjuster_notes",
         ]
@@ -382,7 +408,16 @@ Return JSON:
         ]
         
         for f in string_fields:
-            v = result.get(f, "").strip()
+            raw_value = result.get(f, "")
+            
+            # Handle list values (convert to comma-separated string)
+            if isinstance(raw_value, list):
+                v = ", ".join([str(item).strip() for item in raw_value if item])
+            elif isinstance(raw_value, str):
+                v = raw_value.strip()
+            else:
+                v = str(raw_value).strip() if raw_value else ""
+            
             v_lower = v.lower()
             
             # Check if empty or placeholder
