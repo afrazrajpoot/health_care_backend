@@ -3,13 +3,14 @@ QME/AME/IME specialized extractor with LLM chaining and full doctor name extract
 """
 import logging
 import re
-from typing import Dict
+from typing import Dict, Optional
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
+from utils.doctor_detector import DoctorDetector
 
 logger = logging.getLogger("document_ai")
 
@@ -18,24 +19,58 @@ class QMEExtractorChained:
     """
     Enhanced QME extractor with multi-stage LLM chaining and full doctor name extraction:
     Stage 1: Extract raw data
-    Stage 2: Build summary
-    Stage 3: Verify and correct
+    Stage 2: Detect examiner via DoctorDetector (zone-aware)
+    Stage 3: Build summary
+    Stage 4: Verify and correct
     """
 
     def __init__(self, llm: AzureChatOpenAI):
         self.llm = llm
         self.parser = JsonOutputParser()
         self.verifier = ExtractionVerifier(llm)
+        self.doctor_detector = DoctorDetector(llm)
         # Pre-compile regex for efficiency
         self.medical_credential_pattern = re.compile(
             r'\b(dr\.?|doctor|m\.?d\.?|d\.?o\.?|mbbs|m\.?b\.?b\.?s\.?)\b',
             re.IGNORECASE
         )
+        logger.info("✅ QMEExtractorChained initialized with DoctorDetector")
 
-    def extract(self, text: str, doc_type: str, fallback_date: str) -> ExtractionResult:
-        """Extract with verification chain"""
+    def extract(
+        self, 
+        text: str, 
+        doc_type: str, 
+        fallback_date: str,
+        page_zones: Optional[Dict[str, Dict[str, str]]] = None,
+        raw_text: Optional[str] = None
+    ) -> ExtractionResult:
+        """
+        Extract with DoctorDetector integration and verification chain.
+        
+        Args:
+            text: Layout-preserved text from Document AI
+            doc_type: Document type (QME/AME/IME)
+            fallback_date: Fallback date if not found
+            page_zones: Per-page zone extraction {page_num: {header, body, footer, signature}}
+            raw_text: Original flat text (for backward compatibility)
+        """
+        # Debug: Check if page_zones is provided
+        if page_zones:
+            logger.info(f"✅ QME extractor received page_zones with {len(page_zones)} pages: {list(page_zones.keys())}")
+        else:
+            logger.warning("⚠️ QME extractor did NOT receive page_zones")
+        
+        # Stage 1: Extract clinical data (NO doctor extraction in prompt)
         raw_result = self._extract_raw_data(text, doc_type, fallback_date)
+        
+        # Stage 2: Detect examiner via DoctorDetector (zone-aware)
+        examiner_name = self._detect_examiner(text, page_zones)
+        raw_result["examiner_name"] = examiner_name
+        
+        # Stage 3: Build initial result
         initial_result = self._build_initial_result(raw_result, doc_type, fallback_date)
+        
+        # Stage 4: Verify and fix
         final_result = self.verifier.verify_and_fix(initial_result)
         return final_result
 
@@ -214,6 +249,50 @@ Return JSON:
         except Exception as e:
             logger.error(f"❌ Raw extraction failed: {e}")
             return {}
+
+    def _detect_examiner(
+        self,
+        text: str,
+        page_zones: Optional[Dict[str, Dict[str, str]]] = None
+    ) -> str:
+        """
+        Stage 2: Detect QME/AME examiner using DoctorDetector (zone-aware).
+        
+        Args:
+            text: Full document text
+            page_zones: Page zones for zone-aware detection
+        
+        Returns:
+            Examiner name with title, or empty string
+        """
+        logger.info("🔍 Stage 2: Running DoctorDetector for QME/AME examiner (zone-aware)...")
+        
+        # Debug: Check if page_zones is provided
+        if page_zones:
+            logger.info(f"✅ QME extractor received page_zones with {len(page_zones)} pages: {list(page_zones.keys())}")
+        else:
+            logger.warning("⚠️ QME extractor did NOT receive page_zones")
+        
+        detection_result = self.doctor_detector.detect_doctor(
+            text=text,
+            page_zones=page_zones
+        )
+        
+        if detection_result["doctor_name"]:
+            logger.info(
+                f"✅ Examiner detected: {detection_result['doctor_name']} "
+                f"(confidence: {detection_result['confidence']}, "
+                f"source: {detection_result['source']})"
+            )
+            examiner_name = detection_result["doctor_name"]
+            logger.info(f"🎯 QME extractor returning examiner: '{examiner_name}'")
+            return examiner_name
+        else:
+            logger.warning(
+                f"⚠️ No valid examiner found: {detection_result['validation_notes']}"
+            )
+            logger.info("🎯 QME extractor returning empty examiner name")
+            return ""
 
     def _build_initial_result(self, raw_data: Dict, doc_type: str, fallback_date: str) -> ExtractionResult:
         cleaned = self._validate_and_clean(raw_data, fallback_date)

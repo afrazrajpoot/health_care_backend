@@ -888,6 +888,18 @@ class WebhookService:
         else:
             logger.info(f"ℹ️ Skipping previous update: status={document_status}, total_previous={total_previous_docs}, has_conflicts={status_result['has_conflicting_claims']}, patient={status_result['patient_name_to_use']}, has_dob={updated_dob_for_query is not None}, is_first_time_claim_only={is_first_time_claim_only}")
 
+        # 🆕 FINAL SYNC: Query DB and update all documents with same patient/claim
+        # This catches documents that were saved in parallel batch processing
+        await self._sync_patient_documents(
+            db_service=db_service,
+            physician_id=physician_id,
+            patient_name=status_result["patient_name_to_use"],
+            claim_number=status_result["claim_to_save"],
+            document_status=document_status,
+            is_first_time_claim_only=is_first_time_claim_only,
+            has_conflicting_claims=status_result["has_conflicting_claims"]
+        )
+
         logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}, filename: {processed_data['filename']}")
 
         logger.info(f"📡 Success event processed for document: {document_id}")
@@ -930,7 +942,134 @@ class WebhookService:
                 "is_task_needed": document_analysis.is_task_needed,  # Changed from is_rfa_task_needed
                 "tasks_created": created_tasks
             }
-        }    
+        }
+    
+    async def _sync_patient_documents(
+        self,
+        db_service,
+        physician_id: str,
+        patient_name: str,
+        claim_number: str,
+        document_status: str,
+        is_first_time_claim_only: bool,
+        has_conflicting_claims: bool
+    ):
+        """
+        🆕 FINAL SYNC: Query database and update all documents with same patient/claim.
+        This catches documents saved in parallel batch processing that may have incomplete data.
+        
+        Handles all cases from perform_patient_lookup:
+        1. First-time claim-only: Skip (no previous docs to sync)
+        2. Conflicting claims: Skip (ambiguous which docs to update)
+        3. Failed document: Skip (invalid data)
+        4. Patient name only: Sync all docs for patient (propagate claim if available)
+        5. Claim only: Sync all docs with claim (propagate patient if available)
+        6. Patient + Claim: Sync all docs for patient (update all fields)
+        7. Missing patient/claim: Skip (insufficient data)
+        
+        Cache strategy:
+        - Invalidates cache after sync to ensure fresh lookups
+        - Prevents stale data in subsequent batch uploads
+        """
+        # CASE 1: Skip if document failed
+        if document_status == "failed":
+            logger.debug("⏭️ Skipping sync: document failed")
+            return
+        
+        # CASE 2: Skip first-time claim-only (no previous docs exist)
+        if is_first_time_claim_only:
+            logger.debug("⏭️ Skipping sync: first-time claim-only document (no previous docs)")
+            return
+        
+        # CASE 3: Skip if conflicting claims detected
+        if has_conflicting_claims:
+            logger.debug("⏭️ Skipping sync: conflicting claims detected (ambiguous)")
+            return
+        
+        # CASE 7: Need at least patient name OR claim number to sync
+        has_valid_patient = patient_name and patient_name != "Not specified"
+        has_valid_claim = claim_number and claim_number != "Not specified"
+        
+        if not has_valid_patient and not has_valid_claim:
+            logger.debug(f"⏭️ Skipping sync: no valid patient ({patient_name}) or claim ({claim_number})")
+            return
+        
+        # Determine sync strategy based on what's available
+        sync_type = None
+        if has_valid_patient and has_valid_claim:
+            sync_type = "patient+claim"
+            logger.info(f"🔄 FINAL SYNC [PATIENT+CLAIM]: Patient '{patient_name}' + Claim '{claim_number}'")
+        elif has_valid_patient:
+            sync_type = "patient-only"
+            logger.info(f"🔄 FINAL SYNC [PATIENT-ONLY]: Patient '{patient_name}' (will propagate claim if found)")
+        elif has_valid_claim:
+            sync_type = "claim-only"
+            logger.info(f"🔄 FINAL SYNC [CLAIM-ONLY]: Claim '{claim_number}' (will propagate patient if found)")
+        
+        try:
+            # CASE 4, 5, 6: Query all documents for patient (don't filter by claim to catch all)
+            lookup_result = await db_service.get_patient_claim_numbers(
+                patient_name=patient_name if has_valid_patient else None,
+                physicianId=physician_id,
+                claim_number=claim_number if has_valid_claim and not has_valid_patient else None,  # Only use claim if no patient
+                dob=None  # Don't filter by DOB in sync - we want all matches
+            )
+            
+            if not lookup_result or lookup_result.get("total_documents", 0) <= 1:
+                logger.debug(f"⏭️ No other documents found for sync ({lookup_result.get('total_documents', 0)} total)")
+                return
+            
+            # Extract best available data from ALL documents in DB
+            best_dob = lookup_result.get("dob")
+            best_doi = lookup_result.get("doi")
+            best_claim = lookup_result.get("claim_number")
+            best_patient = lookup_result.get("patient_name")
+            
+            # Determine what to sync (use current doc's data if valid, otherwise use best from DB)
+            patient_to_sync = patient_name if has_valid_patient else (best_patient if best_patient else "Not specified")
+            claim_to_sync = claim_number if has_valid_claim else (best_claim if best_claim else "Not specified")
+            dob_to_sync = best_dob if best_dob else "Not specified"
+            doi_to_sync = best_doi if best_doi else None
+            
+            # Check if we have anything useful to sync
+            has_data_to_sync = (
+                (patient_to_sync != "Not specified") or
+                (claim_to_sync != "Not specified") or
+                (dob_to_sync != "Not specified") or
+                doi_to_sync
+            )
+            
+            if not has_data_to_sync:
+                logger.debug("⏭️ No valid data to sync (all fields empty)")
+                return
+            
+            # Update all documents with best available data
+            logger.info(f"🔄 Syncing {lookup_result.get('total_documents')} documents:")
+            logger.info(f"   Patient: {patient_to_sync}")
+            logger.info(f"   Claim: {claim_to_sync}")
+            logger.info(f"   DOB: {dob_to_sync}")
+            logger.info(f"   DOI: {doi_to_sync}")
+            
+            updated_count = await db_service.update_previous_fields(
+                patient_name=patient_to_sync,
+                dob=dob_to_sync,
+                physician_id=physician_id,
+                claim_number=claim_to_sync,
+                doi=doi_to_sync
+            )
+            
+            logger.info(f"✅ FINAL SYNC [{sync_type.upper()}]: Updated {updated_count} documents")
+            
+            # Invalidate cache after sync (use both patient and claim for thorough invalidation)
+            if has_valid_patient:
+                await self.cache_service.invalidate_patient(patient_name, physician_id)
+            if has_valid_claim and claim_number != patient_name:
+                # Also invalidate by claim if different from patient
+                await self.cache_service.invalidate_patient(claim_number, physician_id)
+            
+        except Exception as e:
+            logger.error(f"❌ Error in final sync for patient '{patient_name}': {str(e)}", exc_info=True)
+    
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
         Orchestrates the full webhook processing pipeline (UNCHANGED).
