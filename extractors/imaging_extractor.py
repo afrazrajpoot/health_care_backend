@@ -98,27 +98,40 @@ EXTRACTION RULES:
 Document text:
 {text}
 
-Extract these fields (do NOT extract consulting_doctor):
-- study_date: Imaging date (MM/DD/YY format, or use {fallback_date} if not found)
-- document_type: Type of report (MRI, CT, X-ray, Ultrasound, EMG)
-- body_part: Anatomical area studied (abbreviated form)
-- contrast_used: "with contrast", "without contrast", or empty
-- primary_finding: Most important diagnostic finding (max 16 words)
-- impression_status: "normal", "abnormal", "post-op", or "inconclusive"
-
 CRITICAL REASONING RULES - VERIFY BEFORE RETURNING:
-1. ONLY extract meaningful findings. DO NOT extract "normal" or "unremarkable" as primary_finding.
-   ✗ BAD: "No acute findings", "Unremarkable study", "Within normal limits"
-   ✓ GOOD: "Grade 2 AC joint separation", "L4-5 disc herniation", "Rotator cuff tear"
+
+1. EXTRACT ALL KEY FINDINGS - both positive pathology AND negative findings:
+   ✓ GOOD (Pathology): "Grade 2 AC joint separation", "L4-5 disc herniation", "Full-thickness rotator cuff tear"
+   ✓ GOOD (Negative/Normal): "No acute fracture or dislocation", "Normal study", "No significant abnormality"
+   ✓ GOOD (Incidental): "Degenerative changes", "Mild osteoarthritis"
+   ✗ BAD (Placeholders): "Not mentioned", "Not provided", "N/A"
    
-2. If the study is completely normal with no pathology, set primary_finding to empty string "".
+2. If a field has NO actual information (truly not mentioned in document), return empty string "".
+   If study has findings (even if normal/negative), include them.
    
-3. For impression_status: Use "normal" ONLY if study is truly normal. If abnormalities exist, use "abnormal".
+3. For impression_status: Extract the radiologist's assessment:
+   ✓ Use "normal" if study is normal/unremarkable
+   ✓ Use "abnormal" if pathology is present (even if mild)
+   ✓ Use "post-op" if post-surgical changes are primary finding
+   ✓ Use "inconclusive" if study is limited or non-diagnostic
    
-4. REASONING CHECK: Before returning primary_finding, ask yourself:
-   - "Is this finding ACTIONABLE or clinically significant?"
-   - "Would this change treatment or diagnosis?"
-   - If answer is NO → return empty string for primary_finding
+4. For primary_finding: Extract the radiologist's main impression:
+   ✓ GOOD (Pathology present): "L5-S1 disc herniation with nerve root impingement"
+   ✓ GOOD (Normal study): "No acute abnormality identified", "Normal study"
+   ✓ GOOD (Post-op): "Post-surgical changes, hardware in place, no complications"
+   ✓ GOOD (Incidental findings): "Mild degenerative disc disease L4-5"
+   ✗ BAD: Empty string when study has findings (even if normal)
+   
+5. Include clinically relevant negative findings:
+   ✓ GOOD: "No fracture, no dislocation" (rules out acute injury)
+   ✓ GOOD: "No disc herniation" (rules out suspected pathology)
+   ✗ BAD: Omitting findings just because they're negative
+
+6. REASONING CHECK: Before returning primary_finding, ask yourself:
+   - "Does this reflect what the radiologist concluded in the impression?"
+   - "Would a treating physician want to know this finding (even if normal)?"
+   - If YES → include it (include normal findings like "no acute abnormality")
+   - If NO (placeholder) → return empty string
 
 Return JSON:
 {{

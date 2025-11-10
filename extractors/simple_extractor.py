@@ -18,23 +18,26 @@ logger = logging.getLogger("document_ai")
 class SimpleExtractor:
     """Generic extractor for simpler document types with optional doctor detection"""
 
-    # Universal clarity guide
+       # Updated clarity guide - shows ALL findings, avoids only non-informative placeholders
     CLEAR_EXTRACTION_GUIDE = (
-        "Ensure all extracted information is explicit and actionable. "
+        "Ensure all extracted information is explicit and clear. "
         "When listing body parts, diagnoses, or findings, name each explicitly. "
         "Avoid vague terms like '+1 more', 'etc.', or incomplete fragments. "
         "Always produce full, meaningful, concise phrases (30-60 words for summaries). "
         "Do NOT extract physician/doctor names - this is handled separately. "
-        "\n\nCRITICAL REASONING RULES:\n"
-        "1. ONLY extract POSITIVE/ACTIONABLE findings. DO NOT extract negative statements.\n"
-        "   ✗ BAD: 'No treatment needed', 'Not approved', 'No restrictions'\n"
-        "   ✓ GOOD: 'PT 6 visits approved', 'MRI denied - insufficient medical necessity'\n"
-        "2. If a field has NO meaningful positive data, return empty string '' - DO NOT return negative phrases.\n"
-        "3. For denials/UR: Include the reason if it provides actionable information.\n"
-        "4. REASONING CHECK: Before returning each field, ask yourself:\n"
-        "   - 'Is this information ACTIONABLE for the treating physician?'\n"
-        "   - 'Does this tell me what TO DO or what IS happening?'\n"
-        "   - If answer is NO → return empty string for that field"
+        "\n\nCRITICAL EXTRACTION RULES:\n"
+        "1. EXTRACT ALL KEY FINDINGS - both positive and negative clinical findings:\n"
+        "   ✓ GOOD: 'No fracture identified', 'MRI denied - insufficient medical necessity', 'Normal exam'\n"
+        "   ✓ GOOD: 'Fracture present', 'PT 6 visits approved', 'Modified duty with restrictions'\n"
+        "   ✗ BAD: 'Not provided', 'Not mentioned', 'Not specified', 'N/A'\n"
+        "2. If field has NO actual information (truly not mentioned in document), return empty string ''.\n"
+        "3. If field has clinical information (even if negative finding like 'no abnormalities'), include it.\n"
+        "4. For denials/UR: Always include the decision AND reason (e.g., 'MRI denied - insufficient medical necessity').\n"
+        "5. REASONING CHECK: Before returning each field, ask:\n"
+        "   - 'Does this contain actual clinical/administrative information from the document?'\n"
+        "   - 'Is this something a physician would want to know?'\n"
+        "   - If YES → include it (whether positive or negative finding)\n"
+        "   - If NO (placeholder/generic) → return empty string"
     )
 
     TEMPLATES = {
@@ -44,25 +47,29 @@ class SimpleExtractor:
             "prompt": (
                 "Extract: date (MM/DD/YY), service_requested (e.g., 'PT 6 visits', 'MRI L-spine'), "
                 "and body_part (list clearly; e.g., 'R shoulder', 'L knee'). "
+                "INCLUDE service_requested even if it's a resubmission or status update. "
                 + CLEAR_EXTRACTION_GUIDE
             ),
-            "include_doctor": True,  # NEW: flag to include doctor detection
+            "include_doctor": True,
         },
         "UR": {
-            "fields": ["date", "service_denied", "reason"],
-            "format": "[DATE]: UR Decision{doctor_section} | Service denied → {service_denied} | Reason → {reason}",
+            "fields": ["date", "service", "decision", "reason"],
+            "format": "[DATE]: UR Decision{doctor_section} | Service → {service} | Decision → {decision} | Reason → {reason}",
             "prompt": (
-                "Extract: date (MM/DD/YY), service_denied (what was denied, e.g., 'MRI', 'PT'), "
-                "and reason (brief rationale, max 16 words). "
+                "Extract: date (MM/DD/YY), service (what was reviewed, e.g., 'MRI', 'PT'), "
+                "decision (Approved/Denied/Modified/Delayed), "
+                "and reason (brief rationale, max 20 words). "
+                "ALWAYS extract decision and reason - these are key findings even if decision is 'denied'. "
                 + CLEAR_EXTRACTION_GUIDE
             ),
             "include_doctor": True,
         },
         "Authorization": {
-            "fields": ["date", "service_approved", "body_part"],
-            "format": "[DATE]: Authorization{doctor_section} | Service approved → {service_approved} | Body part → {body_part}",
+            "fields": ["date", "service_approved", "visits_quantity", "body_part"],
+            "format": "[DATE]: Authorization{doctor_section} | Service → {service_approved} | Visits → {visits_quantity} | Body part → {body_part}",
             "prompt": (
-                "Extract: date (MM/DD/YY), service_approved (e.g., 'MRI', 'PT 6 visits'), "
+                "Extract: date (MM/DD/YY), service_approved (e.g., 'MRI', 'PT'), "
+                "visits_quantity (e.g., '6 visits', '1 injection'), "
                 "and body_part (e.g., 'R shoulder'). "
                 + CLEAR_EXTRACTION_GUIDE
             ),
@@ -73,17 +80,20 @@ class SimpleExtractor:
             "format": "[DATE]: DFR{doctor_section} | DOI → {doi} | Diagnosis → {diagnosis} | Plan → {plan}",
             "prompt": (
                 "Extract: report date (MM/DD/YY), DOI (date of injury in MM/DD/YY), "
-                "primary diagnosis, and initial treatment plan (max 16 words). "
+                "primary diagnosis (include all key diagnoses), "
+                "and initial treatment plan (max 20 words). "
                 + CLEAR_EXTRACTION_GUIDE
             ),
             "include_doctor": True,
         },
         "PR-4": {
-            "fields": ["date", "mmi_status", "future_care"],
-            "format": "[DATE]: PR-4{doctor_section} | MMI Status → {mmi_status} | Future care → {future_care}",
+            "fields": ["date", "mmi_status", "impairment", "future_care"],
+            "format": "[DATE]: PR-4{doctor_section} | MMI → {mmi_status} | Impairment → {impairment} | Future care → {future_care}",
             "prompt": (
-                "Extract: date (MM/DD/YY), mmi_status ('MMI reached', 'Ongoing treatment', or 'Deferred'), "
-                "and future_care (future medical needs, max 16 words). "
+                "Extract: date (MM/DD/YY), mmi_status (e.g., 'MMI reached', 'Not at MMI', 'Deferred'), "
+                "impairment (WPI percentage if stated, or 'None' if 0%), "
+                "and future_care (future medical needs, max 20 words, or 'None' if not needed). "
+                "INCLUDE mmi_status and impairment findings even if MMI not reached or 0% WPI. "
                 + CLEAR_EXTRACTION_GUIDE
             ),
             "include_doctor": True,
@@ -235,18 +245,22 @@ You are an AI Medical Assistant extracting structured data from a {doc_type} doc
 INSTRUCTION: {instruction}
 
 RULES:
-- Extract ONLY explicitly stated information
+- Extract ALL key findings, whether positive or negative clinical information
+- Examples of what TO INCLUDE:
+  ✓ "No fracture", "Normal study", "MRI denied", "Authorization approved", "MMI not reached"
+- Examples of what NOT to include (return empty string instead):
+  ✗ "Not provided", "Not mentioned", "Not specified", "N/A", generic placeholders
 - DO NOT extract physician/doctor names - handled separately
 - Use MM/DD/YY date format
-- If field not found, return empty string
+- If field truly has no information in document, return empty string ''
 - Follow word limits strictly
-- Avoid vague phrases (e.g., '+1 more', 'etc.')
+- Avoid vague terms like '+1 more', 'etc.'
 - Ensure output is clear and meaningful
 
 Document text:
 {text}
 
-Return JSON:
+Return JSON with actual findings (not placeholders):
 {{{field_json}}}
 
 {format_instructions}
@@ -264,6 +278,9 @@ Return JSON:
                 "field_json": field_json,
             })
             
+            # Clean placeholder values
+            result = self._clean_placeholder_values(result)
+            
             # Use fallback date if not extracted
             if "date" in result and not result["date"]:
                 result["date"] = fallback_date
@@ -273,6 +290,35 @@ Return JSON:
         except Exception as e:
             logger.error(f"❌ {doc_type} extraction failed: {e}")
             return {"date": fallback_date}
+    
+    def _clean_placeholder_values(self, data: Dict) -> Dict:
+        """Remove non-informative placeholder values, keep actual findings"""
+        placeholder_phrases = {
+            "not provided", "not mentioned", "not specified", "n/a", "na",
+            "not found", "not available", "not applicable", "unknown",
+            "not stated", "not documented", "not indicated", "empty",
+            "none provided", "none mentioned", "none specified"
+        }
+        
+        cleaned = {}
+        for key, value in data.items():
+            if not value:
+                cleaned[key] = ""
+                continue
+            
+            value_str = str(value).strip().lower()
+            
+            # Check if it's a placeholder phrase
+            if value_str in placeholder_phrases:
+                cleaned[key] = ""
+                logger.debug(f"🧹 Removed placeholder for {key}: {value}")
+                continue
+            
+            # Keep actual findings (even negative clinical findings)
+            cleaned[key] = value
+        
+        return cleaned
+    
 
     def _detect_physician(
         self,

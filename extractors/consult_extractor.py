@@ -103,24 +103,45 @@ Extract these fields (do NOT extract physician_name):
 - work_status: Work ability or restrictions (max 16 words)
 
 CRITICAL REASONING RULES - VERIFY BEFORE RETURNING:
-1. ONLY extract POSITIVE/ACTIONABLE findings. DO NOT extract negative statements.
-   ✗ BAD: "No significant pathology", "No recommendations", "Cleared for full duty"
-   ✓ GOOD: "AC joint arthritis", "ESI recommended", "Modified duty - no lifting >20 lbs"
-   
-2. If a field has NO meaningful positive data, return empty string "" - DO NOT return negative phrases.
-   
-3. For findings: ONLY return if there's an actual diagnosis or significant clinical finding.
-   ✗ BAD: "Normal exam", "No acute findings"
-   ✓ GOOD: "Rotator cuff tendinopathy", "L5-S1 radiculopathy"
-   
-4. For work_status: ONLY return if there are actual restrictions or specific status.
-   ✗ BAD: "Full duty", "No restrictions"
-   ✓ GOOD: "TTD", "Modified duty - sedentary only"
 
-5. REASONING CHECK: Before returning each field, ask yourself:
-   - "Is this information ACTIONABLE for the treating physician?"
-   - "Does this tell me what TO DO or what IS present?"
-   - If answer is NO → return empty string for that field
+1. EXTRACT ALL KEY FINDINGS - both positive pathology AND negative/normal findings:
+   ✓ GOOD (Pathology): "AC joint arthritis", "L5-S1 radiculopathy", "Rotator cuff tendinopathy"
+   ✓ GOOD (Normal): "Normal exam - no significant pathology", "Exam unremarkable", "Resolved - no current complaints"
+   ✓ GOOD (Negative findings): "No evidence of nerve impingement", "No significant findings on exam"
+   ✗ BAD (Placeholders): "Not mentioned", "Not provided", "N/A"
+   
+2. If a field has NO actual information (truly not mentioned in document), return empty string "".
+   If field has actual clinical finding (even negative/normal), include it.
+   
+3. For findings: Extract the consultant's assessment:
+   ✓ GOOD (Pathology): "Rotator cuff tendinopathy with impingement", "Lumbar radiculopathy L5 distribution"
+   ✓ GOOD (Normal): "Normal neurological exam", "No acute pathology identified"
+   ✓ GOOD (Improvement): "Significant improvement since last visit", "Condition resolved"
+   ✗ BAD: Empty string when consultant provided an assessment (even if normal)
+   
+4. For recommendations: Extract actual recommendations:
+   ✓ GOOD (New plan): "ESI recommended", "Refer to PT", "Surgical consult advised"
+   ✓ GOOD (Continue): "Continue current treatment plan", "Continue conservative management"
+   ✓ GOOD (Discharge): "No further treatment needed - condition resolved", "Discharge to PCP care"
+   ✗ BAD: "No recommendations" without context (specify: "No changes recommended - stable")
+   
+5. For treatment_recommendations: Extract specific treatments:
+   ✓ GOOD (New): "Start gabapentin 300mg TID", "ESI C5-6", "PT 2x/week for 6 weeks"
+   ✓ GOOD (Continue): "Continue current medications and PT", "No changes to treatment regimen"
+   ✓ GOOD (Stop): "Discontinue NSAIDs - not effective", "Wean off opioids"
+   ✗ BAD: Empty string when consultant discussed treatment (even if "continue current")
+   
+6. For work_status: Extract actual work status assessment:
+   ✓ GOOD (Restricted): "Modified duty - no lifting >20 lbs", "TTD for 2 weeks", "Sedentary work only"
+   ✓ GOOD (Cleared): "Full duty - no restrictions", "Cleared for return to work", "Released to full activities"
+   ✓ GOOD (Status): "Continue current work restrictions", "Not yet ready for work"
+   ✗ BAD: Empty string when consultant addressed work status (even if "full duty")
+
+7. REASONING CHECK: Before returning each field, ask yourself:
+   - "Does this contain actual information from the consultation (whether positive or negative)?"
+   - "Would a treating physician or case manager find this clinically useful?"
+   - If YES → include it (include negative findings, normal exams, clearances)
+   - If NO (placeholder like "not mentioned") → return empty string
 
 Return JSON:
 {{
@@ -298,7 +319,7 @@ CRITICAL RULES:
 6. Do NOT write standalone ambiguous terms - always include the label
 
 EXAMPLES:
-Good: "09/26/25: Consult by Dr. Smith (Ortho) for R shoulder | Findings → rotator cuff tear | Treatment → PT, NSAIDs | Recommendations → Re-eval in 4 weeks | Work status → modified duty"
+Good: "09/26/25: Consult - Dr. Smith (Ortho) for R shoulder | Findings → rotator cuff tear | Treatment → PT, NSAIDs | Recommendations → Re-eval in 4 weeks | Work status → modified duty"
 Good: "10/05/25: Consult for L knee | Findings → possible meniscal tear | Treatment → MRI ordered | Recommendations → Follow-up post-MRI"
 Bad: "09/26/25: Consult for shoulder = Tear; Modified duty" (missing labels!)
 

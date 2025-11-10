@@ -192,28 +192,55 @@ Extract these fields with precision:
 - future_medical_recommendations: Follow-up or future care recommendations (max 12 words)
 
 CRITICAL REASONING RULES - VERIFY BEFORE RETURNING:
-1. ONLY extract POSITIVE/ACTIONABLE findings. DO NOT extract negative statements.
-   ✗ BAD: "No additional treatment indicated", "No future medical care indicated", "Injury fully resolved"
-   ✓ GOOD: "Continue PT 2x/week", "ESI recommended", "Follow-up in 6 weeks"
-   
-2. If a field has NO meaningful positive data, return empty string "" - DO NOT return negative phrases.
-   
-3. For MMI_status: ONLY return if MMI is explicitly stated with a positive finding
-   ✗ BAD: "reached" (too vague)
-   ✓ GOOD: "MMI reached", "MMI deferred pending MRI", "Not at MMI"
-   
-4. For impairment_summary: ONLY return if there's an actual impairment percentage > 0%
-   ✗ BAD: "0% Whole Person Impairment"
-   ✓ GOOD: "15% WPI", "8% lower extremity impairment"
-   
-5. For causation_opinion: ONLY return if there's meaningful apportionment data
-   ✗ BAD: "no apportionment indicated", "0% industrial"
-   ✓ GOOD: "60% industrial, 40% non-industrial", "100% industrial"
 
-6. REASONING CHECK: Before returning each field, ask yourself:
-   - "Is this information ACTIONABLE for the treating physician?"
-   - "Does this tell me what TO DO or what IS present?"
-   - If answer is NO → return empty string for that field
+1. EXTRACT ALL KEY FINDINGS - both positive and negative clinical findings:
+   ✓ GOOD (Positive findings): "Continue PT 2x/week", "ESI recommended", "MMI reached", "15% WPI"
+   ✓ GOOD (Negative findings): "No additional treatment needed at this time", "0% WPI", "No apportionment"
+   ✗ BAD (Placeholders): "Not provided", "Not mentioned", "Not specified", "N/A"
+   
+2. If a field has NO actual information (truly not mentioned in document), return empty string "".
+   If field has actual clinical finding (even negative), include it.
+   
+3. For MMI_status: Extract the actual MMI status statement:
+   ✓ GOOD: "MMI reached", "MMI deferred pending MRI", "Not at MMI", "MMI pending further treatment"
+   ✗ BAD: "reached" (too vague - add context), "Not mentioned" (use empty string instead)
+   
+4. For impairment_summary: Extract actual impairment findings:
+   ✓ GOOD: "15% WPI", "8% lower extremity impairment", "0% WPI - no permanent impairment"
+   ✓ GOOD: "Impairment rating deferred pending MMI"
+   ✗ BAD: "Not provided" (use empty string instead)
+   
+5. For causation_opinion: Extract actual apportionment/causation findings:
+   ✓ GOOD: "60% industrial, 40% non-industrial", "100% industrial", "No apportionment - 100% non-industrial"
+   ✓ GOOD: "Apportionment deferred pending additional records"
+   ✗ BAD: "Not mentioned" (use empty string instead)
+
+6. For treatment_recommendations: Extract actual treatment recommendations:
+   ✓ GOOD: "Continue PT 2x/week for 6 weeks", "ESI C5-6 recommended", "Surgical consult recommended"
+   ✓ GOOD: "No further treatment recommended - patient at MMI"
+   ✗ BAD: "None indicated" without context (specify why: "No further treatment - resolved")
+   
+7. For medication_recommendations: Extract actual medication findings:
+   ✓ GOOD: "Continue Gabapentin 300mg TID", "Increase Ibuprofen to 800mg", "Tramadol 50mg PRN"
+   ✓ GOOD: "No medication changes recommended"
+   ✗ BAD: "Not mentioned" (use empty string instead)
+
+8. For work_restrictions: Extract actual restriction findings:
+   ✓ GOOD: "No lifting >10 lbs", "Sedentary work only", "Modified duty - no overhead reaching"
+   ✓ GOOD: "No work restrictions - full duty", "Restrictions lifted"
+   ✗ BAD: "Not specified" (use empty string instead)
+
+9. For future_medical_recommendations: Extract actual future care findings:
+   ✓ GOOD: "Follow-up in 6 months", "Annual monitoring recommended", "PT maintenance as needed"
+   ✓ GOOD: "No future medical care anticipated", "Future care not medically necessary"
+   ✗ BAD: "Not indicated" without context (specify: "No future care needed - resolved")
+
+10. REASONING CHECK: Before returning each field, ask yourself:
+    - "Does this contain actual information from the QME report (whether positive or negative)?"
+    - "Would a treating physician find this clinically useful?"
+    - If YES → include it (include negative findings like '0% WPI', 'No restrictions')
+    - If NO (placeholder like 'not mentioned') → return empty string
+
 
 Return JSON:
 {{

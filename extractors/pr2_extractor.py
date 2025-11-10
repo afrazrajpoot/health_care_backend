@@ -101,24 +101,39 @@ Extract these fields:
 - next_plan: Next step / follow-up (max 16 words)
 
 CRITICAL REASONING RULES - VERIFY BEFORE RETURNING:
-1. ONLY extract POSITIVE/ACTIONABLE findings. DO NOT extract negative statements.
-   ✗ BAD: "No treatment changes", "No follow-up needed", "Fully resolved"
-   ✓ GOOD: "Continue PT 2x/week", "Add gabapentin 300mg", "Follow-up in 2 weeks"
-   
-2. If a field has NO meaningful positive data, return empty string "" - DO NOT return negative phrases.
-   
-3. For work_status: ONLY return if there's a specific status or restriction
-   ✗ BAD: "No restrictions", "Released to full duty"
-   ✓ GOOD: "TTD", "Modified duty - no lifting >10 lbs", "Return to work 01/15/25"
-   
-4. For treatment_recommendations: ONLY return if new treatments or meds are prescribed
-   ✗ BAD: "No new treatments", "Continue current regimen" (too vague)
-   ✓ GOOD: "Continue PT", "Start NSAIDs", "ESI scheduled"
 
-5. REASONING CHECK: Before returning each field, ask yourself:
-   - "Is this information ACTIONABLE for the treating physician?"
-   - "Does this tell me what TO DO or what IS happening?"
-   - If answer is NO → return empty string for that field
+1. EXTRACT ALL KEY FINDINGS - both positive and negative clinical findings:
+   ✓ GOOD (Positive): "Continue PT 2x/week", "Add gabapentin 300mg", "Follow-up in 2 weeks"
+   ✓ GOOD (Negative): "No treatment changes - stable", "Resolved - no further treatment", "Full duty - no restrictions"
+   ✗ BAD (Placeholders): "Not mentioned", "Not provided", "N/A"
+   
+2. If a field has NO actual information (truly not mentioned in document), return empty string "".
+   If field has actual clinical finding (even negative), include it with context.
+   
+3. For current_status: Extract actual status assessment:
+   ✓ GOOD: "Improved", "Unchanged", "Worsened", "Stable", "Resolved", "Plateaued"
+   ✗ BAD: "Not specified" (use empty string instead)
+   
+4. For treatment_recommendations: Extract actual treatment plan:
+   ✓ GOOD: "Continue PT 2x/week", "Start NSAIDs", "ESI scheduled", "No changes - continue current meds"
+   ✓ GOOD: "No further treatment needed - condition resolved"
+   ✗ BAD: "No new treatments" (too vague - specify: "Continue current treatment" or "No treatment changes")
+   
+5. For work_status: Extract actual work status/restrictions:
+   ✓ GOOD: "TTD", "Modified duty - no lifting >10 lbs", "Full duty - no restrictions", "Return to work 01/15/25"
+   ✓ GOOD: "Restrictions lifted - cleared for full duty"
+   ✗ BAD: "Not mentioned" (use empty string instead)
+   
+6. For next_plan: Extract actual follow-up plan:
+   ✓ GOOD: "Follow-up in 2 weeks", "Re-eval in 1 month", "Discharge to home exercise program"
+   ✓ GOOD: "No follow-up needed - patient discharged", "PRN follow-up if symptoms worsen"
+   ✗ BAD: "No follow-up" without context (specify: "No follow-up needed - condition stable")
+
+7. REASONING CHECK: Before returning each field, ask yourself:
+   - "Does this contain actual information from the PR-2 report (whether positive or negative)?"
+   - "Would a treating physician or case manager find this clinically useful?"
+   - If YES → include it (include negative findings like "stable", "no restrictions", "resolved")
+   - If NO (placeholder like "not mentioned") → return empty string
 
 Return JSON:
 {{
