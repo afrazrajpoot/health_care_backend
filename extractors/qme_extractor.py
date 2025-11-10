@@ -156,6 +156,30 @@ Extract these fields with precision:
 - work_restrictions: Explicit functional restrictions (max 12 words)
 - future_medical_recommendations: Follow-up or future care recommendations (max 12 words)
 
+CRITICAL REASONING RULES - VERIFY BEFORE RETURNING:
+1. ONLY extract POSITIVE/ACTIONABLE findings. DO NOT extract negative statements.
+   ✗ BAD: "No additional treatment indicated", "No future medical care indicated", "Injury fully resolved"
+   ✓ GOOD: "Continue PT 2x/week", "ESI recommended", "Follow-up in 6 weeks"
+   
+2. If a field has NO meaningful positive data, return empty string "" - DO NOT return negative phrases.
+   
+3. For MMI_status: ONLY return if MMI is explicitly stated with a positive finding
+   ✗ BAD: "reached" (too vague)
+   ✓ GOOD: "MMI reached", "MMI deferred pending MRI", "Not at MMI"
+   
+4. For impairment_summary: ONLY return if there's an actual impairment percentage > 0%
+   ✗ BAD: "0% Whole Person Impairment"
+   ✓ GOOD: "15% WPI", "8% lower extremity impairment"
+   
+5. For causation_opinion: ONLY return if there's meaningful apportionment data
+   ✗ BAD: "no apportionment indicated", "0% industrial"
+   ✓ GOOD: "60% industrial, 40% non-industrial", "100% industrial"
+
+6. REASONING CHECK: Before returning each field, ask yourself:
+   - "Is this information ACTIONABLE for the treating physician?"
+   - "Does this tell me what TO DO or what IS present?"
+   - If answer is NO → return empty string for that field
+
 Return JSON:
 {{
   "document_date": "MM/DD/YY or {fallback_date}",
@@ -266,9 +290,36 @@ Return JSON:
             "follow_up_instructions",
             "attorney_or_adjuster_notes",
         ]
+        
+        # Negative phrases that should be filtered out (non-actionable information)
+        negative_phrases = [
+            "no additional treatment", "no future medical", "no treatment",
+            "no recommendations", "injury fully resolved", "injury resolved",
+            "no restrictions", "no limitations", "no follow-up",
+            "no apportionment", "0% industrial", "0% wpi", "0% whole person",
+            "not indicated", "not recommended", "not needed", "not required",
+            "no significant", "unremarkable", "within normal limits",
+            "no impairment", "no disability", "no work restrictions"
+        ]
+        
         for f in string_fields:
             v = result.get(f, "").strip()
-            cleaned[f] = v if v and v.lower() not in ["", "empty", "none", "n/a", "not mentioned"] else ""
+            v_lower = v.lower()
+            
+            # Check if empty or placeholder
+            if not v or v_lower in ["", "empty", "none", "n/a", "not mentioned", "reached"]:
+                cleaned[f] = ""
+                continue
+            
+            # Check if contains negative/non-actionable phrases
+            is_negative = any(neg_phrase in v_lower for neg_phrase in negative_phrases)
+            if is_negative:
+                logger.debug(f"⚠️ Filtering out negative phrase in {f}: {v}")
+                cleaned[f] = ""
+                continue
+            
+            # Keep only meaningful, actionable information
+            cleaned[f] = v
 
         return cleaned
 

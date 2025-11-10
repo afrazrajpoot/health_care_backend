@@ -7,7 +7,6 @@ from fastapi import HTTPException
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 from models.schemas import ExtractionResult
-from services.database_service import get_database_service
 from services.report_analyzer import ReportAnalyzer
 from services.task_creation import TaskCreator
 from services.resoning_agent import EnhancedReportAnalyzer
@@ -191,12 +190,22 @@ class WebhookService:
         
         result_data = data["result"]
         text = result_data.get("text", "")
+        llm_text = result_data.get("llm_text", "")  # NEW: Get LLM-optimized text
         mode = data.get("mode", "wc")
         
-        logger.info(f"📋 Document mode: {mode}")
+        # Try to get page_zones from result_data first, then fallback to top-level data
+        page_zones = result_data.get("page_zones", None) or data.get("page_zones", None)
         
-        # Use text directly (no DLP de-identification)
-        deidentified_text = text
+        logger.info(f"📋 Document mode: {mode}")
+        logger.info(f"🔍 Checking page_zones sources:")
+        logger.info(f"   - In result_data: {result_data.get('page_zones') is not None}")
+        logger.info(f"   - In top-level data: {data.get('page_zones') is not None}")
+        logger.info(f"   - Final page_zones: {page_zones is not None}")
+        
+        # Use LLM-optimized text if available, fallback to plain text
+        text_for_llm = llm_text if llm_text else text
+        logger.info(f"🤖 Using {'LLM-optimized' if llm_text else 'plain'} text for analysis ({len(text_for_llm)} chars)")
+        
         extracted_phi = {
             "patient_name": "",
             "claim_number": "",
@@ -206,11 +215,17 @@ class WebhookService:
         # OPTIMIZATION: Run analysis and summary generation in parallel
         analyzer = EnhancedReportAnalyzer()
         
+        # Pass page_zones if available for enhanced doctor detection
+        if page_zones:
+            logger.info(f"📦 page_zones available with {len(page_zones)} pages: {list(page_zones.keys())}")
+        else:
+            logger.warning("⚠️ No page_zones in result_data OR top-level data")
+        
         analysis_task = asyncio.create_task(
-            asyncio.to_thread(analyzer.extract_document_data_with_reasoning, deidentified_text)
+            asyncio.to_thread(analyzer.extract_document_data_with_reasoning, text_for_llm, page_zones)
         )
         summary_task = asyncio.create_task(
-            asyncio.to_thread(analyzer.generate_brief_summary, deidentified_text)
+            asyncio.to_thread(analyzer.generate_brief_summary, text_for_llm)
         )
         
         # Wait for both to complete
@@ -284,7 +299,8 @@ class WebhookService:
             "document_analysis": document_analysis,
             "brief_summary": brief_summary,
             "extracted_phi": extracted_phi,
-            "deidentified_text": deidentified_text,
+            "text_for_llm": text_for_llm,  # NEW: Used for LLM analysis
+            "page_zones": page_zones,  # NEW: Pass page_zones for comparison task
             "has_date_reasoning": has_date_reasoning,
             "date_reasoning_data": {
                 "reasoning": document_analysis.date_reasoning.reasoning if has_date_reasoning else "",
@@ -512,7 +528,8 @@ class WebhookService:
         comparison_task = asyncio.create_task(
             asyncio.to_thread(
                 analyzer.compare_with_previous_documents,
-                processed_data["deidentified_text"]
+                processed_data["text_for_llm"],  # Use LLM-optimized text for comparison
+                processed_data.get("page_zones")  # NEW: Pass page_zones for doctor detection
             )
         )
         

@@ -26,64 +26,82 @@ class ExtractionVerifier:
     # [KEEP ALL FORMAT_SPECS EXACTLY AS IN YOUR FILE - file:27]
     FORMAT_SPECS = {
         "QME": {
-            "pattern": r"^\d{2}/\d{2}/\d{2}: QME",
+            "pattern": r"QME",
             "max_words": 65,
-            "required_elements": ["date", "QME/AME/IME", "body_part or diagnosis"],
-            "format_template": "[DATE]: QME (Dr [LastName], [Specialty]) for [Body parts] = [Status] → [Recommendations]"
+            "required_elements": ["date", "QME"],
+            "format_template": "QME{doctor_section} for [Body parts] : [DATE] = [MMI/Impairment] → [Treatment/Future medical] | [Restrictions/Causation]"
         },
         "AME": {
-            "pattern": r"^\d{2}/\d{2}/\d{2}: AME",
+            "pattern": r"AME",
             "max_words": 65,
-            "required_elements": ["date", "QME/AME/IME", "body_part or diagnosis"],
-            "format_template": "[DATE]: AME (Dr [LastName], [Specialty]) for [Body parts] = [Status] → [Recommendations]"
+            "required_elements": ["date", "AME"],
+            "format_template": "AME{doctor_section} for [Body parts] : [DATE] = [MMI/Impairment] → [Treatment/Future medical] | [Restrictions/Causation]"
         },
         "IME": {
-            "pattern": r"^\d{2}/\d{2}/\d{2}: IME",
+            "pattern": r"IME",
             "max_words": 65,
-            "required_elements": ["date", "QME/AME/IME", "body_part or diagnosis"],
-            "format_template": "[DATE]: IME (Dr [LastName], [Specialty]) for [Body parts] = [Status] → [Recommendations]"
+            "required_elements": ["date", "IME"],
+            "format_template": "IME{doctor_section} for [Body parts] : [DATE] = [MMI/Impairment] → [Treatment/Future medical] | [Restrictions/Causation]"
         },
         "MRI": {
-            "pattern": r"^MRI .+ \d{2}/\d{2}/\d{2} =",
+            "pattern": r"MRI",
             "max_words": 60,
-            "required_elements": ["MRI", "body_part", "date", "finding"],
-            "format_template": "MRI [Body part] [DATE] = [Primary finding]"
+            "required_elements": ["date", "MRI", "body_part"],
+            "format_template": "[DATE]: MRI{doctor_section} for [Body part] | Status → [Status] | Finding → [Primary finding]"
         },
         "CT": {
-            "pattern": r"^CT .+ \d{2}/\d{2}/\d{2} =",
+            "pattern": r"CT",
             "max_words": 60,
-            "required_elements": ["CT", "body_part", "date", "finding"],
-            "format_template": "CT [Body part] [DATE] = [Primary finding]"
+            "required_elements": ["date", "CT", "body_part"],
+            "format_template": "[DATE]: CT{doctor_section} for [Body part] | Status → [Status] | Finding → [Primary finding]"
         },
         "X-ray": {
-            "pattern": r"^X-ray .+ \d{2}/\d{2}/\d{2} =",
+            "pattern": r"X-ray",
             "max_words": 60,
-            "required_elements": ["X-ray", "body_part", "date", "finding"],
-            "format_template": "X-ray [Body part] [DATE] = [Primary finding]"
+            "required_elements": ["date", "X-ray", "body_part"],
+            "format_template": "[DATE]: X-ray{doctor_section} for [Body part] | Status → [Status] | Finding → [Primary finding]"
         },
         "PR-2": {
-            "pattern": r"^(Dr\.|MD|DO).+ PR-2 \d{2}/\d{2}/\d{2}",
-            "max_words": 60,
-            "required_elements": ["physician", "PR-2", "date", "status", "plan"],
-            "format_template": "Dr [Name] PR-2 [DATE] [Body part] = [Status]; [Plan]"
+            "pattern": r"PR-2",
+            "max_words": 65,
+            "required_elements": ["date", "PR-2"],
+            "format_template": "[DATE]: PR-2{doctor_section} for [Body part] | Clinical status → [Status] | Work status → [Work status] | Treatment → [Treatment] | Plan → [Plan]"
         },
         "Consult": {
-            "pattern": r"^(Dr\.|MD|DO).+ Consult \d{2}/\d{2}/\d{2}",
-            "max_words": 60,
-            "required_elements": ["physician", "specialty", "date", "recommendations"],
-            "format_template": "Dr [Name] [Specialty] Consult [DATE] = [Recommendations]"
+            "pattern": r"Consult",
+            "max_words": 65,
+            "required_elements": ["date", "Consult"],
+            "format_template": "[DATE]: Consult{doctor_section} for [Body part] | Findings → [Findings] | Treatment → [Treatment] | Recommendations → [Recommendations]"
         },
         "RFA": {
-            "pattern": r"^RFA \d{2}/\d{2}/\d{2} =",
+            "pattern": r"RFA",
             "max_words": 60,
-            "required_elements": ["RFA", "date", "service"],
-            "format_template": "RFA [DATE] = [Service] [Body part] requested"
+            "required_elements": ["RFA", "date", "service", "body_part"],
+            "format_template": "[DATE]: RFA{doctor_section} | Service → [Service] | Body part → [Body part]"
         },
         "UR": {
-            "pattern": r"^UR \d{2}/\d{2}/\d{2} =",
+            "pattern": r"UR",
             "max_words": 60,
             "required_elements": ["UR", "date", "service", "reason"],
-            "format_template": "UR [DATE] = [Service] denied; [Reason]"
+            "format_template": "[DATE]: UR Decision{doctor_section} | Service denied → [Service] | Reason → [Reason]"
+        },
+        "Authorization": {
+            "pattern": r"Authorization",
+            "max_words": 60,
+            "required_elements": ["Authorization", "date", "service", "body_part"],
+            "format_template": "[DATE]: Authorization{doctor_section} | Service approved → [Service] | Body part → [Body part]"
+        },
+        "DFR": {
+            "pattern": r"DFR",
+            "max_words": 60,
+            "required_elements": ["DFR", "date", "diagnosis"],
+            "format_template": "[DATE]: DFR{doctor_section} | DOI → [DOI] | Diagnosis → [Diagnosis] | Plan → [Plan]"
+        },
+        "PR-4": {
+            "pattern": r"PR-4",
+            "max_words": 60,
+            "required_elements": ["PR-4", "date"],
+            "format_template": "[DATE]: PR-4{doctor_section} | MMI Status → [MMI Status] | Future care → [Future care]"
         }
     }
    
@@ -157,7 +175,7 @@ class ExtractionVerifier:
         
         prompt = PromptTemplate(
             template="""
-You are an AI Medical Assistant, that helps doctors and medical professionals by extracting actual actionalble and useful information from medical documents. Fix the summary to match the exact required format.
+You are an AI Medical Assistant, that helps doctors and medical professionals by extracting actual actionable and useful information from medical documents. Fix the summary to match the exact required format.
 
 DOCUMENT TYPE: {doc_type}
 
@@ -170,7 +188,7 @@ DETECTED ISSUES:
 REQUIRED FORMAT:
 {format_template}
 
-RULES:
+CRITICAL RULES:
 1. Maintain all factual information from current summary
 2. Fix format to match required template exactly
 3. Ensure date is in MM/DD/YY format
@@ -178,13 +196,15 @@ RULES:
 5. Use standard abbreviations (R/L, PT, ESI, f/u, etc.)
 6. Do NOT add information not in current summary
 7. Do NOT remove key medical facts
+8. **MOST IMPORTANT: ONLY include fields that have actual data. Do NOT add placeholders like "not provided", "not specified", "not mentioned" for missing fields. Simply omit those fields entirely.**
+9. If a field in the template has no corresponding data, skip it completely - do not include the field label or any placeholder text.
 
 RAW EXTRACTED DATA (for reference):
 {raw_data}
 
 Return JSON:
 {{
-  "corrected_summary": "Fixed summary in exact format",
+  "corrected_summary": "Fixed summary with ONLY fields that have actual data (no 'not provided' placeholders)",
   "changes_made": ["list of changes"],
   "confidence": "high|medium|low"
 }}

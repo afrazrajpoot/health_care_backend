@@ -117,6 +117,12 @@ class ComprehensiveAnalysis(BaseModel):
 
 class ExtractionResult(BaseModel):
     text: str = ""
+    raw_text: Optional[str] = ""  # NEW: Original flat text
+    llm_text: Optional[str] = Field(default=None, description="LLM-optimized text with explicit section annotations")
+    page_zones: Optional[Dict[str, Dict[str, str]]] = Field(
+        default=None,
+        description="Per-page zones: header, body, footer, signature"
+    )
     pages: int = 0
     entities: List[Dict[str, Any]] = Field(default_factory=list)
     tables: List[Dict[str, Any]] = Field(default_factory=list)

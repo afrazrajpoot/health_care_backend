@@ -19,7 +19,6 @@ from services.file_service import FileService
 from services.database_service import get_database_service
 from services.document_ai_service import get_document_ai_processor
 from services.document_converter import DocumentConverter
-from services.report_analyzer import ReportAnalyzer
 from models.schemas import ExtractionResult
 from utils.celery_task import process_batch_documents
 from services.progress_service import progress_service
@@ -194,6 +193,7 @@ class DocumentExtractorService:
             result = ExtractionResult(
                 text=document_result.text,
                 pages=document_result.pages,
+                page_zones=document_result.page_zones if hasattr(document_result, 'page_zones') else None,
                 entities=document_result.entities,
                 tables=document_result.tables,
                 formFields=document_result.formFields,
@@ -236,7 +236,8 @@ class DocumentExtractorService:
             
             # Step 9: Prepare webhook payload (unchanged)
             webhook_payload = {
-                "result": result.dict(),
+                "result": result.model_dump(mode='json', exclude_none=False) if hasattr(result, 'model_dump') else result.dict(exclude_none=False),  # Include all fields including page_zones
+                "page_zones": result.page_zones,
                 "filename": document.filename,
                 "file_size": file_size,
                 "mime_type": document.content_type or "application/octet-stream",
@@ -249,6 +250,17 @@ class DocumentExtractorService:
                 "user_id": user_id,
                 "mode": mode
             }
+            
+            # Debug: Check if page_zones and llm_text are in the payload
+            result_data = webhook_payload["result"]
+            logger.info(f"🔍 result_data keys: {list(result_data.keys())}")
+            has_page_zones = "page_zones" in result_data and result_data["page_zones"] is not None
+            has_llm_text = "llm_text" in result_data and result_data["llm_text"] is not None
+            logger.info(f"📦 Webhook payload prepared - page_zones: {has_page_zones}, llm_text: {has_llm_text}")
+            if has_page_zones:
+                logger.info(f"📄 page_zones has {len(result_data['page_zones'])} pages")
+            else:
+                logger.warning(f"⚠️ page_zones NOT in result_data after serialization!")
             
             return {
                 "success": True,
