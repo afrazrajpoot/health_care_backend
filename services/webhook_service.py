@@ -645,9 +645,9 @@ class WebhookService:
         old_gcs_url = processed_data["gcs_url"]
 
         # Prepare components for new filename
-        patient_name_safe = "not_specified" if status_result["patient_name_to_use"] == "Not specified" else status_result["patient_name_to_use"].replace(" ", "_").replace("/", "_").replace("\\", "_")
-        dob_safe = dob_str if dob_str else "not_specified"
-        claim_safe = "not_specified" if status_result["claim_to_save"] == "Not specified" else status_result["claim_to_save"].replace(" ", "_").replace("/", "_").replace("\\", "_")
+        patient_name_safe = "" if status_result["patient_name_to_use"] == "Not specified" else status_result["patient_name_to_use"].replace(" ", "_").replace("/", "_").replace("\\", "_")
+        dob_safe = dob_str if dob_str else ""
+        claim_safe = "" if status_result["claim_to_save"] == "Not specified" else status_result["claim_to_save"].replace(" ", "_").replace("/", "_").replace("\\", "_")
         document_type = document_analysis.document_type.replace(" ", "_").replace("/", "_").replace("\\", "_") if document_analysis.document_type else "document"
         # Extract file extension
         ext = "." + old_filename.split(".")[-1] if "." in old_filename and len(old_filename.split(".")) > 1 else ""
