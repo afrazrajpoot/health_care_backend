@@ -1,5 +1,5 @@
 """
-OPTIMIZED Webhook Service with Redis Caching and Batch DB Queries
+OPTIMIZED Webhook Service with Batch DB Queries
 Performance: 30-60 sec → 5-10 sec DB overhead per 100 docs (6-10x faster)
 """
 
@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 from models.schemas import ExtractionResult
+from services.database_service import get_database_service
 from services.report_analyzer import ReportAnalyzer
 from services.task_creation import TaskCreator
 from services.resoning_agent import EnhancedReportAnalyzer
@@ -17,121 +18,31 @@ import asyncio
 import json
 from google.cloud import storage
 
-# OPTIMIZATION: Redis for caching
-try:
-    import redis.asyncio as redis
-    REDIS_AVAILABLE = True
-except ImportError:
-    logger.warning("⚠️ redis.asyncio not available. Install with: pip install redis[hiredis]")
-    REDIS_AVAILABLE = False
-
 BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
 
 
 # ============================================================================
-# REDIS CACHE SERVICE
-# ============================================================================
-
-class CacheService:
-    """
-    OPTIMIZATION: Redis caching for patient lookups.
-    Reduces DB queries by 50-70% with 1-hour TTL.
-    """
-    
-    def __init__(self):
-        if REDIS_AVAILABLE:
-            try:
-                self.redis_client = redis.Redis(
-                    host=os.getenv('REDIS_HOST', 'localhost'),
-                    port=int(os.getenv('REDIS_PORT', 6379)),
-                    db=int(os.getenv('REDIS_DB', 0)),
-                    decode_responses=True,
-                    socket_connect_timeout=5
-                )
-                self.enabled = True
-                logger.info("✅ Redis cache service initialized")
-            except Exception as e:
-                logger.warning(f"⚠️ Redis connection failed: {e}. Caching disabled.")
-                self.enabled = False
-        else:
-            self.enabled = False
-            logger.info("ℹ️ Redis not available. Caching disabled.")
-    
-    async def get_cached_patient(self, patient_name: str, physician_id: str, claim_number: str = None) -> Optional[Dict]:
-        """Get cached patient lookup data"""
-        if not self.enabled:
-            return None
-        
-        try:
-            cache_key = f"patient:{physician_id}:{patient_name}"
-            if claim_number:
-                cache_key += f":{claim_number}"
-            
-            cached = await self.redis_client.get(cache_key)
-            if cached:
-                logger.info(f"📦 Cache HIT for {patient_name}")
-                return json.loads(cached)
-            
-            logger.debug(f"📦 Cache MISS for {patient_name}")
-            return None
-        except Exception as e:
-            logger.warning(f"⚠️ Cache get failed: {e}")
-            return None
-    
-    async def cache_patient(self, patient_name: str, physician_id: str, data: Dict, claim_number: str = None, ttl: int = 3600):
-        """Cache patient lookup data (default 1 hour TTL)"""
-        if not self.enabled:
-            return
-        
-        try:
-            cache_key = f"patient:{physician_id}:{patient_name}"
-            if claim_number:
-                cache_key += f":{claim_number}"
-            
-            await self.redis_client.setex(cache_key, ttl, json.dumps(data))
-            logger.debug(f"📦 Cached {patient_name} for {ttl}s")
-        except Exception as e:
-            logger.warning(f"⚠️ Cache set failed: {e}")
-    
-    async def invalidate_patient(self, patient_name: str, physician_id: str):
-        """Invalidate patient cache (call after DB updates)"""
-        if not self.enabled:
-            return
-        
-        try:
-            pattern = f"patient:{physician_id}:{patient_name}*"
-            keys = await self.redis_client.keys(pattern)
-            if keys:
-                await self.redis_client.delete(*keys)
-                logger.info(f"🗑️ Invalidated {len(keys)} cache entries for {patient_name}")
-        except Exception as e:
-            logger.warning(f"⚠️ Cache invalidation failed: {e}")
-
-
-# ============================================================================
-# OPTIMIZED WEBHOOK SERVICE
+# OPTIMIZED WEBHOOK SERVICE (NO CACHING)
 # ============================================================================
 
 class WebhookService:
     """
-    OPTIMIZED Service with Redis caching and batch DB operations.
+    OPTIMIZED Service with batch DB operations and parallel processing.
     
     Performance improvements:
-    - 50-70% reduction in DB queries (caching)
     - 6-10x faster patient lookups (batch queries)
     - Parallel LLM + DB operations
+    - No Redis caching to ensure fresh data
     """
     
     def __init__(self):
-        # Initialize cache service
-        self.cache_service = CacheService()
+        logger.info("✅ WebhookService initialized - Caching DISABLED for fresh data")
     
     async def rename_gcs_file(self, old_blob_path: str, new_filename: str, old_gcs_url: str) -> tuple[str, str]:
         """
-        Renames a file in Google Cloud Storage (UNCHANGED).
+        Renames a file in Google Cloud Storage.
         Returns the new blob_path and new gcs_url.
         """
-        # [KEEP EXACT CODE FROM YOUR FILE - Line 29-85]
         if not old_blob_path:
             logger.warning(f"⚠️ Skipping GCS rename: missing blob_path")
             return old_blob_path, old_gcs_url
@@ -190,22 +101,12 @@ class WebhookService:
         
         result_data = data["result"]
         text = result_data.get("text", "")
-        llm_text = result_data.get("llm_text", "")  # NEW: Get LLM-optimized text
         mode = data.get("mode", "wc")
         
-        # Try to get page_zones from result_data first, then fallback to top-level data
-        page_zones = result_data.get("page_zones", None) or data.get("page_zones", None)
-        
         logger.info(f"📋 Document mode: {mode}")
-        logger.info(f"🔍 Checking page_zones sources:")
-        logger.info(f"   - In result_data: {result_data.get('page_zones') is not None}")
-        logger.info(f"   - In top-level data: {data.get('page_zones') is not None}")
-        logger.info(f"   - Final page_zones: {page_zones is not None}")
         
-        # Use LLM-optimized text if available, fallback to plain text
-        text_for_llm = llm_text if llm_text else text
-        logger.info(f"🤖 Using {'LLM-optimized' if llm_text else 'plain'} text for analysis ({len(text_for_llm)} chars)")
-        
+        # Use text directly (no DLP de-identification)
+        deidentified_text = text
         extracted_phi = {
             "patient_name": "",
             "claim_number": "",
@@ -215,17 +116,11 @@ class WebhookService:
         # OPTIMIZATION: Run analysis and summary generation in parallel
         analyzer = EnhancedReportAnalyzer()
         
-        # Pass page_zones if available for enhanced doctor detection
-        if page_zones:
-            logger.info(f"📦 page_zones available with {len(page_zones)} pages: {list(page_zones.keys())}")
-        else:
-            logger.warning("⚠️ No page_zones in result_data OR top-level data")
-        
         analysis_task = asyncio.create_task(
-            asyncio.to_thread(analyzer.extract_document_data_with_reasoning, text_for_llm, page_zones)
+            asyncio.to_thread(analyzer.extract_document_data_with_reasoning, deidentified_text)
         )
         summary_task = asyncio.create_task(
-            asyncio.to_thread(analyzer.generate_brief_summary, text_for_llm)
+            asyncio.to_thread(analyzer.generate_brief_summary, deidentified_text)
         )
         
         # Wait for both to complete
@@ -233,7 +128,6 @@ class WebhookService:
         
         logger.info(f"Document analysis: {document_analysis}")
         
-        # [KEEP ALL EXISTING DATE PARSING LOGIC - Lines 112-197 from your file]
         has_date_reasoning = hasattr(document_analysis, 'date_reasoning') and document_analysis.date_reasoning is not None
         
         if has_date_reasoning:
@@ -299,8 +193,7 @@ class WebhookService:
             "document_analysis": document_analysis,
             "brief_summary": brief_summary,
             "extracted_phi": extracted_phi,
-            "text_for_llm": text_for_llm,  # NEW: Used for LLM analysis
-            "page_zones": page_zones,  # NEW: Pass page_zones for comparison task
+            "deidentified_text": deidentified_text,
             "has_date_reasoning": has_date_reasoning,
             "date_reasoning_data": {
                 "reasoning": document_analysis.date_reasoning.reasoning if has_date_reasoning else "",
@@ -333,45 +226,37 @@ class WebhookService:
     
     async def perform_patient_lookup(self, db_service, processed_data: dict, physician_id: str) -> dict:
         """
-        OPTIMIZED: Step 2 with Redis caching.
-        Checks cache before hitting DB, reducing query load by 50-70%.
+        OPTIMIZED: Step 2 with FRESH DB queries (no caching).
+        Always gets latest patient data from database.
         """
-        logger.info(f"🔍 Performing patient lookup for physician_id: {physician_id}")
+        logger.info(f"🔍 Performing FRESH patient lookup for physician_id: {physician_id}")
         
         patient_name = processed_data["patient_name_for_query"]
         claim_number = processed_data["claim_number_for_query"]
         
-        # OPTIMIZATION: Check cache first
-        cached_lookup = await self.cache_service.get_cached_patient(
-            patient_name or "unknown",
-            physician_id,
-            claim_number
+        # 🚫 NO CACHING - Always query DB directly for fresh data
+        logger.info(f"🔍 Querying DB directly for {patient_name} (caching disabled)")
+        lookup_data = await db_service.get_patient_claim_numbers(
+            patient_name=patient_name,
+            physicianId=physician_id,
+            dob=processed_data["dob_for_query"],
+            claim_number=claim_number
         )
         
-        if cached_lookup:
-            logger.info(f"📦 Using cached lookup data for {patient_name}")
-            lookup_data = cached_lookup
-        else:
-            # Cache miss: Query DB
-            logger.info(f"🔍 Cache miss, querying DB for {patient_name}")
-            lookup_data = await db_service.get_patient_claim_numbers(
-                patient_name=patient_name,
-                physicianId=physician_id,
-                dob=processed_data["dob_for_query"],
-                claim_number=claim_number
-            )
-            
-            # Cache the result
-            await self.cache_service.cache_patient(
-                patient_name or "unknown",
-                physician_id,
-                lookup_data,
-                claim_number
-            )
+        # 🎯 DEBUG: Comprehensive logging of lookup data
+        logger.info(f"🎯 DEBUG - LOOKUP DATA RECEIVED:")
+        logger.info(f"  - total_documents: {lookup_data.get('total_documents', 0)}")
+        logger.info(f"  - patient_name: '{lookup_data.get('patient_name')}'")
+        logger.info(f"  - dob: '{lookup_data.get('dob')}'")
+        logger.info(f"  - doi: '{lookup_data.get('doi')}'")
+        logger.info(f"  - claim_number: '{lookup_data.get('claim_number')}'")
+        logger.info(f"  - has_conflicting_claims: {lookup_data.get('has_conflicting_claims', False)}")
+        logger.info(f"  - unique_valid_claims: {lookup_data.get('unique_valid_claims', [])}")
+        if lookup_data.get('documents'):
+            logger.info(f"  - individual documents:")
+            for i, doc in enumerate(lookup_data['documents']):
+                logger.info(f"    Doc {i+1}: patient='{doc.get('patientName')}', dob='{doc.get('dob')}', doi='{doc.get('doi')}', claim='{doc.get('claimNumber')}'")
         
-        logger.info(f"Lookup data: {lookup_data}")
-        
-        # [KEEP ALL EXISTING LOOKUP LOGIC - Lines 208-357 from your file]
         is_first_time_claim_only = (
             processed_data["has_claim_number"]
             and not processed_data["has_patient_name"]
@@ -395,91 +280,122 @@ class WebhookService:
         
         document_analysis = processed_data["document_analysis"]
         
-        # Override missing fields logic (unchanged)
+        # 🎯 DEBUG: Document analysis before override
+        logger.info(f"🎯 DEBUG - DOCUMENT ANALYSIS BEFORE OVERRIDE:")
+        logger.info(f"  - patient_name: '{document_analysis.patient_name}'")
+        logger.info(f"  - dob: '{document_analysis.dob}'")
+        logger.info(f"  - doi: '{document_analysis.doi}'")
+        logger.info(f"  - claim_number: '{document_analysis.claim_number}'")
+        
+        # FIXED: SIMPLIFIED override logic - override if we have ANY lookup data
+        override_attempted = False
         if lookup_data and lookup_data.get("total_documents", 0) > 0 and (not has_conflicting_claims or is_first_time_claim_only):
             fetched_patient_name = lookup_data.get("patient_name")
             fetched_dob = lookup_data.get("dob")
             fetched_doi = lookup_data.get("doi")
             fetched_claim_number = lookup_data.get("claim_number")
             
+            logger.info(f"🔄 ATTEMPTING FIELD OVERRIDE:")
+            logger.info(f"  - Document current - Patient: '{document_analysis.patient_name}', DOB: '{document_analysis.dob}', DOI: '{document_analysis.doi}', Claim: '{document_analysis.claim_number}'")
+            logger.info(f"  - Fetched from DB  - Patient: '{fetched_patient_name}', DOB: '{fetched_dob}', DOI: '{fetched_doi}', Claim: '{fetched_claim_number}'")
+            
+            # SIMPLIFIED: Override ANY "not specified" or missing field with fetched data
+            def should_override(doc_value, fetched_value):
+                if not fetched_value:
+                    logger.debug(f"    ❌ No fetched value to override with")
+                    return False
+                if not doc_value or str(doc_value).lower() in ["not specified", "unknown", ""]:
+                    logger.debug(f"    ✅ Should override: doc_value='{doc_value}', fetched_value='{fetched_value}'")
+                    return True
+                logger.debug(f"    ❌ No override needed: doc_value='{doc_value}' is already valid")
+                return False
+            
+            override_attempted = True
+            
             # Patient name override
-            doc_patient_name = document_analysis.patient_name
-            doc_name_missing = not doc_patient_name or str(doc_patient_name).lower() == "not specified"
-            
-            if doc_name_missing:
-                if fetched_patient_name:
-                    document_analysis.patient_name = fetched_patient_name
-                    logger.info(f"🔄 Overrode patient_name: {fetched_patient_name}")
+            if should_override(document_analysis.patient_name, fetched_patient_name):
+                old_value = document_analysis.patient_name
+                document_analysis.patient_name = fetched_patient_name
+                logger.info(f"🔄 OVERRODE patient_name: '{old_value}' → '{fetched_patient_name}'")
             else:
-                if fetched_patient_name:
-                    doc_name_norm = str(doc_patient_name).strip().lower()
-                    fetched_name_norm = str(fetched_patient_name).strip().lower()
-                    if doc_name_norm != fetched_name_norm:
-                        logger.warning(f"⚠️ Patient name mismatch - document: '{doc_patient_name}', previous: '{fetched_patient_name}'")
+                logger.info(f"ℹ️ No patient_name override needed")
             
-            # DOB override
-            doc_dob = document_analysis.dob
-            doc_dob_missing = not doc_dob or str(doc_dob).lower() == "not specified"
-            
-            if doc_dob_missing:
-                if fetched_dob:
-                    document_analysis.dob = fetched_dob
-                    logger.info(f"🔄 Overrode DOB: {fetched_dob}")
+            # DOB override  
+            if should_override(document_analysis.dob, fetched_dob):
+                old_value = document_analysis.dob
+                document_analysis.dob = fetched_dob
+                logger.info(f"🔄 OVERRODE dob: '{old_value}' → '{fetched_dob}'")
             else:
-                if fetched_dob:
-                    doc_dob_norm = str(doc_dob).strip().lower()
-                    fetched_dob_norm = str(fetched_dob).strip().lower()
-                    if doc_dob_norm != fetched_dob_norm:
-                        logger.warning(f"⚠️ DOB mismatch - document: '{doc_dob}', previous: '{fetched_dob}'")
+                logger.info(f"ℹ️ No dob override needed")
             
             # DOI override
-            doc_doi = document_analysis.doi
-            doc_doi_missing = not doc_doi or str(doc_doi).lower() == "not specified"
-            
-            if doc_doi_missing:
-                if fetched_doi:
-                    document_analysis.doi = fetched_doi
-                    logger.info(f"🔄 Overrode DOI: {fetched_doi}")
+            if should_override(document_analysis.doi, fetched_doi):
+                old_value = document_analysis.doi
+                document_analysis.doi = fetched_doi
+                logger.info(f"🔄 OVERRODE doi: '{old_value}' → '{fetched_doi}'")
             else:
-                if fetched_doi:
-                    doc_doi_str = str(doc_doi).strip()
-                    fetched_doi_str = str(fetched_doi).strip()
-                    if doc_doi_str != fetched_doi_str:
-                        logger.warning(f"⚠️ DOI mismatch - document: '{doc_doi}', previous: '{fetched_doi}'")
+                logger.info(f"ℹ️ No doi override needed")
             
             # Claim number override
-            doc_claim_number = document_analysis.claim_number
-            doc_claim_missing = not doc_claim_number or str(doc_claim_number).lower() == "not specified"
-            
-            if doc_claim_missing:
-                if fetched_claim_number:
-                    document_analysis.claim_number = fetched_claim_number
-                    logger.info(f"🔄 Overrode claim_number: {fetched_claim_number}")
+            if should_override(document_analysis.claim_number, fetched_claim_number):
+                old_value = document_analysis.claim_number
+                document_analysis.claim_number = fetched_claim_number
+                logger.info(f"🔄 OVERRODE claim_number: '{old_value}' → '{fetched_claim_number}'")
             else:
-                if fetched_claim_number:
-                    doc_claim_norm = str(doc_claim_number).strip().lower()
-                    fetched_claim_norm = str(fetched_claim_number).strip().lower()
-                    if doc_claim_norm != fetched_claim_norm:
-                        logger.warning(f"⚠️ Claim mismatch - document: '{doc_claim_number}', previous: '{fetched_claim_number}'")
+                logger.info(f"ℹ️ No claim_number override needed")
+            
+            # FIXED: Also check for mismatches (warn but don't override)
+            if (document_analysis.patient_name and fetched_patient_name and 
+                str(document_analysis.patient_name).strip().lower() != str(fetched_patient_name).strip().lower()):
+                logger.warning(f"⚠️ Patient name mismatch - document: '{document_analysis.patient_name}', previous: '{fetched_patient_name}'")
+            
+            if (document_analysis.dob and fetched_dob and 
+                str(document_analysis.dob).strip().lower() != str(fetched_dob).strip().lower()):
+                logger.warning(f"⚠️ DOB mismatch - document: '{document_analysis.dob}', previous: '{fetched_dob}'")
+            
+            if (document_analysis.doi and fetched_doi and 
+                str(document_analysis.doi).strip() != str(fetched_doi).strip()):
+                logger.warning(f"⚠️ DOI mismatch - document: '{document_analysis.doi}', previous: '{fetched_doi}'")
+            
+            if (document_analysis.claim_number and fetched_claim_number and 
+                str(document_analysis.claim_number).strip().lower() != str(fetched_claim_number).strip().lower()):
+                logger.warning(f"⚠️ Claim mismatch - document: '{document_analysis.claim_number}', previous: '{fetched_claim_number}'")
+        else:
+            logger.info(f"🎯 DEBUG - OVERRIDE SKIPPED:")
+            logger.info(f"  - lookup_data exists: {bool(lookup_data)}")
+            logger.info(f"  - total_documents > 0: {lookup_data.get('total_documents', 0) > 0 if lookup_data else False}")
+            logger.info(f"  - has_conflicting_claims: {has_conflicting_claims}")
+            logger.info(f"  - is_first_time_claim_only: {is_first_time_claim_only}")
+        
+        # FIXED: Better field validation after override
+        def is_valid_field(value):
+            is_valid = value and str(value).lower() not in ["not specified", "unknown", ""]
+            logger.debug(f"    Field validation: '{value}' → {is_valid}")
+            return is_valid
         
         updated_claim_number_for_query = (
             document_analysis.claim_number
-            if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified"
+            if is_valid_field(document_analysis.claim_number)
             else None
         )
         
         updated_patient_name_for_query = (
             document_analysis.patient_name
-            if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified"
+            if is_valid_field(document_analysis.patient_name)
             else "Unknown Patient"
         )
         
+        # FIXED: Check actual values after override
         updated_required_fields = {
             "patient_name": document_analysis.patient_name,
             "dob": document_analysis.dob,
         }
         
-        updated_missing_fields = [k for k, v in updated_required_fields.items() if not v or str(v).lower() == "not specified"]
+        updated_missing_fields = []
+        for field_name, field_value in updated_required_fields.items():
+            if not is_valid_field(field_value):
+                updated_missing_fields.append(field_name)
+        
         has_missing_required_fields = len(updated_missing_fields) > 0
         
         # Skip failure conditions if document has claim number
@@ -489,6 +405,17 @@ class WebhookService:
             has_missing_required_fields = False
             conflicting_claims_reason = None
             updated_missing_fields = []
+        
+        # 🎯 DEBUG: Final state after all processing
+        logger.info(f"🎯 DEBUG - FINAL STATE:")
+        logger.info(f"  - Patient: '{document_analysis.patient_name}'")
+        logger.info(f"  - DOB: '{document_analysis.dob}'")
+        logger.info(f"  - DOI: '{document_analysis.doi}'")
+        logger.info(f"  - Claim: '{document_analysis.claim_number}'")
+        logger.info(f"  - Missing fields: {updated_missing_fields}")
+        logger.info(f"  - Has conflicts: {has_conflicting_claims}")
+        logger.info(f"  - Total documents found: {lookup_data.get('total_documents', 0) if lookup_data else 0}")
+        logger.info(f"  - Override attempted: {override_attempted}")
         
         return {
             "lookup_data": lookup_data,
@@ -502,7 +429,6 @@ class WebhookService:
             "is_first_time_claim_only": is_first_time_claim_only,
             "mode": processed_data.get("mode")
         }
-    
     async def compare_and_determine_status(self, processed_data: dict, lookup_result: dict, db_service, physician_id: str) -> dict:
         """
         OPTIMIZED: Step 3 with parallel DB fetch + comparison.
@@ -528,8 +454,7 @@ class WebhookService:
         comparison_task = asyncio.create_task(
             asyncio.to_thread(
                 analyzer.compare_with_previous_documents,
-                processed_data["text_for_llm"],  # Use LLM-optimized text for comparison
-                processed_data.get("page_zones")  # NEW: Pass page_zones for doctor detection
+                processed_data["deidentified_text"]
             )
         )
         
@@ -538,7 +463,6 @@ class WebhookService:
         
         previous_documents = db_response.get('documents', []) if db_response else []
         
-        # [KEEP ALL REMAINING LOGIC FROM YOUR FILE - Lines 404-558]
         # Handle whats_new_data validation
         if whats_new_data is None:
             logger.warning(f"⚠️ Invalid whats_new data; using empty list")
@@ -652,6 +576,7 @@ class WebhookService:
             "mode": mode,
             "has_multiple_body_parts": len(summary_snapshots) > 1
         }
+
     async def save_and_process_document(self, processed_data: dict, status_result: dict, data: dict, db_service) -> dict:
         document_analysis = status_result["document_analysis"]
         has_date_reasoning = processed_data["has_date_reasoning"]
@@ -888,18 +813,6 @@ class WebhookService:
         else:
             logger.info(f"ℹ️ Skipping previous update: status={document_status}, total_previous={total_previous_docs}, has_conflicts={status_result['has_conflicting_claims']}, patient={status_result['patient_name_to_use']}, has_dob={updated_dob_for_query is not None}, is_first_time_claim_only={is_first_time_claim_only}")
 
-        # 🆕 FINAL SYNC: Query DB and update all documents with same patient/claim
-        # # This catches documents that were saved in parallel batch processing
-        # await self._sync_patient_documents(
-        #     db_service=db_service,
-        #     physician_id=physician_id,
-        #     patient_name=status_result["patient_name_to_use"],
-        #     claim_number=status_result["claim_to_save"],
-        #     document_status=document_status,
-        #     is_first_time_claim_only=is_first_time_claim_only,
-        #     has_conflicting_claims=status_result["has_conflicting_claims"]
-        # )
-
         logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}, filename: {processed_data['filename']}")
 
         logger.info(f"📡 Success event processed for document: {document_id}")
@@ -942,137 +855,11 @@ class WebhookService:
                 "is_task_needed": document_analysis.is_task_needed,  # Changed from is_rfa_task_needed
                 "tasks_created": created_tasks
             }
-        }
-    
-    async def _sync_patient_documents(
-        self,
-        db_service,
-        physician_id: str,
-        patient_name: str,
-        claim_number: str,
-        document_status: str,
-        is_first_time_claim_only: bool,
-        has_conflicting_claims: bool
-    ):
-        """
-        🆕 FINAL SYNC: Query database and update all documents with same patient/claim.
-        This catches documents saved in parallel batch processing that may have incomplete data.
-        
-        Handles all cases from perform_patient_lookup:
-        1. First-time claim-only: Skip (no previous docs to sync)
-        2. Conflicting claims: Skip (ambiguous which docs to update)
-        3. Failed document: Skip (invalid data)
-        4. Patient name only: Sync all docs for patient (propagate claim if available)
-        5. Claim only: Sync all docs with claim (propagate patient if available)
-        6. Patient + Claim: Sync all docs for patient (update all fields)
-        7. Missing patient/claim: Skip (insufficient data)
-        
-        Cache strategy:
-        - Invalidates cache after sync to ensure fresh lookups
-        - Prevents stale data in subsequent batch uploads
-        """
-        # CASE 1: Skip if document failed
-        if document_status == "failed":
-            logger.debug("⏭️ Skipping sync: document failed")
-            return
-        
-        # CASE 2: Skip first-time claim-only (no previous docs exist)
-        if is_first_time_claim_only:
-            logger.debug("⏭️ Skipping sync: first-time claim-only document (no previous docs)")
-            return
-        
-        # CASE 3: Skip if conflicting claims detected
-        if has_conflicting_claims:
-            logger.debug("⏭️ Skipping sync: conflicting claims detected (ambiguous)")
-            return
-        
-        # CASE 7: Need at least patient name OR claim number to sync
-        has_valid_patient = patient_name and patient_name != "Not specified"
-        has_valid_claim = claim_number and claim_number != "Not specified"
-        
-        if not has_valid_patient and not has_valid_claim:
-            logger.debug(f"⏭️ Skipping sync: no valid patient ({patient_name}) or claim ({claim_number})")
-            return
-        
-        # Determine sync strategy based on what's available
-        sync_type = None
-        if has_valid_patient and has_valid_claim:
-            sync_type = "patient+claim"
-            logger.info(f"🔄 FINAL SYNC [PATIENT+CLAIM]: Patient '{patient_name}' + Claim '{claim_number}'")
-        elif has_valid_patient:
-            sync_type = "patient-only"
-            logger.info(f"🔄 FINAL SYNC [PATIENT-ONLY]: Patient '{patient_name}' (will propagate claim if found)")
-        elif has_valid_claim:
-            sync_type = "claim-only"
-            logger.info(f"🔄 FINAL SYNC [CLAIM-ONLY]: Claim '{claim_number}' (will propagate patient if found)")
-        
-        try:
-            # CASE 4, 5, 6: Query all documents for patient (don't filter by claim to catch all)
-            lookup_result = await db_service.get_patient_claim_numbers(
-                patient_name=patient_name if has_valid_patient else None,
-                physicianId=physician_id,
-                claim_number=claim_number if has_valid_claim and not has_valid_patient else None,  # Only use claim if no patient
-                dob=None  # Don't filter by DOB in sync - we want all matches
-            )
-            
-            if not lookup_result or lookup_result.get("total_documents", 0) <= 1:
-                logger.debug(f"⏭️ No other documents found for sync ({lookup_result.get('total_documents', 0)} total)")
-                return
-            
-            # Extract best available data from ALL documents in DB
-            best_dob = lookup_result.get("dob")
-            best_doi = lookup_result.get("doi")
-            best_claim = lookup_result.get("claim_number")
-            best_patient = lookup_result.get("patient_name")
-            
-            # Determine what to sync (use current doc's data if valid, otherwise use best from DB)
-            patient_to_sync = patient_name if has_valid_patient else (best_patient if best_patient else "Not specified")
-            claim_to_sync = claim_number if has_valid_claim else (best_claim if best_claim else "Not specified")
-            dob_to_sync = best_dob if best_dob else "Not specified"
-            doi_to_sync = best_doi if best_doi else None
-            
-            # Check if we have anything useful to sync
-            has_data_to_sync = (
-                (patient_to_sync != "Not specified") or
-                (claim_to_sync != "Not specified") or
-                (dob_to_sync != "Not specified") or
-                doi_to_sync
-            )
-            
-            if not has_data_to_sync:
-                logger.debug("⏭️ No valid data to sync (all fields empty)")
-                return
-            
-            # Update all documents with best available data
-            logger.info(f"🔄 Syncing {lookup_result.get('total_documents')} documents:")
-            logger.info(f"   Patient: {patient_to_sync}")
-            logger.info(f"   Claim: {claim_to_sync}")
-            logger.info(f"   DOB: {dob_to_sync}")
-            logger.info(f"   DOI: {doi_to_sync}")
-            
-            updated_count = await db_service.update_previous_fields(
-                patient_name=patient_to_sync,
-                dob=dob_to_sync,
-                physician_id=physician_id,
-                claim_number=claim_to_sync,
-                doi=doi_to_sync
-            )
-            
-            logger.info(f"✅ FINAL SYNC [{sync_type.upper()}]: Updated {updated_count} documents")
-            
-            # Invalidate cache after sync (use both patient and claim for thorough invalidation)
-            if has_valid_patient:
-                await self.cache_service.invalidate_patient(patient_name, physician_id)
-            if has_valid_claim and claim_number != patient_name:
-                # Also invalidate by claim if different from patient
-                await self.cache_service.invalidate_patient(claim_number, physician_id)
-            
-        except Exception as e:
-            logger.error(f"❌ Error in final sync for patient '{patient_name}': {str(e)}", exc_info=True)
+        }    
     
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
-        Orchestrates the full webhook processing pipeline (UNCHANGED).
+        Orchestrates the full webhook processing pipeline.
         """
         # Step 1: Process document data
         processed_data = await self.process_document_data(data)
@@ -1080,7 +867,7 @@ class WebhookService:
         # Extract physician_id
         physician_id = processed_data["physician_id"]
         
-        # Step 2: Perform patient lookup
+        # Step 2: Perform patient lookup (NO CACHING - always fresh data)
         lookup_result = await self.perform_patient_lookup(db_service, processed_data, physician_id)
         
         # Step 3: Compare and determine status
@@ -1089,8 +876,7 @@ class WebhookService:
         # Step 4: Save and process
         result = await self.save_and_process_document(processed_data, status_result, data, db_service)
         
-        return result   
-    
+        return result
     async def update_fail_document(self, fail_doc: Any, updated_fields: dict, user_id: str = None, db_service: Any = None) -> dict:
         """
         Handles updating and processing a failed document using webhook-like logic.

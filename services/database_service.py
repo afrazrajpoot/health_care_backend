@@ -766,29 +766,99 @@ class DatabaseService:
         patient_name: Optional[str] = None,
         physicianId: Optional[str] = None,
         dob: Optional[datetime] = None,
-        claim_number: Optional[str] = None,  # 🆕 NEW: Optional claim_number for lookup
+        claim_number: Optional[str] = None,
     ) -> Dict[str, Any]:
         try:
-            where_clause = {}
+            logger.info(f"🎯 DEBUG - get_patient_claim_numbers CALLED WITH:")
+            logger.info(f"  - patient_name: '{patient_name}'")
+            logger.info(f"  - physicianId: '{physicianId}'")
+            logger.info(f"  - dob: '{dob}'")
+            logger.info(f"  - claim_number: '{claim_number}'")
             
-            # 🆕 ENHANCED: Support multiple lookup strategies (prioritize claim_number if provided)
-            if claim_number:
-                where_clause["claimNumber"] = claim_number
-                logger.info(f"🔍 Fetching data using claim number: {claim_number}")
-            else:
-                # Fallback to patient_name + optional dob/physician
-                if patient_name:
-                    where_clause["patientName"] = patient_name
-                if physicianId:
-                    where_clause["physicianId"] = physicianId
-                if dob:
-                    dob_str = dob.strftime("%Y-%m-%d")
-                    where_clause["dob"] = dob_str
-                logger.info(f"🔍 Fetching data for patient: {patient_name or 'unknown'}")
-
-            documents = await self.prisma.document.find_many(where=where_clause)
+            # 🆕 ENHANCED: Build multiple WHERE clauses for better matching
+            where_conditions = []
             
-            # 🆕 EXPANDED: Extract not just claim_numbers, but also patient_name, dob, doi
+            # Always include physicianId if provided
+            if physicianId:
+                where_conditions.append({"physicianId": physicianId})
+            
+            # 🆕 MULTI-FIELD MATCHING: Try different combinations
+            if claim_number and patient_name and dob:
+                # Case 1: All three fields provided - strongest match
+                where_conditions.append({
+                    "OR": [
+                        {"claimNumber": claim_number},
+                        {"AND": [
+                            {"patientName": patient_name},
+                            {"dob": dob.strftime("%Y-%m-%d") if dob else None}
+                        ]}
+                    ]
+                })
+                logger.info(f"🔍 Using multi-field match: claim_number + patient_name + dob")
+            
+            elif claim_number and patient_name:
+                # Case 2: Claim number + patient name
+                where_conditions.append({
+                    "OR": [
+                        {"claimNumber": claim_number},
+                        {"patientName": patient_name}
+                    ]
+                })
+                logger.info(f"🔍 Using dual-field match: claim_number + patient_name")
+            
+            elif claim_number and dob:
+                # Case 3: Claim number + DOB
+                where_conditions.append({
+                    "OR": [
+                        {"claimNumber": claim_number},
+                        {"dob": dob.strftime("%Y-%m-%d") if dob else None}
+                    ]
+                })
+                logger.info(f"🔍 Using dual-field match: claim_number + dob")
+            
+            elif patient_name and dob:
+                # Case 4: Patient name + DOB
+                where_conditions.append({
+                    "AND": [
+                        {"patientName": patient_name},
+                        {"dob": dob.strftime("%Y-%m-%d") if dob else None}
+                    ]
+                })
+                logger.info(f"🔍 Using dual-field match: patient_name + dob")
+            
+            elif claim_number:
+                # Case 5: Only claim number
+                where_conditions.append({"claimNumber": claim_number})
+                logger.info(f"🔍 Using single-field match: claim_number")
+            
+            elif patient_name:
+                # Case 6: Only patient name
+                where_conditions.append({"patientName": patient_name})
+                logger.info(f"🔍 Using single-field match: patient_name")
+            
+            elif dob:
+                # Case 7: Only DOB (least specific)
+                where_conditions.append({"dob": dob.strftime("%Y-%m-%d") if dob else None})
+                logger.info(f"🔍 Using single-field match: dob")
+            
+            # Combine all conditions with AND
+            final_where = {}
+            if where_conditions:
+                if len(where_conditions) == 1:
+                    final_where = where_conditions[0]
+                else:
+                    final_where = {"AND": where_conditions}
+            
+            logger.info(f"🎯 DEBUG - FINAL WHERE CLAUSE: {final_where}")
+            
+            # Execute query
+            documents = await self.prisma.document.find_many(where=final_where)
+            
+            logger.info(f"🎯 DEBUG - RAW DOCUMENTS FOUND: {len(documents)}")
+            for i, doc in enumerate(documents):
+                logger.info(f"  Doc {i+1}: patientName='{getattr(doc, 'patientName', None)}', dob='{getattr(doc, 'dob', None)}', claimNumber='{getattr(doc, 'claimNumber', None)}', physicianId='{getattr(doc, 'physicianId', None)}'")
+            
+            # Extract fields from documents
             claim_numbers = [
                 doc.claimNumber for doc in documents if getattr(doc, "claimNumber", None)
             ]
@@ -802,23 +872,27 @@ class DatabaseService:
                 doc.doi for doc in documents if getattr(doc, "doi", None)
             ]
             
-            # 🆕 DEDUPLICATE AND PRIORITIZE: Use first non-None/"Not specified" value for each field
-            def get_first_valid(lst):
+            # Get primary values
+            def get_primary_value(lst):
+                if not lst:
+                    return None
+                # First try to find a valid (non-"not specified") value
                 for item in lst:
                     if item and str(item).lower() != "not specified":
                         return item
-                return None
+                # If no valid values found, return the first one (even if "not specified")
+                return lst[0] if lst else None
             
-            primary_patient_name = get_first_valid(patient_names) or patient_names[0] if patient_names else None
-            primary_dob = get_first_valid(dobs) or dobs[0] if dobs else None
-            primary_doi = get_first_valid(dois) or dois[0] if dois else None
-            primary_claim_number = get_first_valid(claim_numbers) or claim_numbers[0] if claim_numbers else None
+            primary_patient_name = get_primary_value(patient_names)
+            primary_dob = get_primary_value(dobs)
+            primary_doi = get_primary_value(dois)
+            primary_claim_number = get_primary_value(claim_numbers)
 
-            # 🆕 NEW: Detect conflicting claim numbers
+            # Detect conflicting claim numbers
             valid_claims_set = set([c for c in claim_numbers if c and str(c).lower() != 'not specified'])
             has_conflicting_claims = len(valid_claims_set) > 1
 
-            logger.info(f"✅ Found data for lookup: patient_name={primary_patient_name}, dob={primary_dob}, doi={primary_doi}, claim={primary_claim_number}, conflicting_claims={has_conflicting_claims}")
+            logger.info(f"✅ Found {len(documents)} documents for lookup: patient_name={primary_patient_name}, dob={primary_dob}, doi={primary_doi}, claim={primary_claim_number}, conflicting_claims={has_conflicting_claims}")
             
             return {
                 "patient_name": primary_patient_name,
@@ -828,13 +902,13 @@ class DatabaseService:
                 "total_documents": len(documents),
                 "has_conflicting_claims": has_conflicting_claims,
                 "unique_valid_claims": list(valid_claims_set),
-                "documents": [  # 🆕 OPTIONAL: Include full docs if needed for further processing
+                "documents": [
                     {
                         "patientName": doc.patientName,
                         "dob": doc.dob,
                         "doi": doc.doi,
                         "claimNumber": doc.claimNumber,
-                        "id": doc.id  # For reference
+                        "id": doc.id
                     } for doc in documents
                 ]
             }
