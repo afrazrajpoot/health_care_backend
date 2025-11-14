@@ -1,11 +1,13 @@
 """
-QME/AME/IME specialized extractor with LLM chaining and full doctor name extraction
+QME/AME/IME specialized extractor with few-shot prompting and chunked processing
 """
 import logging
 import re
-from typing import Dict, Optional
+import json
+from typing import Dict, Optional, List
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
@@ -17,10 +19,10 @@ logger = logging.getLogger("document_ai")
 
 class QMEExtractorChained:
     """
-    Enhanced QME extractor with multi-stage LLM chaining and full doctor name extraction:
-    Stage 1: Extract raw data
+    Enhanced QME extractor with few-shot prompting and chunked processing:
+    Stage 1: Extract raw data from full document via chunked processing
     Stage 2: Detect examiner via DoctorDetector (zone-aware)
-    Stage 3: Build summary
+    Stage 3: Build professional 50-60 word summary
     Stage 4: Verify and correct
     """
 
@@ -34,7 +36,14 @@ class QMEExtractorChained:
             r'\b(dr\.?|doctor|m\.?d\.?|d\.?o\.?|mbbs|m\.?b\.?b\.?s\.?)\b',
             re.IGNORECASE
         )
-        logger.info("✅ QMEExtractorChained initialized with DoctorDetector")
+        # Initialize recursive text splitter for large documents
+        self.splitter = RecursiveCharacterTextSplitter(
+            chunk_size=3000,
+            chunk_overlap=200,
+            separators=["\n\n", "\n", ".", " ", ""],
+            length_function=len,
+        )
+        logger.info("✅ QMEExtractorChained initialized with few-shot prompting")
 
     def extract(
         self, 
@@ -46,28 +55,20 @@ class QMEExtractorChained:
     ) -> ExtractionResult:
         """
         Extract with DoctorDetector integration and verification chain.
-        
-        Args:
-            text: Layout-preserved text from Document AI
-            doc_type: Document type (QME/AME/IME)
-            fallback_date: Fallback date if not found
-            page_zones: Per-page zone extraction {page_num: {header, body, footer, signature}}
-            raw_text: Original flat text (for backward compatibility)
         """
-        # Debug: Check if page_zones is provided
         if page_zones:
-            logger.info(f"✅ QME extractor received page_zones with {len(page_zones)} pages: {list(page_zones.keys())}")
+            logger.info(f"✅ QME extractor received page_zones with {len(page_zones)} pages")
         else:
             logger.warning("⚠️ QME extractor did NOT receive page_zones")
         
-        # Stage 1: Extract clinical data (NO doctor extraction in prompt)
+        # Stage 1: Extract clinical data using chunked processing
         raw_result = self._extract_raw_data(text, doc_type, fallback_date)
         
-        # Stage 2: Detect examiner via DoctorDetector (zone-aware)
+        # Stage 2: Detect examiner via DoctorDetector
         examiner_name = self._detect_examiner(text, page_zones)
         raw_result["examiner_name"] = examiner_name
         
-        # Stage 3: Build initial result
+        # Stage 3: Build initial result with professional summary
         initial_result = self._build_initial_result(raw_result, doc_type, fallback_date)
         
         # Stage 4: Verify and fix
@@ -75,230 +76,220 @@ class QMEExtractorChained:
         return final_result
 
     def _extract_raw_data(self, text: str, doc_type: str, fallback_date: str) -> Dict:
-        """Stage 1: Extract raw structured data using concise QME summary schema"""
-        prompt = PromptTemplate(
-            template="""
-You are summarizing a Qualified Medical Evaluator (QME/AME) report into a concise,
-structured, actual/actionable summary line for a physician dashboard and treatment timeline.
+        """Stage 1: Extract raw structured data using chunked processing with few-shot prompts"""
+        logger.info(f"🔍 Stage 1: Splitting document into chunks (text length: {len(text)})")
+        
+        chunks = self.splitter.split_text(text)
+        logger.info(f"📦 Created {len(chunks)} chunks for processing")
+        
+        # Few-shot examples for better prompting
+        few_shot_examples = [
+            {
+                "input": """QME REPORT: Patient with right shoulder pain. EXAM: Right shoulder tenderness. 
+                DIAGNOSIS: Rotator cuff tear. MMI: Reached. IMPAIRMENT: 15% WPI. 
+                WORK STATUS: No overhead lifting. TREATMENT: PT 2x/week.""",
+                "output": {
+                    "document_date": "10/15/2024",
+                    "examiner_name": "Dr. John Smith",
+                    "referral_physician": "",
+                    "specialty": "Ortho",
+                    "body_parts_evaluated": ["R shoulder"],
+                    "diagnoses_confirmed": ["Rotator cuff tear"],
+                    "MMI_status": "MMI reached",
+                    "impairment_summary": "15% WPI",
+                    "causation_opinion": "",
+                    "treatment_recommendations": "PT 2x/week",
+                    "medication_recommendations": "",
+                    "work_restrictions": "No overhead lifting",
+                    "future_medical_recommendations": ""
+                }
+            },
+            {
+                "input": """AME EVALUATION: Lumbar spine injury. FINDINGS: L4-5 disc herniation. 
+                MMI: Not reached. IMPAIRMENT: Deferred. WORK: TTD. TREATMENT: ESI recommended.""",
+                "output": {
+                    "document_date": "11/20/2024",
+                    "examiner_name": "Dr. Sarah Chen, MD",
+                    "referral_physician": "",
+                    "specialty": "Pain Management",
+                    "body_parts_evaluated": ["Lumbar spine"],
+                    "diagnoses_confirmed": ["L4-5 disc herniation"],
+                    "MMI_status": "MMI not reached",
+                    "impairment_summary": "Deferred",
+                    "causation_opinion": "",
+                    "treatment_recommendations": "ESI recommended",
+                    "medication_recommendations": "",
+                    "work_restrictions": "TTD",
+                    "future_medical_recommendations": ""
+                }
+            }
+        ]
 
-CRITICAL PHYSICIAN IDENTIFICATION RULES:
+        # System prompt with instructions
+        system_prompt = SystemMessagePromptTemplate.from_template("""
+You are a medical data extraction specialist. Extract structured clinical information from QME/AME/IME reports.
 
-1. PRIMARY PHYSICIAN (QME/AME Examiner):
-   - MUST have medical credentials: Dr., MD, M.D., DO, D.O., MBBS
-   - Look for: "QME:", "AME:", "Examiner:", "Evaluating Physician:"
-   - Check signatures: "Electronically signed by:", "Dictated by:", "Signed by:"
-   - EXTRACT FULL NAME: Always extract the complete physician name with title
-     Examples:
-       ✓ "Dr. John Michael Smith" → "Dr. John Michael Smith"
-       ✓ "Sarah Jennifer Johnson, MD" → "Sarah Jennifer Johnson, MD"
-       ✓ "Robert K. Chen, D.O." → "Robert K. Chen, D.O."
+EXTRACTION RULES:
+- Extract ONLY information present in the text
+- Return empty string "" for missing fields
+- Be precise and clinical
+- For work restrictions: extract specific limitations
+- For treatments: be specific about procedures
+- For medications: include drug names and dosages
 
-2. REFERRAL DOCTOR FALLBACK (ONLY if no primary physician found):
-   - Use referral doctor ONLY when no QME/AME examiner is identified
-   - Look for: "Referred by:", "Referral from:", "PCP:", "Primary Care:"
-   - Must have medical credentials
-   - EXTRACT FULL NAME: Always extract complete name with title
-     Examples: ✓ "Referred by: Dr. James William Wilson" → "Dr. James William Wilson"
+OUTPUT FORMAT: JSON with these exact fields:
+- document_date, examiner_name, referral_physician, specialty
+- body_parts_evaluated (list), diagnoses_confirmed (list)
+- MMI_status, impairment_summary, causation_opinion
+- treatment_recommendations, medication_recommendations
+- work_restrictions, future_medical_recommendations
+""")
 
-3. REJECT NON-DOCTOR SIGNATORIES:
-   - ✗ Reject names without medical credentials (e.g., "Syed Akbar")
-   - ✗ Reject administrators, coordinators, case managers
-   - ✗ Reject any name without proper medical credentials
+        # User prompt with few-shot examples
+        user_prompt = HumanMessagePromptTemplate.from_template("""
+EXAMPLES:
+{examples}
 
-4. FULL NAME EXTRACTION REQUIREMENTS:
-   - ALWAYS extract complete name including first, middle (if present), and last name
-   - PRESERVE medical titles: "Dr.", "MD", "DO", "M.D.", "D.O."
-   - DO NOT shorten names: "Dr. J. Smith" → try to find full name elsewhere in document
-   - If only shortened name available, use as-is but note in verification
-
-5. PRIORITY ORDER:
-   1. QME/AME Examiner (with credentials and full name)
-   2. Referral Doctor (with credentials and full name, ONLY if no examiner)
-   3. "Not specified" (if no qualified doctors found)
-
-INPUT:
-Full QME/AME report text.
-
-INSTRUCTIONS:
-1. Extract the following key elements:
-   - Date of exam/report
-   - QME/AME physician FULL NAME with credentials (complete name with title)
-   - Body parts evaluated
-   - Key diagnoses confirmed
-   - MMI/WPI status
-   - Apportionment (industrial vs non-industrial)
-   - Specific treatment recommendations (PT, injections, surgery, consults)
-   - Specific medication recommendations (use drug names when present)
-   - Work status AND specific functional restrictions
-     Examples:
-       * "No lifting >10 lbs"
-       * "Limit overhead reaching"
-       * "Sedentary work only"
-       * "No repetitive bending/twisting"
-       * "No pushing/pulling >5 lbs"
-   - Future medical and follow-up recommendations
-
-2. Output a structured summary schema — concise and factual, optimized for clinical timeline parsing.
-
-3. WORK RESTRICTIONS RULE:
-   - DO NOT summarize work status as “modified work” or “restricted duty.”
-   - ALWAYS extract and list the actual functional restrictions.
-   - If restrictions are not explicitly stated, infer the most accurate
-     functional description from context (e.g., for chronic shoulder pain:
-     “avoid overhead lifting/reaching; lifting ≤10 lbs to waist height”).
-
-4. HANDLING QUESTION MARKS (“?”):
-   - If the report uses “?” to show uncertainty, clarify what is uncertain
-     using a short parenthetical (≤8 words).
-     Examples:
-       "? rotator cuff tear" → "? rotator cuff tear (diagnosis uncertain)"
-       "? repeat MRI" → "? repeat MRI (pending rationale)"
-
-5. PHYSICIAN EXTRACTION PRIORITY:
-   - First: QME/AME examiner with credentials and FULL NAME
-   - Fallback: Referral doctor with credentials and FULL NAME (ONLY if no examiner)
-   - Last: "Not specified" (if no qualified doctors)
-
-6. FULL NAME EXAMPLES:
-   ✓ ACCEPT: "Dr. Michael Jonathan Brown"
-   ✓ ACCEPT: "Sarah Elizabeth Martinez, MD"
-   ✓ ACCEPT: "Robert K. Chen, D.O."
-   ✓ ACCEPT: "Dr. Jennifer Marie O'Malley"
-   ✗ REJECT: "Dr. Smith" (too short - find full name)
-   ✗ REJECT: "J. Johnson, MD" (initial only - find full name)
-   ✗ REJECT: "Syed Akbar" (no medical title)
-
-7. Tone:
-   - Neutral, clinical, concise.
-   - Use standard medical abbreviations.
-   - Avoid speculation or redundant phrasing.
-
-Document text:
+NOW EXTRACT FROM THIS TEXT:
 {text}
 
-Extract these fields with precision:
-- document_date: Date of exam/report (MM/DD/YY format, or use {fallback_date} if not found)
-- examiner_name: FULL NAME of QME/AME physician (must include Dr./MD/DO and complete name) - minimum first and last name with title
-- referral_physician: FULL NAME of referral doctor if explicitly mentioned (must have credentials and complete name)
-- specialty: Physician specialty (e.g., Orthopedic Surgery, Neurology, Pain Management)
-- body_parts_evaluated: All body parts evaluated (e.g., ["R shoulder", "L knee"])
-- diagnoses_confirmed: Key confirmed diagnoses (up to 3 most important)
-- MMI_status: MMI reached/deferred/pending/ongoing
-- impairment_summary: WPI or impairment rating if stated
-- causation_opinion: Apportionment or causation percentages if applicable
-- treatment_recommendations: Specific treatments or procedures recommended (max 12 words)
-- medication_recommendations: Specific medications or drug names recommended (max 10 words)
-- work_restrictions: Explicit functional restrictions (max 12 words)
-- future_medical_recommendations: Follow-up or future care recommendations (max 12 words)
+Return valid JSON only.
+""")
 
-CRITICAL REASONING RULES - VERIFY BEFORE RETURNING:
-
-1. EXTRACT ALL KEY FINDINGS - both positive and negative clinical findings:
-   ✓ GOOD (Positive findings): "Continue PT 2x/week", "ESI recommended", "MMI reached", "15% WPI"
-   ✓ GOOD (Negative findings): "No additional treatment needed at this time", "0% WPI", "No apportionment"
-   ✗ BAD (Placeholders): "Not provided", "Not mentioned", "Not specified", "N/A"
-   
-2. If a field has NO actual information (truly not mentioned in document), return empty string "".
-   If field has actual clinical finding (even negative), include it.
-   
-3. For MMI_status: Extract the actual MMI status statement:
-   ✓ GOOD: "MMI reached", "MMI deferred pending MRI", "Not at MMI", "MMI pending further treatment"
-   ✗ BAD: "reached" (too vague - add context), "Not mentioned" (use empty string instead)
-   
-4. For impairment_summary: Extract actual impairment findings:
-   ✓ GOOD: "15% WPI", "8% lower extremity impairment", "0% WPI - no permanent impairment"
-   ✓ GOOD: "Impairment rating deferred pending MMI"
-   ✗ BAD: "Not provided" (use empty string instead)
-   
-5. For causation_opinion: Extract actual apportionment/causation findings:
-   ✓ GOOD: "60% industrial, 40% non-industrial", "100% industrial", "No apportionment - 100% non-industrial"
-   ✓ GOOD: "Apportionment deferred pending additional records"
-   ✗ BAD: "Not mentioned" (use empty string instead)
-
-6. For treatment_recommendations: Extract actual treatment recommendations:
-   ✓ GOOD: "Continue PT 2x/week for 6 weeks", "ESI C5-6 recommended", "Surgical consult recommended"
-   ✓ GOOD: "No further treatment recommended - patient at MMI"
-   ✗ BAD: "None indicated" without context (specify why: "No further treatment - resolved")
-   
-7. For medication_recommendations: Extract actual medication findings:
-   ✓ GOOD: "Continue Gabapentin 300mg TID", "Increase Ibuprofen to 800mg", "Tramadol 50mg PRN"
-   ✓ GOOD: "No medication changes recommended"
-   ✗ BAD: "Not mentioned" (use empty string instead)
-
-8. For work_restrictions: Extract actual restriction findings:
-   ✓ GOOD: "No lifting >10 lbs", "Sedentary work only", "Modified duty - no overhead reaching"
-   ✓ GOOD: "No work restrictions - full duty", "Restrictions lifted"
-   ✗ BAD: "Not specified" (use empty string instead)
-
-9. For future_medical_recommendations: Extract actual future care findings:
-   ✓ GOOD: "Follow-up in 6 months", "Annual monitoring recommended", "PT maintenance as needed"
-   ✓ GOOD: "No future medical care anticipated", "Future care not medically necessary"
-   ✗ BAD: "Not indicated" without context (specify: "No future care needed - resolved")
-
-10. REASONING CHECK: Before returning each field, ask yourself:
-    - "Does this contain actual information from the QME report (whether positive or negative)?"
-    - "Would a treating physician find this clinically useful?"
-    - If YES → include it (include negative findings like '0% WPI', 'No restrictions')
-    - If NO (placeholder like 'not mentioned') → return empty string
-
-
-Return JSON:
-{{
-  "document_date": "MM/DD/YY or {fallback_date}",
-  "examiner_name": "Full Name with Title (e.g., 'Dr. John Michael Smith', 'Sarah Jennifer Johnson, MD') or empty if no qualified doctor",
-  "referral_physician": "Full Name with Title (e.g., 'Dr. James William Wilson') or empty",
-  "specialty": "Specialty or empty",
-  "body_parts_evaluated": ["part1", "part2", ...] or [],
-  "diagnoses_confirmed": ["diagnosis1", "diagnosis2", ...] or [],
-  "MMI_status": "status phrase or empty",
-  "impairment_summary": "WPI or impairment note or empty",
-  "causation_opinion": "apportionment or empty",
-  "treatment_recommendations": "procedures or therapies or empty",
-  "medication_recommendations": "medications or empty",
-  "work_restrictions": "explicit restrictions or empty",
-  "future_medical_recommendations": "ongoing/follow-up plan or empty"
-}}
-
-{format_instructions}
-""",
-            input_variables=["text", "doc_type", "fallback_date"],
-            partial_variables={
-                "format_instructions": self.parser.get_format_instructions()
-            },
-        )
+        # Create the chat prompt template
+        chat_prompt = ChatPromptTemplate.from_messages([
+            system_prompt,
+            user_prompt
+        ])
 
         try:
-            chain = prompt | self.llm | self.parser
-            result = chain.invoke(
-                {"text": text[:8000], "doc_type": doc_type, "fallback_date": fallback_date}
-            )
-            return result
+            partial_results = []
+            for i, chunk in enumerate(chunks):
+                logger.debug(f"🔄 Processing chunk {i+1}/{len(chunks)}")
+                
+                # Format few-shot examples as string
+                examples_str = "\n\n".join([
+                    f"Input: {ex['input']}\nOutput: {json.dumps(ex['output'])}" 
+                    for ex in few_shot_examples
+                ])
+                
+                chain = chat_prompt | self.llm | self.parser
+                partial = chain.invoke({
+                    "examples": examples_str,
+                    "text": chunk
+                })
+                partial_results.append(partial)
+                logger.debug(f"✅ Chunk {i+1} processed")
+            
+            # Merge partial extractions
+            merged_result = self._merge_partial_extractions(partial_results, fallback_date)
+            logger.info(f"✅ Chunked extraction completed: {len(partial_results)} chunks merged")
+            return merged_result
+            
         except Exception as e:
-            logger.error(f"❌ Raw extraction failed: {e}")
-            return {}
+            logger.error(f"❌ Chunked extraction failed: {e}")
+            return self._get_fallback_result(fallback_date)
+
+    def _merge_partial_extractions(self, partials: List[Dict], fallback_date: str) -> Dict:
+        """Merge extractions from multiple chunks into a single comprehensive result."""
+        if not partials:
+            return self._get_fallback_result(fallback_date)
+        
+        merged = self._get_fallback_result(fallback_date)
+        
+        # List fields: union unique values across chunks
+        list_fields = ["body_parts_evaluated", "diagnoses_confirmed"]
+        for partial in partials:
+            for field in list_fields:
+                value = partial.get(field, [])
+                if isinstance(value, list):
+                    merged[field].extend([v.strip() for v in value if v and v.strip()])
+                elif isinstance(value, str) and value.strip():
+                    items = [v.strip() for v in value.split(",") if v.strip()]
+                    merged[field].extend(items)
+        
+        # Deduplicate list fields
+        for field in list_fields:
+            seen = set()
+            deduped = []
+            for item in merged[field]:
+                if item not in seen:
+                    seen.add(item)
+                    deduped.append(item)
+            merged[field] = deduped
+
+        # String fields: take most complete value
+        string_fields = [
+            "document_date", "examiner_name", "referral_physician", "specialty",
+            "MMI_status", "impairment_summary", "causation_opinion",
+            "treatment_recommendations", "medication_recommendations",
+            "work_restrictions", "future_medical_recommendations"
+        ]
+        
+        for field in string_fields:
+            candidates = []
+            for partial in partials:
+                value = partial.get(field, "")
+                if isinstance(value, str) and value.strip() and value.strip() != fallback_date:
+                    candidates.append(value.strip())
+            
+            if candidates:
+                candidates.sort(key=len, reverse=True)
+                merged[field] = candidates[0]
+
+        # Handle physician names with validation
+        examiner_candidates = []
+        referral_candidates = []
+        
+        for partial in partials:
+            examiner = partial.get("examiner_name", "")
+            if examiner and examiner.strip():
+                validated = self._validate_physician_full_name(examiner)
+                if validated:
+                    examiner_candidates.append(validated)
+            
+            referral = partial.get("referral_physician", "")
+            if referral and referral.strip():
+                validated = self._validate_physician_full_name(referral)
+                if validated:
+                    referral_candidates.append(validated)
+        
+        if examiner_candidates:
+            examiner_candidates.sort(key=len, reverse=True)
+            merged["examiner_name"] = examiner_candidates[0]
+        
+        if referral_candidates:
+            referral_candidates.sort(key=len, reverse=True)
+            merged["referral_physician"] = referral_candidates[0]
+
+        logger.info(f"📊 Merge completed: {len(merged['body_parts_evaluated'])} body parts")
+        return merged
+
+    def _get_fallback_result(self, fallback_date: str) -> Dict:
+        """Return a minimal fallback result structure."""
+        return {
+            "document_date": fallback_date,
+            "examiner_name": "",
+            "referral_physician": "",
+            "specialty": "",
+            "body_parts_evaluated": [],
+            "diagnoses_confirmed": [],
+            "MMI_status": "",
+            "impairment_summary": "",
+            "causation_opinion": "",
+            "treatment_recommendations": "",
+            "medication_recommendations": "",
+            "work_restrictions": "",
+            "future_medical_recommendations": "",
+        }
 
     def _detect_examiner(
         self,
         text: str,
         page_zones: Optional[Dict[str, Dict[str, str]]] = None
     ) -> str:
-        """
-        Stage 2: Detect QME/AME examiner using DoctorDetector (zone-aware).
-        
-        Args:
-            text: Full document text
-            page_zones: Page zones for zone-aware detection
-        
-        Returns:
-            Examiner name with title, or empty string
-        """
-        logger.info("🔍 Stage 2: Running DoctorDetector for QME/AME examiner (zone-aware)...")
-        
-        # Debug: Check if page_zones is provided
-        if page_zones:
-            logger.info(f"✅ QME extractor received page_zones with {len(page_zones)} pages: {list(page_zones.keys())}")
-        else:
-            logger.warning("⚠️ QME extractor did NOT receive page_zones")
+        """Stage 2: Detect QME/AME examiner using DoctorDetector."""
+        logger.info("🔍 Stage 2: Running DoctorDetector...")
         
         detection_result = self.doctor_detector.detect_doctor(
             text=text,
@@ -306,29 +297,22 @@ Return JSON:
         )
         
         if detection_result["doctor_name"]:
-            logger.info(
-                f"✅ Examiner detected: {detection_result['doctor_name']} "
-                f"(confidence: {detection_result['confidence']}, "
-                f"source: {detection_result['source']})"
-            )
-            examiner_name = detection_result["doctor_name"]
-            logger.info(f"🎯 QME extractor returning examiner: '{examiner_name}'")
-            return examiner_name
+            logger.info(f"✅ Examiner detected: {detection_result['doctor_name']}")
+            return detection_result["doctor_name"]
         else:
-            logger.warning(
-                f"⚠️ No valid examiner found: {detection_result['validation_notes']}"
-            )
-            logger.info("🎯 QME extractor returning empty examiner name")
+            logger.warning(f"⚠️ No valid examiner found")
             return ""
 
     def _build_initial_result(self, raw_data: Dict, doc_type: str, fallback_date: str) -> ExtractionResult:
+        """Build initial result with professional summary."""
         cleaned = self._validate_and_clean(raw_data, fallback_date)
         
         # Apply referral doctor fallback logic
         final_examiner = self._apply_referral_fallback(cleaned)
         cleaned["final_examiner"] = final_examiner
         
-        summary_line = self._build_qme_summary(cleaned, doc_type, fallback_date)
+        # Generate professional summary using few-shot approach
+        summary_line = self._build_professional_summary(cleaned, doc_type, fallback_date)
         
         return ExtractionResult(
             document_type=doc_type,
@@ -341,56 +325,42 @@ Return JSON:
         )
 
     def _apply_referral_fallback(self, data: Dict) -> str:
-        """
-        Apply referral doctor fallback logic:
-        - Primary: QME/AME examiner with credentials
-        - Fallback: Referral physician with credentials (ONLY if no examiner)
-        - Final: "Not specified"
-        """
+        """Apply referral doctor fallback logic."""
         examiner_md = data.get("examiner_name", "")
         referral_md = data.get("referral_physician", "")
         
-        # Primary: Use QME/AME examiner if qualified
         if examiner_md and examiner_md != "":
             logger.info(f"✅ Using QME/AME examiner: {examiner_md}")
             return examiner_md
         
-        # Fallback: Use referral doctor ONLY if no examiner found
         if referral_md and referral_md != "":
-            logger.info(f"🔄 Using referral doctor as fallback: {referral_md}")
+            logger.info(f"🔄 Using referral doctor: {referral_md}")
             return referral_md
         
-        # No qualified doctors found
         logger.info("❌ No qualified doctors found")
         return ""
 
     def _validate_and_clean(self, result: Dict, fallback_date: str) -> Dict:
-        """Validate and clean extracted data, handling both string and list types"""
+        """Validate and clean extracted data."""
         cleaned = {}
         
         # Date validation
         date = result.get("document_date", "")
-        date = date.strip() if isinstance(date, str) else str(date)
         cleaned["document_date"] = date if date and date != "empty" else fallback_date
 
-        # Physician validation with strict credential checking
+        # Physician validation
         examiner = result.get("examiner_name", "")
-        examiner = examiner.strip() if isinstance(examiner, str) else ""
         referral_physician = result.get("referral_physician", "")
-        referral_physician = referral_physician.strip() if isinstance(referral_physician, str) else ""
-        
         cleaned["examiner_name"] = self._validate_physician_full_name(examiner)
         cleaned["referral_physician"] = self._validate_physician_full_name(referral_physician)
 
         # Specialty validation
         specialty = result.get("specialty", "")
-        specialty = specialty.strip() if isinstance(specialty, str) else ""
         cleaned["specialty"] = specialty if specialty and specialty != "empty" else ""
 
-        # Body parts validation (always expects list)
+        # Body parts validation
         body_parts = result.get("body_parts_evaluated", [])
         if isinstance(body_parts, str):
-            # LLM returned string instead of list, split it
             body_parts = [bp.strip() for bp in body_parts.split(",") if bp.strip()]
         elif isinstance(body_parts, list):
             body_parts = [bp.strip() for bp in body_parts if bp and isinstance(bp, str)]
@@ -398,10 +368,9 @@ Return JSON:
             body_parts = []
         cleaned["body_parts_evaluated"] = [bp for bp in body_parts if bp and bp != "empty"]
 
-        # Diagnoses validation (always expects list)
+        # Diagnoses validation
         diagnoses = result.get("diagnoses_confirmed", [])
         if isinstance(diagnoses, str):
-            # LLM returned string instead of list, split it
             diagnoses = [dx.strip() for dx in diagnoses.split(",") if dx.strip()]
         elif isinstance(diagnoses, list):
             diagnoses = [dx.strip() for dx in diagnoses if dx and isinstance(dx, str)]
@@ -409,35 +378,22 @@ Return JSON:
             diagnoses = []
         cleaned["diagnoses_confirmed"] = [dx for dx in diagnoses if dx and dx != "empty"]
 
-        # String fields validation with list handling
+        # String fields validation
         string_fields = [
-            "causation_opinion",
-            "impairment_summary",
-            "MMI_status",
-            "work_status",
-            "work_restrictions",
-            "future_medical_recommendations",
-            "treatment_recommendations",
-            "medication_recommendations",  # This is the problematic field
-            "follow_up_instructions",
-            "attorney_or_adjuster_notes",
+            "MMI_status", "impairment_summary", "causation_opinion",
+            "work_restrictions", "treatment_recommendations", 
+            "medication_recommendations", "future_medical_recommendations"
         ]
         
-        # Negative phrases that should be filtered out (non-actionable information)
         negative_phrases = [
             "no additional treatment", "no future medical", "no treatment",
-            "no recommendations", "injury fully resolved", "injury resolved",
-            "no restrictions", "no limitations", "no follow-up",
-            "no apportionment", "0% industrial", "0% wpi", "0% whole person",
-            "not indicated", "not recommended", "not needed", "not required",
-            "no significant", "unremarkable", "within normal limits",
-            "no impairment", "no disability", "no work restrictions"
+            "no recommendations", "no restrictions", "no limitations",
+            "not indicated", "not recommended", "not needed"
         ]
         
-        for f in string_fields:
-            raw_value = result.get(f, "")
+        for field in string_fields:
+            raw_value = result.get(field, "")
             
-            # Handle list values (convert to comma-separated string)
             if isinstance(raw_value, list):
                 v = ", ".join([str(item).strip() for item in raw_value if item])
             elif isinstance(raw_value, str):
@@ -447,92 +403,157 @@ Return JSON:
             
             v_lower = v.lower()
             
-            # Check if empty or placeholder
-            if not v or v_lower in ["", "empty", "none", "n/a", "not mentioned", "reached"]:
-                cleaned[f] = ""
+            if not v or v_lower in ["", "empty", "none", "n/a", "not mentioned"]:
+                cleaned[field] = ""
                 continue
             
-            # Check if contains negative/non-actionable phrases
-            is_negative = any(neg_phrase in v_lower for neg_phrase in negative_phrases)
-            if is_negative:
-                logger.debug(f"⚠️ Filtering out negative phrase in {f}: {v}")
-                cleaned[f] = ""
+            if any(neg_phrase in v_lower for neg_phrase in negative_phrases):
+                cleaned[field] = ""
                 continue
             
-            # Keep only meaningful, actionable information
-            cleaned[f] = v
+            cleaned[field] = v
 
         return cleaned
 
     def _validate_physician_full_name(self, name: str) -> str:
-        """Efficiently validate physician name has proper medical credentials and full name."""
+        """Validate physician name has proper credentials."""
         if not name or name.lower() in ["not specified", "not found", "none", "n/a", ""]:
             return ""
         
         name_lower = name.lower()
         
-        # Fast rejection using set membership (O(1) lookup)
         reject_terms = {
             "admin", "administrator", "case manager", "coordinator", "manager",
-            "therapist", "technician", "assistant", "technologist",
-            "staff", "authority", "personnel", "clerk", "secretary",
-            "signed by", "dictated by", "transcribed by"
+            "therapist", "technician", "assistant", "technologist"
         }
         
-        # Check if any reject term is in the name
         if any(term in name_lower for term in reject_terms):
             return ""
         
-        # Use pre-compiled regex for efficiency - MUST have medical credentials
         if not self.medical_credential_pattern.search(name_lower):
             return ""
         
-        # Validate name has sufficient length for full name (at least 2 words + title)
         words = name.split()
         if len(words) < 2:
-            logger.warning(f"⚠️ Name too short for full name: {name}")
             return ""
         
-        # Check if name appears to be a full name (not just initials or single names)
-        # Look for patterns like "Dr. First Last" or "First Last, MD"
-        has_proper_name_structure = (
-            (len(words) >= 3 and any(title in words[0].lower() for title in ["dr", "dr."])) or  # "Dr. First Last"
-            (len(words) >= 2 and any(title in words[-1].lower() for title in ["md", "do", "m.d.", "d.o."]))  # "First Last, MD"
+        has_proper_structure = (
+            (len(words) >= 3 and any(title in words[0].lower() for title in ["dr", "dr."])) or
+            (len(words) >= 2 and any(title in words[-1].lower() for title in ["md", "do", "m.d.", "d.o."]))
         )
         
-        if not has_proper_name_structure:
-            logger.warning(f"⚠️ Name doesn't appear to be full name: {name}")
-            # Still return if it has credentials and at least 2 words
+        if not has_proper_structure:
             if len(words) >= 2 and self.medical_credential_pattern.search(name_lower):
-                logger.info(f"✅ Accepting name with credentials: {name}")
                 return name
             return ""
         
         return name
 
-    def _build_qme_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
+    def _build_professional_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
+        """Build professional 50-60 word summary using few-shot approach."""
+        
+        # System prompt for summary generation
+        system_prompt = SystemMessagePromptTemplate.from_template("""
+You are a medical summarizer creating concise QME/AME report summaries for physicians.
+
+RULES:
+- Keep summary 50-60 words
+- Focus on key findings and recommendations
+- Use professional clinical language
+- Include: date, physician, body parts, key findings, recommendations
+- Be concise but informative
+""")
+
+        # User prompt with data
+        user_prompt = HumanMessagePromptTemplate.from_template("""
+Create a professional 50-60 word summary from this QME/AME data:
+
+Date: {date}
+Physician: {physician}
+Specialty: {specialty}
+Body Parts: {body_parts}
+Diagnoses: {diagnoses}
+MMI Status: {mmi_status}
+Impairment: {impairment}
+Work Restrictions: {restrictions}
+Treatment: {treatment}
+Medications: {medications}
+Future Care: {future_care}
+
+Summary (50-60 words):
+""")
+
+        chat_prompt = ChatPromptTemplate.from_messages([
+            system_prompt,
+            user_prompt
+        ])
+
+        try:
+            # Prepare data for summary
+            date = data.get("document_date", fallback_date)
+            physician = data.get("final_examiner", "")
+            specialty = data.get("specialty", "")
+            body_parts = ", ".join(data.get("body_parts_evaluated", [])[:3])
+            diagnoses = ", ".join(data.get("diagnoses_confirmed", [])[:2])
+            mmi_status = data.get("MMI_status", "")
+            impairment = data.get("impairment_summary", "")
+            restrictions = data.get("work_restrictions", "")
+            treatment = data.get("treatment_recommendations", "")
+            medications = data.get("medication_recommendations", "")
+            future_care = data.get("future_medical_recommendations", "")
+
+            chain = chat_prompt | self.llm
+            response = chain.invoke({
+                "date": date,
+                "physician": physician,
+                "specialty": specialty,
+                "body_parts": body_parts,
+                "diagnoses": diagnoses,
+                "mmi_status": mmi_status,
+                "impairment": impairment,
+                "restrictions": restrictions,
+                "treatment": treatment,
+                "medications": medications,
+                "future_care": future_care
+            })
+            
+            summary = response.content.strip()
+            
+            # Ensure appropriate length
+            words = summary.split()
+            if len(words) > 70:
+                summary = " ".join(words[:65]) + "..."
+            elif len(words) < 45:
+                # Add context if too short
+                if not summary.endswith('.'):
+                    summary += '.'
+                if mmi_status:
+                    summary += f" {mmi_status}."
+            
+            logger.info(f"📊 Generated summary: {len(summary.split())} words")
+            return summary
+            
+        except Exception as e:
+            logger.error(f"❌ Summary generation failed: {e}")
+            # Fallback manual summary
+            return self._build_manual_summary(data, doc_type, fallback_date)
+
+    def _build_manual_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
+        """Fallback manual summary construction."""
         date = data.get("document_date", fallback_date)
-        examiner = data.get("final_examiner", "")
-        referral_physician = data.get("referral_physician", "")
+        physician = data.get("final_examiner", "")
         specialty = data.get("specialty", "")
         body_parts = data.get("body_parts_evaluated", [])
         mmi = data.get("MMI_status", "")
         impairment = data.get("impairment_summary", "")
-        causation = data.get("causation_opinion", "")
-        work_status = data.get("work_status", "")
         restrictions = data.get("work_restrictions", "")
-        future_med = data.get("future_medical_recommendations", "")
         treatment = data.get("treatment_recommendations", "")
 
-        parts = [f"{date}: {doc_type}"]
-
-        if examiner:
-            # Use full examiner name in summary (no abbreviation)
+        parts = [f"{doc_type} Report dated {date}"]
+        
+        if physician:
             specialty_abbrev = self._abbreviate_specialty(specialty) if specialty else 'QME'
-            if examiner == referral_physician and referral_physician != "":
-                parts.append(f"(Referral: {examiner}, {specialty_abbrev})")
-            else:
-                parts.append(f"({examiner}, {specialty_abbrev})")
+            parts.append(f"by {physician}, {specialty_abbrev}")
 
         if body_parts:
             body_str = ", ".join(body_parts[:3])
@@ -543,34 +564,25 @@ Return JSON:
             findings.append(mmi)
         if impairment:
             findings.append(impairment)
-        if work_status:
-            findings.append(work_status)
 
         if findings:
             parts.append(f"= {'; '.join(findings)}")
 
-        recommendations = []
-        if treatment:
-            recommendations.append(treatment)
-        if future_med:
-            recommendations.append(future_med)
-
-        if recommendations:
-            parts.append(f"→ {'; '.join(recommendations)}")
-
         if restrictions:
-            parts.append(f"; {restrictions}")
-        elif causation:
-            parts.append(f"; {causation}")
+            parts.append(f"Work: {restrictions[:40]}")
+
+        if treatment:
+            parts.append(f"Treatment: {treatment[:40]}")
 
         summary = " ".join(parts)
         words = summary.split()
         if len(words) > 70:
-            summary = " ".join(words[:70]) + "..."
-
+            summary = " ".join(words[:65]) + "..."
+        
         return summary
 
     def _abbreviate_specialty(self, specialty: str) -> str:
+        """Abbreviate medical specialties."""
         abbreviations = {
             "Orthopedic Surgery": "Ortho",
             "Orthopedics": "Ortho",
@@ -583,4 +595,4 @@ Return JSON:
             "Internal Medicine": "IM",
             "Occupational Medicine": "Occ Med",
         }
-        return abbreviations.get(specialty, specialty[:10])
+        return abbreviations.get(specialty, specialty[:12])

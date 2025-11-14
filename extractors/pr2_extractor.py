@@ -1,11 +1,12 @@
 """
-PR-2 Progress Report extractor with DoctorDetector integration.
-All doctor extraction logic delegated to DoctorDetector for consistency.
+PR-2 Progress Report extractor with few-shot prompting and DoctorDetector integration.
 """
 import logging
-from typing import Dict, Optional
+import json
+from typing import Dict, Optional, List
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
@@ -17,11 +18,11 @@ logger = logging.getLogger("document_ai")
 
 class PR2ExtractorChained:
     """
-    Enhanced PR-2 extractor with DoctorDetector integration:
-    - Stage 1: Extract structured clinical data (NO doctor extraction)
-    - Stage 2: Build summary
-    - Stage 3: Verify and correct
-    - Stage 4: Doctor detection via DoctorDetector (zone-aware)
+    Enhanced PR-2 extractor with few-shot prompting:
+    - Stage 1: Extract clinical data using chunked processing with few-shot examples
+    - Stage 2: Doctor detection via DoctorDetector
+    - Stage 3: Build professional summary with few-shot guidance
+    - Stage 4: Verify and correct
     """
 
     def __init__(self, llm: AzureChatOpenAI):
@@ -29,7 +30,14 @@ class PR2ExtractorChained:
         self.parser = JsonOutputParser()
         self.verifier = ExtractionVerifier(llm)
         self.doctor_detector = DoctorDetector(llm)
-        logger.info("✅ PR2ExtractorChained initialized with DoctorDetector")
+        # Initialize recursive text splitter
+        self.splitter = RecursiveCharacterTextSplitter(
+            chunk_size=3000,
+            chunk_overlap=200,
+            separators=["\n\n", "\n", ".", " ", ""],
+            length_function=len,
+        )
+        logger.info("✅ PR2ExtractorChained initialized with few-shot prompting")
 
     def extract(
         self, 
@@ -40,23 +48,16 @@ class PR2ExtractorChained:
         raw_text: Optional[str] = None
     ) -> ExtractionResult:
         """
-        Extract with DoctorDetector integration.
-        
-        Args:
-            text: Layout-preserved text from Document AI
-            doc_type: Document type (PR-2)
-            fallback_date: Fallback date if not found
-            page_zones: Per-page zone extraction {page_num: {header, body, footer, signature}}
-            raw_text: Original flat text (for backward compatibility)
+        Extract with few-shot prompting and DoctorDetector integration.
         """
-        # Stage 1: Extract clinical data (NO doctor extraction in prompt)
+        # Stage 1: Extract clinical data using few-shot chunked processing
         raw_result = self._extract_clinical_data(text, doc_type, fallback_date)
         
-        # Stage 2: Doctor detection via DoctorDetector (zone-aware)
+        # Stage 2: Doctor detection via DoctorDetector
         physician_name = self._detect_physician(text, page_zones)
         raw_result["physician_name"] = physician_name
         
-        # Stage 3: Build initial result
+        # Stage 3: Build initial result with professional summary
         initial_result = self._build_initial_result(raw_result, doc_type, fallback_date)
         
         # Stage 4: Verify and fix
@@ -71,122 +72,168 @@ class PR2ExtractorChained:
         fallback_date: str
     ) -> Dict:
         """
-        Stage 1: Extract clinical data ONLY (NO doctor extraction).
-        Doctor extraction is handled by DoctorDetector.
+        Stage 1: Extract clinical data using few-shot chunked processing.
         """
-        prompt = PromptTemplate(
-            template="""
-You are an AI Medical Assistant extracting structured clinical data from a PR-2 (Progress Report).
+        logger.info(f"🔍 Stage 1: Splitting PR-2 document into chunks (text length: {len(text)})")
+        
+        chunks = self.splitter.split_text(text)
+        logger.info(f"📦 Created {len(chunks)} chunks for processing")
+        
+        # Few-shot examples for PR-2 extraction
+        few_shot_examples = [
+            {
+                "input": """PROGRESS NOTE: Patient with right shoulder pain. STATUS: Improved with PT. 
+                TREATMENT: Continue PT 2x/week, add NSAIDs. WORK: Modified duty - no lifting >10 lbs. 
+                PLAN: Follow-up in 4 weeks.""",
+                "output": {
+                    "report_date": "10/15/2024",
+                    "body_part": "R shoulder",
+                    "current_status": "Improved with PT",
+                    "treatment_recommendations": "Continue PT 2x/week, add NSAIDs",
+                    "work_status": "Modified duty - no lifting >10 lbs",
+                    "next_plan": "Follow-up in 4 weeks"
+                }
+            },
+            {
+                "input": """PR-2 REPORT: Lumbar spine evaluation. STATUS: Stable, minimal pain. 
+                TREATMENT: Continue home exercises. WORK: Full duty, no restrictions. 
+                PLAN: PRN follow-up if symptoms worsen.""",
+                "output": {
+                    "report_date": "11/20/2024",
+                    "body_part": "Lumbar spine",
+                    "current_status": "Stable, minimal pain",
+                    "treatment_recommendations": "Continue home exercises",
+                    "work_status": "Full duty, no restrictions",
+                    "next_plan": "PRN follow-up if symptoms worsen"
+                }
+            },
+            {
+                "input": """PROGRESS REPORT: Right knee post-op. STATUS: Worsened swelling. 
+                TREATMENT: Ice, elevation, continue medications. WORK: TTD. 
+                PLAN: Re-eval next week, consider imaging.""",
+                "output": {
+                    "report_date": "12/05/2024",
+                    "body_part": "R knee",
+                    "current_status": "Worsened swelling",
+                    "treatment_recommendations": "Ice, elevation, continue medications",
+                    "work_status": "TTD",
+                    "next_plan": "Re-eval next week, consider imaging"
+                }
+            }
+        ]
+
+        # System prompt with extraction rules
+        system_prompt = SystemMessagePromptTemplate.from_template("""
+You are a medical data extraction specialist. Extract structured clinical information from PR-2 Progress Reports.
 
 EXTRACTION RULES:
-1. Focus on CLINICAL DATA ONLY (status, body part, treatment, work status, plan).
-2. DO NOT extract physician/doctor names - this is handled separately.
-3. Status: one word or short phrase (e.g., "improved", "unchanged", "worsened", "stable").
-4. Body part: primary area treated (e.g., "R shoulder", "L knee").
-5. Plan: clear next treatment step(s). Include follow-ups, referrals, or testing.
-6. Treatment recommendations: new orders, procedures, or specific medications.
-7. Work status: include phrases like "TTD", "modified duty", "return to full duty", or similar.
-8. If any "?" is used (e.g., "? MMI"), replace with a brief clarification (e.g., "uncertain, pending evaluation").
-9. Output must be short, factual, and readable.
+- Extract ONLY information present in the text
+- Return empty string "" for missing fields
+- Be precise and clinical in terminology
+- For work status: extract specific restrictions and limitations
+- For treatments: include specific procedures, therapies, medications
+- For status: use terms like "improved", "stable", "worsened", "resolved"
+- DO NOT extract physician names - handled separately
 
-Document text:
+OUTPUT FORMAT: JSON with these exact fields:
+- report_date, body_part, current_status
+- treatment_recommendations, work_status, next_plan
+""")
+
+        # User prompt with few-shot examples
+        user_prompt = HumanMessagePromptTemplate.from_template("""
+EXAMPLES:
+{examples}
+
+NOW EXTRACT FROM THIS PR-2 TEXT:
 {text}
 
-Extract these fields:
-- report_date: Date of report (MM/DD/YY format, or use {fallback_date} if not found)
-- body_part: Primary area addressed (e.g., "R shoulder", "L knee")
-- current_status: Patient's current clinical status (max 10 words)
-- treatment_recommendations: New or continued treatments, including medications (max 12 words)
-- work_status: Work ability or restriction (max 16 words)
-- next_plan: Next step / follow-up (max 16 words)
+Return valid JSON only.
+""")
 
-CRITICAL REASONING RULES - VERIFY BEFORE RETURNING:
-
-1. EXTRACT ALL KEY FINDINGS - both positive and negative clinical findings:
-   ✓ GOOD (Positive): "Continue PT 2x/week", "Add gabapentin 300mg", "Follow-up in 2 weeks"
-   ✓ GOOD (Negative): "No treatment changes - stable", "Resolved - no further treatment", "Full duty - no restrictions"
-   ✗ BAD (Placeholders): "Not mentioned", "Not provided", "N/A"
-   
-2. If a field has NO actual information (truly not mentioned in document), return empty string "".
-   If field has actual clinical finding (even negative), include it with context.
-   
-3. For current_status: Extract actual status assessment:
-   ✓ GOOD: "Improved", "Unchanged", "Worsened", "Stable", "Resolved", "Plateaued"
-   ✗ BAD: "Not specified" (use empty string instead)
-   
-4. For treatment_recommendations: Extract actual treatment plan:
-   ✓ GOOD: "Continue PT 2x/week", "Start NSAIDs", "ESI scheduled", "No changes - continue current meds"
-   ✓ GOOD: "No further treatment needed - condition resolved"
-   ✗ BAD: "No new treatments" (too vague - specify: "Continue current treatment" or "No treatment changes")
-   
-5. For work_status: Extract actual work status/restrictions:
-   ✓ GOOD: "TTD", "Modified duty - no lifting >10 lbs", "Full duty - no restrictions", "Return to work 01/15/25"
-   ✓ GOOD: "Restrictions lifted - cleared for full duty"
-   ✗ BAD: "Not mentioned" (use empty string instead)
-   
-6. For next_plan: Extract actual follow-up plan:
-   ✓ GOOD: "Follow-up in 2 weeks", "Re-eval in 1 month", "Discharge to home exercise program"
-   ✓ GOOD: "No follow-up needed - patient discharged", "PRN follow-up if symptoms worsen"
-   ✗ BAD: "No follow-up" without context (specify: "No follow-up needed - condition stable")
-
-7. REASONING CHECK: Before returning each field, ask yourself:
-   - "Does this contain actual information from the PR-2 report (whether positive or negative)?"
-   - "Would a treating physician or case manager find this clinically useful?"
-   - If YES → include it (include negative findings like "stable", "no restrictions", "resolved")
-   - If NO (placeholder like "not mentioned") → return empty string
-
-Return JSON:
-{{
-  "report_date": "MM/DD/YY or {fallback_date}",
-  "body_part": "Primary part or empty",
-  "current_status": "Status term or empty",
-  "treatment_recommendations": "Treatments or meds or empty",
-  "work_status": "Work status or empty",
-  "next_plan": "Follow-up plan or empty"
-}}
-
-{format_instructions}
-""",
-            input_variables=["text", "fallback_date"],
-            partial_variables={
-                "format_instructions": self.parser.get_format_instructions()
-            },
-        )
+        # Create the chat prompt template
+        chat_prompt = ChatPromptTemplate.from_messages([
+            system_prompt,
+            user_prompt
+        ])
 
         try:
-            chain = prompt | self.llm | self.parser
-            result = chain.invoke({
-                "text": text[:8000],
-                "fallback_date": fallback_date,
-            })
-            logger.info("✅ Stage 1: Clinical data extraction complete")
-            return result
+            partial_results = []
+            for i, chunk in enumerate(chunks):
+                logger.debug(f"🔄 Processing chunk {i+1}/{len(chunks)}")
+                
+                # Format few-shot examples as string
+                examples_str = "\n\n".join([
+                    f"Input: {ex['input']}\nOutput: {json.dumps(ex['output'])}" 
+                    for ex in few_shot_examples
+                ])
+                
+                chain = chat_prompt | self.llm | self.parser
+                partial = chain.invoke({
+                    "examples": examples_str,
+                    "text": chunk
+                })
+                partial_results.append(partial)
+                logger.debug(f"✅ Chunk {i+1} processed")
+            
+            # Merge partial extractions
+            merged_result = self._merge_partial_extractions(partial_results, fallback_date)
+            logger.info(f"✅ Stage 1: Few-shot extraction completed - {len(partial_results)} chunks merged")
+            return merged_result
+            
         except Exception as e:
-            logger.error(f"❌ PR-2 clinical data extraction failed: {e}")
-            return {}
+            logger.error(f"❌ PR-2 few-shot extraction failed: {e}")
+            return self._get_fallback_result(fallback_date)
+
+    def _merge_partial_extractions(self, partials: List[Dict], fallback_date: str) -> Dict:
+        """Merge extractions from multiple chunks."""
+        if not partials:
+            return self._get_fallback_result(fallback_date)
+        
+        merged = self._get_fallback_result(fallback_date)
+        
+        # String fields: take most complete value across chunks
+        string_fields = [
+            "report_date", "body_part", "current_status",
+            "treatment_recommendations", "work_status", "next_plan"
+        ]
+        
+        for field in string_fields:
+            candidates = []
+            for partial in partials:
+                value = partial.get(field, "")
+                if isinstance(value, str) and value.strip() and value.strip() != fallback_date:
+                    candidates.append(value.strip())
+            
+            if candidates:
+                candidates.sort(key=len, reverse=True)
+                merged[field] = candidates[0]
+
+        # Special handling for date
+        if not merged["report_date"]:
+            merged["report_date"] = fallback_date
+
+        logger.info(f"📊 Merge completed: body_part='{merged['body_part']}', status='{merged['current_status']}'")
+        return merged
+
+    def _get_fallback_result(self, fallback_date: str) -> Dict:
+        """Return minimal fallback result structure."""
+        return {
+            "report_date": fallback_date,
+            "body_part": "",
+            "current_status": "",
+            "treatment_recommendations": "",
+            "work_status": "",
+            "next_plan": "",
+        }
 
     def _detect_physician(
         self,
         text: str,
         page_zones: Optional[Dict[str, Dict[str, str]]] = None
     ) -> str:
-        """
-        Stage 2: Detect physician using DoctorDetector (zone-aware).
-        
-        Args:
-            text: Full document text
-            page_zones: Page zones for zone-aware detection
-        
-        Returns:
-            Physician name with title, or empty string
-        """
-        logger.info("🔍 Stage 2: Running DoctorDetector (zone-aware)...")
-        
-        # Debug: Check if page_zones is provided
-        if page_zones:
-            logger.info(f"✅ PR2 extractor received page_zones with {len(page_zones)} pages: {list(page_zones.keys())}")
-        else:
-            logger.warning("⚠️ PR2 extractor did NOT receive page_zones")
+        """Stage 2: Detect physician using DoctorDetector."""
+        logger.info("🔍 Stage 2: Running DoctorDetector...")
         
         detection_result = self.doctor_detector.detect_doctor(
             text=text,
@@ -194,19 +241,10 @@ Return JSON:
         )
         
         if detection_result["doctor_name"]:
-            logger.info(
-                f"✅ Physician detected: {detection_result['doctor_name']} "
-                f"(confidence: {detection_result['confidence']}, "
-                f"source: {detection_result['source']})"
-            )
-            physician_name = detection_result["doctor_name"]
-            logger.info(f"🎯 PR2 extractor returning physician: '{physician_name}'")
-            return physician_name
+            logger.info(f"✅ Physician detected: {detection_result['doctor_name']}")
+            return detection_result["doctor_name"]
         else:
-            logger.warning(
-                f"⚠️  No valid physician found: {detection_result['validation_notes']}"
-            )
-            logger.info("🎯 PR2 extractor returning empty physician name")
+            logger.warning("⚠️ No valid physician found")
             return ""
 
     def _build_initial_result(
@@ -215,9 +253,9 @@ Return JSON:
         doc_type: str,
         fallback_date: str
     ) -> ExtractionResult:
-        """Stage 3: Build initial result with validation and summary"""
+        """Stage 3: Build initial result with professional summary."""
         cleaned = self._validate_and_clean(raw_data, fallback_date)
-        summary_line = self._build_pr2_summary(cleaned, doc_type, fallback_date)
+        summary_line = self._build_professional_summary(cleaned, doc_type, fallback_date)
         
         result = ExtractionResult(
             document_type=doc_type,
@@ -232,19 +270,19 @@ Return JSON:
         return result
 
     def _validate_and_clean(self, result: Dict, fallback_date: str) -> Dict:
-        """Validate and clean extracted data"""
+        """Validate and clean extracted data."""
         cleaned = {}
         
         # Date validation
-        date = result.get("report_date", "").strip()
+        date = result.get("report_date", "")
         cleaned["report_date"] = date if date and date != "empty" else fallback_date
 
-        # Physician (from DoctorDetector - already validated)
-        physician = result.get("physician_name", "").strip()
-        cleaned["physician_name"] = physician
+        # Physician (from DoctorDetector)
+        physician = result.get("physician_name", "")
+        cleaned["physician_name"] = physician.strip()
 
         # Body part validation
-        body_part = result.get("body_part", "").strip()
+        body_part = result.get("body_part", "")
         cleaned["body_part"] = body_part if body_part and body_part != "empty" else ""
 
         # String fields validation
@@ -255,49 +293,158 @@ Return JSON:
             "next_plan",
         ]
         
-        # Negative phrases that should be filtered out (non-actionable information)
         negative_phrases = [
             "no treatment", "no changes", "no new", "no follow-up",
             "fully resolved", "resolved", "no restrictions",
             "released to full duty", "full duty", "unrestricted",
-            "not indicated", "not recommended", "not needed",
-            "no significant", "within normal limits", "stable with no changes"
+            "not indicated", "not recommended", "not needed"
         ]
         
-        for f in string_fields:
-            v = result.get(f, "").strip()
+        for field in string_fields:
+            raw_value = result.get(field, "")
+            
+            if isinstance(raw_value, list):
+                v = ", ".join([str(item).strip() for item in raw_value if item])
+            elif isinstance(raw_value, str):
+                v = raw_value.strip()
+            else:
+                v = str(raw_value).strip() if raw_value else ""
+            
             v_lower = v.lower()
             
-            # Check if empty or placeholder
-            if not v or v_lower in [
-                "", "empty", "none", "n/a", "not mentioned", "not specified"
-            ]:
-                cleaned[f] = ""
+            if not v or v_lower in ["", "empty", "none", "n/a", "not mentioned"]:
+                cleaned[field] = ""
                 continue
             
-            # Check if contains negative/non-actionable phrases
-            is_negative = any(neg_phrase in v_lower for neg_phrase in negative_phrases)
-            if is_negative:
-                logger.debug(f"⚠️ Filtering out negative phrase in {f}: {v}")
-                cleaned[f] = ""
+            if any(neg_phrase in v_lower for neg_phrase in negative_phrases):
+                cleaned[field] = ""
                 continue
             
-            # Keep only meaningful, actionable information
-            cleaned[f] = v
+            cleaned[field] = v
 
         return cleaned
 
-    def _build_pr2_summary(
-    self,
-    data: Dict,
-    doc_type: str,
-    fallback_date: str
-) -> str:
-        """
-        Build concise, physician-friendly summary for PR-2 report.
-        Uses explicit field labels for clarity (e.g., "Status → improved", "Work status → TTD").
-        Enforces 35-65 word range.
-        """
+    def _build_professional_summary(
+        self,
+        data: Dict,
+        doc_type: str,
+        fallback_date: str
+    ) -> str:
+        """Build professional 50-60 word summary using few-shot approach."""
+        
+        # Few-shot examples for summary generation
+        summary_examples = [
+            {
+                "data": {
+                    "date": "10/15/2024",
+                    "physician": "Dr. Smith",
+                    "body_part": "R shoulder",
+                    "status": "Improved with PT",
+                    "treatment": "Continue PT 2x/week, add NSAIDs",
+                    "work_status": "Modified duty - no lifting >10 lbs",
+                    "next_plan": "Follow-up in 4 weeks"
+                },
+                "summary": "PR-2 Progress Report dated 10/15/2024 by Dr. Smith for R shoulder. Clinical status: Improved with PT. Work status: Modified duty with no lifting over 10 lbs. Treatment: Continue PT 2x/week and add NSAIDs. Plan: Follow-up evaluation in 4 weeks to assess progress."
+            },
+            {
+                "data": {
+                    "date": "11/20/2024",
+                    "physician": "",
+                    "body_part": "Lumbar spine",
+                    "status": "Stable, minimal pain",
+                    "treatment": "Continue home exercises",
+                    "work_status": "Full duty, no restrictions",
+                    "next_plan": "PRN follow-up"
+                },
+                "summary": "PR-2 Progress Report dated 11/20/2024 for lumbar spine. Patient reports stable condition with minimal pain. Cleared for full duty work without restrictions. Treatment plan: continue home exercise program. Follow-up as needed if symptoms change."
+            }
+        ]
+
+        # System prompt for summary generation
+        system_prompt = SystemMessagePromptTemplate.from_template("""
+You are a medical summarizer creating concise PR-2 Progress Report summaries for physicians.
+
+RULES:
+- Keep summary 50-60 words
+- Focus on clinical progress and recommendations
+- Use professional medical language
+- Include: date, body part, status, key treatments, work status, follow-up plan
+- Be concise but informative
+- Maintain clinical accuracy
+""")
+
+        # User prompt with data and examples
+        user_prompt = HumanMessagePromptTemplate.from_template("""
+EXAMPLES:
+{examples}
+
+NOW CREATE SUMMARY FROM THIS DATA:
+Date: {date}
+Physician: {physician}
+Body Part: {body_part}
+Status: {status}
+Treatment: {treatment}
+Work Status: {work_status}
+Next Plan: {next_plan}
+
+Create a professional 50-60 word summary:
+""")
+
+        chat_prompt = ChatPromptTemplate.from_messages([
+            system_prompt,
+            user_prompt
+        ])
+
+        try:
+            # Prepare data
+            date = data.get("report_date", fallback_date)
+            physician = data.get("physician_name", "")
+            body_part = data.get("body_part", "")
+            status = data.get("current_status", "")
+            treatment = data.get("treatment_recommendations", "")
+            work_status = data.get("work_status", "")
+            next_plan = data.get("next_plan", "")
+
+            # Format few-shot examples
+            examples_str = "\n\n".join([
+                f"Data: {json.dumps(ex['data'])}\nSummary: {ex['summary']}" 
+                for ex in summary_examples
+            ])
+
+            chain = chat_prompt | self.llm
+            response = chain.invoke({
+                "examples": examples_str,
+                "date": date,
+                "physician": physician,
+                "body_part": body_part,
+                "status": status,
+                "treatment": treatment,
+                "work_status": work_status,
+                "next_plan": next_plan
+            })
+            
+            summary = response.content.strip()
+            
+            # Ensure appropriate length
+            words = summary.split()
+            if len(words) > 70:
+                summary = " ".join(words[:65]) + "..."
+            elif len(words) < 45:
+                # Add context if too short
+                if body_part and not status:
+                    summary += f" {body_part} condition reviewed."
+                if not summary.endswith('.'):
+                    summary += '.'
+            
+            logger.info(f"📊 Generated PR-2 summary: {len(summary.split())} words")
+            return summary
+            
+        except Exception as e:
+            logger.error(f"❌ PR-2 summary generation failed: {e}")
+            return self._build_manual_summary(data, doc_type, fallback_date)
+
+    def _build_manual_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
+        """Fallback manual summary construction."""
         date = data.get("report_date", fallback_date)
         physician = data.get("physician_name", "")
         body_part = data.get("body_part", "")
@@ -306,121 +453,29 @@ Return JSON:
         work_status = data.get("work_status", "")
         next_plan = data.get("next_plan", "")
 
-        # Doctor section (only if valid)
-        doctor_section = ""
-        if physician:
-            doctor_section = f" {physician}"
-
-        # Compose enhanced summary prompt with explicit labeling rules
-        summary_prompt = f"""You are an expert medical summarizer creating a concise PR-2 Progress Report summary for physicians.
-
-    REQUIRED FORMAT WITH LABELS:
-    PR-2{doctor_section} for [Body part] [DATE]: | Clinical status → [Status] | Work status → [Work status] | Treatment → [Meds/procedures] | Plan → [Follow-up/next steps]
-
-    CRITICAL RULES:
-    1. ALWAYS prefix field values with labels for clarity:
-    - "Clinical status →" before current_status
-    - "Work status →" before work_status  
-    - "Treatment →" before treatment_recommendations
-    - "Plan →" before next_plan
-    2. Use "→" arrows to separate labels from values
-    3. Use "|" pipes to separate major sections
-    4. Omit entire sections (including labels) if field is empty
-    5. Keep concise (35-65 words total)
-    6. Do NOT write standalone ambiguous terms like "Uncertain" - always include the label
-
-    EXAMPLES:
-    Good: "09/26/25: PR-2 by Dr. Smith for R shoulder | Clinical status → improved | Work status → TTD | Treatment → Continue PT, add NSAIDs | Plan → Re-eval in 2 weeks"
-    Good: "10/05/25: PR-2 for L knee | Clinical status → stable | Work status → modified duty, no lifting >20 lbs | Plan → Follow-up in 4 weeks"
-    Bad: "09/26/25: PR-2 for Head = Improved; Uncertain → Continue meds" (missing labels!)
-
-    EXTRACTED FIELDS:
-    - report_date: {date}
-    - physician_name: {physician}
-    - body_part: {body_part}
-    - current_status: {status}
-    - treatment_recommendations: {treatment}
-    - work_status: {work_status}
-    - next_plan: {next_plan}
-
-    Generate the summary now (35-65 words, with field labels):"""
-
-        try:
-            summary_chain = PromptTemplate(
-                template="""{summary_prompt}""",
-                input_variables=["summary_prompt"]
-            ) | self.llm
-            
-            response = summary_chain.invoke({"summary_prompt": summary_prompt})
-            summary = response.content if hasattr(response, 'content') else str(response)
-            summary = summary.strip()
-            
-            # Validate that labels are present
-            required_labels = []
-            if status:
-                required_labels.append("Clinical status →")
-            if work_status:
-                required_labels.append("Work status →")
-            if treatment or next_plan:
-                required_labels.append("→")  # At least one arrow should be present
-            
-            missing_labels = [label for label in required_labels if label not in summary]
-            if missing_labels:
-                logger.warning(f"⚠️ Summary missing required labels: {missing_labels}. Rebuilding...")
-                # Fallback to manual construction
-                summary = self._build_manual_summary(date, doc_type, doctor_section, body_part, status, treatment, work_status, next_plan)
-            
-            logger.info(f"✅ PR-2 Summary: {summary}")
-            return summary
-            
-        except Exception as e:
-            logger.error(f"❌ PR-2 summary LLM failed: {e}")
-            # Fallback: manual construction with labels
-            return self._build_manual_summary(date, doc_type, doctor_section, body_part, status, treatment, work_status, next_plan)
-
-    def _build_manual_summary(
-        self,
-        date: str,
-        doc_type: str,
-        doctor_section: str,
-        body_part: str,
-        status: str,
-        treatment: str,
-        work_status: str,
-        next_plan: str
-    ) -> str:
-        """
-        Manual summary construction with explicit field labels.
-        Fallback when LLM fails or produces unlabeled output.
-        """
-        parts = [f"{date}: {doc_type}"]
+        parts = [f"PR-2 Progress Report dated {date}"]
         
-        if doctor_section:
-            parts.append(doctor_section)
+        if physician:
+            parts.append(f"by {physician}")
         
         if body_part:
             parts.append(f"for {body_part}")
-        
-        # Clinical findings with labels
-        findings = []
+
         if status:
-            findings.append(f"Clinical status → {status}")
+            parts.append(f"Status: {status}")
+
         if work_status:
-            findings.append(f"Work status → {work_status}")
-        
-        if findings:
-            parts.append(f"| {' | '.join(findings)}")
-        
-        # Treatment and plan with labels
-        actions = []
+            parts.append(f"Work: {work_status[:40]}")
+
         if treatment:
-            actions.append(f"Treatment → {treatment}")
+            parts.append(f"Treatment: {treatment[:40]}")
+
         if next_plan:
-            actions.append(f"Plan → {next_plan}")
-        
-        if actions:
-            parts.append(f"| {' | '.join(actions)}")
-        
+            parts.append(f"Plan: {next_plan[:30]}")
+
         summary = " ".join(parts)
-        logger.info(f"✅ Manual PR-2 summary built: {summary}")
+        words = summary.split()
+        if len(words) > 70:
+            summary = " ".join(words[:65]) + "..."
+        
         return summary
