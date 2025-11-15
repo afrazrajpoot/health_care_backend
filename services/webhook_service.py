@@ -100,13 +100,22 @@ class WebhookService:
             raise HTTPException(status_code=400, detail="Missing required fields in webhook payload")
         
         result_data = data["result"]
-        text = result_data.get("text", "")
+        text = result_data.get("text", "")  # Layout-preserved text (fallback)
+        llm_text = result_data.get("llm_text")  # NEW: Structured JSON for LLM (can be None)
+        page_zones = result_data.get("page_zones")  # NEW: Per-page zones (can be None)
         mode = data.get("mode", "wc")
         
         logger.info(f"📋 Document mode: {mode}")
+        logger.info(f"🔍 Extraction data available:")
+        logger.info(f"   - Layout text: {len(text)} chars")
+        logger.info(f"   - LLM JSON text: {len(llm_text) if llm_text else 0} chars")
+        logger.info(f"   - Page zones: {len(page_zones) if page_zones else 0} pages")
         
-        # Use text directly (no DLP de-identification)
-        deidentified_text = text
+        # Use LLM-optimized text if available, fallback to layout text
+        text_for_llm = llm_text if llm_text else text
+        logger.info(f"🤖 Using {'LLM-optimized JSON' if llm_text else 'layout-preserved'} text for analysis")
+        
+        # No DLP de-identification needed
         extracted_phi = {
             "patient_name": "",
             "claim_number": "",
@@ -116,11 +125,16 @@ class WebhookService:
         # OPTIMIZATION: Run analysis and summary generation in parallel
         analyzer = EnhancedReportAnalyzer()
         
+        # Pass page_zones to extraction for zone-aware doctor detection
         analysis_task = asyncio.create_task(
-            asyncio.to_thread(analyzer.extract_document_data_with_reasoning, deidentified_text)
+            asyncio.to_thread(
+                analyzer.extract_document_data_with_reasoning, 
+                text_for_llm,
+                page_zones  # NEW: Pass zones for enhanced extraction
+            )
         )
         summary_task = asyncio.create_task(
-            asyncio.to_thread(analyzer.generate_brief_summary, deidentified_text)
+            asyncio.to_thread(analyzer.generate_brief_summary, text_for_llm)
         )
         
         # Wait for both to complete
@@ -193,7 +207,8 @@ class WebhookService:
             "document_analysis": document_analysis,
             "brief_summary": brief_summary,
             "extracted_phi": extracted_phi,
-            "deidentified_text": deidentified_text,
+            "text_for_analysis": text_for_llm,  # Text used for LLM analysis
+            "page_zones": page_zones,  # NEW: Pass zones forward
             "has_date_reasoning": has_date_reasoning,
             "date_reasoning_data": {
                 "reasoning": document_analysis.date_reasoning.reasoning if has_date_reasoning else "",
@@ -454,7 +469,7 @@ class WebhookService:
         comparison_task = asyncio.create_task(
             asyncio.to_thread(
                 analyzer.compare_with_previous_documents,
-                processed_data["deidentified_text"]
+                processed_data["text_for_analysis"]  # Use same text as LLM analysis
             )
         )
         

@@ -482,14 +482,16 @@ Return **valid JSON only** following the schema in the system template.
             )
 
             human_prompt = HumanMessagePromptTemplate.from_template(
-                """Generate a concise 1-2 sentence professional summary of this medical document.
+                """Analyze the following medical document. Identify the report type (e.g., AME, QME, Progress Note, Operative Report) and extract all critical, actionable, and key findings specific to that report type.
+
+Generate a highly detailed, professional summary that immediately provides the physician with the most crucial information without missing any important details
 
 DOCUMENT TEXT:
 {document_text}
 
 CURRENT DATE: {current_date}
 
-Focus: Patient condition, key findings, recommendations. Use clinical language.
+# Focus: Patient condition, key findings, recommendations. Use clinical language.
 
 {format_instructions}"""
             )

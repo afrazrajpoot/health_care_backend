@@ -1,10 +1,13 @@
 """
-QME/AME/IME specialized extractor with few-shot prompting and chunked processing
+QME/AME/IME Enhanced Extractor - Medical-Legal Focus (Parallel Processing)
+Optimized for 6 critical categories with thread-based parallel chunk processing
 """
 import logging
 import re
 import json
+import time
 from typing import Dict, Optional, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -19,11 +22,7 @@ logger = logging.getLogger("document_ai")
 
 class QMEExtractorChained:
     """
-    Enhanced QME extractor with few-shot prompting and chunked processing:
-    Stage 1: Extract raw data from full document via chunked processing
-    Stage 2: Detect examiner via DoctorDetector (zone-aware)
-    Stage 3: Build professional 50-60 word summary
-    Stage 4: Verify and correct
+    Enhanced QME extractor with parallel processing for 6 medical-legal categories
     """
 
     def __init__(self, llm: AzureChatOpenAI):
@@ -31,256 +30,601 @@ class QMEExtractorChained:
         self.parser = JsonOutputParser()
         self.verifier = ExtractionVerifier(llm)
         self.doctor_detector = DoctorDetector(llm)
-        # Pre-compile regex for efficiency
+        
+        # Pre-compile regex
         self.medical_credential_pattern = re.compile(
             r'\b(dr\.?|doctor|m\.?d\.?|d\.?o\.?|mbbs|m\.?b\.?b\.?s\.?)\b',
             re.IGNORECASE
         )
-        # Initialize recursive text splitter for large documents
+        
+        # Optimized chunking settings (4000 chars with 200 overlap)
         self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=3000,
-            chunk_overlap=200,
-            separators=["\n\n", "\n", ".", " ", ""],
+            chunk_size=4000,  # Optimal for QME reports
+            chunk_overlap=200,  # Good overlap for context
+            separators=["\n\n\n", "\n\n", "\n", ". ", " ", ""],  # Section-aware
             length_function=len,
         )
-        logger.info("✅ QMEExtractorChained initialized with few-shot prompting")
+        
+        logger.info("✅ QMEExtractorChained initialized with parallel processing")
 
     def extract(
-        self, 
-        text: str, 
-        doc_type: str, 
+        self,
+        text: str,
+        doc_type: str,
         fallback_date: str,
         page_zones: Optional[Dict[str, Dict[str, str]]] = None,
         raw_text: Optional[str] = None
     ) -> ExtractionResult:
-        """
-        Extract with DoctorDetector integration and verification chain.
-        """
-        if page_zones:
-            logger.info(f"✅ QME extractor received page_zones with {len(page_zones)} pages")
-        else:
-            logger.warning("⚠️ QME extractor did NOT receive page_zones")
+        """Extract QME data with parallel chunk processing"""
+        logger.info("=" * 80)
+        logger.info("🏥 STARTING QME MEDICAL-LEGAL EXTRACTION (PARALLEL)")
+        logger.info("=" * 80)
         
-        # Stage 1: Extract clinical data using chunked processing
-        raw_result = self._extract_raw_data(text, doc_type, fallback_date)
+        # Stage 1: Extract clinical data using parallel chunked processing
+        raw_result = self._extract_medical_legal_data_parallel(text, doc_type, fallback_date)
         
         # Stage 2: Detect examiner via DoctorDetector
         examiner_name = self._detect_examiner(text, page_zones)
-        raw_result["examiner_name"] = examiner_name
+        raw_result["qme_physician_name"] = examiner_name
         
-        # Stage 3: Build initial result with professional summary
+        # Stage 3: Build initial result
         initial_result = self._build_initial_result(raw_result, doc_type, fallback_date)
         
         # Stage 4: Verify and fix
         final_result = self.verifier.verify_and_fix(initial_result)
+        
+        logger.info("=" * 80)
+        logger.info("✅ QME MEDICAL-LEGAL EXTRACTION COMPLETE")
+        logger.info("=" * 80)
+        
         return final_result
 
-    def _extract_raw_data(self, text: str, doc_type: str, fallback_date: str) -> Dict:
-        """Stage 1: Extract raw structured data using chunked processing with few-shot prompts"""
-        logger.info(f"🔍 Stage 1: Splitting document into chunks (text length: {len(text)})")
-        
+    def _extract_medical_legal_data_parallel(self, text: str, doc_type: str, fallback_date: str) -> Dict:
+        """
+        Stage 1: Extract with PARALLEL chunk processing for speedup
+        """
+        logger.info(f"🔍 Stage 1: Splitting document (length: {len(text)} chars)")
         chunks = self.splitter.split_text(text)
-        logger.info(f"📦 Created {len(chunks)} chunks for processing")
+        logger.info(f"📦 Created {len(chunks)} chunks for PARALLEL processing")
         
-        # Few-shot examples for better prompting
-        few_shot_examples = [
-            {
-                "input": """QME REPORT: Patient with right shoulder pain. EXAM: Right shoulder tenderness. 
-                DIAGNOSIS: Rotator cuff tear. MMI: Reached. IMPAIRMENT: 15% WPI. 
-                WORK STATUS: No overhead lifting. TREATMENT: PT 2x/week.""",
-                "output": {
-                    "document_date": "10/15/2024",
-                    "examiner_name": "Dr. John Smith",
-                    "referral_physician": "",
-                    "specialty": "Ortho",
-                    "body_parts_evaluated": ["R shoulder"],
-                    "diagnoses_confirmed": ["Rotator cuff tear"],
-                    "MMI_status": "MMI reached",
-                    "impairment_summary": "15% WPI",
-                    "causation_opinion": "",
-                    "treatment_recommendations": "PT 2x/week",
-                    "medication_recommendations": "",
-                    "work_restrictions": "No overhead lifting",
-                    "future_medical_recommendations": ""
-                }
-            },
-            {
-                "input": """AME EVALUATION: Lumbar spine injury. FINDINGS: L4-5 disc herniation. 
-                MMI: Not reached. IMPAIRMENT: Deferred. WORK: TTD. TREATMENT: ESI recommended.""",
-                "output": {
-                    "document_date": "11/20/2024",
-                    "examiner_name": "Dr. Sarah Chen, MD",
-                    "referral_physician": "",
-                    "specialty": "Pain Management",
-                    "body_parts_evaluated": ["Lumbar spine"],
-                    "diagnoses_confirmed": ["L4-5 disc herniation"],
-                    "MMI_status": "MMI not reached",
-                    "impairment_summary": "Deferred",
-                    "causation_opinion": "",
-                    "treatment_recommendations": "ESI recommended",
-                    "medication_recommendations": "",
-                    "work_restrictions": "TTD",
-                    "future_medical_recommendations": ""
-                }
-            }
-        ]
-
-        # System prompt with instructions
+        # Build prompt
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a medical data extraction specialist. Extract structured clinical information from QME/AME/IME reports.
+You are a senior QME/IME/AME Medical-Legal Extraction Engine.
+Your job is to extract HIGH-ACCURACY structured data from long medical-legal reports
+(QME, AME, IME, PR-2, PR-4, PTP notes, orthopedic reports, pain management reports).
 
+🎯 PRIMARY GOAL:
+Return a COMPLETE, NO-MISSING-FIELDS structured extraction for ALL medically and legally
+relevant information contained in the report.
+
+YOU MUST EXTRACT THE FOLLOWING CATEGORIES WITH MAXIMUM COMPLETENESS:
+
+===================================================================
+I. CORE CASE IDENTITY (REQUIRED)
+- Applicant/Case Name
+- Patient name (even if repeated in multiple sections)
+- Patient DOB and/or age
+- Date of Injury (DOI)
+- Dates: evaluation date, exam date, report date
+- Evaluating physician name, credentials, and specialty/subspecialty
+- Referring attorney or insurer (if mentioned)
+
+===================================================================
+II. DIAGNOSES (FULL LIST)
+Extract ALL diagnoses exactly as written, including:
+- Musculoskeletal diagnoses
+- Psych diagnoses
+- Internal medicine and rheumatology findings
+- Chronic conditions
+- Differential diagnoses
+- Laterality (left/right/bilateral)
+- ICD-10 codes if included
+
+The diagnoses list MUST be complete, not abbreviated.
+
+===================================================================
+III. SURGICAL & TREATMENT HISTORY
+Extract ALL:
+- Past surgeries (arthroscopy, TKA, THA, meniscectomy, RFA, injections)
+- Dates of surgeries
+- Prior conservative care (PT, acupuncture, chiropractic)
+- Relevant imaging and findings
+
+===================================================================
+IV. EXAM FINDINGS & CLINICAL STATUS
+Extract EXACT values and descriptions:
+- Pain score (current and highest)
+- Gait abnormalities
+- ROM limits (degrees, flexion, extension)
+- Positive special tests (McMurray, Lachman, FABER, Hawkins, SLRT, etc.)
+- Neurologic deficits
+- Swelling, effusion, tenderness
+- Muscle weakness
+- Imaging summaries if included
+
+===================================================================
+V. MEDICATIONS (COMPLETE LIST)
+Categorize medications into:
+- Narcotics/opioids
+- Neuropathic pain meds (Gabapentin, Duloxetine, Amitriptyline, etc.)
+- Anti-inflammatories (NSAIDs, Meloxicam, Ibuprofen)
+- Other long-term meds (statins, antihistamines, inhalers, dermatologic meds)
+Include dosages WHEN explicitly provided.
+
+===================================================================
+VI. MEDICAL-LEGAL OPINIONS (CRITICAL)
+Extract EXACT legal conclusions:
+- MMI / P&S Status (Yes, No, or Deferred)
+- If deferred → extract the REASON
+- WPI % (whole person impairment)
+- If deferred → extract the REASON
+- Apportionment explanation
+- Industrial vs non-industrial percentages
+- Causation summary (industrial vs degenerative)
+
+===================================================================
+VII. FUTURE TREATMENT & RECOMMENDATIONS
+Extract ALL future care recommendations:
+- Surgeries
+- Injections (steroid, PRP, genicular nerve blocks, RFA)
+- Diagnostic testing (MRI, CT, sleep study)
+- Specialist referrals (Rheumatology QME, Psych QME, Neuro QME)
+- Medication changes
+- Follow-up QME timelines
+
+===================================================================
+VIII. WORK STATUS & RESTRICTIONS
+Extract:
+- TTD / TPD / Full Duty / Modified Duty
+- Specific functional restrictions (e.g., no kneeling, lifting <10 lbs)
+- RTW status and reasoning
+- Anticipated RTW timeline if stated
+
+===================================================================
 EXTRACTION RULES:
-- Extract ONLY information present in the text
-- Return empty string "" for missing fields
-- Be precise and clinical
-- For work restrictions: extract specific limitations
-- For treatments: be specific about procedures
-- For medications: include drug names and dosages
+- DO NOT INVENT OR FILL IN MISSING INFORMATION.
+- Only extract text explicitly found in the document.
+- Use empty strings "" or empty lists [] for missing values.
+- Preserve original medical wording EXACTLY.
+- If something appears in multiple sections, include it only once.
+- If data is uncertain, include the exact phrasing used (e.g., “Osteoarthritis vs labral injury”).
 
-OUTPUT FORMAT: JSON with these exact fields:
-- document_date, examiner_name, referral_physician, specialty
-- body_parts_evaluated (list), diagnoses_confirmed (list)
-- MMI_status, impairment_summary, causation_opinion
-- treatment_recommendations, medication_recommendations
-- work_restrictions, future_medical_recommendations
+===================================================================
+OUTPUT:
+Return ONLY the JSON structure required by the user prompt.
+Do NOT include commentary, summaries, or additional text.
 """)
 
-        # User prompt with few-shot examples
         user_prompt = HumanMessagePromptTemplate.from_template("""
-EXAMPLES:
-{examples}
+Extract ALL medically and legally relevant data from the following QME/AME/IME text.
 
-NOW EXTRACT FROM THIS TEXT:
+You MUST NOT miss ANY information.
+
+TEXT:
 {text}
 
-Return valid JSON only.
+Return JSON using this exact structure and field names:
+
+{{
+  "category_1_core_identity": {{
+    "applicant_or_case_name": "",
+    "patient_name": "",
+    "patient_age": "",
+    "patient_dob": "",
+    "date_of_injury": "",
+    "evaluation_date": "",
+    "report_date": "",
+    "qme_physician_name": "",
+    "qme_specialty": ""
+  }},
+  "category_2_diagnosis": {{
+    "primary_diagnoses": [],
+    "icd_codes": [],
+    "affected_body_parts": []
+  }},
+  "category_3_clinical_status": {{
+    "past_surgeries": [],
+    "current_chief_complaint": "",
+    "pain_score_current": "",
+    "pain_score_max": "",
+    "objective_findings": {{
+      "rom_limitations": "",
+      "gait_abnormalities": "",
+      "positive_tests": "",
+      "effusion_swelling": "",
+      "neurologic_findings": "",
+      "other_objective": ""
+    }}
+  }},
+  "category_4_medications": {{
+    "narcotics_opioids": [],
+    "nerve_pain_meds": [],
+    "anti_inflammatories": [],
+    "other_long_term_meds": []
+  }},
+  "category_5_medical_legal_conclusions": {{
+    "mmi_status": "",
+    "mmi_deferred_reason": "",
+    "wpi_percentage": "",
+    "wpi_deferred_reason": "",
+    "apportionment_industrial": "",
+    "apportionment_nonindustrial": "",
+    "causation_summary": ""
+  }},
+  "category_6_actionable_recommendations": {{
+    "future_surgery": "",
+    "future_injections": "",
+    "future_therapy": "",
+    "future_diagnostics": "",
+    "specialist_referrals": [],
+    "work_status": "",
+    "work_restrictions_specific": [],
+    "follow_up_timeline": ""
+  }}
+}}
 """)
 
-        # Create the chat prompt template
-        chat_prompt = ChatPromptTemplate.from_messages([
-            system_prompt,
-            user_prompt
-        ])
-
+        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
+        
         try:
+            # Parallel processing with ThreadPoolExecutor
             partial_results = []
-            for i, chunk in enumerate(chunks):
-                logger.debug(f"🔄 Processing chunk {i+1}/{len(chunks)}")
+            
+            logger.info(f"🚀 Processing {len(chunks)} chunks in PARALLEL...")
+            start_time = time.time()  # Use time.time() instead of asyncio
+            
+            # Determine optimal number of workers (max 5 to avoid rate limits)
+            max_workers = min(len(chunks), 5)
+            logger.info(f"⚙️ Using {max_workers} parallel workers")
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all chunks for processing
+                future_to_chunk = {
+                    executor.submit(self._process_chunk, chat_prompt, chunk, i+1, len(chunks)): i 
+                    for i, chunk in enumerate(chunks)
+                }
                 
-                # Format few-shot examples as string
-                examples_str = "\n\n".join([
-                    f"Input: {ex['input']}\nOutput: {json.dumps(ex['output'])}" 
-                    for ex in few_shot_examples
-                ])
-                
-                chain = chat_prompt | self.llm | self.parser
-                partial = chain.invoke({
-                    "examples": examples_str,
-                    "text": chunk
-                })
-                partial_results.append(partial)
-                logger.debug(f"✅ Chunk {i+1} processed")
+                # Collect results as they complete
+                for future in as_completed(future_to_chunk):
+                    chunk_idx = future_to_chunk[future]
+                    try:
+                        result = future.result()
+                        partial_results.append((chunk_idx, result))
+                    except Exception as e:
+                        logger.error(f"❌ Chunk {chunk_idx+1} processing failed: {e}")
+                        partial_results.append((chunk_idx, None))
+            
+            end_time = time.time()
+            processing_time = end_time - start_time
+            
+            # Sort by original chunk order and filter None results
+            partial_results.sort(key=lambda x: x[0])
+            successful_results = [r[1] for r in partial_results if r[1] is not None]
+            
+            logger.info(f"⚡ Parallel processing completed in {processing_time:.2f}s")
+            logger.info(f"✅ Successfully processed {len(successful_results)}/{len(chunks)} chunks")
+            
+            if not successful_results:
+                logger.error("❌ No chunks processed successfully!")
+                return self._get_fallback_result(fallback_date)
             
             # Merge partial extractions
-            merged_result = self._merge_partial_extractions(partial_results, fallback_date)
-            logger.info(f"✅ Chunked extraction completed: {len(partial_results)} chunks merged")
+            merged_result = self._merge_medical_legal_extractions(successful_results, fallback_date)
+            logger.info(f"✅ Chunked extraction completed: {len(successful_results)} chunks merged")
+            
+            # Log extracted categories
+            self._log_extracted_categories(merged_result)
+            
             return merged_result
             
         except Exception as e:
-            logger.error(f"❌ Chunked extraction failed: {e}")
+            logger.error(f"❌ Parallel extraction failed: {e}", exc_info=True)
             return self._get_fallback_result(fallback_date)
 
-    def _merge_partial_extractions(self, partials: List[Dict], fallback_date: str) -> Dict:
-        """Merge extractions from multiple chunks into a single comprehensive result."""
+    def _process_chunk(self, chat_prompt, chunk: str, chunk_num: int, total_chunks: int) -> Dict:
+        """Process a single chunk (called in parallel threads)"""
+        try:
+            logger.info(f"🔄 Processing chunk {chunk_num}/{total_chunks}")
+            
+            chain = chat_prompt | self.llm | self.parser
+            result = chain.invoke({"text": chunk})
+            
+            logger.debug(f"✅ Chunk {chunk_num}/{total_chunks} completed")
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Error processing chunk {chunk_num}/{total_chunks}: {e}")
+            raise
+
+    def _merge_medical_legal_extractions(self, partials: List[Dict], fallback_date: str) -> Dict:
+        """Merge extractions from multiple chunks (FIXED: safe type handling)"""
         if not partials:
             return self._get_fallback_result(fallback_date)
         
+        logger.info(f"🔄 Merging {len(partials)} partial extractions...")
+        
         merged = self._get_fallback_result(fallback_date)
         
-        # List fields: union unique values across chunks
-        list_fields = ["body_parts_evaluated", "diagnoses_confirmed"]
-        for partial in partials:
-            for field in list_fields:
-                value = partial.get(field, [])
-                if isinstance(value, list):
-                    merged[field].extend([v.strip() for v in value if v and v.strip()])
-                elif isinstance(value, str) and value.strip():
-                    items = [v.strip() for v in value.split(",") if v.strip()]
-                    merged[field].extend(items)
-        
-        # Deduplicate list fields
-        for field in list_fields:
-            seen = set()
-            deduped = []
-            for item in merged[field]:
-                if item not in seen:
-                    seen.add(item)
-                    deduped.append(item)
-            merged[field] = deduped
-
-        # String fields: take most complete value
-        string_fields = [
-            "document_date", "examiner_name", "referral_physician", "specialty",
-            "MMI_status", "impairment_summary", "causation_opinion",
-            "treatment_recommendations", "medication_recommendations",
-            "work_restrictions", "future_medical_recommendations"
-        ]
-        
-        for field in string_fields:
-            candidates = []
+        try:
+            # Merge Category 1: Core Identity (take most complete)
             for partial in partials:
-                value = partial.get(field, "")
-                if isinstance(value, str) and value.strip() and value.strip() != fallback_date:
-                    candidates.append(value.strip())
+                cat1 = partial.get("category_1_core_identity", {})
+                if not isinstance(cat1, dict):
+                    continue
+                    
+                for key, value in cat1.items():
+                    if value and not merged["category_1_core_identity"].get(key):
+                        # Safe string conversion
+                        merged["category_1_core_identity"][key] = str(value).strip() if value else ""
             
-            if candidates:
-                candidates.sort(key=len, reverse=True)
-                merged[field] = candidates[0]
-
-        # Handle physician names with validation
-        examiner_candidates = []
-        referral_candidates = []
-        
-        for partial in partials:
-            examiner = partial.get("examiner_name", "")
-            if examiner and examiner.strip():
-                validated = self._validate_physician_full_name(examiner)
-                if validated:
-                    examiner_candidates.append(validated)
+            # Merge Category 2: Diagnosis (union of lists)
+            for partial in partials:
+                cat2 = partial.get("category_2_diagnosis", {})
+                if not isinstance(cat2, dict):
+                    continue
+                    
+                for field in ["primary_diagnoses", "icd_codes", "affected_body_parts"]:
+                    values = cat2.get(field, [])
+                    if isinstance(values, list):
+                        merged["category_2_diagnosis"][field].extend([
+                            str(v).strip() for v in values if v and str(v).strip()
+                        ])
+                    elif isinstance(values, str) and values.strip():
+                        merged["category_2_diagnosis"][field].extend([
+                            v.strip() for v in values.split(",") if v.strip()
+                        ])
             
-            referral = partial.get("referral_physician", "")
-            if referral and referral.strip():
-                validated = self._validate_physician_full_name(referral)
-                if validated:
-                    referral_candidates.append(validated)
+            # Deduplicate diagnosis lists
+            for field in ["primary_diagnoses", "icd_codes", "affected_body_parts"]:
+                seen = set()
+                deduped = []
+                for item in merged["category_2_diagnosis"][field]:
+                    if item not in seen:
+                        seen.add(item)
+                        deduped.append(item)
+                merged["category_2_diagnosis"][field] = deduped
+            
+            # Merge Category 3: Clinical Status
+            for partial in partials:
+                cat3 = partial.get("category_3_clinical_status", {})
+                if not isinstance(cat3, dict):
+                    continue
+                
+                # Surgeries (list)
+                surgeries = cat3.get("past_surgeries", [])
+                if isinstance(surgeries, list):
+                    merged["category_3_clinical_status"]["past_surgeries"].extend([
+                        str(s).strip() for s in surgeries if s and str(s).strip()
+                    ])
+                
+                # String fields (take most complete)
+                for field in ["current_chief_complaint", "pain_score_current", "pain_score_max"]:
+                    value = cat3.get(field, "")
+                    current_len = len(str(merged["category_3_clinical_status"].get(field, "")))
+                    new_len = len(str(value).strip()) if value else 0
+                    if new_len > current_len:
+                        merged["category_3_clinical_status"][field] = str(value).strip()
+                
+                # Objective findings (CRITICAL FIX: check if dict before iterating)
+                obj_findings = cat3.get("objective_findings", {})
+                if isinstance(obj_findings, dict):
+                    for key, value in obj_findings.items():
+                        current_len = len(str(merged["category_3_clinical_status"]["objective_findings"].get(key, "")))
+                        new_len = len(str(value).strip()) if value else 0
+                        if new_len > current_len:
+                            merged["category_3_clinical_status"]["objective_findings"][key] = str(value).strip()
+            
+            # Deduplicate surgeries
+            seen = set()
+            deduped_surgeries = []
+            for surgery in merged["category_3_clinical_status"]["past_surgeries"]:
+                if surgery not in seen:
+                    seen.add(surgery)
+                    deduped_surgeries.append(surgery)
+            merged["category_3_clinical_status"]["past_surgeries"] = deduped_surgeries
+            
+            # Merge Category 4: Medications (union of lists)
+            for partial in partials:
+                cat4 = partial.get("category_4_medications", {})
+                if not isinstance(cat4, dict):
+                    continue
+                    
+                for field in ["narcotics_opioids", "nerve_pain_meds", "anti_inflammatories", "other_long_term_meds"]:
+                    meds = cat4.get(field, [])
+                    if isinstance(meds, list):
+                        merged["category_4_medications"][field].extend([
+                            str(m).strip() for m in meds if m and str(m).strip()
+                        ])
+                    elif isinstance(meds, str) and meds.strip():
+                        merged["category_4_medications"][field].extend([
+                            m.strip() for m in meds.split(",") if m.strip()
+                        ])
+            
+            # Deduplicate medications
+            for field in ["narcotics_opioids", "nerve_pain_meds", "anti_inflammatories", "other_long_term_meds"]:
+                seen = set()
+                deduped = []
+                for med in merged["category_4_medications"][field]:
+                    if med not in seen:
+                        seen.add(med)
+                        deduped.append(med)
+                merged["category_4_medications"][field] = deduped
+            
+            # Merge Category 5: Medical-Legal Conclusions (take most complete)
+            for partial in partials:
+                cat5 = partial.get("category_5_medical_legal_conclusions", {})
+                if not isinstance(cat5, dict):
+                    continue
+                    
+                for key, value in cat5.items():
+                    current_len = len(str(merged["category_5_medical_legal_conclusions"].get(key, "")))
+                    new_len = len(str(value).strip()) if value else 0
+                    if new_len > current_len:
+                        merged["category_5_medical_legal_conclusions"][key] = str(value).strip()
+            
+            # Merge Category 6: Actionable Recommendations
+            for partial in partials:
+                cat6 = partial.get("category_6_actionable_recommendations", {})
+                if not isinstance(cat6, dict):
+                    continue
+                
+                # String fields (take most complete)
+                for field in ["future_surgery", "future_injections", "future_therapy", "future_diagnostics", "work_status"]:
+                    value = cat6.get(field, "")
+                    current_len = len(str(merged["category_6_actionable_recommendations"].get(field, "")))
+                    new_len = len(str(value).strip()) if value else 0
+                    if new_len > current_len:
+                        merged["category_6_actionable_recommendations"][field] = str(value).strip()
+                
+                # Work restrictions (list)
+                restrictions = cat6.get("work_restrictions_specific", [])
+                if isinstance(restrictions, list):
+                    merged["category_6_actionable_recommendations"]["work_restrictions_specific"].extend([
+                        str(r).strip() for r in restrictions if r and str(r).strip()
+                    ])
+                elif isinstance(restrictions, str) and restrictions.strip():
+                    merged["category_6_actionable_recommendations"]["work_restrictions_specific"].extend([
+                        r.strip() for r in restrictions.split(",") if r.strip()
+                    ])
+            
+            # Deduplicate work restrictions
+            seen = set()
+            deduped_restrictions = []
+            for restriction in merged["category_6_actionable_recommendations"]["work_restrictions_specific"]:
+                if restriction not in seen:
+                    seen.add(restriction)
+                    deduped_restrictions.append(restriction)
+            merged["category_6_actionable_recommendations"]["work_restrictions_specific"] = deduped_restrictions
+            
+            logger.info("✅ Merge completed successfully")
+            return merged
+            
+        except Exception as e:
+            logger.error(f"❌ Merge failed: {e}", exc_info=True)
+            return self._get_fallback_result(fallback_date)
+  
+    def _log_extracted_categories(self, data: Dict):
+        """Log extracted data organized by medical-legal categories"""
+        logger.info("=" * 80)
+        logger.info("📋 EXTRACTED MEDICAL-LEGAL DATA BY CATEGORY:")
+        logger.info("=" * 80)
         
-        if examiner_candidates:
-            examiner_candidates.sort(key=len, reverse=True)
-            merged["examiner_name"] = examiner_candidates[0]
+        # Category I: Core Identity
+        cat1 = data.get("category_1_core_identity", {})
+        logger.info("\n📌 CATEGORY I: CORE IDENTITY")
+        logger.info(f"  Patient: {cat1.get('patient_name', 'Not found')} (Age: {cat1.get('patient_age', 'N/A')}, DOB: {cat1.get('patient_dob', 'N/A')})")
+        logger.info(f"  Date of Injury: {cat1.get('date_of_injury', 'Not found')}")
+        logger.info(f"  Report Date: {cat1.get('report_date', 'Not found')}")
+        logger.info(f"  QME Physician: {cat1.get('qme_physician_name', 'Not found')} ({cat1.get('qme_specialty', 'N/A')})")
         
-        if referral_candidates:
-            referral_candidates.sort(key=len, reverse=True)
-            merged["referral_physician"] = referral_candidates[0]
-
-        logger.info(f"📊 Merge completed: {len(merged['body_parts_evaluated'])} body parts")
-        return merged
+        # Category II: Diagnosis
+        cat2 = data.get("category_2_diagnosis", {})
+        logger.info("\n🩺 CATEGORY II: DIAGNOSIS")
+        logger.info(f"  Primary Diagnoses: {', '.join(cat2.get('primary_diagnoses', [])) or 'Not found'}")
+        logger.info(f"  ICD Codes: {', '.join(cat2.get('icd_codes', [])) or 'Not found'}")
+        logger.info(f"  Affected Body Parts: {', '.join(cat2.get('affected_body_parts', [])) or 'Not found'}")
+        
+        # Category III: Clinical Status
+        cat3 = data.get("category_3_clinical_status", {})
+        logger.info("\n🏥 CATEGORY III: CLINICAL STATUS")
+        logger.info(f"  Past Surgeries: {', '.join(cat3.get('past_surgeries', [])) or 'None'}")
+        logger.info(f"  Chief Complaint: {cat3.get('current_chief_complaint', 'Not found')}")
+        logger.info(f"  Pain Score: {cat3.get('pain_score_current', 'N/A')}/10 (Max: {cat3.get('pain_score_max', 'N/A')}/10)")
+        obj = cat3.get("objective_findings", {})
+        logger.info(f"  Objective Findings:")
+        logger.info(f"    - ROM: {obj.get('rom_limitations', 'Normal')}")
+        logger.info(f"    - Gait: {obj.get('gait_abnormalities', 'Normal')}")
+        logger.info(f"    - Tests: {obj.get('positive_tests', 'None')}")
+        
+        # Category IV: Medications
+        cat4 = data.get("category_4_medications", {})
+        logger.info("\n💊 CATEGORY IV: MEDICATIONS")
+        logger.info(f"  Narcotics/Opioids: {', '.join(cat4.get('narcotics_opioids', [])) or 'None'}")
+        logger.info(f"  Nerve Pain Meds: {', '.join(cat4.get('nerve_pain_meds', [])) or 'None'}")
+        logger.info(f"  Anti-inflammatories: {', '.join(cat4.get('anti_inflammatories', [])) or 'None'}")
+        logger.info(f"  Other Long-term: {', '.join(cat4.get('other_long_term_meds', [])) or 'None'}")
+        
+        # Category V: Medical-Legal Conclusions (CRITICAL)
+        cat5 = data.get("category_5_medical_legal_conclusions", {})
+        logger.info("\n⚖️ CATEGORY V: MEDICAL-LEGAL CONCLUSIONS (CRITICAL)")
+        logger.info(f"  MMI Status: {cat5.get('mmi_status', 'Not stated')}")
+        if cat5.get('mmi_deferred_reason'):
+            logger.info(f"    └─ Reason Deferred: {cat5.get('mmi_deferred_reason')}")
+        logger.info(f"  WPI: {cat5.get('wpi_percentage', 'Not stated')}")
+        if cat5.get('wpi_deferred_reason'):
+            logger.info(f"    └─ Reason Deferred: {cat5.get('wpi_deferred_reason')}")
+        logger.info(f"  Apportionment: {cat5.get('apportionment_industrial', 'N/A')}% Industrial / {cat5.get('apportionment_nonindustrial', 'N/A')}% Non-industrial")
+        
+        # Category VI: Actionable Recommendations (MOST IMPORTANT)
+        cat6 = data.get("category_6_actionable_recommendations", {})
+        logger.info("\n🎯 CATEGORY VI: ACTIONABLE RECOMMENDATIONS (CRITICAL FOR REVIEW)")
+        logger.info(f"  Future Surgery: {cat6.get('future_surgery', 'None recommended')}")
+        logger.info(f"  Future Injections: {cat6.get('future_injections', 'None recommended')}")
+        logger.info(f"  Future Therapy: {cat6.get('future_therapy', 'None recommended')}")
+        logger.info(f"  Future Diagnostics: {cat6.get('future_diagnostics', 'None recommended')}")
+        logger.info(f"  Work Status: {cat6.get('work_status', 'Not specified')}")
+        restrictions = cat6.get('work_restrictions_specific', [])
+        if restrictions:
+            logger.info(f"  Specific Work Restrictions:")
+            for restriction in restrictions:
+                logger.info(f"    - {restriction}")
+        else:
+            logger.info(f"  Specific Work Restrictions: None specified")
+        
+        logger.info("=" * 80)
 
     def _get_fallback_result(self, fallback_date: str) -> Dict:
-        """Return a minimal fallback result structure."""
+        """Return minimal fallback result structure organized by categories"""
         return {
-            "document_date": fallback_date,
-            "examiner_name": "",
-            "referral_physician": "",
-            "specialty": "",
-            "body_parts_evaluated": [],
-            "diagnoses_confirmed": [],
-            "MMI_status": "",
-            "impairment_summary": "",
-            "causation_opinion": "",
-            "treatment_recommendations": "",
-            "medication_recommendations": "",
-            "work_restrictions": "",
-            "future_medical_recommendations": "",
+            "category_1_core_identity": {
+                "patient_name": "",
+                "patient_age": "",
+                "patient_dob": "",
+                "date_of_injury": "",
+                "report_date": fallback_date,
+                "qme_physician_name": "",
+                "qme_specialty": ""
+            },
+            "category_2_diagnosis": {
+                "primary_diagnoses": [],
+                "icd_codes": [],
+                "affected_body_parts": []
+            },
+            "category_3_clinical_status": {
+                "past_surgeries": [],
+                "current_chief_complaint": "",
+                "pain_score_current": "",
+                "pain_score_max": "",
+                "objective_findings": {
+                    "rom_limitations": "",
+                    "gait_abnormalities": "",
+                    "positive_tests": "",
+                    "effusion_swelling": "",
+                    "other_objective": ""
+                }
+            },
+            "category_4_medications": {
+                "narcotics_opioids": [],
+                "nerve_pain_meds": [],
+                "anti_inflammatories": [],
+                "other_long_term_meds": []
+            },
+            "category_5_medical_legal_conclusions": {
+                "mmi_status": "",
+                "mmi_deferred_reason": "",
+                "wpi_percentage": "",
+                "wpi_deferred_reason": "",
+                "apportionment_industrial": "",
+                "apportionment_nonindustrial": ""
+            },
+            "category_6_actionable_recommendations": {
+                "future_surgery": "",
+                "future_injections": "",
+                "future_therapy": "",
+                "future_diagnostics": "",
+                "work_status": "",
+                "work_restrictions_specific": []
+            }
         }
 
     def _detect_examiner(
@@ -288,8 +632,8 @@ Return valid JSON only.
         text: str,
         page_zones: Optional[Dict[str, Dict[str, str]]] = None
     ) -> str:
-        """Stage 2: Detect QME/AME examiner using DoctorDetector."""
-        logger.info("🔍 Stage 2: Running DoctorDetector...")
+        """Stage 2: Detect QME/AME examiner using DoctorDetector"""
+        logger.info("🔍 Stage 2: Running DoctorDetector for QME physician...")
         
         detection_result = self.doctor_detector.detect_doctor(
             text=text,
@@ -297,126 +641,136 @@ Return valid JSON only.
         )
         
         if detection_result["doctor_name"]:
-            logger.info(f"✅ Examiner detected: {detection_result['doctor_name']}")
+            logger.info(f"✅ QME Physician detected: {detection_result['doctor_name']}")
             return detection_result["doctor_name"]
         else:
-            logger.warning(f"⚠️ No valid examiner found")
+            logger.warning("⚠️ No valid QME physician found")
             return ""
 
     def _build_initial_result(self, raw_data: Dict, doc_type: str, fallback_date: str) -> ExtractionResult:
-        """Build initial result with professional summary."""
-        cleaned = self._validate_and_clean(raw_data, fallback_date)
+        """Build initial result from categorized data"""
+        logger.info("🔨 Stage 3: Building initial result from categorized data...")
         
-        # Apply referral doctor fallback logic
-        final_examiner = self._apply_referral_fallback(cleaned)
-        cleaned["final_examiner"] = final_examiner
+        # Extract core identity
+        cat1 = raw_data.get("category_1_core_identity", {})
+        cat2 = raw_data.get("category_2_diagnosis", {})
+        cat5 = raw_data.get("category_5_medical_legal_conclusions", {})
+        cat6 = raw_data.get("category_6_actionable_recommendations", {})
         
-        # Generate professional summary using few-shot approach
-        summary_line = self._build_professional_summary(cleaned, doc_type, fallback_date)
+        # Build summary
+        summary_line = self._build_medical_legal_summary(raw_data, doc_type, fallback_date)
         
-        return ExtractionResult(
+        result = ExtractionResult(
             document_type=doc_type,
-            document_date=cleaned.get("document_date", fallback_date),
+            document_date=cat1.get("report_date", fallback_date),
             summary_line=summary_line,
-            examiner_name=final_examiner,
-            specialty=cleaned.get("specialty"),
-            body_parts=cleaned.get("body_parts_evaluated", []),
-            raw_data=cleaned,
+            examiner_name=raw_data.get("qme_physician_name", ""),
+            specialty=cat1.get("qme_specialty", ""),
+            body_parts=cat2.get("affected_body_parts", []),
+            raw_data=raw_data,
         )
-
-    def _apply_referral_fallback(self, data: Dict) -> str:
-        """Apply referral doctor fallback logic."""
-        examiner_md = data.get("examiner_name", "")
-        referral_md = data.get("referral_physician", "")
         
-        if examiner_md and examiner_md != "":
-            logger.info(f"✅ Using QME/AME examiner: {examiner_md}")
-            return examiner_md
+        logger.info(f"✅ Initial result built (Physician: {result.examiner_name})")
+        return result
+
+    def _build_medical_legal_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
+        """Build concise summary focused on medical-legal key points"""
+        cat1 = data.get("category_1_core_identity", {})
+        cat2 = data.get("category_2_diagnosis", {})
+        cat5 = data.get("category_5_medical_legal_conclusions", {})
+        cat6 = data.get("category_6_actionable_recommendations", {})
         
-        if referral_md and referral_md != "":
-            logger.info(f"🔄 Using referral doctor: {referral_md}")
-            return referral_md
+        parts = []
         
-        logger.info("❌ No qualified doctors found")
-        return ""
-
-    def _validate_and_clean(self, result: Dict, fallback_date: str) -> Dict:
-        """Validate and clean extracted data."""
-        cleaned = {}
+        # Date and physician
+        date = cat1.get("report_date", fallback_date)
+        physician = data.get("qme_physician_name", "")
+        specialty = cat1.get("qme_specialty", "")
         
-        # Date validation
-        date = result.get("document_date", "")
-        cleaned["document_date"] = date if date and date != "empty" else fallback_date
-
-        # Physician validation
-        examiner = result.get("examiner_name", "")
-        referral_physician = result.get("referral_physician", "")
-        cleaned["examiner_name"] = self._validate_physician_full_name(examiner)
-        cleaned["referral_physician"] = self._validate_physician_full_name(referral_physician)
-
-        # Specialty validation
-        specialty = result.get("specialty", "")
-        cleaned["specialty"] = specialty if specialty and specialty != "empty" else ""
-
-        # Body parts validation
-        body_parts = result.get("body_parts_evaluated", [])
-        if isinstance(body_parts, str):
-            body_parts = [bp.strip() for bp in body_parts.split(",") if bp.strip()]
-        elif isinstance(body_parts, list):
-            body_parts = [bp.strip() for bp in body_parts if bp and isinstance(bp, str)]
-        else:
-            body_parts = []
-        cleaned["body_parts_evaluated"] = [bp for bp in body_parts if bp and bp != "empty"]
-
-        # Diagnoses validation
-        diagnoses = result.get("diagnoses_confirmed", [])
-        if isinstance(diagnoses, str):
-            diagnoses = [dx.strip() for dx in diagnoses.split(",") if dx.strip()]
-        elif isinstance(diagnoses, list):
-            diagnoses = [dx.strip() for dx in diagnoses if dx and isinstance(dx, str)]
-        else:
-            diagnoses = []
-        cleaned["diagnoses_confirmed"] = [dx for dx in diagnoses if dx and dx != "empty"]
-
-        # String fields validation
-        string_fields = [
-            "MMI_status", "impairment_summary", "causation_opinion",
-            "work_restrictions", "treatment_recommendations", 
-            "medication_recommendations", "future_medical_recommendations"
-        ]
-        
-        negative_phrases = [
-            "no additional treatment", "no future medical", "no treatment",
-            "no recommendations", "no restrictions", "no limitations",
-            "not indicated", "not recommended", "not needed"
-        ]
-        
-        for field in string_fields:
-            raw_value = result.get(field, "")
-            
-            if isinstance(raw_value, list):
-                v = ", ".join([str(item).strip() for item in raw_value if item])
-            elif isinstance(raw_value, str):
-                v = raw_value.strip()
+        parts.append(f"{date}: {doc_type}")
+        if physician:
+            if specialty:
+                parts.append(f"by {physician} ({self._abbreviate_specialty(specialty)})")
             else:
-                v = str(raw_value).strip() if raw_value else ""
+                parts.append(f"by {physician}")
+        
+        # Body parts and diagnoses
+        body_parts = cat2.get("affected_body_parts", [])
+        diagnoses = cat2.get("primary_diagnoses", [])
+        
+        if body_parts:
+            parts.append(f"for {', '.join(body_parts[:2])}")
+        
+        if diagnoses:
+            parts.append(f"= Dx: {', '.join(diagnoses[:2])}")
+        
+        # Medical-legal conclusions (CRITICAL)
+        mmi = cat5.get("mmi_status", "")
+        wpi = cat5.get("wpi_percentage", "")
+        apport_ind = cat5.get("apportionment_industrial", "")
+        
+        conclusions = []
+        if mmi:
+            conclusions.append(mmi)
+        if wpi:
+            conclusions.append(f"WPI: {wpi}")
+        if apport_ind:
+            conclusions.append(f"Apportionment: {apport_ind}% industrial")
+        
+        if conclusions:
+            parts.append(f"| {'; '.join(conclusions)}")
+        
+        # Actionable recommendations
+        future_tx = []
+        if cat6.get("future_surgery"):
+            future_tx.append(cat6.get("future_surgery"))
+        if cat6.get("future_injections"):
+            future_tx.append(cat6.get("future_injections"))
+        if cat6.get("future_therapy"):
+            future_tx.append(cat6.get("future_therapy"))
+        
+        work_status = cat6.get("work_status", "")
+        restrictions = cat6.get("work_restrictions_specific", [])
+        
+        if future_tx or work_status or restrictions:
+            rec_parts = []
+            if future_tx:
+                rec_parts.append(f"Tx: {', '.join(future_tx[:2])}")
+            if work_status:
+                rec_parts.append(f"Work: {work_status}")
+            elif restrictions:
+                rec_parts.append(f"Work: {', '.join(restrictions[:2])}")
             
-            v_lower = v.lower()
-            
-            if not v or v_lower in ["", "empty", "none", "n/a", "not mentioned"]:
-                cleaned[field] = ""
-                continue
-            
-            if any(neg_phrase in v_lower for neg_phrase in negative_phrases):
-                cleaned[field] = ""
-                continue
-            
-            cleaned[field] = v
+            parts.append(f"→ {'; '.join(rec_parts)}")
+        
+        summary = " ".join(parts)
+        
+        # Truncate if too long
+        words = summary.split()
+        if len(words) > 70:
+            summary = " ".join(words[:70]) + "..."
+        
+        logger.info(f"📝 Summary generated: {len(summary.split())} words")
+        return summary
 
-        return cleaned
+    def _abbreviate_specialty(self, specialty: str) -> str:
+        """Abbreviate medical specialties"""
+        abbreviations = {
+            "Orthopedic Surgery": "Ortho",
+            "Orthopedics": "Ortho",
+            "Neurology": "Neuro",
+            "Pain Management": "Pain",
+            "Psychiatry": "Psych",
+            "Psychology": "Psych",
+            "Physical Medicine & Rehabilitation": "PM&R",
+            "Physical Medicine and Rehabilitation": "PM&R",
+            "Internal Medicine": "IM",
+            "Occupational Medicine": "Occ Med",
+        }
+        return abbreviations.get(specialty, specialty[:12])
 
     def _validate_physician_full_name(self, name: str) -> str:
-        """Validate physician name has proper credentials."""
+        """Validate physician name has proper credentials"""
         if not name or name.lower() in ["not specified", "not found", "none", "n/a", ""]:
             return ""
         
@@ -448,151 +802,3 @@ Return valid JSON only.
             return ""
         
         return name
-
-    def _build_professional_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
-        """Build professional 50-60 word summary using few-shot approach."""
-        
-        # System prompt for summary generation
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a medical summarizer creating concise QME/AME report summaries for physicians.
-
-RULES:
-- Keep summary 50-60 words
-- Focus on key findings and recommendations
-- Use professional clinical language
-- Include: date, physician, body parts, key findings, recommendations
-- Be concise but informative
-""")
-
-        # User prompt with data
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-Create a professional 50-60 word summary from this QME/AME data:
-
-Date: {date}
-Physician: {physician}
-Specialty: {specialty}
-Body Parts: {body_parts}
-Diagnoses: {diagnoses}
-MMI Status: {mmi_status}
-Impairment: {impairment}
-Work Restrictions: {restrictions}
-Treatment: {treatment}
-Medications: {medications}
-Future Care: {future_care}
-
-Summary (50-60 words):
-""")
-
-        chat_prompt = ChatPromptTemplate.from_messages([
-            system_prompt,
-            user_prompt
-        ])
-
-        try:
-            # Prepare data for summary
-            date = data.get("document_date", fallback_date)
-            physician = data.get("final_examiner", "")
-            specialty = data.get("specialty", "")
-            body_parts = ", ".join(data.get("body_parts_evaluated", [])[:3])
-            diagnoses = ", ".join(data.get("diagnoses_confirmed", [])[:2])
-            mmi_status = data.get("MMI_status", "")
-            impairment = data.get("impairment_summary", "")
-            restrictions = data.get("work_restrictions", "")
-            treatment = data.get("treatment_recommendations", "")
-            medications = data.get("medication_recommendations", "")
-            future_care = data.get("future_medical_recommendations", "")
-
-            chain = chat_prompt | self.llm
-            response = chain.invoke({
-                "date": date,
-                "physician": physician,
-                "specialty": specialty,
-                "body_parts": body_parts,
-                "diagnoses": diagnoses,
-                "mmi_status": mmi_status,
-                "impairment": impairment,
-                "restrictions": restrictions,
-                "treatment": treatment,
-                "medications": medications,
-                "future_care": future_care
-            })
-            
-            summary = response.content.strip()
-            
-            # Ensure appropriate length
-            words = summary.split()
-            if len(words) > 70:
-                summary = " ".join(words[:65]) + "..."
-            elif len(words) < 45:
-                # Add context if too short
-                if not summary.endswith('.'):
-                    summary += '.'
-                if mmi_status:
-                    summary += f" {mmi_status}."
-            
-            logger.info(f"📊 Generated summary: {len(summary.split())} words")
-            return summary
-            
-        except Exception as e:
-            logger.error(f"❌ Summary generation failed: {e}")
-            # Fallback manual summary
-            return self._build_manual_summary(data, doc_type, fallback_date)
-
-    def _build_manual_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
-        """Fallback manual summary construction."""
-        date = data.get("document_date", fallback_date)
-        physician = data.get("final_examiner", "")
-        specialty = data.get("specialty", "")
-        body_parts = data.get("body_parts_evaluated", [])
-        mmi = data.get("MMI_status", "")
-        impairment = data.get("impairment_summary", "")
-        restrictions = data.get("work_restrictions", "")
-        treatment = data.get("treatment_recommendations", "")
-
-        parts = [f"{doc_type} Report dated {date}"]
-        
-        if physician:
-            specialty_abbrev = self._abbreviate_specialty(specialty) if specialty else 'QME'
-            parts.append(f"by {physician}, {specialty_abbrev}")
-
-        if body_parts:
-            body_str = ", ".join(body_parts[:3])
-            parts.append(f"for {body_str}")
-
-        findings = []
-        if mmi:
-            findings.append(mmi)
-        if impairment:
-            findings.append(impairment)
-
-        if findings:
-            parts.append(f"= {'; '.join(findings)}")
-
-        if restrictions:
-            parts.append(f"Work: {restrictions[:40]}")
-
-        if treatment:
-            parts.append(f"Treatment: {treatment[:40]}")
-
-        summary = " ".join(parts)
-        words = summary.split()
-        if len(words) > 70:
-            summary = " ".join(words[:65]) + "..."
-        
-        return summary
-
-    def _abbreviate_specialty(self, specialty: str) -> str:
-        """Abbreviate medical specialties."""
-        abbreviations = {
-            "Orthopedic Surgery": "Ortho",
-            "Orthopedics": "Ortho",
-            "Neurology": "Neuro",
-            "Pain Management": "Pain",
-            "Psychiatry": "Psych",
-            "Psychology": "Psych",
-            "Physical Medicine & Rehabilitation": "PM&R",
-            "Physical Medicine and Rehabilitation": "PM&R",
-            "Internal Medicine": "IM",
-            "Occupational Medicine": "Occ Med",
-        }
-        return abbreviations.get(specialty, specialty[:12])
