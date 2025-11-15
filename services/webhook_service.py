@@ -17,7 +17,7 @@ import os
 import asyncio
 import json
 from google.cloud import storage
-
+import re
 BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
 
 
@@ -725,66 +725,125 @@ class WebhookService:
         if not parse_decremented:
             logger.warning(f"⚠️ Could not decrement parse count for physician {physician_id}")
 
-        # ✅ ENHANCED TASK CREATION - Check is_task_needed for EVERY document
+        # ✅ ENHANCED TASK CREATION - Check physician role and name matching consulting_doctor
         created_tasks = 0
-        if document_analysis.is_task_needed:  # Changed from is_rfa_task_needed to is_task_needed
-            logger.info(f"🔧 Task needed - generating tasks for document {processed_data['filename']}")
-            task_creator = TaskCreator()
+        if document_analysis.is_task_needed:
+            logger.info(f"🔧 Task needed - checking physician authorization for document {processed_data['filename']}")
             
+            # Step 1: Get all users from DB using physician_id
             try:
-                # Prepare document data for task generation
-                document_data = document_analysis.dict()
-                document_data["filename"] = processed_data["filename"]
-                document_data["document_id"] = document_id
-                document_data["physician_id"] = physician_id
-                
-                # Generate tasks based on document analysis
-                tasks = await task_creator.generate_tasks(document_data, processed_data["filename"])
-                logger.info(f"📋 Generated {len(tasks)} tasks for document {processed_data['filename']}")
-
-                # Save tasks to DB
                 prisma = Prisma()
                 await prisma.connect()
                 
-                for task in tasks:
-                    try:
-                        # Map task fields
-                        mapped_task = {
-                            "description": task.get("description"),
-                            "department": task.get("department"),
-                            "status":"Open",
-                            "dueDate": None,
-                            "patient": task.get("patient", "Unknown"),
-                            "actions": task.get("actions") if isinstance(task.get("actions"), list) else [],
-                            "sourceDocument": task.get("source_document") or task.get("sourceDocument") or processed_data.get("filename"),
-                            "documentId": document_id,
+                users = await prisma.user.find_many(where={
+                    "OR": [
+                        {
                             "physicianId": physician_id,
+                            "role": "Physician"
+                        },
+                        {
+                            "id": physician_id,  # Match by user ID if it's an admin physician
+                            "role": "Physician"
                         }
-
-                        # Normalize due date
-                        due_raw = task.get("due_date") or task.get("dueDate")
-                        if due_raw:
-                            if isinstance(due_raw, str):
-                                try:
-                                    mapped_task["dueDate"] = datetime.strptime(due_raw, "%Y-%m-%d")
-                                except Exception:
-                                    mapped_task["dueDate"] = datetime.now() + timedelta(days=3)
-                            else:
-                                mapped_task["dueDate"] = due_raw
-
-                        await prisma.task.create(data=mapped_task)
-                        created_tasks += 1
-                        logger.info(f"✅ Created task: {task.get('description', 'Unknown task')}")
-                        
-                    except Exception as task_err:
-                        logger.error(f"❌ Failed to create task for document {processed_data['filename']}: {task_err}", exc_info=True)
-                        continue
-
-                await prisma.disconnect()
-                logger.info(f"✅ {created_tasks} / {len(tasks)} tasks created for document {processed_data['filename']}")
+                    ]
+                })
                 
-            except Exception as e:
-                logger.error(f"❌ Task generation failed for document {processed_data['filename']}: {str(e)}", exc_info=True)
+                await prisma.disconnect()
+
+                if not users:
+                    logger.warning(f"⚠️ No physician users found with physician_id: {physician_id} - skipping task creation")
+                else:
+                    # Step 2: Check if any user's name matches consulting_doctor (ignoring titles)
+                    consulting_doctor = document_analysis.consulting_doctor or ""
+                    matching_user = None
+
+                    # Function to remove titles and normalize names
+                    def normalize_name(name):
+                        if not name:
+                            return ""
+                        # Remove common titles
+                        name = re.sub(r'^(Dr\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?)\s*', '', name, flags=re.IGNORECASE)
+                        # Remove extra spaces and convert to lowercase
+                        return name.strip().lower()
+
+                    normalized_consulting_doctor = normalize_name(consulting_doctor)
+
+                    for user in users:
+                        user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
+                        normalized_user_name = normalize_name(user_full_name)
+                        
+                        logger.info(f"🔍 Checking physician match - User: '{user_full_name}' (normalized: '{normalized_user_name}'), Consulting Doctor: '{consulting_doctor}' (normalized: '{normalized_consulting_doctor}')")
+                        
+                        if normalized_user_name and normalized_consulting_doctor and normalized_user_name == normalized_consulting_doctor:
+                            matching_user = user
+                            logger.info(f"✅ Physician name matches consulting doctor (after normalization) - User ID: {user.id}")
+                            break
+                    
+                    # Step 3: Create tasks only if names match
+                    if matching_user:
+                        logger.info(f"✅ Physician name matches consulting doctor - proceeding with task creation")
+                        
+                        task_creator = TaskCreator()
+                        
+                        try:
+                            # Prepare document data for task generation
+                            document_data = document_analysis.dict()
+                            document_data["filename"] = processed_data["filename"]
+                            document_data["document_id"] = document_id
+                            document_data["physician_id"] = physician_id
+                            
+                            # Generate tasks based on document analysis
+                            tasks = await task_creator.generate_tasks(document_data, processed_data["filename"])
+                            logger.info(f"📋 Generated {len(tasks)} tasks for document {processed_data['filename']}")
+
+                            # Save tasks to DB
+                            prisma = Prisma()
+                            await prisma.connect()
+                            
+                            for task in tasks:
+                                try:
+                                    # Map task fields
+                                    mapped_task = {
+                                        "description": task.get("description"),
+                                        "department": task.get("department"),
+                                        "status": "Open",
+                                        "dueDate": None,
+                                        "patient": task.get("patient", "Unknown"),
+                                        "actions": task.get("actions") if isinstance(task.get("actions"), list) else [],
+                                        "sourceDocument": task.get("source_document") or task.get("sourceDocument") or processed_data.get("filename"),
+                                        "documentId": document_id,
+                                        "physicianId": physician_id,
+                                    }
+
+                                    # Normalize due date
+                                    due_raw = task.get("due_date") or task.get("dueDate")
+                                    if due_raw:
+                                        if isinstance(due_raw, str):
+                                            try:
+                                                mapped_task["dueDate"] = datetime.strptime(due_raw, "%Y-%m-%d")
+                                            except Exception:
+                                                mapped_task["dueDate"] = datetime.now() + timedelta(days=3)
+                                        else:
+                                            mapped_task["dueDate"] = due_raw
+
+                                    await prisma.task.create(data=mapped_task)
+                                    created_tasks += 1
+                                    logger.info(f"✅ Created task: {task.get('description', 'Unknown task')}")
+                                    
+                                except Exception as task_err:
+                                    logger.error(f"❌ Failed to create task for document {processed_data['filename']}: {task_err}", exc_info=True)
+                                    continue
+
+                            await prisma.disconnect()
+                            logger.info(f"✅ {created_tasks} / {len(tasks)} tasks created for document {processed_data['filename']}")
+                            
+                        except Exception as e:
+                            logger.error(f"❌ Task generation failed for document {processed_data['filename']}: {str(e)}", exc_info=True)
+                    else:
+                        logger.warning(f"⚠️ No physician user name matches consulting doctor '{consulting_doctor}' - skipping task creation")
+                        
+            except Exception as user_err:
+                logger.error(f"❌ Error fetching user for physician_id {physician_id}: {user_err}", exc_info=True)
         else:
             logger.info(f"ℹ️ No tasks needed for document {processed_data['filename']} - skipping task creation")
 
@@ -855,8 +914,7 @@ class WebhookService:
                 "is_task_needed": document_analysis.is_task_needed,  # Changed from is_rfa_task_needed
                 "tasks_created": created_tasks
             }
-        }    
-    
+        }
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
         Orchestrates the full webhook processing pipeline.
@@ -877,6 +935,8 @@ class WebhookService:
         result = await self.save_and_process_document(processed_data, status_result, data, db_service)
         
         return result
+    
+    
     async def update_fail_document(self, fail_doc: Any, updated_fields: dict, user_id: str = None, db_service: Any = None) -> dict:
         """
         Handles updating and processing a failed document using webhook-like logic.
