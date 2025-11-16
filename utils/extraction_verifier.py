@@ -27,7 +27,7 @@ class ExtractionVerifier:
     FORMAT_SPECS = {
         "QME": {
             "pattern": r"QME",
-            "max_words": 65,
+            "max_words": 165,
             "required_elements": ["date", "QME"],
             "format_template": "QME{doctor_section} for [Body parts] : [DATE] = [MMI/Impairment] → [Treatment/Future medical] | [Restrictions/Causation]"
         },

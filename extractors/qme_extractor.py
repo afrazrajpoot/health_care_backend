@@ -96,30 +96,41 @@ class QMEExtractorChained:
             fallback_date=fallback_date,
             context_analysis=context_analysis
         )
-        
+
+        # Log medicine/medications extraction
+        meds = None
+        if 'current_medications' in raw_result:
+            meds = raw_result['current_medications']
+        elif 'medications' in raw_result:
+            meds = raw_result['medications']
+        if meds:
+            logger.info(f"✅ Extracted medications: {meds}")
+        else:
+            logger.warning("⚠️ No 'current_medications' or 'medications' found in QME extraction result.")
+
         # Stage 2: Override physician if context identified one with high confidence
         if context_analysis:
             context_physician = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
             if context_physician.get("name") and context_physician.get("confidence") in ["high", "medium"]:
                 logger.info(f"🎯 Using context-identified physician: {context_physician.get('name')}")
                 raw_result["qme_physician_name"] = context_physician.get("name")
-        
+
         # Stage 3: Fallback to DoctorDetector if no physician identified
         if not raw_result.get("qme_physician_name"):
             logger.info("🔍 No physician from context/extraction, using DoctorDetector...")
             examiner_name = self._detect_examiner(text, page_zones)
             raw_result["qme_physician_name"] = examiner_name
-        
+
         # Stage 4: Build initial result
         initial_result = self._build_initial_result(raw_result, doc_type, fallback_date)
-        
+
         # Stage 5: Verify and fix
         final_result = self.verifier.verify_and_fix(initial_result)
-        
+
         logger.info("=" * 80)
         logger.info("✅ QME EXTRACTION COMPLETE (FULL CONTEXT)")
         logger.info("=" * 80)
-        
+
         return final_result
 
     def _extract_full_context_with_guidance(
@@ -206,7 +217,7 @@ CONTEXTUAL GUIDANCE PROVIDED:
    ❌ WRONG: Return: "pain_score_current": "Not mentioned" (use empty string instead)
 
 4. **EXACT QUOTES FOR CRITICAL FIELDS**
-   - For MMI status, WPI, Apportionment, Work Restrictions: use EXACT wording from document
+   - For MMI status, WPI, Work Restrictions: use EXACT wording from document
    - DO NOT paraphrase or interpret
    - If exact value not found, return empty
    
@@ -302,11 +313,6 @@ V. MEDICAL-LEGAL CONCLUSIONS (MOST CRITICAL - HIGHEST PRIORITY)
   * If WPI deferred, extract SPECIFIC REASON
   * Location hint: {wpi_location}
 
-- Apportionment:
-  * Look for industrial vs non-industrial percentages
-  * Format: "X% industrial, Y% non-industrial" or "100% industrial"
-  * Include reasoning if provided
-  * Location hint: {apportionment_location}
 
 VI. ACTIONABLE RECOMMENDATIONS (SECOND HIGHEST PRIORITY)
 **These are critical for immediate clinical action:**
@@ -350,7 +356,7 @@ Extract into COMPREHENSIVE structured JSON with all critical details:
   }},
   
   "report_metadata": {{
-    "report_title": "Panel Qualified Medical Evaluation / AME / IME",
+    "report_title": "",
     "report_date": "",
     "evaluation_date": "",
     "report_type": "QME/AME/IME"
@@ -363,188 +369,91 @@ Extract into COMPREHENSIVE structured JSON with all critical details:
       "credentials": "",
       "role": "Evaluating Physician/QME/AME"
     }},
-    "treating_physicians": [
-      {{
-        "name": "",
-        "specialty": "",
-        "role": "Primary Treating Physician",
-        "context": "mentioned in patient history"
-      }}
-    ],
-    "consulting_physicians": [
-      {{
-        "name": "",
-        "specialty": "",
-        "role": "Consulting Surgeon/Specialist",
-        "context": "performed procedure X"
-      }}
-    ],
+    "treating_physicians": [],
+    "consulting_physicians": [],
     "referring_source": {{
       "name": "",
-      "type": "defense/applicant attorney, adjuster, employer"
+      "type": ""
     }}
   }},
   
   "diagnosis": {{
-    "primary_diagnoses": [
-      {{
-        "diagnosis": "Left knee status post TKR",
-        "icd_code": "",
-        "body_part": "L knee",
-        "severity": "post-surgical"
-      }},
-      {{
-        "diagnosis": "Right knee osteoarthritis post-meniscectomy",
-        "icd_code": "",
-        "body_part": "R knee",
-        "severity": "moderate to severe"
-      }}
-    ],
-    "secondary_diagnoses": [
-      {{
-        "diagnosis": "Hip pathology",
-        "body_part": "bilateral hips",
-        "needs_evaluation": true
-      }},
-      {{
-        "diagnosis": "Insomnia",
-        "type": "psychological/sleep disorder"
-      }},
-      {{
-        "diagnosis": "Mood/anxiety disorder",
-        "type": "psychological"
-      }}
-    ],
-    "historical_conditions": [
-      "Psoriasis history"
-    ]
+    "primary_diagnoses": [],
+    "secondary_diagnoses": [],
+    "historical_conditions": []
   }},
   
   "clinical_status": {{
-    "chief_complaint": "Persistent bilateral knee pain post-surgeries",
+    "chief_complaint": "",
     "pain_scores": {{
-      "current": "7/10",
-      "maximum": "9/10",
-      "location": "bilateral knees, L hip"
+      "current": "",
+      "maximum": "",
+      "location": ""
     }},
-    "functional_limitations": [
-      "Difficulty walking >10 minutes",
-      "Cannot kneel or squat",
-      "Limited stair climbing"
-    ],
-    "past_surgeries": [
-      "Left total knee replacement (TKR)",
-      "Right knee meniscectomy"
-    ],
+    "functional_limitations": [],
+    "past_surgeries": [],
     "objective_findings": {{
-      "rom_limitations": "L knee: flexion 90°, extension -5°; R knee: flexion 110°, extension 0°",
-      "gait": "Antalgic gait, uses assistive device",
-      "positive_tests": "Positive patellar grind test bilaterally",
-      "other_findings": "Effusion noted in L knee"
+      "rom_limitations": "",
+      "gait": "",
+      "positive_tests": "",
+      "other_findings": ""
     }}
   }},
   
   "medications": {{
-    "current_medications": [
-      {{"name": "Gabapentin", "dose": "300mg TID", "purpose": "nerve pain"}},
-      {{"name": "Meloxicam", "dose": "15mg daily", "purpose": "anti-inflammatory"}},
-      {{"name": "Tramadol", "dose": "50mg PRN", "purpose": "pain management"}}
-    ],
-    "future_medications": [
-      {{"name": "Consider increasing Gabapentin", "dose": "up to 600mg TID", "condition": "if pain persists"}},
-      {{"name": "Amitriptyline", "dose": "25mg at bedtime", "purpose": "insomnia and mood"}}
-    ]
+    "current_medications": [],
+    "future_medications": []
   }},
   
   "treatment_history": {{
-    "past_treatments": [
-      "Physical therapy (completed 12 sessions)",
-      "Corticosteroid injections R knee (3 injections, minimal relief)",
-      "Pain management program"
-    ],
-    "current_treatments": [
-      "Home exercise program",
-      "Pain medications as listed"
-    ]
+    "past_treatments": [],
+    "current_treatments": []
   }},
   
   "medical_legal_conclusions": {{
     "mmi_status": {{
-      "status": "Not at MMI",
-      "reason": "Requires additional diagnostic workup and interventional procedures",
-      "expected_mmi_date": "Pending completion of recommended treatments",
-      "reasoning": "Patient has not reached maximum medical improvement as further treatment modalities are available and medically necessary"
+      "status": "",
+      "reason": "",
+      "reasoning": ""
     }},
     "wpi_impairment": {{
-      "total_wpi": "5% WPI",
-      "breakdown": [
-        {{"body_part": "insomnia/sleep disorder", "percentage": "5%", "method": "AMA Guides, 5th Edition, Table 13-8"}}
-      ],
-      "additional_impairment_pending": "Final WPI will be determined after patient reaches MMI and completion of Rheumatology/Psychiatry QMEs",
-      "reasoning": "Current impairment rating reflects sleep disorder only; orthopedic and psychiatric impairments deferred pending specialist evaluations"
+      "total_wpi": "",
+      "breakdown": [],
+      "reasoning": ""
     }},
-    "causation_apportionment": {{
-      "industrial": "100%",
-      "nonindustrial": "0%",
-      "reasoning": "All current conditions directly result from industrial injury of [DOI]. No evidence of pre-existing pathology or non-industrial contributing factors."
-    }}
   }},
   
   "work_status": {{
-    "current_status": "Temporary Total Disability (TTD)",
-    "work_restrictions": [
-      "No lifting >10 lbs",
-      "No climbing stairs/ladders",
-      "No kneeling or squatting",
-      "No prolonged standing >15 minutes",
-      "No repetitive bending"
-    ],
-    "prognosis_for_return_to_work": "Deferred pending completion of recommended treatments and specialist QMEs",
-    "modified_duty_options": "None available at this time due to functional limitations"
+    "current_status": "",
+    "work_restrictions": [],
+    "prognosis_for_return_to_work": ""
   }},
   
   "recommendations": {{
-    "diagnostic_tests": [
-      {{"test": "MRI left hip", "reason": "Evaluate suspected osteoarthritis and rule out AVN", "urgency": "high"}},
-      {{"test": "Sleep study (polysomnography)", "reason": "Formal diagnosis and treatment of insomnia", "urgency": "medium"}}
-    ],
-    "interventional_procedures": [
-      {{"procedure": "Bilateral geniculate nerve blocks", "body_part": "bilateral knees", "purpose": "diagnostic and therapeutic for chronic knee pain", "urgency": "high"}},
-      {{"procedure": "Radiofrequency ablation (RFA) of geniculate nerves", "body_part": "bilateral knees", "purpose": "if nerve blocks provide >50% relief", "urgency": "high", "conditional": true}},
-      {{"procedure": "Left hip corticosteroid injection", "body_part": "L hip", "purpose": "if MRI confirms arthritis", "urgency": "medium", "conditional": true}}
-    ],
-    "specialist_referrals": [
-      {{"specialty": "Rheumatology", "reason": "Evaluate bilateral knee and hip joint pathology, determine need for revision surgery or other interventions"}},
-      {{"specialty": "Psychiatry/Psychology", "reason": "Panel QME for mood disorder, anxiety, and insomnia; determine psychological impairment and treatment needs"}},
-      {{"specialty": "Sleep Medicine", "reason": "Formal diagnosis and treatment of insomnia"}}
-    ],
-    "therapy": [
-      {{"type": "Physical therapy", "frequency": "2x/week", "duration": "6-8 weeks", "focus": "L knee strengthening and ROM", "body_part": "L knee"}},
-      {{"type": "Aquatic therapy", "frequency": "1x/week", "duration": "ongoing", "purpose": "low-impact exercise for bilateral knees"}}
-    ],
-    "future_surgical_needs": [
-      {{"procedure": "Possible revision TKR", "body_part": "L knee", "condition": "if conservative measures fail and Rheumatology evaluation supports", "timing": "deferred"}}
-    ]
+    "diagnostic_tests": [],
+    "interventional_procedures": [],
+    "specialist_referrals": [],
+    "therapy": [],
+    "future_surgical_needs": []
   }},
   
-  "critical_findings": [
-    {{"finding": "Patient not at MMI", "significance": "critical", "action": "multiple interventions required before final impairment rating"}},
-    {{"finding": "Requires bilateral geniculate nerve blocks/RFA", "significance": "high", "action": "schedule interventional pain management procedures"}},
-    {{"finding": "Left hip pathology needs MRI and potential injection", "significance": "high", "action": "order MRI L hip, consider injection if arthritis confirmed"}},
-    {{"finding": "Psychological QME required", "significance": "high", "action": "schedule Psychiatry/Psychology panel QME for mood, anxiety, insomnia evaluation"}},
-    {{"finding": "Rheumatology QME required", "significance": "high", "action": "schedule Rheumatology QME for joint pathology assessment"}},
-    {{"finding": "Sleep study needed", "significance": "medium", "action": "refer to sleep medicine for polysomnography"}},
-    {{"finding": "Current 5% WPI for insomnia only", "significance": "medium", "action": "final WPI pending completion of specialist evaluations"}},
-    {{"finding": "100% industrial causation", "significance": "critical", "action": "all conditions work-related, no apportionment"}}
-  ],
-  
-  "assessments": {{
-    "overall_prognosis": "Guarded. Patient has complex multi-system involvement (orthopedic, psychological, sleep) requiring coordinated multidisciplinary approach.",
-    "treatment_prognosis": "Fair to good if recommended interventions (nerve blocks, RFA, specialist QMEs, psychological treatment) are completed.",
-    "functional_prognosis": "Patient unlikely to return to pre-injury work capacity. Permanent work restrictions expected.",
-    "quality_of_life_impact": "Significant impairment in ADLs due to chronic pain, mobility limitations, sleep disturbance, and psychological symptoms."
-  }}
+  "critical_findings": []
 }}
+
+⚠️ CRITICAL REMINDERS:
+1. For "work_restrictions": Extract EXACT wording from document
+   - If document says "no lifting", extract: "no lifting" (NOT "no lifting >10 lbs")
+   - If document says "no standing", extract: "no standing" (NOT "no prolonged standing >15 min")
+   - DO NOT add weight limits, time limits, or specifics not stated
+
+2. For "current_medications": Extract ONLY from "Current Medications" section
+   - Include dosage ONLY if explicitly stated
+   - DO NOT extract discontinued medications
+   - DO NOT extract recommended future medications (use future_medications for those)
+
+3. For "critical_findings": Include MAIN actionable points only (max 5-8 items)
+   - Focus on: MMI status, required procedures, required QMEs, important diagnostic tests
+   - DO NOT include minor details or routine follow-ups
 """)
 
         # Build context guidance summary
@@ -557,7 +466,6 @@ FOCUS ON THESE SECTIONS: {', '.join(focus_sections) if focus_sections else 'All 
 CRITICAL FINDING LOCATIONS:
 - MMI Status: {critical_locations.get('mmi_location', 'Search entire document')}
 - WPI Percentage: {critical_locations.get('wpi_location', 'Search entire document')}
-- Apportionment: {critical_locations.get('apportionment_location', 'Search entire document')}
 - Work Restrictions: {critical_locations.get('work_restrictions_location', 'Search entire document')}
 
 KNOWN AMBIGUITIES: {len(ambiguities)} detected
@@ -582,7 +490,6 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
                 "critical_locations": str(critical_locations),
                 "mmi_location": critical_locations.get('mmi_location', 'Search document'),
                 "wpi_location": critical_locations.get('wpi_location', 'Search document'),
-                "apportionment_location": critical_locations.get('apportionment_location', 'Search document'),
                 "work_restrictions_location": critical_locations.get('work_restrictions_location', 'Search document'),
                 "ambiguities": str(ambiguities)
             })
@@ -647,6 +554,7 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
             examiner_name=raw_data.get("qme_physician_name", ""),
             specialty=cat1.get("qme_specialty", ""),
             body_parts=cat2.get("affected_body_parts", []),
+            medications=raw_data.get("medications"),
             raw_data=raw_data,
         )
         
@@ -702,7 +610,14 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
             narrative_parts.append(f"**Work Status:** {work_mmi_text}")
         
         # Section 3: TREATMENT/CRITICAL FINDINGS (Most important)
-        treatment_critical_text = self._build_treatment_critical_narrative(recommendations, critical_findings, medical_legal)
+        medications = data.get("medications", {})
+        # Section 3: TREATMENT/CRITICAL FINDINGS (Most important) - NOW includes medications
+        treatment_critical_text = self._build_treatment_critical_narrative(
+            recommendations, 
+            critical_findings, 
+            medical_legal,
+            medications  # PASS medications to include in summary
+        )
         if treatment_critical_text:
             narrative_parts.append(f"**Treatment/Critical Findings:** {treatment_critical_text}")
         
@@ -793,71 +708,94 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         
         return ", ".join(parts) if parts else "Work status not specified"
 
-    def _build_treatment_critical_narrative(self, recommendations: Dict, critical_findings: list, medical_legal: Dict) -> str:
-        """Build treatment and critical findings narrative (most important section)"""
-        treatment_items = []
-        
-        # Interventional procedures (highest priority)
-        procedures = recommendations.get("interventional_procedures", [])
-        if procedures and isinstance(procedures, list):
-            for proc in procedures:
-                if isinstance(proc, dict):
-                    proc_name = proc.get("procedure", "")
-                    body_part = proc.get("body_part", "")
-                    if proc_name:
-                        if body_part:
-                            treatment_items.append(f"{proc_name} for {body_part}")
-                        else:
-                            treatment_items.append(proc_name)
-                elif proc:
-                    treatment_items.append(str(proc))
-        
-        # Diagnostic tests
-        tests = recommendations.get("diagnostic_tests", [])
-        if tests and isinstance(tests, list):
-            for test in tests:
-                if isinstance(test, dict):
-                    test_name = test.get("test", "")
-                    reason = test.get("reason", "")
-                    if test_name:
-                        if reason:
-                            treatment_items.append(f"{test_name} for {reason}")
-                        else:
-                            treatment_items.append(test_name)
-                elif test:
-                    treatment_items.append(str(test))
-        
-        # Specialist referrals (QMEs)
-        referrals = recommendations.get("specialist_referrals", [])
-        if referrals and isinstance(referrals, list):
-            for ref in referrals:
-                if isinstance(ref, dict):
-                    specialty = ref.get("specialty", "")
-                    reason = ref.get("reason", "")
-                    if specialty:
-                        if reason:
-                            treatment_items.append(f"{specialty} QME for {reason}")
-                        else:
-                            treatment_items.append(f"{specialty} QME")
-                elif ref:
-                    treatment_items.append(str(ref))
-        
-        # Therapy
-        therapy = recommendations.get("therapy", [])
-        if therapy and isinstance(therapy, list):
-            for tx in therapy:
-                if isinstance(tx, dict):
-                    tx_type = tx.get("type", "")
-                    body_part = tx.get("body_part", "")
-                    if tx_type:
-                        if body_part:
-                            treatment_items.append(f"{tx_type} for {body_part}")
-                        else:
-                            treatment_items.append(tx_type)
-                elif tx:
-                    treatment_items.append(str(tx))
-        
-        return "; ".join(treatment_items[:8]) if treatment_items else "No specific recommendations extracted"  # Limit to 8 items
+    def _build_treatment_critical_narrative(self, recommendations: Dict, critical_findings: list, medical_legal: Dict, medications: Dict = None) -> str:
+      """Build treatment and critical findings narrative (most important section) - includes medications"""
+      treatment_items = []
+      
+      # 1. MEDICATIONS (if any) - FIRST PRIORITY for summary
+      if medications:
+          current_meds = medications.get("current_medications", [])
+          if current_meds and isinstance(current_meds, list):
+              med_names = []
+              for med in current_meds[:5]:  # Max 5 medications in summary
+                  if isinstance(med, dict):
+                      med_name = med.get("name", "")
+                      med_dose = med.get("dose", "")
+                      if med_name:
+                          if med_dose:
+                              med_names.append(f"{med_name} {med_dose}")
+                          else:
+                              med_names.append(med_name)
+                  elif med:
+                      med_names.append(str(med))
+              
+              if med_names:
+                  treatment_items.insert(0, f"Current medications: {', '.join(med_names)}")
+      
+      # 2. Interventional procedures (high priority)
+      procedures = recommendations.get("interventional_procedures", [])
+      if procedures and isinstance(procedures, list):
+          for proc in procedures[:3]:  # Max 3 procedures
+              if isinstance(proc, dict):
+                  proc_name = proc.get("procedure", "")
+                  body_part = proc.get("body_part", "")
+                  if proc_name:
+                      if body_part:
+                          treatment_items.append(f"{proc_name} for {body_part}")
+                      else:
+                          treatment_items.append(proc_name)
+              elif proc:
+                  treatment_items.append(str(proc))
+      
+      # 3. Diagnostic tests
+      tests = recommendations.get("diagnostic_tests", [])
+      if tests and isinstance(tests, list):
+          for test in tests[:3]:  # Max 3 tests
+              if isinstance(test, dict):
+                  test_name = test.get("test", "")
+                  reason = test.get("reason", "")
+                  if test_name:
+                      if reason:
+                          treatment_items.append(f"{test_name} for {reason}")
+                      else:
+                          treatment_items.append(test_name)
+              elif test:
+                  treatment_items.append(str(test))
+      
+      # 4. Specialist referrals (QMEs)
+      referrals = recommendations.get("specialist_referrals", [])
+      if referrals and isinstance(referrals, list):
+          for ref in referrals[:3]:  # Max 3 referrals
+              if isinstance(ref, dict):
+                  specialty = ref.get("specialty", "")
+                  reason = ref.get("reason", "")
+                  if specialty:
+                      if reason:
+                          treatment_items.append(f"{specialty} QME for {reason}")
+                      else:
+                          treatment_items.append(f"{specialty} QME")
+              elif ref:
+                  treatment_items.append(str(ref))
+      
+      # 5. Therapy
+      therapy = recommendations.get("therapy", [])
+      if therapy and isinstance(therapy, list):
+          for tx in therapy[:2]:  # Max 2 therapy types
+              if isinstance(tx, dict):
+                  tx_type = tx.get("type", "")
+                  body_part = tx.get("body_part", "")
+                  if tx_type:
+                      if body_part:
+                          treatment_items.append(f"{tx_type} for {body_part}")
+                      else:
+                          treatment_items.append(tx_type)
+              elif tx:
+                  treatment_items.append(str(tx))
+      
+      # 6. Work restrictions (from work_status, NOT recommendations)
+      # This ensures we get the EXACT wording from the extracted work_status
+      
+      return "; ".join(treatment_items[:10]) if treatment_items else "No specific recommendations extracted"
 
     def _build_medical_legal_summary_legacy(self, data: Dict, doc_type: str, fallback_date: str) -> str:
         """
@@ -908,23 +846,20 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         # Medical-legal conclusions
         mmi = str(cat5.get("mmi_status", "")) if cat5.get("mmi_status") else ""
         wpi = str(cat5.get("wpi_percentage", "")) if cat5.get("wpi_percentage") else ""
-        apport_ind = str(cat5.get("apportionment_industrial", "")) if cat5.get("apportionment_industrial") else ""
         
         conclusions = []
         if mmi:
             conclusions.append(mmi)
         if wpi:
             conclusions.append(f"WPI: {wpi}")
-        if apport_ind:
-            conclusions.append(f"Apportionment: {apport_ind}% industrial")
         
         if conclusions:
             parts.append(f"| {'; '.join(conclusions)}")
         
         summary = " ".join(parts)
         words = summary.split()
-        if len(words) > 70:
-            summary = " ".join(words[:70]) + "..."
+        # if len(words) > 170:
+        #     summary = " ".join(words[:170]) + "..."
         
         return summary
 
@@ -985,8 +920,6 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
                 "mmi_deferred_reason": "",
                 "wpi_percentage": "",
                 "wpi_deferred_reason": "",
-                "apportionment_industrial": "",
-                "apportionment_nonindustrial": ""
             },
             "category_6_actionable_recommendations": {
                 "future_surgery": "",

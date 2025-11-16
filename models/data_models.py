@@ -45,6 +45,7 @@ class ExtractionResult:
     examiner_name: Optional[str] = None
     specialty: Optional[str] = None
     body_parts: List[str] = field(default_factory=list)
+    medications: Optional[Dict[str, Any]] = None  # <-- NEW FIELD
     raw_data: Dict[str, Any] = field(default_factory=dict)
 
 

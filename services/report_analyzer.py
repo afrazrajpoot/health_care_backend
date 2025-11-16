@@ -198,6 +198,7 @@ class ReportAnalyzer:
                 text, 
                 doctype.value, 
                 fallback_date, 
+                context_analysis=context_analysis,  # ✅ Pass context!
                 page_zones=page_zones
             )
         
@@ -208,6 +209,7 @@ class ReportAnalyzer:
                 text, 
                 doctype.value, 
                 fallback_date, 
+                context_analysis=context_analysis,  # ✅ Pass context!
                 page_zones=page_zones
             )
         
@@ -218,6 +220,7 @@ class ReportAnalyzer:
                 text, 
                 doctype.value, 
                 fallback_date, 
+                context_analysis=context_analysis,  # ✅ Pass context!
                 page_zones=page_zones
             )
     

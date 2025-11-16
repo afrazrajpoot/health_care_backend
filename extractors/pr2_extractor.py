@@ -67,19 +67,19 @@ class PR2ExtractorChained:
         logger.info("📋 STARTING PR-2 EXTRACTION (FULL CONTEXT + CONTEXT-AWARE)")
         logger.info("=" * 80)
         
-        # Log context guidance if available
         if context_analysis:
             primary_physician = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
             focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
-            clinical_timeline = context_analysis.get("clinical_timeline", {})
-            
+            critical_locations = context_analysis.get("critical_findings_map", {})
             logger.info(f"🎯 Context Guidance Received:")
             logger.info(f"   Primary Physician: {primary_physician.get('name', 'Unknown')}")
             logger.info(f"   Confidence: {primary_physician.get('confidence', 'Unknown')}")
             logger.info(f"   Focus Sections: {focus_sections}")
-            logger.info(f"   Clinical Timeline: {len(clinical_timeline)} entries")
+            logger.info(f"   Critical Locations: {list(critical_locations.keys())}")
         else:
             logger.warning("⚠️ No context analysis provided - proceeding without guidance")
+            logger.info("📋 STARTING PR-2 EXTRACTION (FULL CONTEXT + CONTEXT-AWARE)")
+            logger.info("=" * 80)
         
         # Check document size
         text_length = len(text)
