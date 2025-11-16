@@ -12,6 +12,7 @@ from config.settings import CONFIG
 from models.data_models import DocumentType, ExtractionResult
 from utils.document_detector import detect_document_type
 from utils.extraction_verifier import ExtractionVerifier
+from utils.document_context_analyzer import DocumentContextAnalyzer
 from extractors.qme_extractor import QMEExtractorChained
 from extractors.imaging_extractor import ImagingExtractorChained
 from extractors.pr2_extractor import PR2ExtractorChained
@@ -50,6 +51,7 @@ class ReportAnalyzer:
         
     # No longer need DocumentTypeDetector instance; use detect_document_type function
         self.verifier = ExtractionVerifier(self.llm)
+        self.document_analyzer = DocumentContextAnalyzer(self.analysis_llm)
         
         # Initialize specialized extractors with dual LLMs
         self.qme_extractor = QMEExtractorChained(self.llm)
@@ -84,70 +86,142 @@ class ReportAnalyzer:
             fallback_date = datetime.now().strftime("%m/%d/%y")
             return [f"• {fallback_date}: Extraction failed - manual review required"]
     
-    def extract_document(self, text: str, page_zones: Optional[Dict[str, Dict[str, str]]] = None) -> ExtractionResult:
+    def extract_document(self, text: str, page_zones: Optional[Dict] = None) -> ExtractionResult:
         """
-        Full extraction pipeline with chaining and verification.
-        
-        Pipeline stages:
-        1. Document type detection (pattern + LLM)
-        2. Specialized extraction (type-specific extractors)
-        3. Verification and correction (format validation)
-        
-        Args:
-            text: Raw document text
-            page_zones: Per-page zone extraction {page_num: {header, body, footer, signature}}
-            
-        Returns:
-            ExtractionResult with structured data and summary
+        Enhanced pipeline with context analysis
         """
         fallback_date = datetime.now().strftime("%m/%d/%y")
         
         try:
+            # Stage 0: Analyze document context
+            logger.info("🧠 Stage 0: Analyzing document context...")
+            context_analysis = self.document_analyzer.analyze_document_structure(
+                text=text,
+                doc_type_hint=None
+            )
+            
             # Stage 1: Detect document type
             detection_result = detect_document_type(text)
             doc_type_str = detection_result.get("doc_type", "Unknown")
-            logger.info(f"📄 Detected document type: {doc_type_str}")
             
-            # Convert to DocumentType enum if possible, else fallback
-            try:
-                # Normalize the string to match enum (e.g., "X-ray" -> "XRAY", "PR-2" -> "PR2")
-                normalized = doc_type_str.upper().replace("-", "").replace(" ", "_")
+            # Update context analysis with detected type
+            context_analysis["detected_doc_type"] = doc_type_str
+            
+            logger.info(f"📄 Document type: {doc_type_str}")
+            
+            # Log context analysis details
+            if context_analysis:
+                primary_physician = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
+                focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
                 
-                # Try direct match first
-                if normalized in DocumentType.__members__:
-                    doc_type = DocumentType[normalized]
-                # Handle special cases
-                elif doc_type_str == "X-ray":
-                    doc_type = DocumentType.XRAY
-                elif doc_type_str in ["PR-2", "PR2"]:
-                    doc_type = DocumentType.PR2
-                elif doc_type_str in ["PR-4", "PR4"]:
-                    doc_type = DocumentType.PR4
-                else:
-                    doc_type = DocumentType.UNKNOWN
-                    logger.warning(f"⚠️ Unknown document type '{doc_type_str}', using UNKNOWN")
-            except Exception as e:
-                logger.warning(f"⚠️ Error parsing document type '{doc_type_str}': {e}")
-                doc_type = DocumentType.UNKNOWN
-
-            # Stage 2: Route to specialized extractor
-            result = self._route_to_extractor(text, doc_type, fallback_date, page_zones)
-
-            # Stage 3: Verify and correct (if needed) - SKIP for imaging reports
+                logger.info(f"🎯 Critical sections identified: {focus_sections}")
+                logger.info(f"👨‍⚕️ Primary physician: {primary_physician.get('name', 'Unknown')}")
+                logger.info(f"   Role: {primary_physician.get('role', 'Unknown')}, Confidence: {primary_physician.get('confidence', 'low')}")
+            
+            # Convert to DocumentType enum
+            doc_type = self._parse_document_type(doc_type_str)
+            
+            # Stage 2: Context-aware extraction
+            result = self._route_to_extractor_with_context(  # ✅ Use the context-aware routing!
+                text=text,
+                doctype=doc_type,
+                fallback_date=fallback_date,
+                page_zones=page_zones,
+                context_analysis=context_analysis  # ✅ Pass context!
+            )
+            
+            # Stage 3: Verify
             final_result = self._verify_result(result, doc_type)
-
+            
             logger.info(f"✅ Extraction complete: {final_result.summary_line}")
             return final_result
-
+            
         except Exception as e:
-            logger.error(f"❌ Extraction failed: {e}")
+            logger.error(f"❌ Extraction failed: {e}", exc_info=True)
             return ExtractionResult(
                 document_type="Unknown",
                 document_date=fallback_date,
                 summary_line=f"{fallback_date}: Extraction failed - manual review required",
                 raw_data={}
             )
+
+
+    def _route_to_extractor_with_context(
+        self,
+        text: str,
+        doctype: DocumentType,
+        fallback_date: str,
+        page_zones: Optional[Dict],
+        context_analysis: Dict  # NEW
+    ) -> ExtractionResult:
+        """
+        Route document to appropriate extractor WITH context analysis.
+        
+        Args:
+            text: Document text
+            doctype: Detected document type
+            fallback_date: Fallback date if extraction fails
+            page_zones: Per-page zone extraction
+            context_analysis: Context from DocumentContextAnalyzer (CRITICAL)
+        
+        Returns:
+            ExtractionResult from specialized extractor
+        """
+        
+        # QME/AME/IME - use context-aware extraction
+        if doctype in [DocumentType.QME, DocumentType.AME, DocumentType.IME]:
+            logger.info(f"🎯 Routing to QME extractor WITH context analysis")
+            return self.qme_extractor.extract(
+                text=text,
+                doc_type=doctype.value,
+                fallback_date=fallback_date,
+                page_zones=page_zones,
+                context_analysis=context_analysis,  # ✅ FIXED: Pass context!
+                raw_text=None
+            )
+        
+        # Imaging reports
+        elif doctype in [DocumentType.MRI, DocumentType.CT, DocumentType.XRAY, 
+                        DocumentType.ULTRASOUND, DocumentType.EMG]:
+            logger.info(f"🎯 Routing to Imaging extractor")
+            return self.imaging_extractor.extract(
+                text, 
+                doctype.value, 
+                fallback_date, 
+                page_zones=page_zones
+            )
+        
+        # Progress reports (PR-2)
+        elif doctype == DocumentType.PR2:
+            logger.info(f"🎯 Routing to PR-2 extractor")
+            return self.pr2_extractor.extract(
+                text, 
+                doctype.value, 
+                fallback_date, 
+                page_zones=page_zones
+            )
+        
+        # Specialist consults
+        elif doctype == DocumentType.CONSULT:
+            logger.info(f"🎯 Routing to Consult extractor")
+            return self.consult_extractor.extract(
+                text, 
+                doctype.value, 
+                fallback_date, 
+                page_zones=page_zones
+            )
+        
+        # All other simple document types
+        else:
+            logger.info(f"🎯 Routing to Simple extractor for {doctype.value}")
+            return self.simple_extractor.extract(
+                text, 
+                doctype.value, 
+                fallback_date, 
+                page_zones=page_zones
+            )
     
+             
     def _route_to_extractor(self, text: str, doc_type: DocumentType, fallback_date: str, page_zones: Optional[Dict[str, Dict[str, str]]] = None) -> ExtractionResult:
         """
         Route document to appropriate specialized extractor.
@@ -181,6 +255,38 @@ class ReportAnalyzer:
         # All other simple document types
         else:
             return self.simple_extractor.extract(text, doc_type.value, fallback_date, page_zones=page_zones)
+    
+    def _parse_document_type(self, doc_type_str: str) -> DocumentType:
+        """
+        Parse document type string to DocumentType enum.
+        
+        Args:
+            doc_type_str: Document type string from detection
+            
+        Returns:
+            DocumentType enum value
+        """
+        try:
+            # Normalize the string to match enum (e.g., "X-ray" -> "XRAY", "PR-2" -> "PR2")
+            normalized = doc_type_str.upper().replace("-", "").replace(" ", "_")
+            
+            # Try direct match first
+            if normalized in DocumentType.__members__:
+                return DocumentType[normalized]
+            
+            # Handle special cases
+            if doc_type_str == "X-ray":
+                return DocumentType.XRAY
+            elif doc_type_str in ["PR-2", "PR2"]:
+                return DocumentType.PR2
+            elif doc_type_str in ["PR-4", "PR4"]:
+                return DocumentType.PR4
+            else:
+                logger.warning(f"⚠️ Unknown document type '{doc_type_str}', using UNKNOWN")
+                return DocumentType.UNKNOWN
+        except Exception as e:
+            logger.warning(f"⚠️ Error parsing document type '{doc_type_str}': {e}")
+            return DocumentType.UNKNOWN
     
     def _verify_result(self, result: ExtractionResult, doc_type: DocumentType) -> ExtractionResult:
         """
