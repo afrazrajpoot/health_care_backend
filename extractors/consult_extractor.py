@@ -1,12 +1,13 @@
 """
-Specialist Consult extractor with few-shot prompting and DoctorDetector integration.
+Specialist Consult Enhanced Extractor - Full Context with Context-Awareness
+Optimized for accuracy using Gemini-style full-document processing with contextual guidance
 """
 import logging
-import json
+import re
+import time
 from typing import Dict, Optional, List
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
@@ -18,11 +19,13 @@ logger = logging.getLogger("document_ai")
 
 class ConsultExtractorChained:
     """
-    Enhanced Consult extractor with few-shot prompting:
-    - Stage 1: Extract clinical data using chunked processing with few-shot examples
-    - Stage 2: Doctor detection via DoctorDetector
-    - Stage 3: Build professional summary with few-shot guidance
-    - Stage 4: Verify and correct
+    Enhanced Consult extractor with FULL CONTEXT processing and contextual awareness.
+    
+    Key Features:
+    - Full document context (no chunking) = No information loss
+    - Context-aware extraction using DocumentContextAnalyzer guidance
+    - Chain-of-thought reasoning for specialist recommendations
+    - Optimized for consultation report specific patterns and clinical decision-making
     """
 
     def __init__(self, llm: AzureChatOpenAI):
@@ -30,14 +33,16 @@ class ConsultExtractorChained:
         self.parser = JsonOutputParser()
         self.verifier = ExtractionVerifier(llm)
         self.doctor_detector = DoctorDetector(llm)
-        # Initialize recursive text splitter
-        self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=3000,
-            chunk_overlap=200,
-            separators=["\n\n", "\n", ".", " ", ""],
-            length_function=len,
-        )
-        logger.info("✅ ConsultExtractorChained initialized with few-shot prompting")
+        
+        # Pre-compile regex patterns for consultation specific content
+        self.consult_patterns = {
+            'specialty': re.compile(r'\b(ortho|neuro|pain|psych|pm&r|cardio|pulm|rheum|surgery)\b', re.IGNORECASE),
+            'recommendation_type': re.compile(r'\b(injection|surgery|therapy|medication|imaging|referral|follow-up)\b', re.IGNORECASE),
+            'work_status': re.compile(r'\b(ttd|modified duty|full duty|light duty|sedentary|restrictions)\b', re.IGNORECASE),
+            'urgency': re.compile(r'\b(urgent|emergent|routine|elective|asap)\b', re.IGNORECASE)
+        }
+        
+        logger.info("✅ ConsultExtractorChained initialized (Full Context + Context-Aware)")
 
     def extract(
         self,
@@ -45,243 +50,510 @@ class ConsultExtractorChained:
         doc_type: str,
         fallback_date: str,
         page_zones: Optional[Dict[str, Dict[str, str]]] = None,
+        context_analysis: Optional[Dict] = None,  # NEW: from DocumentContextAnalyzer
         raw_text: Optional[str] = None
     ) -> ExtractionResult:
         """
-        Extract with few-shot prompting and DoctorDetector integration.
+        Extract Consult data with FULL CONTEXT and contextual awareness.
+        
+        Args:
+            text: Complete document text (layout-preserved)
+            doc_type: Document type (Specialist Consultation)
+            fallback_date: Fallback date if not found
+            page_zones: Per-page zone extraction
+            context_analysis: Document context from DocumentContextAnalyzer
+            raw_text: Original flat text (optional)
         """
-        # Stage 1: Extract clinical data using few-shot chunked processing
-        raw_result = self._extract_clinical_data(text, doc_type, fallback_date)
+        logger.info("=" * 80)
+        logger.info("👨‍⚕️ STARTING CONSULT EXTRACTION (FULL CONTEXT + CONTEXT-AWARE)")
+        logger.info("=" * 80)
         
-        # Stage 2: Doctor detection via DoctorDetector
-        consulting_physician = self._detect_consultant(text, page_zones)
-        raw_result["physician_name"] = consulting_physician
+        # Log context guidance if available
+        if context_analysis:
+            primary_physician = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
+            focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
+            clinical_context = context_analysis.get("clinical_context", {})
+            
+            logger.info(f"🎯 Context Guidance Received:")
+            logger.info(f"   Consulting Physician: {primary_physician.get('name', 'Unknown')}")
+            logger.info(f"   Confidence: {primary_physician.get('confidence', 'Unknown')}")
+            logger.info(f"   Focus Sections: {focus_sections}")
+            logger.info(f"   Clinical Context: {clinical_context.get('referral_reason', 'Unknown')}")
+        else:
+            logger.warning("⚠️ No context analysis provided - proceeding without guidance")
         
-        # Stage 3: Build initial result with professional summary
+        # Check document size
+        text_length = len(text)
+        token_estimate = text_length // 4
+        logger.info(f"📄 Document size: {text_length:,} chars (~{token_estimate:,} tokens)")
+        
+        if token_estimate > 120000:
+            logger.warning(f"⚠️ Document very large ({token_estimate:,} tokens)")
+            logger.warning("⚠️ May exceed GPT-4o context window (128K tokens)")
+        
+        # Stage 1: Extract with FULL CONTEXT and contextual guidance
+        raw_result = self._extract_full_context_with_guidance(
+            text=text,
+            doc_type=doc_type,
+            fallback_date=fallback_date,
+            context_analysis=context_analysis
+        )
+        
+        # Stage 2: Override consultant if context identified one with high confidence
+        if context_analysis:
+            context_physician = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
+            if context_physician.get("name") and context_physician.get("confidence") in ["high", "medium"]:
+                logger.info(f"🎯 Using context-identified consultant: {context_physician.get('name')}")
+                raw_result["consulting_physician_name"] = context_physician.get("name")
+        
+        # Stage 3: Fallback to DoctorDetector if no consultant identified
+        if not raw_result.get("consulting_physician_name"):
+            logger.info("🔍 No consultant from context/extraction, using DoctorDetector...")
+            consultant_name = self._detect_consultant(text, page_zones)
+            raw_result["consulting_physician_name"] = consultant_name
+        
+        # Stage 4: Build initial result
         initial_result = self._build_initial_result(raw_result, doc_type, fallback_date)
         
-        # Stage 4: Verify and fix
-        verified_result = self.verifier.verify_and_fix(initial_result)
+        # Stage 5: Verify and fix
+        final_result = self.verifier.verify_and_fix(initial_result)
         
-        return verified_result
+        logger.info("=" * 80)
+        logger.info("✅ CONSULT EXTRACTION COMPLETE (FULL CONTEXT)")
+        logger.info("=" * 80)
+        
+        return final_result
 
-    def _extract_clinical_data(
+    def _extract_full_context_with_guidance(
         self,
         text: str,
         doc_type: str,
-        fallback_date: str
+        fallback_date: str,
+        context_analysis: Optional[Dict]
     ) -> Dict:
         """
-        Stage 1: Extract clinical data using few-shot chunked processing.
+        Extract with FULL document context + contextual guidance from DocumentContextAnalyzer.
+        Optimized for specialist consultation specific patterns and clinical decision-making.
         """
-        logger.info(f"🔍 Stage 1: Splitting Consult document into chunks (text length: {len(text)})")
+        logger.info("🔍 Processing ENTIRE consultation report in single context window with guidance...")
         
-        chunks = self.splitter.split_text(text)
-        logger.info(f"📦 Created {len(chunks)} chunks for processing")
+        # Extract guidance from context analysis
+        primary_physician = ""
+        focus_sections = []
+        clinical_context = {}
+        physician_reasoning = ""
+        ambiguities = []
         
-        # Few-shot examples for consultation extraction
-        few_shot_examples = [
-            {
-                "input": """ORTHOPEDIC CONSULTATION
-                DATE: 10/15/2024
-                PATIENT: Right shoulder pain
-                ASSESSMENT: Rotator cuff tendinopathy with impingement
-                PLAN: Physical therapy 2x/week, subacromial injection
-                WORK STATUS: Modified duty - no overhead lifting
-                FOLLOW-UP: 6 weeks""",
-                "output": {
-                    "consult_date": "10/15/2024",
-                    "specialty": "Ortho",
-                    "body_part": "R shoulder",
-                    "findings": "Rotator cuff tendinopathy with impingement",
-                    "treatment_recommendations": "Physical therapy 2x/week, subacromial injection",
-                    "recommendations": "Follow-up in 6 weeks",
-                    "work_status": "Modified duty - no overhead lifting"
-                }
-            },
-            {
-                "input": """NEUROLOGY CONSULT
-                DATE: 11/20/2024
-                CHIEF COMPLAINT: Low back pain with radiculopathy
-                IMPRESSION: L5 radiculopathy, likely discogenic
-                RECOMMENDATIONS: MRI lumbar spine, gabapentin 300mg TID
-                WORK STATUS: TTD, no bending/lifting
-                FOLLOW-UP: After MRI results""",
-                "output": {
-                    "consult_date": "11/20/2024",
-                    "specialty": "Neuro",
-                    "body_part": "Lumbar spine",
-                    "findings": "L5 radiculopathy, likely discogenic",
-                    "treatment_recommendations": "Gabapentin 300mg TID",
-                    "recommendations": "MRI lumbar spine, follow-up after results",
-                    "work_status": "TTD, no bending/lifting"
-                }
-            },
-            {
-                "input": """PAIN MANAGEMENT CONSULTATION
-                DATE: 12/05/2024
-                EVALUATION: Chronic cervical pain
-                DIAGNOSIS: Cervical spondylosis C5-C6
-                TREATMENT: Cervical ESI recommended, continue NSAIDs
-                WORK: Sedentary duty only
-                PLAN: ESI scheduled for next week""",
-                "output": {
-                    "consult_date": "12/05/2024",
-                    "specialty": "Pain",
-                    "body_part": "Cervical spine",
-                    "findings": "Cervical spondylosis C5-C6",
-                    "treatment_recommendations": "Cervical ESI, continue NSAIDs",
-                    "recommendations": "ESI scheduled for next week",
-                    "work_status": "Sedentary duty only"
-                }
-            },
-            {
-                "input": """FOLLOW-UP CONSULT
-                DATE: 01/10/2025
-                STATUS: Improved with current treatment
-                ASSESSMENT: Condition resolving
-                RECOMMENDATIONS: Continue current regimen
-                WORK: Released to full duty
-                PLAN: Discharge to PCP""",
-                "output": {
-                    "consult_date": "01/10/2025",
-                    "specialty": "",
-                    "body_part": "",
-                    "findings": "Condition resolving, improved with treatment",
-                    "treatment_recommendations": "Continue current regimen",
-                    "recommendations": "Discharge to PCP",
-                    "work_status": "Released to full duty"
-                }
-            }
-        ]
-
-        # System prompt with extraction rules
+        if context_analysis:
+            phys_analysis = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
+            primary_physician = phys_analysis.get("name", "")
+            physician_reasoning = phys_analysis.get("reasoning", "")
+            focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
+            clinical_context = context_analysis.get("clinical_context", {})
+            ambiguities = context_analysis.get("ambiguities_detected", [])
+        
+        # Build context-aware system prompt for Consultations
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a medical consultation data extraction specialist. Extract structured clinical information from specialist consultation reports.
+You are an expert medical documentation specialist analyzing a COMPLETE Specialist Consultation Report with CONTEXTUAL GUIDANCE.
 
-EXTRACTION RULES:
-- Extract ONLY information present in the text
-- Return empty string "" for missing fields
-- Be precise and clinical in terminology
-- For specialty: use abbreviated forms (Ortho, Neuro, Pain, PM&R, Psych, etc.)
-- For findings: focus on key diagnostic impressions
-- For treatments: include specific procedures, therapies, medications
-- For work status: extract specific restrictions and limitations
-- DO NOT extract physician names - handled separately
+CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
+You are seeing the ENTIRE consultation report at once, allowing you to:
+- Understand the complete referral context and clinical questions
+- Correlate subjective complaints with objective examination findings
+- Assess the specialist's diagnostic reasoning and clinical decision-making
+- Identify treatment recommendations and their clinical rationale
+- Provide comprehensive specialist assessment without information loss
 
-OUTPUT FORMAT: JSON with these exact fields:
-- consult_date, specialty, body_part, findings
-- treatment_recommendations, recommendations, work_status
+CONTEXTUAL GUIDANCE PROVIDED:
+{context_guidance}
+
+⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY):
+
+1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
+   - If a finding/recommendation is NOT explicitly mentioned in the report, return EMPTY string "" or empty list []
+   - DO NOT infer, assume, or extrapolate clinical decisions
+   - DO NOT fill in "typical" or "common" specialist recommendations
+   - DO NOT use medical knowledge to "complete" incomplete information
+   
+   Examples:
+   ✅ CORRECT: If report says "Recommend MRI lumbar spine", extract: "imaging_recommendations": ["MRI lumbar spine"]
+   ❌ WRONG: If report says "Continue current medications", DO NOT extract specific medication names (not stated)
+   ✅ CORRECT: Extract: "medication_recommendations": "Continue current medications" (exact wording)
+
+2. **RECOMMENDATIONS - ZERO TOLERANCE FOR ASSUMPTIONS**
+   - Extract ONLY recommendations explicitly stated in assessment/plan sections
+   - Include timing/scheduling ONLY if explicitly stated
+   - DO NOT extract:
+     * Treatments mentioned as "considered but not recommended"
+     * Historical treatments unless explicitly recommended for continuation
+     * Standard care that is not explicitly mentioned
+   
+   Examples:
+   ✅ CORRECT: Report states "Recommend physical therapy 2x/week for 6 weeks"
+   Extract: {{"therapy_recommendations": ["Physical therapy 2x/week for 6 weeks"]}}
+   
+   ❌ WRONG: Report states "Patient may benefit from therapy"
+   DO NOT extract specific therapy recommendations (not specified)
+
+3. **EMPTY FIELDS ARE ACCEPTABLE - DO NOT FILL**
+   - It is BETTER to return an empty field than to guess
+   - If you cannot find information for a field, leave it empty
+   - DO NOT use phrases like "Not mentioned", "Not stated", "Unknown" - just return ""
+   
+   Examples:
+   ✅ CORRECT: If no work restrictions mentioned, return: "work_restrictions": []
+   ❌ WRONG: Return: "work_restrictions": "Not specified" (use empty list instead)
+
+4. **EXACT CLINICAL TERMINOLOGY**
+   - Use EXACT wording from report for diagnoses and recommendations
+   - DO NOT upgrade "mild" to "moderate" or downgrade "severe" to "moderate"
+   - Capture nuanced clinical language: "likely", "probable", "consistent with", "rule out"
+   
+   Examples:
+   ✅ CORRECT: Report says "Clinical findings consistent with rotator cuff tendinopathy"
+   Extract: "diagnostic_impression": "Clinical findings consistent with rotator cuff tendinopathy"
+   
+   ❌ WRONG: Report says "Clinical findings consistent with rotator cuff tendinopathy"
+   DO NOT extract: "diagnostic_impression": "Rotator cuff tendinopathy" (changes meaning)
+
+5. **NO CLINICAL DECISION-MAKING BEYOND REPORT**
+   - DO NOT predict treatment outcomes
+   - DO NOT suggest additional evaluations beyond what's recommended
+   - DO NOT infer specialist preferences or practice patterns
+   
+   Examples:
+   ❌ WRONG: Report mentions "corticosteroid injection"
+   DO NOT assume: "will provide 3 months of pain relief" (outcome not stated)
+   ✅ CORRECT: Extract: "procedure_recommendations": ["corticosteroid injection"]
+
+6. **VERIFICATION CHECKLIST BEFORE SUBMISSION**
+   Before returning your extraction, verify:
+   □ Every recommendation has a direct quote in the report
+   □ Every diagnosis is explicitly stated (not inferred from symptoms)
+   □ Every work restriction is directly from restrictions section
+   □ No fields are filled with "expected" or "typical" specialist advice
+   □ Empty fields are truly empty (not "Not mentioned" or "Unknown")
+
+CONSULTATION SPECIFIC EXTRACTION FOCUS - 6 CRITICAL SPECIALIST CATEGORIES:
+
+I. CONSULTATION CONTEXT & HISTORY
+- Referral source and clinical questions
+- Presenting symptoms and duration
+- Previous treatments and responses
+- Relevant medical and surgical history
+
+II. SPECIALIST EXAMINATION FINDINGS
+- Physical examination: ROM, strength, special tests
+- Neurological assessment: sensation, reflexes, coordination
+- Functional assessment: gait, posture, functional limitations
+- Diagnostic test review: imaging, labs, other studies
+
+III. DIAGNOSTIC IMPRESSION & ASSESSMENT
+- Primary diagnosis and differential diagnoses
+- Clinical correlation and diagnostic certainty
+- Causation assessment (if work-related)
+- Prognosis and expected clinical course
+
+IV. TREATMENT RECOMMENDATIONS (Most Critical)
+- Medication management: new prescriptions, adjustments, discontinuations
+- Therapeutic interventions: PT, OT, other therapies
+- Interventional procedures: injections, nerve blocks, other procedures
+- Surgical recommendations: specific procedures, timing, indications
+
+V. DIAGNOSTIC & CONSULTATION RECOMMENDATIONS
+- Additional imaging studies with clinical rationale
+- Laboratory or other diagnostic testing
+- Additional specialist referrals
+- Further evaluation or workup needs
+
+VI. WORK STATUS & FUNCTIONAL CAPACITY
+- Current work capacity and restrictions
+- Specific functional limitations
+- Duration of restrictions
+- Return-to-work progression plan
+
+⚠️ FINAL REMINDER:
+- If information is NOT in the report, return EMPTY ("" or [])
+- NEVER assume, infer, or extrapolate clinical decisions
+- RECOMMENDATIONS: Only extract what is explicitly recommended
+- It is BETTER to have empty fields than incorrect information
+
+Now analyze this COMPLETE specialist consultation report and extract ALL relevant clinical information:
 """)
 
-        # User prompt with few-shot examples
         user_prompt = HumanMessagePromptTemplate.from_template("""
-EXAMPLES:
-{examples}
+COMPLETE SPECIALIST CONSULTATION REPORT TEXT:
 
-NOW EXTRACT FROM THIS CONSULTATION TEXT:
-{text}
+{full_document_text}
 
-Return valid JSON only.
+Extract into COMPREHENSIVE structured JSON with all specialist assessment details:
+
+{{
+  "consultation_context": {{
+    "report_type": "Specialist Consultation",
+    "consultation_date": "",
+    "referral_source": "",
+    "referring_physician": "",
+    "clinical_questions": "",
+    "consultation_type": "initial/follow-up/pre-op/post-op"
+  }},
+  
+  "clinical_presentation": {{
+    "chief_complaint": "",
+    "symptom_duration": "",
+    "presenting_symptoms": [
+      "Right shoulder pain",
+      "Limited overhead reaching",
+      "Night pain"
+    ],
+    "previous_treatments": [
+      "Physical therapy - minimal improvement",
+      "NSAIDs - partial relief",
+      "Previous injection - good but temporary relief"
+    ],
+    "relevant_history": [
+      "Work-related injury 6 months ago",
+      "No prior shoulder problems",
+      "Non-smoker, no diabetes"
+    ]
+  }},
+  
+  "consulting_physician": {{
+    "name": "{primary_physician}",
+    "specialty": "",
+    "credentials": "",
+    "facility": ""
+  }},
+  
+  "examination_findings": {{
+    "physical_exam": {{
+      "inspection": "mild atrophy supraspinatus fossa",
+      "palpation": "tenderness greater tuberosity",
+      "range_of_motion": "forward flexion 120° (NL 180°), abduction 100° (NL 180°)",
+      "strength": "supraspinatus 4/5, infraspinatus 5/5",
+      "special_tests": "positive Neer, positive Hawkins, positive empty can"
+    }},
+    "neurological_exam": {{
+      "sensation": "intact to light touch C5-T1",
+      "reflexes": "biceps 2+, brachioradialis 2+",
+      "motor": "deltoid 5/5, biceps 5/5, triceps 5/5"
+    }},
+    "functional_assessment": {{
+      "gait": "normal",
+      "posture": "forward shoulder posture",
+      "functional_limitations": "unable to lift overhead, difficulty with reaching behind back"
+    }}
+  }},
+  
+  "diagnostic_impression": {{
+    "primary_diagnosis": "Rotator cuff tendinopathy with impingement",
+    "differential_diagnosis": [
+      "Partial thickness rotator cuff tear",
+      "Acromioclavicular joint arthritis",
+      "Biceps tendinopathy"
+    ],
+    "diagnostic_certainty": "high",
+    "clinical_correlation": "consistent with overhead work activities",
+    "causation_assessment": "work-related",
+    "prognosis": "good with appropriate treatment"
+  }},
+  
+  "diagnostic_recommendations": {{
+    "imaging_studies": [
+      {{
+        "study": "MRI right shoulder without contrast",
+        "rationale": "evaluate for rotator cuff tear given refractory symptoms",
+        "urgency": "routine"
+      }}
+    ],
+    "laboratory_tests": [
+      {{
+        "test": "Complete blood count",
+        "rationale": "pre-procedure baseline",
+        "urgency": "routine"
+      }}
+    ],
+    "additional_workup": [
+      "Consider diagnostic ultrasound if MRI equivocal"
+    ]
+  }},
+  
+  "treatment_recommendations": {{
+    "medication_management": [
+      {{
+        "medication": "Naproxen 500mg twice daily",
+        "duration": "2 weeks",
+        "rationale": "anti-inflammatory for tendinopathy",
+        "new_prescription": true
+      }},
+      {{
+        "medication": "Cyclobenzaprine 10mg at bedtime",
+        "duration": "as needed",
+        "rationale": "muscle relaxation for night pain",
+        "new_prescription": true
+      }}
+    ],
+    "therapy_recommendations": [
+      {{
+        "therapy_type": "Physical therapy",
+        "frequency": "2 times per week",
+        "duration": "6 weeks",
+        "focus": "rotator cuff strengthening, scapular stabilization",
+        "goals": "improve overhead function, reduce pain"
+      }}
+    ],
+    "interventional_procedures": [
+      {{
+        "procedure": "Subacromial corticosteroid injection",
+        "location": "right shoulder",
+        "rationale": "reduce inflammation, facilitate therapy participation",
+        "timing": "within 2 weeks",
+        "urgency": "semi-urgent"
+      }}
+    ],
+    "surgical_recommendations": [
+      {{
+        "procedure": "Arthroscopic subacromial decompression",
+        "indication": "if conservative measures fail after 3 months",
+        "urgency": "elective",
+        "contingency": "dependent on MRI findings and treatment response"
+      }}
+    ]
+  }},
+  
+  "additional_consultations": [
+    {{
+      "specialty": "Pain Management",
+      "rationale": "if injection provides incomplete relief",
+      "urgency": "routine"
+    }},
+    {{
+      "specialty": "Work Capacity Evaluation",
+      "rationale": "formal functional assessment for work restrictions",
+      "urgency": "routine"
+    }}
+  ],
+  
+  "work_status_recommendations": {{
+    "current_work_status": "Modified Duty",
+    "work_restrictions": [
+      "No overhead work",
+      "No lifting greater than 10 pounds",
+      "No repetitive reaching above shoulder level",
+      "Limited pushing/pulling with right arm"
+    ],
+    "restriction_duration": "6 weeks",
+    "reevaluation_timing": "after completion of injection and 4 weeks of therapy",
+    "return_to_work_progression": [
+      "Current: modified duty with above restrictions",
+      "Next: light duty if 50% improvement in symptoms",
+      "Goal: full duty after complete rehabilitation"
+    ]
+  }},
+  
+  "follow_up_planning": {{
+    "next_appointment": {{
+      "timing": "6 weeks",
+      "purpose": "Re-evaluate treatment response, review MRI results",
+      "contingencies": [
+        "Sooner if worsening symptoms",
+        "Phone update after MRI completed"
+      ]
+    }},
+    "treatment_milestones": [
+      "50% pain reduction after injection",
+      "Improved overhead ROM after 4 weeks therapy",
+      "Strength normalization after 8 weeks therapy"
+    ],
+    "discharge_criteria": [
+      "Pain-free full ROM",
+      "Normal strength",
+      "Return to full work duties"
+    ]
+  }},
+  
+  "critical_recommendations": [
+    {{
+      "recommendation": "Subacromial corticosteroid injection within 2 weeks",
+      "significance": "high",
+      "rationale": "break pain cycle to enable effective therapy",
+      "action": "schedule with interventional radiology/pain management"
+    }},
+    {{
+      "recommendation": "MRI right shoulder to rule out rotator cuff tear",
+      "significance": "high",
+      "rationale": "guide surgical decision-making if conservative treatment fails",
+      "action": "order MRI within 4 weeks"
+    }},
+    {{
+      "recommendation": "Strict adherence to work restrictions for 6 weeks",
+      "significance": "medium",
+      "rationale": "prevent symptom exacerbation during healing phase",
+      "action": "communicate restrictions to employer"
+    }}
+  ]
+}}
 """)
 
-        # Create the chat prompt template
-        chat_prompt = ChatPromptTemplate.from_messages([
-            system_prompt,
-            user_prompt
-        ])
+        # Build context guidance summary
+        context_guidance_text = f"""
+CONSULTING PHYSICIAN: {primary_physician or 'Not identified in context'}
+REASONING: {physician_reasoning or 'See document for identification'}
 
+FOCUS ON THESE SECTIONS: {', '.join(focus_sections) if focus_sections else 'Assessment, Plan, Recommendations'}
+
+CLINICAL CONTEXT:
+- Referral Reason: {clinical_context.get('referral_reason', 'Not specified')}
+- Clinical History: {clinical_context.get('clinical_history', 'Not provided')}
+
+KNOWN AMBIGUITIES: {len(ambiguities)} detected
+{chr(10).join([f"- {amb.get('type')}: {amb.get('description')}" for amb in ambiguities]) if ambiguities else 'None detected'}
+"""
+
+        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
+        
         try:
-            partial_results = []
-            for i, chunk in enumerate(chunks):
-                logger.debug(f"🔄 Processing chunk {i+1}/{len(chunks)}")
-                
-                # Format few-shot examples as string
-                examples_str = "\n\n".join([
-                    f"Input: {ex['input']}\nOutput: {json.dumps(ex['output'])}" 
-                    for ex in few_shot_examples
-                ])
-                
-                chain = chat_prompt | self.llm | self.parser
-                partial = chain.invoke({
-                    "examples": examples_str,
-                    "text": chunk
-                })
-                partial_results.append(partial)
-                logger.debug(f"✅ Chunk {i+1} processed")
+            start_time = time.time()
             
-            # Merge partial extractions
-            merged_result = self._merge_partial_extractions(partial_results, fallback_date)
-            logger.info(f"✅ Stage 1: Few-shot extraction completed - {len(partial_results)} chunks merged")
-            return merged_result
+            logger.info("🤖 Invoking LLM for full-context consultation extraction...")
+            
+            # Single LLM call with FULL document context and guidance
+            chain = chat_prompt | self.llm | self.parser
+            result = chain.invoke({
+                "full_document_text": text,
+                "context_guidance": context_guidance_text,
+                "primary_physician": primary_physician or "Extract from document",
+                "physician_reasoning": physician_reasoning or "Use signature and documentation sections",
+                "focus_sections": ', '.join(focus_sections) if focus_sections else "Standard consultation sections",
+                "clinical_context": str(clinical_context),
+                "ambiguities": str(ambiguities)
+            })
+            
+            end_time = time.time()
+            processing_time = end_time - start_time
+            
+            logger.info(f"⚡ Full-context consultation extraction completed in {processing_time:.2f}s")
+            logger.info(f"✅ Extracted consultation data from complete {len(text):,} char document")
+            
+            return result
             
         except Exception as e:
-            logger.error(f"❌ Consult few-shot extraction failed: {e}")
-            return self._get_fallback_result(fallback_date)
-
-    def _merge_partial_extractions(self, partials: List[Dict], fallback_date: str) -> Dict:
-        """Merge extractions from multiple chunks."""
-        if not partials:
-            return self._get_fallback_result(fallback_date)
-        
-        merged = self._get_fallback_result(fallback_date)
-        
-        # String fields: take most complete value across chunks
-        string_fields = [
-            "consult_date", "specialty", "body_part", "findings",
-            "treatment_recommendations", "recommendations", "work_status"
-        ]
-        
-        for field in string_fields:
-            candidates = []
-            for partial in partials:
-                value = partial.get(field, "")
-                if isinstance(value, str) and value.strip() and value.strip() != fallback_date:
-                    candidates.append(value.strip())
+            logger.error(f"❌ Full-context consultation extraction failed: {e}", exc_info=True)
             
-            if candidates:
-                candidates.sort(key=len, reverse=True)
-                merged[field] = candidates[0]
-
-        # Special handling for date
-        if not merged["consult_date"]:
-            merged["consult_date"] = fallback_date
-
-        # Special handling for findings: combine complementary findings
-        if len(partials) > 1:
-            finding_candidates = []
-            for partial in partials:
-                candidate = partial.get("findings", "").strip()
-                if candidate and candidate not in finding_candidates:
-                    finding_candidates.append(candidate)
+            # Check if context length exceeded
+            if "context_length_exceeded" in str(e).lower() or "maximum context" in str(e).lower():
+                logger.error("❌ Document exceeds GPT-4o 128K context window")
+                logger.error("❌ Consider implementing chunked fallback for very large documents")
             
-            if len(finding_candidates) > 1:
-                combined = f"{finding_candidates[0]}; {finding_candidates[1][:50]}"
-                if len(combined) <= 100:
-                    merged["findings"] = combined
-
-        logger.info(f"📊 Merge completed: specialty='{merged['specialty']}', findings='{merged['findings'][:50]}...'")
-        return merged
-
-    def _get_fallback_result(self, fallback_date: str) -> Dict:
-        """Return minimal fallback result structure."""
-        return {
-            "consult_date": fallback_date,
-            "specialty": "",
-            "body_part": "",
-            "findings": "",
-            "treatment_recommendations": "",
-            "recommendations": "",
-            "work_status": "",
-        }
+            return self._get_fallback_result(fallback_date)
 
     def _detect_consultant(
         self,
         text: str,
         page_zones: Optional[Dict[str, Dict[str, str]]] = None
     ) -> str:
-        """Stage 2: Detect consultant using DoctorDetector."""
-        logger.info("🔍 Stage 2: Running DoctorDetector...")
+        """Fallback: Detect consultant using DoctorDetector"""
+        logger.info("🔍 Fallback: Running DoctorDetector for consultant...")
         
         detection_result = self.doctor_detector.detect_doctor(
             text=text,
@@ -295,290 +567,308 @@ Return valid JSON only.
             logger.warning("⚠️ No valid consultant found")
             return ""
 
-    def _build_initial_result(
-        self,
-        raw_data: Dict,
-        doc_type: str,
-        fallback_date: str
-    ) -> ExtractionResult:
-        """Stage 3: Build initial result with professional summary."""
-        cleaned = self._validate_and_clean(raw_data, fallback_date)
-        summary_line = self._build_professional_summary(cleaned, doc_type, fallback_date)
+    def _build_initial_result(self, raw_data: Dict, doc_type: str, fallback_date: str) -> ExtractionResult:
+        """Build initial result from extracted consultation data"""
+        logger.info("🔨 Building initial consultation extraction result...")
+        
+        # Extract core consultation information
+        consultation_context = raw_data.get("consultation_context", {})
+        consulting_physician = raw_data.get("consulting_physician", {})
+        diagnostic_impression = raw_data.get("diagnostic_impression", {})
+        
+        # Build comprehensive consultation summary
+        summary_line = self._build_consultation_narrative_summary(raw_data, doc_type, fallback_date)
         
         result = ExtractionResult(
             document_type=doc_type,
-            document_date=cleaned.get("consult_date", fallback_date),
+            document_date=consultation_context.get("consultation_date", fallback_date),
             summary_line=summary_line,
-            examiner_name=cleaned.get("physician_name", ""),
-            specialty=cleaned.get("specialty"),
-            body_parts=[cleaned.get("body_part")] if cleaned.get("body_part") else [],
-            raw_data=cleaned,
+            examiner_name=raw_data.get("consulting_physician_name", ""),
+            specialty=consulting_physician.get("specialty", ""),
+            body_parts=self._extract_body_parts_from_consultation(raw_data),
+            raw_data=raw_data,
         )
         
-        logger.info(f"✅ Stage 3: Initial result built (consultant: {result.examiner_name})")
+        logger.info(f"✅ Initial consultation result built (Consultant: {result.examiner_name})")
         return result
 
-    def _validate_and_clean(self, result: Dict, fallback_date: str) -> Dict:
-        """Validate and clean extracted data."""
-        cleaned = {}
+    def _extract_body_parts_from_consultation(self, data: Dict) -> List[str]:
+        """Extract body parts from consultation data"""
+        body_parts = []
         
-        # Date validation
-        date = result.get("consult_date", "")
-        cleaned["consult_date"] = date if date and date != "empty" else fallback_date
-
-        # Physician (from DoctorDetector)
-        physician = result.get("physician_name", "")
-        cleaned["physician_name"] = physician.strip()
-
-        # Specialty validation
-        specialty = result.get("specialty", "")
-        cleaned["specialty"] = specialty if specialty and specialty != "empty" else ""
-
-        # Body part validation
-        body_part = result.get("body_part", "")
-        cleaned["body_part"] = body_part if body_part and body_part != "empty" else ""
-
-        # String fields validation
-        string_fields = [
-            "findings",
-            "treatment_recommendations",
-            "recommendations",
-            "work_status",
-        ]
+        # From clinical presentation
+        clinical_presentation = data.get("clinical_presentation", {})
+        chief_complaint = clinical_presentation.get("chief_complaint", "")
+        if chief_complaint:
+            # Extract body parts from common patterns
+            if any(part in chief_complaint.lower() for part in ['shoulder', 'arm', 'upper extremity']):
+                body_parts.append('Upper Extremity')
+            if any(part in chief_complaint.lower() for part in ['back', 'spine', 'lumbar']):
+                body_parts.append('Spine')
+            if any(part in chief_complaint.lower() for part in ['knee', 'leg', 'lower extremity']):
+                body_parts.append('Lower Extremity')
         
-        negative_phrases = [
-            "no treatment", "no changes", "no new", "no follow-up",
-            "fully resolved", "resolved", "no restrictions",
-            "released to full duty", "full duty", "unrestricted",
-            "not indicated", "not recommended", "not needed"
-        ]
+        # From diagnostic impression
+        diagnostic_impression = data.get("diagnostic_impression", {})
+        primary_diagnosis = diagnostic_impression.get("primary_diagnosis", "")
+        if primary_diagnosis and not body_parts:
+            if any(part in primary_diagnosis.lower() for part in ['shoulder', 'rotator cuff']):
+                body_parts.append('Upper Extremity')
+            if any(part in primary_diagnosis.lower() for part in ['spine', 'disc', 'radiculopathy']):
+                body_parts.append('Spine')
+            if any(part in primary_diagnosis.lower() for part in ['knee', 'meniscus', 'acl']):
+                body_parts.append('Lower Extremity')
         
-        for field in string_fields:
-            raw_value = result.get(field, "")
-            
-            if isinstance(raw_value, list):
-                v = ", ".join([str(item).strip() for item in raw_value if item])
-            elif isinstance(raw_value, str):
-                v = raw_value.strip()
-            else:
-                v = str(raw_value).strip() if raw_value else ""
-            
-            v_lower = v.lower()
-            
-            if not v or v_lower in ["", "empty", "none", "n/a", "not mentioned"]:
-                cleaned[field] = ""
-                continue
-            
-            if any(neg_phrase in v_lower for neg_phrase in negative_phrases):
-                cleaned[field] = ""
-                continue
-            
-            cleaned[field] = v
+        return body_parts if body_parts else []
 
-        return cleaned
-
-    def _build_professional_summary(
-        self,
-        data: Dict,
-        doc_type: str,
-        fallback_date: str
-    ) -> str:
-        """Build professional 50-60 word summary using few-shot approach."""
+    def _build_consultation_narrative_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
+        """
+        Build comprehensive narrative summary for consultation reports.
         
-        # Few-shot examples for consultation summary generation
-        summary_examples = [
-            {
-                "data": {
-                    "date": "10/15/2024",
-                    "physician": "Dr. Smith",
-                    "specialty": "Ortho",
-                    "body_part": "R shoulder",
-                    "findings": "Rotator cuff tendinopathy with impingement",
-                    "treatment": "Physical therapy 2x/week, subacromial injection",
-                    "recommendations": "Follow-up in 6 weeks",
-                    "work_status": "Modified duty - no overhead lifting"
-                },
-                "summary": "Orthopedic Consultation dated 10/15/2024 by Dr. Smith for right shoulder. Findings: rotator cuff tendinopathy with impingement. Treatment: physical therapy twice weekly and subacromial injection. Work status: modified duty with no overhead lifting. Plan: follow-up evaluation in 6 weeks to assess treatment response."
+        Consultation style: "Specialty: [type]. Assessment: [diagnosis]. Recommendations: [key actions]. Work Status: [restrictions]."
+        """
+        
+        # Extract all consultation data
+        consultation_context = data.get("consultation_context", {})
+        consulting_physician = data.get("consulting_physician", {})
+        diagnostic_impression = data.get("diagnostic_impression", {})
+        treatment_recommendations = data.get("treatment_recommendations", {})
+        work_status_recommendations = data.get("work_status_recommendations", {})
+        critical_recommendations = data.get("critical_recommendations", [])
+        
+        # Build narrative sections
+        narrative_parts = []
+        
+        # Section 1: SPECIALTY & ASSESSMENT
+        assessment_text = self._build_assessment_narrative(consulting_physician, diagnostic_impression)
+        if assessment_text:
+            narrative_parts.append(f"**Assessment:** {assessment_text}")
+        
+        # Section 2: KEY RECOMMENDATIONS
+        recommendations_text = self._build_recommendations_narrative(treatment_recommendations, critical_recommendations)
+        if recommendations_text:
+            narrative_parts.append(f"**Recommendations:** {recommendations_text}")
+        
+        # Section 3: WORK STATUS & FOLLOW-UP
+        work_followup_text = self._build_work_followup_narrative(work_status_recommendations, consultation_context)
+        if work_followup_text:
+            narrative_parts.append(f"**Work Status:** {work_followup_text}")
+        
+        # Section 4: CONSULTANT & DATE CONTEXT
+        consultant_name = self._safe_str(consulting_physician.get("name", ""))
+        consult_date = consultation_context.get("consultation_date", fallback_date)
+        
+        if consultant_name:
+            context_line = f"Consultation by {consultant_name} on {consult_date}"
+            narrative_parts.insert(0, context_line)
+        
+        # Join with proper formatting
+        full_narrative = "\n\n".join(narrative_parts)
+        
+        logger.info(f"📝 Consultation narrative summary generated: {len(full_narrative)} characters")
+        return full_narrative
+
+    def _safe_str(self, value, default="") -> str:
+        """Safely convert any value to string, handling lists and nested structures."""
+        if not value:
+            return default
+        
+        if isinstance(value, list):
+            # Flatten list and convert all items to strings
+            string_items = []
+            for item in value:
+                if isinstance(item, (dict, list)):
+                    # For complex structures, use JSON representation
+                    try:
+                        import json
+                        string_items.append(json.dumps(item, default=str))
+                    except:
+                        string_items.append(str(item))
+                elif item:
+                    string_items.append(str(item))
+            return ", ".join(string_items) if string_items else default
+        
+        if isinstance(value, dict):
+            # For dictionaries, use JSON representation
+            try:
+                import json
+                return json.dumps(value, default=str)
+            except:
+                return str(value)
+        
+        return str(value) if value else default
+
+    def _build_assessment_narrative(self, consulting_physician: Dict, diagnostic_impression: Dict) -> str:
+        """Build assessment and diagnosis narrative section"""
+        assessment_parts = []
+        
+        # Specialty - safely convert to string
+        specialty = self._safe_str(consulting_physician.get("specialty", ""))
+        if specialty and specialty.strip():
+            assessment_parts.append(specialty.strip())
+        
+        # Primary diagnosis - safely convert to string
+        primary_dx = self._safe_str(diagnostic_impression.get("primary_diagnosis", ""))
+        if primary_dx and primary_dx.strip():
+            assessment_parts.append(primary_dx.strip())
+        
+        # Clinical correlation - safely convert to string
+        correlation = self._safe_str(diagnostic_impression.get("clinical_correlation", ""))
+        if correlation and correlation.strip():
+            assessment_parts.append(correlation.strip())
+        
+        # Only join if we have valid string parts
+        valid_parts = [part for part in assessment_parts if part and isinstance(part, str)]
+        return " - ".join(valid_parts) if valid_parts else "Assessment not specified"
+
+    def _build_recommendations_narrative(self, treatment_recommendations: Dict, critical_recommendations: list) -> str:
+        """Build key recommendations narrative"""
+        recommendation_items = []
+        
+        # Critical recommendations (highest priority)
+        if critical_recommendations and isinstance(critical_recommendations, list):
+            for critical in critical_recommendations[:2]:  # Top 2 critical recommendations
+                if isinstance(critical, dict):
+                    recommendation = self._safe_str(critical.get("recommendation", ""))
+                    if recommendation and recommendation.strip():
+                        recommendation_items.append(recommendation.strip())
+        
+        # Interventional procedures
+        procedures = treatment_recommendations.get("interventional_procedures", [])
+        if procedures and isinstance(procedures, list):
+            for proc in procedures[:2]:
+                if isinstance(proc, dict):
+                    procedure = self._safe_str(proc.get("procedure", ""))
+                    if procedure and procedure.strip():
+                        recommendation_items.append(procedure.strip())
+        
+        # Therapy recommendations
+        therapy = treatment_recommendations.get("therapy_recommendations", [])
+        if therapy and isinstance(therapy, list):
+            for tx in therapy[:1]:
+                if isinstance(tx, dict):
+                    therapy_type = self._safe_str(tx.get("therapy_type", ""))
+                    if therapy_type and therapy_type.strip():
+                        recommendation_items.append(therapy_type.strip())
+        
+        # Medication recommendations
+        medications = treatment_recommendations.get("medication_management", [])
+        if medications and isinstance(medications, list):
+            for med in medications[:1]:
+                if isinstance(med, dict):
+                    medication = self._safe_str(med.get("medication", ""))
+                    if medication and medication.strip():
+                        recommendation_items.append(medication.strip())
+        
+        # Only return if we have valid recommendations
+        valid_items = [item for item in recommendation_items if item and isinstance(item, str)]
+        return "; ".join(valid_items) if valid_items else "Continue current management"
+
+    def _build_work_followup_narrative(self, work_status_recommendations: Dict, consultation_context: Dict) -> str:
+        """Build work status and follow-up planning narrative"""
+        work_parts = []
+        
+        # Current work status
+        current_status = self._safe_str(work_status_recommendations.get("current_work_status", ""))
+        if current_status and current_status.strip():
+            work_parts.append(current_status.strip())
+        
+        # Work restrictions
+        restrictions = work_status_recommendations.get("work_restrictions", [])
+        if restrictions and isinstance(restrictions, list):
+            # Take most significant 2 restrictions
+            significant_restrictions = []
+            for restriction in restrictions:
+                restriction_str = self._safe_str(restriction)
+                if restriction_str and restriction_str.strip():
+                    significant_restrictions.append(restriction_str.strip())
+            
+            if significant_restrictions:
+                work_parts.extend(significant_restrictions[:2])
+        
+        # Follow-up timing
+        follow_up = self._safe_str(consultation_context.get("consultation_type", ""))
+        if "follow-up" in follow_up.lower():
+            work_parts.append("scheduled follow-up")
+        
+        # Only return if we have valid work parts
+        valid_parts = [part for part in work_parts if part and isinstance(part, str)]
+        return ", ".join(valid_parts) if valid_parts else "Work status not specified"
+
+    def _get_fallback_result(self, fallback_date: str) -> Dict:
+        """Return minimal fallback result structure for consultations"""
+        return {
+            "consultation_context": {
+                "report_type": "Specialist Consultation",
+                "consultation_date": fallback_date,
+                "referral_source": "",
+                "referring_physician": "",
+                "clinical_questions": "",
+                "consultation_type": ""
             },
-            {
-                "data": {
-                    "date": "11/20/2024",
-                    "physician": "Dr. Chen",
-                    "specialty": "Neuro",
-                    "body_part": "Lumbar spine",
-                    "findings": "L5 radiculopathy, likely discogenic",
-                    "treatment": "Gabapentin 300mg TID",
-                    "recommendations": "MRI lumbar spine, follow-up after results",
-                    "work_status": "TTD, no bending/lifting"
-                },
-                "summary": "Neurology Consultation dated 11/20/2024 by Dr. Chen for lumbar spine. Diagnosis: L5 radiculopathy likely discogenic. Treatment: gabapentin 300mg three times daily. Work restrictions: temporary total disability with no bending or lifting. Additional imaging with MRI recommended for further evaluation."
+            "clinical_presentation": {
+                "chief_complaint": "",
+                "symptom_duration": "",
+                "presenting_symptoms": [],
+                "previous_treatments": [],
+                "relevant_history": []
             },
-            {
-                "data": {
-                    "date": "01/10/2025",
-                    "physician": "",
-                    "specialty": "",
-                    "body_part": "",
-                    "findings": "Condition resolving, improved with treatment",
-                    "treatment": "Continue current regimen",
-                    "recommendations": "Discharge to PCP",
-                    "work_status": "Released to full duty"
+            "consulting_physician": {
+                "name": "",
+                "specialty": "",
+                "credentials": "",
+                "facility": ""
+            },
+            "examination_findings": {
+                "physical_exam": {
+                    "inspection": "",
+                    "palpation": "",
+                    "range_of_motion": "",
+                    "strength": "",
+                    "special_tests": ""
                 },
-                "summary": "Follow-up Consultation dated 01/10/2025. Patient shows significant improvement with current treatment regimen. Condition resolving appropriately. Cleared for return to full duty work without restrictions. Plan: discharge to primary care physician for ongoing management with no further specialty follow-up needed."
-            }
-        ]
-
-        # System prompt for summary generation
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a medical summarizer creating concise specialist consultation summaries for physicians.
-
-RULES:
-- Keep summary 50-60 words
-- Focus on key findings and clinical recommendations
-- Use professional medical terminology
-- Include: date, specialty, body part, key findings, treatments, work status, follow-up plan
-- Be concise but clinically accurate
-- Highlight specialist recommendations and restrictions
-- For discharge cases, clearly state resolution and clearance
-""")
-
-        # User prompt with data and examples
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-EXAMPLES:
-{examples}
-
-NOW CREATE SUMMARY FROM THIS CONSULTATION DATA:
-Date: {date}
-Physician: {physician}
-Specialty: {specialty}
-Body Part: {body_part}
-Findings: {findings}
-Treatment: {treatment}
-Recommendations: {recommendations}
-Work Status: {work_status}
-
-Create a professional 50-60 word consultation summary:
-""")
-
-        chat_prompt = ChatPromptTemplate.from_messages([
-            system_prompt,
-            user_prompt
-        ])
-
-        try:
-            # Prepare data
-            date = data.get("consult_date", fallback_date)
-            physician = data.get("physician_name", "")
-            specialty = data.get("specialty", "")
-            body_part = data.get("body_part", "")
-            findings = data.get("findings", "")
-            treatment = data.get("treatment_recommendations", "")
-            recommendations = data.get("recommendations", "")
-            work_status = data.get("work_status", "")
-
-            # Format few-shot examples
-            examples_str = "\n\n".join([
-                f"Data: {json.dumps(ex['data'])}\nSummary: {ex['summary']}" 
-                for ex in summary_examples
-            ])
-
-            chain = chat_prompt | self.llm
-            response = chain.invoke({
-                "examples": examples_str,
-                "date": date,
-                "physician": physician,
-                "specialty": specialty,
-                "body_part": body_part,
-                "findings": findings,
-                "treatment": treatment,
-                "recommendations": recommendations,
-                "work_status": work_status
-            })
-            
-            summary = response.content.strip()
-            
-            # Ensure appropriate length
-            words = summary.split()
-            if len(words) > 70:
-                summary = " ".join(words[:65]) + "..."
-            elif len(words) < 45:
-                # Add context if too short
-                if body_part and not findings:
-                    summary += f" {body_part} condition assessed."
-                if not summary.endswith('.'):
-                    summary += '.'
-            
-            logger.info(f"📊 Generated consultation summary: {len(summary.split())} words")
-            return summary
-            
-        except Exception as e:
-            logger.error(f"❌ Consultation summary generation failed: {e}")
-            return self._build_manual_summary(data, doc_type, fallback_date)
-
-    def _build_manual_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
-        """Fallback manual summary construction."""
-        date = data.get("consult_date", fallback_date)
-        physician = data.get("physician_name", "")
-        specialty = data.get("specialty", "")
-        body_part = data.get("body_part", "")
-        findings = data.get("findings", "")
-        treatment = data.get("treatment_recommendations", "")
-        recommendations = data.get("recommendations", "")
-        work_status = data.get("work_status", "")
-
-        parts = [f"Consultation Report dated {date}"]
-        
-        if physician:
-            parts.append(f"by {physician}")
-        
-        if specialty:
-            parts.append(f"({specialty})")
-
-        if body_part:
-            parts.append(f"for {body_part}")
-
-        if findings:
-            parts.append(f"Findings: {findings[:50]}")
-
-        if treatment:
-            parts.append(f"Treatment: {treatment[:40]}")
-
-        if work_status:
-            parts.append(f"Work: {work_status[:30]}")
-
-        if recommendations:
-            parts.append(f"Plan: {recommendations[:30]}")
-
-        summary = " ".join(parts)
-        words = summary.split()
-        if len(words) > 70:
-            summary = " ".join(words[:65]) + "..."
-        
-        return summary
-
-    def _extract_physician_last_name(self, physician_name: str) -> str:
-        """Extract last name from physician name string."""
-        if not physician_name:
-            return ""
-
-        # Remove common titles and suffixes
-        clean_name = (
-            physician_name
-            .replace("Dr.", "")
-            .replace("MD", "")
-            .replace("DO", "")
-            .replace("M.D.", "")
-            .replace("D.O.", "")
-            .replace("MBBS", "")
-            .replace("MBChB", "")
-            .replace(",", "")
-            .strip()
-        )
-
-        # Get the last word as last name
-        parts = clean_name.split()
-        if parts:
-            last_name = parts[-1]
-            logger.info(f"  🔍 Extracted last name: '{last_name}' from '{physician_name}'")
-            return last_name
-        return ""
+                "neurological_exam": {
+                    "sensation": "",
+                    "reflexes": "",
+                    "motor": ""
+                },
+                "functional_assessment": {
+                    "gait": "",
+                    "posture": "",
+                    "functional_limitations": ""
+                }
+            },
+            "diagnostic_impression": {
+                "primary_diagnosis": "",
+                "differential_diagnosis": [],
+                "diagnostic_certainty": "",
+                "clinical_correlation": "",
+                "causation_assessment": "",
+                "prognosis": ""
+            },
+            "diagnostic_recommendations": {
+                "imaging_studies": [],
+                "laboratory_tests": [],
+                "additional_workup": []
+            },
+            "treatment_recommendations": {
+                "medication_management": [],
+                "therapy_recommendations": [],
+                "interventional_procedures": [],
+                "surgical_recommendations": []
+            },
+            "additional_consultations": [],
+            "work_status_recommendations": {
+                "current_work_status": "",
+                "work_restrictions": [],
+                "restriction_duration": "",
+                "reevaluation_timing": "",
+                "return_to_work_progression": []
+            },
+            "follow_up_planning": {
+                "next_appointment": {},
+                "treatment_milestones": [],
+                "discharge_criteria": []
+            },
+            "critical_recommendations": []
+        }

@@ -1,12 +1,13 @@
 """
-Imaging reports extractor with few-shot prompting and DoctorDetector integration.
+Imaging Reports Enhanced Extractor - Full Context with Context-Awareness
+Optimized for accuracy using Gemini-style full-document processing with contextual guidance
 """
 import logging
-import json
-from typing import Dict, Optional, List
+import re
+import time
+from typing import Dict, Optional
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
@@ -18,11 +19,13 @@ logger = logging.getLogger("document_ai")
 
 class ImagingExtractorChained:
     """
-    Enhanced Imaging extractor with few-shot prompting:
-    - Stage 1: Extract imaging data using chunked processing with few-shot examples
-    - Stage 2: Doctor detection via DoctorDetector
-    - Stage 3: Build professional summary with few-shot guidance
-    - Stage 4: Verify and correct
+    Enhanced Imaging extractor with FULL CONTEXT processing and contextual awareness.
+    
+    Key Features:
+    - Full document context (no chunking) = No information loss
+    - Context-aware extraction using DocumentContextAnalyzer guidance
+    - Chain-of-thought reasoning for radiological findings
+    - Optimized for imaging report specific patterns and clinical significance
     """
 
     def __init__(self, llm: AzureChatOpenAI):
@@ -30,14 +33,16 @@ class ImagingExtractorChained:
         self.parser = JsonOutputParser()
         self.verifier = ExtractionVerifier(llm)
         self.doctor_detector = DoctorDetector(llm)
-        # Initialize recursive text splitter
-        self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=3000,
-            chunk_overlap=200,
-            separators=["\n\n", "\n", ".", " ", ""],
-            length_function=len,
-        )
-        logger.info("✅ ImagingExtractorChained initialized with few-shot prompting")
+        
+        # Pre-compile regex patterns for imaging specific content
+        self.imaging_patterns = {
+            'modality': re.compile(r'\b(MRI|CT|X-RAY|XRAY|ULTRASOUND|US|MAMMOGRAM|PET|SPECT|DEXA)\b', re.IGNORECASE),
+            'body_part': re.compile(r'\b(shoulder|knee|spine|wrist|hip|ankle|elbow|hand|foot|brain|chest|abdomen|pelvis)\b', re.IGNORECASE),
+            'contrast': re.compile(r'\b(with|without)\s+contrast\b', re.IGNORECASE),
+            'finding_severity': re.compile(r'\b(mild|moderate|severe|minimal|marked|advanced)\b', re.IGNORECASE)
+        }
+        
+        logger.info("✅ ImagingExtractorChained initialized (Full Context + Context-Aware)")
 
     def extract(
         self,
@@ -45,232 +50,456 @@ class ImagingExtractorChained:
         doc_type: str,
         fallback_date: str,
         page_zones: Optional[Dict[str, Dict[str, str]]] = None,
+        context_analysis: Optional[Dict] = None,  # NEW: from DocumentContextAnalyzer
         raw_text: Optional[str] = None
     ) -> ExtractionResult:
         """
-        Extract with few-shot prompting and DoctorDetector integration.
+        Extract Imaging data with FULL CONTEXT and contextual awareness.
+        
+        Args:
+            text: Complete document text (layout-preserved)
+            doc_type: Document type (MRI, CT, X-ray, Ultrasound, etc.)
+            fallback_date: Fallback date if not found
+            page_zones: Per-page zone extraction
+            context_analysis: Document context from DocumentContextAnalyzer
+            raw_text: Original flat text (optional)
         """
-        logger.info(f"🔍 Starting extraction for {doc_type} report")
+        logger.info("=" * 80)
+        logger.info("📊 STARTING IMAGING EXTRACTION (FULL CONTEXT + CONTEXT-AWARE)")
+        logger.info("=" * 80)
         
-        # Stage 1: Extract imaging data using few-shot chunked processing
-        raw_result = self._extract_clinical_data(text, doc_type, fallback_date)
+        # Log context guidance if available
+        if context_analysis:
+            primary_physician = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
+            focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
+            clinical_context = context_analysis.get("clinical_context", {})
+            
+            logger.info(f"🎯 Context Guidance Received:")
+            logger.info(f"   Primary Physician: {primary_physician.get('name', 'Unknown')}")
+            logger.info(f"   Confidence: {primary_physician.get('confidence', 'Unknown')}")
+            logger.info(f"   Focus Sections: {focus_sections}")
+            logger.info(f"   Clinical Context: {clinical_context.get('indication', 'Unknown')}")
+        else:
+            logger.warning("⚠️ No context analysis provided - proceeding without guidance")
         
-        # Stage 2: Doctor detection via DoctorDetector
-        radiologist_name = self._detect_radiologist(text, page_zones)
-        raw_result["consulting_doctor"] = radiologist_name
+        # Check document size
+        text_length = len(text)
+        token_estimate = text_length // 4
+        logger.info(f"📄 Document size: {text_length:,} chars (~{token_estimate:,} tokens)")
         
-        # Stage 3: Build initial result with professional summary
+        if token_estimate > 120000:
+            logger.warning(f"⚠️ Document very large ({token_estimate:,} tokens)")
+            logger.warning("⚠️ May exceed GPT-4o context window (128K tokens)")
+        
+        # Stage 1: Extract with FULL CONTEXT and contextual guidance
+        raw_result = self._extract_full_context_with_guidance(
+            text=text,
+            doc_type=doc_type,
+            fallback_date=fallback_date,
+            context_analysis=context_analysis
+        )
+        
+        # Stage 2: Override radiologist if context identified one with high confidence
+        if context_analysis:
+            context_physician = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
+            if context_physician.get("name") and context_physician.get("confidence") in ["high", "medium"]:
+                logger.info(f"🎯 Using context-identified radiologist: {context_physician.get('name')}")
+                raw_result["radiologist_name"] = context_physician.get("name")
+        
+        # Stage 3: Fallback to DoctorDetector if no radiologist identified
+        if not raw_result.get("radiologist_name"):
+            logger.info("🔍 No radiologist from context/extraction, using DoctorDetector...")
+            radiologist_name = self._detect_radiologist(text, page_zones)
+            raw_result["radiologist_name"] = radiologist_name
+        
+        # Stage 4: Build initial result
         initial_result = self._build_initial_result(raw_result, doc_type, fallback_date)
         
-        # Stage 4: Verify and fix
-        verified_result = self.verifier.verify_and_fix(initial_result)
+        # Stage 5: Verify and fix
+        final_result = self.verifier.verify_and_fix(initial_result)
         
-        logger.info(f"✅ Extraction completed for {doc_type}")
-        return verified_result
+        logger.info("=" * 80)
+        logger.info("✅ IMAGING EXTRACTION COMPLETE (FULL CONTEXT)")
+        logger.info("=" * 80)
+        
+        return final_result
 
-    def _extract_clinical_data(
+    def _extract_full_context_with_guidance(
         self,
         text: str,
         doc_type: str,
-        fallback_date: str
+        fallback_date: str,
+        context_analysis: Optional[Dict]
     ) -> Dict:
         """
-        Stage 1: Extract imaging data using few-shot chunked processing.
+        Extract with FULL document context + contextual guidance from DocumentContextAnalyzer.
+        Optimized for imaging report specific patterns and clinical significance.
         """
-        logger.info(f"🔍 Stage 1: Splitting {doc_type} document into chunks (text length: {len(text)})")
+        logger.info("🔍 Processing ENTIRE imaging report in single context window with guidance...")
         
-        chunks = self.splitter.split_text(text)
-        logger.info(f"📦 Created {len(chunks)} chunks for processing")
+        # Extract guidance from context analysis
+        primary_physician = ""
+        focus_sections = []
+        clinical_context = {}
+        physician_reasoning = ""
+        ambiguities = []
         
-        # Few-shot examples for imaging extraction
-        few_shot_examples = [
-            {
-                "input": """MRI RIGHT SHOULDER WITHOUT CONTRAST
-                INDICATION: Shoulder pain
-                FINDINGS: There is a full-thickness tear of the supraspinatus tendon.
-                IMPRESSION: Full-thickness rotator cuff tear.""",
-                "output": {
-                    "study_date": "10/15/2024",
-                    "document_type": "MRI",
-                    "body_part": "R shoulder",
-                    "contrast_used": "without contrast",
-                    "primary_finding": "Full-thickness rotator cuff tear",
-                    "impression_status": "abnormal"
-                }
-            },
-            {
-                "input": """CT LUMBAR SPINE WITH CONTRAST
-                CLINICAL HISTORY: Low back pain
-                FINDINGS: Mild degenerative changes at L4-L5. No acute fracture.
-                IMPRESSION: Mild degenerative disc disease.""",
-                "output": {
-                    "study_date": "11/20/2024",
-                    "document_type": "CT",
-                    "body_part": "Lumbar spine",
-                    "contrast_used": "with contrast",
-                    "primary_finding": "Mild degenerative disc disease",
-                    "impression_status": "abnormal"
-                }
-            },
-            {
-                "input": """X-RAY RIGHT KNEE
-                INDICATION: Knee pain after fall
-                FINDINGS: No fracture or dislocation. Joint spaces preserved.
-                IMPRESSION: No acute bony abnormality.""",
-                "output": {
-                    "study_date": "12/05/2024",
-                    "document_type": "X-ray",
-                    "body_part": "R knee",
-                    "contrast_used": "",
-                    "primary_finding": "No acute bony abnormality",
-                    "impression_status": "normal"
-                }
-            },
-            {
-                "input": """ULTRASOUND LEFT WRIST
-                CLINICAL: Carpal tunnel symptoms
-                FINDINGS: Moderate median nerve enlargement.
-                IMPRESSION: Findings consistent with carpal tunnel syndrome.""",
-                "output": {
-                    "study_date": "01/10/2025",
-                    "document_type": "Ultrasound",
-                    "body_part": "L wrist",
-                    "contrast_used": "",
-                    "primary_finding": "Findings consistent with carpal tunnel syndrome",
-                    "impression_status": "abnormal"
-                }
-            }
-        ]
-
-        # System prompt with extraction rules
+        if context_analysis:
+            phys_analysis = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
+            primary_physician = phys_analysis.get("name", "")
+            physician_reasoning = phys_analysis.get("reasoning", "")
+            focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
+            clinical_context = context_analysis.get("clinical_context", {})
+            ambiguities = context_analysis.get("ambiguities_detected", [])
+        
+        # Build context-aware system prompt for Imaging
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a medical imaging data extraction specialist. Extract structured clinical information from imaging reports.
+You are an expert radiology documentation specialist analyzing a COMPLETE imaging report with CONTEXTUAL GUIDANCE.
 
-EXTRACTION RULES:
-- Extract ONLY information present in the text
-- Return empty string "" for missing fields
-- Be precise and clinical in terminology
-- For findings: focus on clinically significant abnormalities
-- For normal studies: use "normal" or "no acute findings"
-- For contrast: specify "with contrast" or "without contrast" when stated
-- For impression_status: use "normal", "abnormal", "post-op", or "inconclusive"
-- DO NOT extract physician names - handled separately
+CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
+You are seeing the ENTIRE imaging report at once, allowing you to:
+- Understand the complete clinical context and indication
+- Correlate findings across different sequences and views
+- Assess the clinical significance of all abnormalities
+- Identify incidental findings and their relevance
+- Provide comprehensive radiological assessment without information loss
 
-OUTPUT FORMAT: JSON with these exact fields:
-- study_date, document_type, body_part, contrast_used
-- primary_finding, impression_status
+CONTEXTUAL GUIDANCE PROVIDED:
+{context_guidance}
+
+⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY):
+
+1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
+   - If a finding/value is NOT explicitly mentioned in the report, return EMPTY string "" or empty list []
+   - DO NOT infer, assume, or extrapolate findings
+   - DO NOT fill in "typical" or "common" imaging findings
+   - DO NOT use radiological knowledge to "complete" incomplete information
+   
+   Examples:
+   ✅ CORRECT: If report says "3cm mass in right upper lobe", extract: "mass_size": "3cm"
+   ❌ WRONG: If report says "mass in right upper lobe", DO NOT extract: "mass_size": "3cm" (size not stated)
+   ✅ CORRECT: Extract: "mass_size": "" (size field empty)
+
+2. **FINDINGS - ZERO TOLERANCE FOR ASSUMPTIONS**
+   - Extract ONLY findings explicitly described in "FINDINGS" or "IMPRESSION" sections
+   - Include measurements ONLY if explicitly stated
+   - DO NOT extract:
+     * Findings mentioned as "rule out" or "possible"
+     * Historical comparisons unless explicitly compared
+     * Normal variants that are not explicitly described as findings
+   
+   Examples:
+   ✅ CORRECT: Report states "1.5cm cystic lesion in right kidney, likely simple cyst"
+   Extract: {{"primary_finding": "1.5cm cystic lesion in right kidney", "characterization": "likely simple cyst"}}
+   
+   ❌ WRONG: Report states "no evidence of renal mass"
+   DO NOT extract renal mass as a finding
+
+3. **EMPTY FIELDS ARE ACCEPTABLE - DO NOT FILL**
+   - It is BETTER to return an empty field than to guess
+   - If you cannot find information for a field, leave it empty
+   - DO NOT use phrases like "Not mentioned", "Not stated", "Unknown" - just return ""
+   
+   Examples:
+   ✅ CORRECT: If no contrast mentioned, return: "contrast_used": ""
+   ❌ WRONG: Return: "contrast_used": "Not mentioned" (use empty string instead)
+
+4. **EXACT RADIOLOGICAL TERMINOLOGY**
+   - Use EXACT wording from report for findings and impressions
+   - DO NOT upgrade "mild" to "moderate" or downgrade "severe" to "moderate"
+   - Capture nuanced descriptions: "subtle", "questionable", "probable", "likely"
+   
+   Examples:
+   ✅ CORRECT: Report says "subtle increased signal on T2"
+   Extract: "finding_description": "subtle increased signal on T2"
+   
+   ❌ WRONG: Report says "subtle increased signal on T2"
+   DO NOT extract: "finding_description": "increased signal on T2" (removes "subtle")
+
+5. **NO CLINICAL INTERPRETATION BEYOND REPORT**
+   - DO NOT predict clinical significance beyond what's stated
+   - DO NOT suggest follow-up studies unless explicitly recommended
+   - DO NOT infer treatment implications
+   
+   Examples:
+   ❌ WRONG: Report mentions "compression fracture"
+   DO NOT assume: "osteoporotic fracture" (etiology not stated)
+   ✅ CORRECT: Extract: "compression fracture" (exact wording)
+
+6. **VERIFICATION CHECKLIST BEFORE SUBMISSION**
+   Before returning your extraction, verify:
+   □ Every finding has a direct quote in the report
+   □ Every measurement is explicitly stated (not estimated)
+   □ Every "normal" finding is explicitly described as normal
+   □ No fields are filled with "typical" or "expected" findings
+   □ Empty fields are truly empty (not "Not mentioned" or "Unknown")
+
+IMAGING SPECIFIC EXTRACTION FOCUS - 6 CRITICAL RADIOLOGICAL CATEGORIES:
+
+I. STUDY IDENTIFICATION & TECHNIQUE
+- Modality and specific protocol (e.g., "MRI brain without contrast")
+- Body part and laterality (be specific: "right shoulder", "lumbar spine")
+- Contrast usage and type if mentioned
+- Technical adequacy and limitations
+
+II. CLINICAL CONTEXT
+- Indication for study from clinical history
+- Specific clinical questions to be answered
+- Relevant patient history affecting interpretation
+
+III. MAJOR FINDINGS (Most Critical)
+- Primary abnormality or most significant finding
+- Size, location, and characterization of lesions
+- Acute vs chronic findings differentiation
+- Comparison to previous studies if explicitly stated
+
+IV. INCIDENTAL FINDINGS
+- Clinically relevant incidental discoveries
+- Characterization and recommended follow-up if stated
+- Significance assessment based on report language
+
+V. IMPRESSION & CONCLUSIONS
+- Summary of clinically significant findings
+- Differential diagnosis if provided
+- Recommendations for follow-up if explicitly stated
+- Overall study interpretation
+
+VI. COMPARISON & PROGRESSION
+- Explicit comparison to prior studies with dates
+- Interval change descriptions
+- Stability or progression assessment
+
+⚠️ FINAL REMINDER:
+- If information is NOT in the report, return EMPTY ("" or [])
+- NEVER assume, infer, or extrapolate findings
+- FINDINGS: Only extract what is explicitly described
+- It is BETTER to have empty fields than incorrect information
+
+Now analyze this COMPLETE imaging report and extract ALL relevant radiological information:
 """)
 
-        # User prompt with few-shot examples
         user_prompt = HumanMessagePromptTemplate.from_template("""
-EXAMPLES:
-{examples}
+COMPLETE IMAGING REPORT TEXT:
 
-NOW EXTRACT FROM THIS IMAGING REPORT TEXT:
-{text}
+{full_document_text}
 
-Return valid JSON only.
+Extract into COMPREHENSIVE structured JSON with all radiological details:
+
+{{
+  "study_identification": {{
+    "report_type": "{doc_type}",
+    "study_date": "",
+    "accession_number": "",
+    "facility": "",
+    "radiologist": {{
+      "name": "{primary_physician}",
+      "credentials": "",
+      "specialty": "Radiology"
+    }}
+  }},
+  
+  "imaging_technique": {{
+    "modality": "{doc_type}",
+    "body_part": "",
+    "laterality": "",
+    "contrast_used": "",
+    "contrast_type": "",
+    "technical_quality": "",
+    "protocol_details": ""
+  }},
+  
+  "clinical_context": {{
+    "indication": "",
+    "clinical_history": "",
+    "specific_questions": "",
+    "relevant_history": ""
+  }},
+  
+  "major_findings": {{
+    "primary_finding": {{
+      "description": "",
+      "location": "",
+      "size": "",
+      "characteristics": "",
+      "significance": ""
+    }},
+    "secondary_findings": [
+      {{
+        "description": "Mild degenerative changes",
+        "location": "L4-L5",
+        "significance": "chronic"
+      }},
+      {{
+        "description": "Small joint effusion",
+        "location": "right knee",
+        "significance": "acute"
+      }}
+    ],
+    "normal_findings": [
+      "No acute fracture",
+      "No dislocation",
+      "Normal alignment"
+    ]
+  }},
+  
+  "detailed_analysis": {{
+    "bone_structures": {{
+      "fractures": "",
+      "degenerative_changes": "",
+      "alignment": "",
+      "bone_marrow": ""
+    }},
+    "joint_structures": {{
+      "cartilage": "",
+      "menisci": "",
+      "ligaments": "",
+      "tendons": "",
+      "effusion": ""
+    }},
+    "soft_tissues": {{
+      "masses": "",
+      "edema": "",
+      "atrophy": "",
+      "calcifications": ""
+    }},
+    "neurological_structures": {{
+      "spinal_cord": "",
+      "nerve_roots": "",
+      "neural_foramina": ""
+    }}
+  }},
+  
+  "incidental_findings": [
+    {{
+      "description": "Small renal cyst",
+      "location": "right kidney",
+      "size": "1.2cm",
+      "characterization": "benign appearing",
+      "recommendation": "no follow-up needed"
+    }},
+    {{
+      "description": "Hepatic steatosis",
+      "location": "liver",
+      "severity": "mild",
+      "recommendation": "clinical correlation"
+    }}
+  ],
+  
+  "comparison_studies": [
+    {{
+      "study_type": "MRI",
+      "body_part": "right shoulder",
+      "date": "01/15/2024",
+      "interval_change": "no significant change",
+      "stability": "stable"
+    }}
+  ],
+  
+  "impression_conclusions": {{
+    "overall_impression": "",
+    "primary_diagnosis": "",
+    "differential_diagnosis": [
+      "Rotator cuff tear",
+      "Tendinosis",
+      "Partial thickness tear"
+    ],
+    "clinical_correlation": "",
+    "recommendations": [
+      "Follow-up MRI in 6 months if symptomatic",
+      "Orthopedic consultation recommended"
+    ],
+    "urgency": "routine"
+  }},
+  
+  "critical_findings": [
+    {{
+      "finding": "Full-thickness rotator cuff tear",
+      "significance": "high",
+      "action": "Orthopedic surgery consultation",
+      "urgency": "semi-urgent"
+    }},
+    {{
+      "finding": "Acute fracture",
+      "significance": "high", 
+      "action": "Immediate orthopedic evaluation",
+      "urgency": "urgent"
+    }},
+    {{
+      "finding": "Mass with suspicious features",
+      "significance": "high",
+      "action": "Biopsy or further characterization",
+      "urgency": "semi-urgent"
+    }}
+  ],
+  
+  "quality_assessment": {{
+    "study_adequacy": "diagnostic",
+    "limitations": "patient motion artifact",
+    "technical_notes": "limited due to body habitus"
+  }}
+}}
 """)
 
-        # Create the chat prompt template
-        chat_prompt = ChatPromptTemplate.from_messages([
-            system_prompt,
-            user_prompt
-        ])
+        # Build context guidance summary
+        context_guidance_text = f"""
+PRIMARY RADIOLOGIST: {primary_physician or 'Not identified in context'}
+REASONING: {physician_reasoning or 'See document for identification'}
 
+FOCUS ON THESE SECTIONS: {', '.join(focus_sections) if focus_sections else 'Findings, Impression, Technique'}
+
+CLINICAL CONTEXT:
+- Indication: {clinical_context.get('indication', 'Not specified')}
+- Clinical History: {clinical_context.get('clinical_history', 'Not provided')}
+
+KNOWN AMBIGUITIES: {len(ambiguities)} detected
+{chr(10).join([f"- {amb.get('type')}: {amb.get('description')}" for amb in ambiguities]) if ambiguities else 'None detected'}
+"""
+
+        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
+        
         try:
-            partial_results = []
-            for i, chunk in enumerate(chunks):
-                logger.debug(f"🔄 Processing chunk {i+1}/{len(chunks)}")
-                
-                # Format few-shot examples as string
-                examples_str = "\n\n".join([
-                    f"Input: {ex['input']}\nOutput: {json.dumps(ex['output'])}" 
-                    for ex in few_shot_examples
-                ])
-                
-                chain = chat_prompt | self.llm | self.parser
-                partial = chain.invoke({
-                    "examples": examples_str,
-                    "text": chunk
-                })
-                partial_results.append(partial)
-                logger.debug(f"✅ Chunk {i+1} processed")
+            start_time = time.time()
             
-            # Merge partial extractions
-            merged_result = self._merge_partial_extractions(partial_results, fallback_date)
-            logger.info(f"✅ Stage 1: Few-shot extraction completed - {len(partial_results)} chunks merged")
-            logger.info(f"  - study_date: {merged_result.get('study_date', 'Not found')}")
-            logger.info(f"  - body_part: {merged_result.get('body_part', 'Not found')}")
-            logger.info(f"  - primary_finding: {merged_result.get('primary_finding', 'Not found')}")
-            return merged_result
+            logger.info("🤖 Invoking LLM for full-context imaging extraction...")
+            
+            # Single LLM call with FULL document context and guidance
+            chain = chat_prompt | self.llm | self.parser
+            result = chain.invoke({
+                "full_document_text": text,
+                "doc_type": doc_type,
+                "context_guidance": context_guidance_text,
+                "primary_physician": primary_physician or "Extract from document",
+                "physician_reasoning": physician_reasoning or "Use signature and interpretation sections",
+                "focus_sections": ', '.join(focus_sections) if focus_sections else "Standard radiology sections",
+                "clinical_context": str(clinical_context),
+                "ambiguities": str(ambiguities)
+            })
+            
+            end_time = time.time()
+            processing_time = end_time - start_time
+            
+            logger.info(f"⚡ Full-context imaging extraction completed in {processing_time:.2f}s")
+            logger.info(f"✅ Extracted imaging data from complete {len(text):,} char document")
+            
+            return result
             
         except Exception as e:
-            logger.error(f"❌ Imaging few-shot extraction failed: {e}")
-            return self._get_fallback_result(fallback_date)
-
-    def _merge_partial_extractions(self, partials: List[Dict], fallback_date: str) -> Dict:
-        """Merge extractions from multiple chunks."""
-        if not partials:
-            return self._get_fallback_result(fallback_date)
-        
-        merged = self._get_fallback_result(fallback_date)
-        
-        # String fields: take most complete value across chunks
-        string_fields = [
-            "study_date", "document_type", "body_part", "contrast_used",
-            "primary_finding", "impression_status"
-        ]
-        
-        for field in string_fields:
-            candidates = []
-            for partial in partials:
-                value = partial.get(field, "")
-                if isinstance(value, str) and value.strip() and value.strip() != fallback_date:
-                    candidates.append(value.strip())
+            logger.error(f"❌ Full-context imaging extraction failed: {e}", exc_info=True)
             
-            if candidates:
-                candidates.sort(key=len, reverse=True)
-                merged[field] = candidates[0]
-
-        # Special handling for date
-        if not merged["study_date"]:
-            merged["study_date"] = fallback_date
-
-        # Special handling for findings: combine complementary findings
-        if len(partials) > 1:
-            finding_candidates = []
-            for partial in partials:
-                candidate = partial.get("primary_finding", "").strip()
-                if candidate and candidate not in finding_candidates:
-                    finding_candidates.append(candidate)
+            # Check if context length exceeded
+            if "context_length_exceeded" in str(e).lower() or "maximum context" in str(e).lower():
+                logger.error("❌ Document exceeds GPT-4o 128K context window")
+                logger.error("❌ Consider implementing chunked fallback for very large documents")
             
-            if len(finding_candidates) > 1:
-                combined = f"{finding_candidates[0]}; {finding_candidates[1][:50]}"
-                if len(combined) <= 100:
-                    merged["primary_finding"] = combined
-
-        logger.info(f"📊 Merge completed: body_part='{merged['body_part']}', finding='{merged['primary_finding'][:50]}...'")
-        return merged
-
-    def _get_fallback_result(self, fallback_date: str) -> Dict:
-        """Return minimal fallback result structure."""
-        return {
-            "study_date": fallback_date,
-            "document_type": "",
-            "body_part": "",
-            "contrast_used": "",
-            "primary_finding": "",
-            "impression_status": "",
-        }
+            return self._get_fallback_result(fallback_date, doc_type)
 
     def _detect_radiologist(
         self,
         text: str,
         page_zones: Optional[Dict[str, Dict[str, str]]] = None
     ) -> str:
-        """Stage 2: Detect radiologist using DoctorDetector."""
-        logger.info("🔍 Stage 2: Running DoctorDetector...")
+        """Fallback: Detect radiologist using DoctorDetector"""
+        logger.info("🔍 Fallback: Running DoctorDetector for radiologist...")
         
         detection_result = self.doctor_detector.detect_doctor(
             text=text,
@@ -284,253 +513,255 @@ Return valid JSON only.
             logger.warning("⚠️ No valid radiologist found")
             return ""
 
-    def _build_initial_result(
-        self,
-        raw_data: Dict,
-        doc_type: str,
-        fallback_date: str
-    ) -> ExtractionResult:
-        """Stage 3: Build initial result with professional summary."""
-        logger.info("🎯 Stage 3: Building initial result with validation")
+    def _build_initial_result(self, raw_data: Dict, doc_type: str, fallback_date: str) -> ExtractionResult:
+        """Build initial result from extracted imaging data"""
+        logger.info("🔨 Building initial imaging extraction result...")
         
-        cleaned = self._validate_and_clean(raw_data, fallback_date)
-        summary_line = self._build_professional_summary(cleaned, doc_type, fallback_date)
+        # Extract core imaging information
+        study_identification = raw_data.get("study_identification", {})
+        imaging_technique = raw_data.get("imaging_technique", {})
+        impression_conclusions = raw_data.get("impression_conclusions", {})
+        
+        # Build comprehensive imaging summary
+        summary_line = self._build_imaging_narrative_summary(raw_data, doc_type, fallback_date)
         
         result = ExtractionResult(
             document_type=doc_type,
-            document_date=cleaned.get("study_date", fallback_date),
+            document_date=study_identification.get("study_date", fallback_date),
             summary_line=summary_line,
-            examiner_name=cleaned.get("consulting_doctor", ""),
-            body_parts=[cleaned.get("body_part")] if cleaned.get("body_part") else [],
-            raw_data=cleaned,
+            examiner_name=raw_data.get("radiologist_name", ""),
+            specialty="Radiology",
+            body_parts=[imaging_technique.get("body_part", "")] if imaging_technique.get("body_part") else [],
+            raw_data=raw_data,
         )
         
-        logger.info(f"✅ Stage 3: Initial result built (radiologist: {result.examiner_name})")
+        logger.info(f"✅ Initial imaging result built (Radiologist: {result.examiner_name})")
         return result
 
-    def _validate_and_clean(self, result: Dict, fallback_date: str) -> Dict:
-        """Validate and clean extracted data."""
-        cleaned = {}
+    def _build_imaging_narrative_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
+        """
+        Build comprehensive narrative summary for imaging reports.
         
-        # Date validation
-        date = result.get("study_date", "")
-        cleaned["study_date"] = date if date and date != "empty" else fallback_date
-        logger.info(f"  📅 Date cleaned: {cleaned['study_date']}")
-
-        # Radiologist (from DoctorDetector)
-        radiologist = result.get("consulting_doctor", "")
-        cleaned["consulting_doctor"] = radiologist.strip()
-        logger.info(f"  👨‍⚕️ Radiologist: {radiologist if radiologist else 'None'}")
-
-        # Body part validation
-        body_part = result.get("body_part", "")
-        cleaned["body_part"] = body_part if body_part and body_part != "empty" else ""
-        logger.info(f"  🦴 Body Part: {cleaned['body_part']}")
-
-        # Primary finding validation
-        primary_finding = result.get("primary_finding", "")
-        cleaned["primary_finding"] = primary_finding if primary_finding and primary_finding != "empty" else ""
-        logger.info(f"  🔍 Primary Finding: {cleaned['primary_finding']}")
-
-        # Contrast validation
-        contrast = result.get("contrast_used", "")
-        cleaned["contrast_used"] = contrast if contrast and contrast != "empty" else ""
-        logger.info(f"  💉 Contrast: {cleaned['contrast_used']}")
-
-        # Impression status validation
-        status = result.get("impression_status", "")
-        cleaned["impression_status"] = status if status and status != "empty" else ""
-        logger.info(f"  📊 Status: {cleaned['impression_status']}")
-
-        return cleaned
-
-    def _build_professional_summary(
-        self,
-        data: Dict,
-        doc_type: str,
-        fallback_date: str
-    ) -> str:
-        """Build professional 50-60 word summary using few-shot approach."""
+        Imaging style: "Modality: [type]. Findings: [key abnormalities]. Impression: [clinical significance]."
+        """
         
-        # Few-shot examples for imaging summary generation
-        summary_examples = [
-            {
-                "data": {
-                    "date": "10/15/2024",
-                    "physician": "Dr. Smith",
-                    "doc_type": "MRI",
-                    "body_part": "R shoulder",
-                    "contrast": "without contrast",
-                    "status": "abnormal",
-                    "finding": "Full-thickness rotator cuff tear"
-                },
-                "summary": "MRI Report dated 10/15/2024 by Dr. Smith for right shoulder without contrast. Impression: abnormal. Findings: full-thickness rotator cuff tear identified. This represents a significant tendon injury requiring orthopedic evaluation and potential surgical consideration for symptomatic patients."
+        # Extract all imaging data
+        study_identification = data.get("study_identification", {})
+        imaging_technique = data.get("imaging_technique", {})
+        major_findings = data.get("major_findings", {})
+        impression_conclusions = data.get("impression_conclusions", {})
+        critical_findings = data.get("critical_findings", [])
+        
+        # Helper function for safe string conversion
+        def safe_str(value, default=""):
+            if not value:
+                return default
+            if isinstance(value, list):
+                return ", ".join([str(x) for x in value if x])
+            return str(value)
+        
+        # Build narrative sections
+        narrative_parts = []
+        
+        # Section 1: MODALITY & TECHNIQUE
+        technique_text = self._build_technique_narrative(imaging_technique, doc_type)
+        if technique_text:
+            narrative_parts.append(f"**Study:** {technique_text}")
+        
+        # Section 2: KEY FINDINGS
+        findings_text = self._build_findings_narrative(major_findings, critical_findings)
+        if findings_text:
+            narrative_parts.append(f"**Findings:** {findings_text}")
+        
+        # Section 3: IMPRESSION & SIGNIFICANCE
+        impression_text = self._build_impression_narrative(impression_conclusions)
+        if impression_text:
+            narrative_parts.append(f"**Impression:** {impression_text}")
+        
+        # Section 4: RADIOLOGIST & DATE CONTEXT
+        radiologist_info = study_identification.get("radiologist", {})
+        radiologist_name = safe_str(radiologist_info.get("name", ""))
+        study_date = study_identification.get("study_date", fallback_date)
+        
+        if radiologist_name:
+            context_line = f"Interpreted by {radiologist_name} on {study_date}"
+            narrative_parts.insert(0, context_line)
+        
+        # Join with proper formatting
+        full_narrative = "\n\n".join(narrative_parts)
+        
+        logger.info(f"📝 Imaging narrative summary generated: {len(full_narrative)} characters")
+        return full_narrative
+
+    def _build_technique_narrative(self, imaging_technique: Dict, doc_type: str) -> str:
+        """Build imaging technique narrative section"""
+        technique_parts = []
+        
+        # Modality and body part
+        modality = imaging_technique.get("modality", doc_type)
+        body_part = imaging_technique.get("body_part", "")
+        laterality = imaging_technique.get("laterality", "")
+        
+        if modality and body_part:
+            technique_str = f"{modality}"
+            if body_part:
+                technique_str += f" {body_part}"
+            if laterality:
+                technique_str += f" ({laterality})"
+            technique_parts.append(technique_str)
+        
+        # Contrast information
+        contrast = imaging_technique.get("contrast_used", "")
+        if contrast:
+            technique_parts.append(contrast)
+        
+        # Technical quality
+        quality = imaging_technique.get("technical_quality", "")
+        if quality and quality != "diagnostic":
+            technique_parts.append(f"Quality: {quality}")
+        
+        return " - ".join(technique_parts) if technique_parts else f"{doc_type} study"
+
+    def _build_findings_narrative(self, major_findings: Dict, critical_findings: list) -> str:
+        """Build key findings narrative"""
+        findings_items = []
+        
+        # Primary finding (highest priority)
+        primary = major_findings.get("primary_finding", {})
+        if isinstance(primary, dict):
+            primary_desc = primary.get("description", "")
+            if primary_desc:
+                findings_items.append(primary_desc)
+        
+        # Critical findings (high urgency)
+        if critical_findings and isinstance(critical_findings, list):
+            for critical in critical_findings[:2]:  # Top 2 critical findings
+                if isinstance(critical, dict):
+                    finding = critical.get("finding", "")
+                    if finding:
+                        findings_items.append(finding)
+        
+        # Secondary findings
+        secondary = major_findings.get("secondary_findings", [])
+        if secondary and isinstance(secondary, list):
+            for finding in secondary[:2]:  # Top 2 secondary findings
+                if isinstance(finding, dict):
+                    finding_desc = finding.get("description", "")
+                    if finding_desc and finding_desc not in findings_items:
+                        findings_items.append(finding_desc)
+        
+        return "; ".join(findings_items) if findings_items else "No significant abnormalities"
+
+    def _build_impression_narrative(self, impression_conclusions: Dict) -> str:
+        """Build impression and clinical significance narrative"""
+        impression_parts = []
+        
+        # Overall impression
+        overall = impression_conclusions.get("overall_impression", "")
+        if overall:
+            impression_parts.append(overall)
+        
+        # Primary diagnosis
+        diagnosis = impression_conclusions.get("primary_diagnosis", "")
+        if diagnosis and diagnosis != overall:
+            impression_parts.append(diagnosis)
+        
+        # Recommendations
+        recommendations = impression_conclusions.get("recommendations", [])
+        if recommendations and isinstance(recommendations, list):
+            primary_rec = recommendations[0] if recommendations else ""
+            if primary_rec and isinstance(primary_rec, str):
+                impression_parts.append(f"Recommend: {primary_rec}")
+            elif primary_rec and isinstance(primary_rec, dict) and primary_rec.get("recommendation"):
+                impression_parts.append(f"Recommend: {primary_rec.get('recommendation')}")
+        
+        # Urgency
+        urgency = impression_conclusions.get("urgency", "")
+        if urgency and urgency != "routine":
+            impression_parts.append(f"Urgency: {urgency}")
+        
+        return "; ".join(impression_parts) if impression_parts else "Routine findings"
+
+    def _get_fallback_result(self, fallback_date: str, doc_type: str) -> Dict:
+        """Return minimal fallback result structure for imaging"""
+        return {
+            "study_identification": {
+                "report_type": doc_type,
+                "study_date": fallback_date,
+                "accession_number": "",
+                "facility": "",
+                "radiologist": {
+                    "name": "",
+                    "credentials": "",
+                    "specialty": "Radiology"
+                }
             },
-            {
-                "data": {
-                    "date": "11/20/2024",
-                    "physician": "",
-                    "doc_type": "X-ray",
-                    "body_part": "R knee",
-                    "contrast": "",
-                    "status": "normal",
-                    "finding": "No acute bony abnormality"
-                },
-                "summary": "X-ray Report dated 11/20/2024 for right knee. Impression: normal. Findings: no acute fracture or dislocation identified, joint spaces preserved. The study demonstrates no evidence of acute traumatic injury or significant degenerative changes at this time."
+            "imaging_technique": {
+                "modality": doc_type,
+                "body_part": "",
+                "laterality": "",
+                "contrast_used": "",
+                "contrast_type": "",
+                "technical_quality": "",
+                "protocol_details": ""
             },
-            {
-                "data": {
-                    "date": "12/05/2024",
-                    "physician": "Dr. Chen",
-                    "doc_type": "CT",
-                    "body_part": "Lumbar spine",
-                    "contrast": "with contrast",
-                    "status": "abnormal",
-                    "finding": "Mild degenerative disc disease L4-L5"
+            "clinical_context": {
+                "indication": "",
+                "clinical_history": "",
+                "specific_questions": "",
+                "relevant_history": ""
+            },
+            "major_findings": {
+                "primary_finding": {
+                    "description": "",
+                    "location": "",
+                    "size": "",
+                    "characteristics": "",
+                    "significance": ""
                 },
-                "summary": "CT Report dated 12/05/2024 by Dr. Chen for lumbar spine with contrast. Impression: abnormal. Findings: mild degenerative disc disease at L4-L5 level. These age-appropriate changes may contribute to mechanical back pain but show no evidence of acute disc herniation or neural compression."
+                "secondary_findings": [],
+                "normal_findings": []
+            },
+            "detailed_analysis": {
+                "bone_structures": {
+                    "fractures": "",
+                    "degenerative_changes": "",
+                    "alignment": "",
+                    "bone_marrow": ""
+                },
+                "joint_structures": {
+                    "cartilage": "",
+                    "menisci": "",
+                    "ligaments": "",
+                    "tendons": "",
+                    "effusion": ""
+                },
+                "soft_tissues": {
+                    "masses": "",
+                    "edema": "",
+                    "atrophy": "",
+                    "calcifications": ""
+                },
+                "neurological_structures": {
+                    "spinal_cord": "",
+                    "nerve_roots": "",
+                    "neural_foramina": ""
+                }
+            },
+            "incidental_findings": [],
+            "comparison_studies": [],
+            "impression_conclusions": {
+                "overall_impression": "",
+                "primary_diagnosis": "",
+                "differential_diagnosis": [],
+                "clinical_correlation": "",
+                "recommendations": [],
+                "urgency": "routine"
+            },
+            "critical_findings": [],
+            "quality_assessment": {
+                "study_adequacy": "",
+                "limitations": "",
+                "technical_notes": ""
             }
-        ]
-
-        # System prompt for summary generation
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a medical imaging summarizer creating concise imaging report summaries for physicians.
-
-RULES:
-- Keep summary 50-60 words
-- Focus on key findings and clinical significance
-- Use professional radiology terminology
-- Include: modality, date, body part, contrast, impression status, key findings
-- Be concise but clinically accurate
-- Highlight clinically significant abnormalities
-- For normal studies, clearly state absence of pathology
-""")
-
-        # User prompt with data and examples
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-EXAMPLES:
-{examples}
-
-NOW CREATE SUMMARY FROM THIS IMAGING DATA:
-Date: {date}
-Physician: {physician}
-Modality: {doc_type}
-Body Part: {body_part}
-Contrast: {contrast}
-Status: {status}
-Finding: {finding}
-
-Create a professional 50-60 word imaging summary:
-""")
-
-        chat_prompt = ChatPromptTemplate.from_messages([
-            system_prompt,
-            user_prompt
-        ])
-
-        try:
-            # Prepare data
-            date = data.get("study_date", fallback_date)
-            physician = data.get("consulting_doctor", "")
-            body_part = data.get("body_part", "")
-            contrast = data.get("contrast_used", "")
-            status = data.get("impression_status", "")
-            finding = data.get("primary_finding", "")
-
-            # Format few-shot examples
-            examples_str = "\n\n".join([
-                f"Data: {json.dumps(ex['data'])}\nSummary: {ex['summary']}" 
-                for ex in summary_examples
-            ])
-
-            chain = chat_prompt | self.llm
-            response = chain.invoke({
-                "examples": examples_str,
-                "date": date,
-                "physician": physician,
-                "doc_type": doc_type,
-                "body_part": body_part,
-                "contrast": contrast,
-                "status": status,
-                "finding": finding
-            })
-            
-            summary = response.content.strip()
-            
-            # Ensure appropriate length
-            words = summary.split()
-            if len(words) > 70:
-                summary = " ".join(words[:65]) + "..."
-            elif len(words) < 45:
-                # Add context if too short
-                if body_part and not status:
-                    summary += f" {body_part} evaluation completed."
-                if not summary.endswith('.'):
-                    summary += '.'
-            
-            logger.info(f"📊 Generated imaging summary: {len(summary.split())} words")
-            return summary
-            
-        except Exception as e:
-            logger.error(f"❌ Imaging summary generation failed: {e}")
-            return self._build_manual_summary(data, doc_type, fallback_date)
-
-    def _build_manual_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
-        """Fallback manual summary construction."""
-        date = data.get("study_date", fallback_date)
-        physician = data.get("consulting_doctor", "")
-        body_part = data.get("body_part", "")
-        contrast = data.get("contrast_used", "")
-        status = data.get("impression_status", "")
-        finding = data.get("primary_finding", "")
-
-        parts = [f"{doc_type} Report dated {date}"]
-        
-        if physician:
-            parts.append(f"by {physician}")
-        
-        if body_part:
-            body_str = f"for {body_part}"
-            if contrast:
-                body_str += f" ({contrast})"
-            parts.append(body_str)
-
-        if status:
-            parts.append(f"Impression: {status}")
-
-        if finding:
-            parts.append(f"Findings: {finding[:50]}")
-
-        summary = " ".join(parts)
-        words = summary.split()
-        if len(words) > 70:
-            summary = " ".join(words[:65]) + "..."
-        
-        return summary
-
-    def _extract_physician_last_name(self, physician_name: str) -> str:
-        """Extract last name from physician name string."""
-        if not physician_name:
-            return ""
-
-        # Remove common titles and suffixes
-        clean_name = (
-            physician_name
-            .replace("Dr.", "")
-            .replace("MD", "")
-            .replace("DO", "")
-            .replace("M.D.", "")
-            .replace("D.O.", "")
-            .replace("MBBS", "")
-            .replace("MBChB", "")
-            .replace(",", "")
-            .strip()
-        )
-
-        # Get the last word as last name
-        parts = clean_name.split()
-        if parts:
-            last_name = parts[-1]
-            logger.info(f"  🔍 Extracted last name: '{last_name}' from '{physician_name}'")
-            return last_name
-        return ""
+        }
