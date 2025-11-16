@@ -26,20 +26,98 @@ class ExtractionVerifier:
     # [KEEP ALL FORMAT_SPECS EXACTLY AS IN YOUR FILE - file:27]
     FORMAT_SPECS = {
         "QME": {
-            "pattern": r"QME",
-            "max_words": 165,
-            "required_elements": ["date", "QME"],
-            "format_template": "QME{doctor_section} for [Body parts] : [DATE] = [MMI/Impairment] → [Treatment/Future medical] | [Restrictions/Causation]"
-        },
+                "pattern": r"QME",
+                "max_words": 400,
+                "required_elements": ["date", "QME"],
+                "format_template": """
+                QME Medical-Legal Summary (Detailed, up to 400 words):
+
+                1. **Patient & Case Info:**
+                    - Patient name, age, date of injury, claim number, employer
+                    - QME physician (name, specialty, credentials)
+                    - Report date, evaluation date, document type
+
+                2. **Diagnosis & Body Parts:**
+                    - Primary and secondary diagnoses (with ICD-10 if available)
+                    - All affected body parts
+                    - Historical conditions relevant to the case
+
+                3. **Clinical Status:**
+                    - Chief complaint, pain scores, functional limitations
+                    - Past surgeries, objective findings (ROM, gait, positive tests)
+
+                4. **Medications:**
+                    - Current medications (name, dose, purpose)
+                    - Future/recommended medications
+
+                5. **Medical-Legal Conclusions:**
+                    - MMI/P&S status (with date/reason)
+                    - WPI impairment (percentages, method)
+                    - Apportionment (industrial/non-industrial, reasoning)
+
+                6. **Treatment & Recommendations:**
+                    - Interventional procedures, diagnostic tests, therapy, specialist referrals, future surgical needs
+
+                7. **Work Status & Restrictions:**
+                    - Current work status, restrictions (exact wording), prognosis for return to work
+
+                8. **Critical Findings & Action Items:**
+                    - Main actionable points (MMI, procedures, QMEs, diagnostics)
+
+                9. **Summary Paragraph:**
+                    - Narrative summary of the case, key findings, and recommendations
+
+                Format as a multi-section narrative or bullet points. Include all available details. Do NOT add placeholders for missing data."
+        """},
         "AME": {
             "pattern": r"AME",
-            "max_words": 65,
+            "max_words": 350,
             "required_elements": ["date", "AME"],
-            "format_template": "AME{doctor_section} for [Body parts] : [DATE] = [MMI/Impairment] → [Treatment/Future medical] | [Restrictions/Causation]"
+            # "format_template": "AME{doctor_section} for [Body parts] : [DATE] = [MMI/Impairment] → [Treatment/Future medical] | [Restrictions/Causation]"
+            "format_template": """
+            AME Medical-Legal Summary (Detailed, up to 350 words):
+
+            1. **Patient & Case Info:**
+                - Patient name, age, date of injury, claim number, employer
+                - AME physician (name, specialty, credentials)
+                - Report date, evaluation date, document type
+
+            2. **Diagnosis & Body Parts:**
+                - Primary and secondary diagnoses (with ICD-10 if available)
+                - All affected body parts
+                - Historical conditions relevant to the case
+
+            3. **Clinical Status:**
+                - Chief complaint, pain scores, functional limitations
+                - Past surgeries, objective findings (ROM, gait, positive tests)
+
+            4. **Medications:**
+                - Current medications (name, dose, purpose)
+                - Future/recommended medications
+
+            5. **Medical-Legal Conclusions:**
+                - MMI/P&S status (with date/reason)
+                - WPI impairment (percentages, method)
+                - Apportionment (industrial/non-industrial, reasoning)
+
+            6. **Treatment & Recommendations:**
+                - Interventional procedures, diagnostic tests, therapy, specialist referrals, future surgical needs
+
+            7. **Work Status & Restrictions:**
+                - Current work status, restrictions (exact wording), prognosis for return to work
+
+            8. **Critical Findings & Action Items:**
+                - Main actionable points (MMI, procedures, QMEs, diagnostics)
+
+            9. **Summary Paragraph:**
+                - Narrative summary of the case, key findings, and recommendations
+
+            Format as a multi-section narrative or bullet points. Include all available details. Do NOT add placeholders for missing data."
+            """
         },
         "IME": {
             "pattern": r"IME",
-            "max_words": 65,
+            "max_words": 350,
             "required_elements": ["date", "IME"],
             "format_template": "IME{doctor_section} for [Body parts] : [DATE] = [MMI/Impairment] → [Treatment/Future medical] | [Restrictions/Causation]"
         },

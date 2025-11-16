@@ -265,7 +265,7 @@ III. CLINICAL STATUS
 - Past surgeries - scan entire history section for surgical history
 - Current chief complaint - patient's own words from subjective section
 - Pain score (current/max on 0-10 scale) - look in subjective complaints
-- Objective findings:
+- Objective findings:✅ Extraction complete
   * ROM limitations - from physical examination section
   * Gait abnormalities - from observation/ambulation section
   * Positive tests - from clinical tests section (e.g., Hawkins, Neer, McMurray)
