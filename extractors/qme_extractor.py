@@ -535,8 +535,255 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
             logger.warning("⚠️ No valid QME physician found")
             return ""
 
+
+    # ADD these 3 new helper methods at the END of the class (before _get_fallback_result):
+
+    def _generate_short_summary_from_structured_data(self, raw_data: Dict) -> str:
+        """
+        Generate a concise short summary using the structured data from extraction.
+        This uses the actual extracted fields rather than the long summary text.
+        IMPROVEMENTS: 
+        - More precise prioritization: MMI/WPI first, then restrictions, recommendations, meds.
+        - Consistent abbreviations and telegraphic style.
+        - Ensure body parts are integrated if relevant (e.g., "lumbar").
+        - Enforce stricter length (30 - 50 words max) with fallback validation.
+        """
+        logger.info("🎯 Generating short summary from structured data...")
+        
+        # Extract key elements directly from structured data
+        key_elements = self._extract_key_elements_for_short_summary(raw_data)
+        
+        system_prompt = SystemMessagePromptTemplate.from_template("""
+    You are a medical-legal specialist creating ULTRA-CONCISE summaries of QME/AME/IME reports.
+
+    CRITICAL REQUIREMENTS:
+    - MAXIMUM 1-2 sentences, no more than 50 words total (count and trim if needed)
+    - Focus ONLY on the MOST critical medical-legal findings in this order: MMI/WPI → Work restrictions → Key recommendations → Critical meds/body parts
+    - Use telegraphic style: Bullet-like facts, no fluff, active voice
+    - Abbreviations: MMI (Max Medical Improvement), P&S (Permanent & Stationary), WPI (Whole Person Impairment), PT (Physical Therapy), DOI (Date of Injury)
+    - Integrate body parts naturally (e.g., "Lumbar strain: Not at MMI")
+
+    FORMAT RULES:
+    - Start with MMI/WPI if available (e.g., "At MMI, 12% lumbar WPI")
+    - Then restrictions (e.g., "No lifting >20lbs, light duty")
+    - Then 1 key rec (e.g., "Rec: PT x6 sessions")
+    - End with critical meds if any (e.g., "; On gabapentin")
+    - Use semicolons (;) or periods (.) to separate facts
+
+    EXAMPLES:
+    ✅ "Not at MMI (lumbar); WPI deferred. Restrictions: no lift >25lbs, no bend. Rec: PT core strength; Ibuprofen PRN."
+    ✅ "MMI reached DOI-related shoulder; 8% WPI. Off work 4wks. Rec: MRI if persistent."
+    ✅ "P&S pending surgery (knee); No restrictions. On oxycodone, gabapentin."
+
+    Now create an ULTRA-CONCISE summary from these structured medical-legal findings:
+    """)
+
+        user_prompt = HumanMessagePromptTemplate.from_template("""
+    MEDICAL-LEGAL FINDINGS FOR SHORT SUMMARY:
+
+    MMI STATUS: {mmi_status}
+    WPI: {wpi_status} ({body_parts})
+    WORK RESTRICTIONS: {work_restrictions}
+    KEY RECOMMENDATIONS: {key_recommendations}
+    CRITICAL MEDICATIONS: {critical_medications}
+
+    Create the most concise possible medical-legal summary (1-2 sentences max, 100-200 chars):
+    """)
+
+        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
+        
+        try:
+            start_time = time.time()
+            
+            chain = chat_prompt | self.llm
+            response = chain.invoke({
+                "mmi_status": key_elements["mmi_status"],
+                "wpi_status": key_elements["wpi"],
+                "body_parts": key_elements["body_parts"],
+                "work_restrictions": key_elements["work_restrictions"],
+                "key_recommendations": ", ".join(key_elements["key_recommendations"][:2]),  # Limit to top 2
+                "critical_medications": ", ".join(key_elements["critical_medications"][:2])
+            })
+            
+            short_summary = response.content.strip()
+            end_time = time.time()
+            
+            # Validate and clean up the short summary
+            short_summary = self._clean_short_summary(short_summary)
+            
+            # Additional improvement: Ensure char count and add fallback if too vague
+            if len(short_summary) < 50 or "review" in short_summary.lower():
+                short_summary = self._create_fallback_short_summary_from_data(key_elements)
+            
+            logger.info(f"⚡ Short summary generated in {end_time - start_time:.2f}s: '{short_summary}' (Len: {len(short_summary)})")
+            return short_summary
+            
+        except Exception as e:
+            logger.error(f"❌ Short summary generation failed: {e}")
+            # Fallback: create basic short summary from structured data
+            return self._create_fallback_short_summary_from_data(key_elements)
+
+    def _extract_key_elements_for_short_summary(self, raw_data: Dict) -> Dict:
+        """Extract the most critical elements for short summary generation from structured data"""
+        key_elements = {
+            "mmi_status": "",
+            "work_restrictions": "",
+            "key_recommendations": [],
+            "critical_medications": [],
+            "wpi": "",
+            "body_parts": ""
+        }
+        
+        # Extract MMI status
+        medical_legal = raw_data.get("medical_legal_conclusions", {})
+        if medical_legal:
+            mmi_data = medical_legal.get("mmi_status", {})
+            if isinstance(mmi_data, dict):
+                status = mmi_data.get("status", "")
+                reason = mmi_data.get("reason", "")
+                if status:
+                    key_elements["mmi_status"] = status
+                if reason and "deferred" in reason.lower():
+                    key_elements["mmi_status"] += f" ({reason.split(',')[0]})"  # Add brief reason
+            else:
+                key_elements["mmi_status"] = str(mmi_data) if mmi_data else ""
+        
+        # Extract WPI
+        if medical_legal:
+            wpi_data = medical_legal.get("wpi_impairment", {})
+            if isinstance(wpi_data, dict):
+                total = wpi_data.get("total_wpi", "")
+                if total:
+                    key_elements["wpi"] = f"{total}%"
+                if not total and wpi_data.get("breakdown"):
+                    breakdown = wpi_data.get("breakdown", [])
+                    if breakdown and isinstance(breakdown, list) and len(breakdown) > 0:
+                        first = breakdown[0]
+                        if isinstance(first, dict):
+                            key_elements["wpi"] = f"{first.get('percentage', '')}%"
+        
+        # Extract work restrictions (more concise joining)
+        work_status = raw_data.get("work_status", {})
+        if work_status:
+            restrictions = work_status.get("work_restrictions", [])
+            if restrictions and isinstance(restrictions, list):
+                key_elements["work_restrictions"] = " | ".join([str(r).strip() for r in restrictions[:4]])  # Use | for tighter separation
+        
+        # Extract body parts from diagnosis (improved mapping)
+        diagnosis = raw_data.get("diagnosis", {})
+        if diagnosis:
+            primary_diagnoses = diagnosis.get("primary_diagnoses", [])
+            if primary_diagnoses and isinstance(primary_diagnoses, list):
+                body_parts = set()  # Use set to avoid duplicates
+                for dx in primary_diagnoses:
+                    if isinstance(dx, dict):
+                        dx_name = str(dx.get("name", "")).lower()
+                        mappings = {
+                            "lumbar": "lumbar", "l-spine": "lumbar", "low back": "lumbar",
+                            "cervical": "cervical", "neck": "cervical",
+                            "shoulder": "shoulder", "rotator cuff": "shoulder",
+                            "knee": "knee", "acl": "knee",
+                            "back": "back", "spine": "spine"
+                        }
+                        for key, part in mappings.items():
+                            if key in dx_name:
+                                body_parts.add(part)
+                                break
+                if body_parts:
+                    key_elements["body_parts"] = ", ".join(list(body_parts))
+        
+        # Extract key recommendations (prioritize surgical/procedural first)
+        recommendations = raw_data.get("recommendations", {})
+        if recommendations:
+            # Surgical/future needs (highest priority)
+            future_surg = recommendations.get("future_surgical_needs", [])
+            if future_surg:
+                key_elements["key_recommendations"].extend([
+                    f"{s.get('procedure', '')} ({s.get('body_part', '')})"
+                    for s in future_surg[:1] if isinstance(s, dict) and s.get('procedure')
+                ])
+            
+            # Procedures
+            procedures = recommendations.get("interventional_procedures", [])
+            if procedures:
+                key_elements["key_recommendations"].extend([
+                    f"{p.get('procedure', '')}"
+                    for p in procedures[:1] if isinstance(p, dict) and p.get('procedure')
+                ])
+            
+            # Therapy
+            therapy = recommendations.get("therapy", [])
+            if therapy:
+                key_elements["key_recommendations"].extend([
+                    f"{t.get('type', '')} x{t.get('frequency', '')}"
+                    for t in therapy[:2] if isinstance(t, dict) and t.get('type')
+                ])
+            
+            # Diagnostics
+            diagnostics = recommendations.get("diagnostic_tests", [])
+            if diagnostics:
+                key_elements["key_recommendations"].extend([
+                    f"{d.get('test', '')}"
+                    for d in diagnostics[:1] if isinstance(d, dict) and d.get('test')
+                ])
+        
+        # Extract critical medications (focus on high-impact)
+        medications = raw_data.get("medications", {})
+        if medications:
+            current_meds = medications.get("current_medications", [])
+            critical_keywords = ['oxycodone', 'hydrocodone', 'morphine', 'fentanyl', 'tramadol', 'opioid', 'gabapentin', 'pregabalin', 'lyrica', 'amitriptyline', 'duloxetine']
+            
+            for med in current_meds:
+                if isinstance(med, dict):
+                    med_name = str(med.get("name", "")).lower()
+                    if any(kw in med_name for kw in critical_keywords):
+                        key_elements["critical_medications"].append(str(med.get("name", "")))
+        
+        return key_elements
+
+    def _clean_short_summary(self, summary: str) -> str:
+        """Clean and validate the short summary"""
+        # Remove excessive whitespace and quotes
+        summary = re.sub(r'\s+', ' ', summary).strip()
+        summary = summary.replace('"', '').replace("'", "")
+        
+        # Ensure it starts with MMI/WPI if possible (post-process check)
+        if "mmi" not in summary.lower() and "wpi" not in summary.lower() and "p&s" not in summary.lower():
+            summary = "MMI status: " + summary
+        
+        return summary
+
+    def _create_fallback_short_summary_from_data(self, key_elements: Dict) -> str:
+        """Create fallback short summary directly from key elements without LLM"""
+        parts = []
+        
+        # MMI/WPI first
+        if key_elements["mmi_status"]:
+            parts.append(key_elements["mmi_status"])
+        if key_elements["wpi"]:
+            parts.append(f"WPI: {key_elements['wpi']}")
+        
+        # Work restrictions
+        if key_elements["work_restrictions"]:
+            parts.append(f"Restrictions: {key_elements['work_restrictions'][:50]}")
+        
+        # Key recommendation
+        if key_elements["key_recommendations"]:
+            parts.append(f"Rec: {key_elements['key_recommendations'][0]}")
+        
+        # Medications
+        if key_elements["critical_medications"]:
+            parts.append(f"On {', '.join(key_elements['critical_medications'][:2])}")
+        
+        summary = "; ".join(parts[:5])
+        
+        return summary if summary else "Review full QME report for details."
+
+
+    # NOW UPDATE the _build_initial_result method to generate BOTH summaries:
+
     def _build_initial_result(self, raw_data: Dict, doc_type: str, fallback_date: str) -> ExtractionResult:
-        """Build initial result from extracted data"""
+        """Build initial result from extracted data with BOTH long and short summaries"""
         logger.info("🔨 Building initial extraction result...")
         
         # Extract core identity
@@ -544,30 +791,35 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         cat2 = raw_data.get("category_2_diagnosis", {})
         cat5 = raw_data.get("category_5_medical_legal_conclusions", {})
         
-        # Build summary
-        summary_line = self._build_comprehensive_narrative_summary(raw_data, doc_type, fallback_date)
-        
+        # Build LONG summary (existing comprehensive narrative)
+        long_summary = self._build_comprehensive_narrative_summary(raw_data, doc_type, fallback_date)
+
+        # Build SHORT summary (new concise telegraphic style)
+        short_summary = self._generate_short_summary_from_structured_data(raw_data)
+
         result = ExtractionResult(
             document_type=doc_type,
             document_date=cat1.get("report_date", fallback_date),
-            summary_line=summary_line,
+            summary_line=long_summary,  # Long detailed summary
+            short_summary=short_summary,  # Concise summary
             examiner_name=raw_data.get("qme_physician_name", ""),
             specialty=cat1.get("qme_specialty", ""),
             body_parts=cat2.get("affected_body_parts", []),
             medications=raw_data.get("medications"),
             raw_data=raw_data,
         )
-        
-        logger.info(f"✅ Initial result built (Physician: {result.examiner_name})")
+
+        logger.info(f"✅ Initial result built with BOTH summaries")
+        logger.info(f"   Long summary: {len(long_summary)} chars")
+        logger.info(f"   Short summary: {len(short_summary)} chars - '{short_summary}'")
+        logger.info(f"   Physician: {result.examiner_name}")
         return result
 
     def _build_comprehensive_narrative_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
         """
         Build comprehensive narrative summary matching Gemini's style.
-        
-        Gemini style: "Diagnosis: [conditions]. Work Status: [status]. Treatment/Critical Findings: [actions]."
+        Returns a string summary, never a dict.
         """
-        
         # Extract all data
         patient_info = data.get("patient_information", {})
         physicians = data.get("physicians", {})
@@ -576,11 +828,15 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         work_status = data.get("work_status", {})
         recommendations = data.get("recommendations", {})
         critical_findings = data.get("critical_findings", [])
-        
+
         # Fallback to old structure if new structure not found
         if not diagnosis and data.get("category_2_diagnosis"):
             # Using old 6-category structure
             return self._build_medical_legal_summary_legacy(data, doc_type, fallback_date)
+
+        # If both new and old structures are missing, return a minimal fallback
+        if not diagnosis and not data.get("category_2_diagnosis"):
+            return f"Fallback long summary - {fallback_date}: Document processed, but extraction format unexpected."
         
         # Helper function for safe string conversion
         def safe_str(value, default=""):
@@ -800,31 +1056,34 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
     def _build_medical_legal_summary_legacy(self, data: Dict, doc_type: str, fallback_date: str) -> str:
         """
         Legacy summary builder for old 6-category structure.
-        Kept for backward compatibility.
+        Always returns a string, never a dict.
         """
         cat1 = data.get("category_1_core_identity", {})
         cat2 = data.get("category_2_diagnosis", {})
         cat5 = data.get("category_5_medical_legal_conclusions", {})
         cat6 = data.get("category_6_actionable_recommendations", {})
-        
+
+        # If even legacy structure is missing, return a minimal fallback
+        if not cat1 and not cat2 and not cat5:
+            return f"Fallback long summary - {fallback_date}: Document processed, but extraction format unexpected."
+
         parts = []
-        
         # Date and physician
         date = cat1.get("report_date", fallback_date)
         physician = data.get("qme_physician_name", "")
         specialty = cat1.get("qme_specialty", "")
-        
+
         parts.append(f"{date}: {doc_type}")
         if physician:
             if specialty:
                 parts.append(f"by {physician} ({self._abbreviate_specialty(specialty)})")
             else:
                 parts.append(f"by {physician}")
-        
+
         # Body parts and diagnoses
         body_parts = cat2.get("affected_body_parts", [])
         diagnoses = cat2.get("primary_diagnoses", [])
-        
+
         # Flatten lists
         def flatten_list(items):
             flat = []
@@ -834,34 +1093,34 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
                 elif item:
                     flat.append(str(item))
             return flat
-        
+
         if body_parts:
             body_parts = flatten_list(body_parts)[:2]
             parts.append(f"for {', '.join(body_parts)}")
-        
+
         if diagnoses:
             diagnoses = flatten_list(diagnoses)[:2]
             parts.append(f"= Dx: {', '.join(diagnoses)}")
-        
+
         # Medical-legal conclusions
         mmi = str(cat5.get("mmi_status", "")) if cat5.get("mmi_status") else ""
         wpi = str(cat5.get("wpi_percentage", "")) if cat5.get("wpi_percentage") else ""
-        
+
         conclusions = []
         if mmi:
             conclusions.append(mmi)
         if wpi:
             conclusions.append(f"WPI: {wpi}")
-        
+
         if conclusions:
             parts.append(f"| {'; '.join(conclusions)}")
-        
+
         summary = " ".join(parts)
         words = summary.split()
         # if len(words) > 170:
         #     summary = " ".join(words[:170]) + "..."
-        
-        return summary
+
+        return summary if summary.strip() else f"Fallback long summary - {fallback_date}: Document processed, but extraction format unexpected."
 
     def _abbreviate_specialty(self, specialty: str) -> str:
         """Abbreviate medical specialties"""

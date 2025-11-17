@@ -1,4 +1,3 @@
-
 import traceback
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
@@ -115,7 +114,7 @@ class DocumentAggregationService:
         sorted_documents = sorted(documents, key=self._parse_report_date, reverse=True)
 
         # Grouped data by document_id
-        whats_new_by_document = {}  # Now stores simple arrays of bullet points
+        whats_new_by_document = {}  # Stores original whatsNew as is, without grouping
         body_part_by_document = {}
         brief_summary_by_document = {}
         document_summary_by_document = {}
@@ -138,33 +137,9 @@ class DocumentAggregationService:
                 body_part_by_document[doc_id] = []
             body_part_by_document[doc_id].extend(grouped_body_parts)
 
-            # UPDATED: Handle whats_new as simple array of bullet point strings
-            grouped_whats_new = []
-            whats_new_data = doc.get("whatsNew", [])
-            
-            # Handle both array format and legacy dict format for backward compatibility
-            if isinstance(whats_new_data, list):
-                # New format: array of bullet point strings
-                for bullet_point in whats_new_data:
-                    if bullet_point and isinstance(bullet_point, str) and bullet_point.strip():
-                        grouped_whats_new.append(bullet_point)
-            elif isinstance(whats_new_data, dict):
-                # Legacy format: convert dict values to array
-                for category, value in whats_new_data.items():
-                    if value and isinstance(value, str) and value.strip() and value.lower() != 'none':
-                        grouped_whats_new.append(value)
-
-            # Add quick_notes from tasks as separate bullet points
-            if doc_id in tasks_dict:
-                for task in tasks_dict[doc_id]:
-                    quick_notes_data = task.get("quickNotes", {})
-                    content = quick_notes_data.get("one_line_note") or quick_notes_data.get("status_update")
-                    description = task.get("description", "")
-                    if content:
-                        grouped_whats_new.append(content)
-
-            # Store simple array of bullet points by document_id
-            whats_new_by_document[doc_id] = grouped_whats_new
+            # Send whats_new as is, without processing or grouping
+            whats_new_data = doc.get("whatsNew")
+            whats_new_by_document[doc_id] = whats_new_data if whats_new_data is not None else []
 
             # Group brief_summary by document
             brief_summary = doc.get("briefSummary")
@@ -217,7 +192,7 @@ class DocumentAggregationService:
             base_doc = await self._format_single_document_base(latest_doc)
             base_doc.update({
                 "body_part_snapshots": body_part_by_document.get(doc_id, []),
-                "whats_new": whats_new_by_document.get(doc_id, []),  # Simple array of bullet point strings
+                "whats_new": whats_new_by_document.get(doc_id, []),  # Original structure as is
                 "brief_summary": brief_summary_by_document.get(doc_id),
                 "document_summary": document_summary_by_document.get(doc_id),
                 "adl": adl_by_document.get(doc_id, {"adls_affected": [], "work_restrictions": []}),
