@@ -41,11 +41,12 @@ class ExtractionResult:
     """Structured output for all extractions"""
     document_type: str
     document_date: str
-    summary_line: str
+    summary_line: str  # Long detailed summary
+    short_summary: str = ""  # NEW: Add this line for concise summary
     examiner_name: Optional[str] = None
     specialty: Optional[str] = None
     body_parts: List[str] = field(default_factory=list)
-    medications: Optional[Dict[str, Any]] = None  # <-- NEW FIELD
+    medications: Optional[Dict[str, Any]] = None
     raw_data: Dict[str, Any] = field(default_factory=dict)
 
 

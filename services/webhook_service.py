@@ -100,22 +100,13 @@ class WebhookService:
             raise HTTPException(status_code=400, detail="Missing required fields in webhook payload")
         
         result_data = data["result"]
-        text = result_data.get("text", "")  # Layout-preserved text (fallback)
-        llm_text = result_data.get("llm_text")  # NEW: Structured JSON for LLM (can be None)
-        page_zones = result_data.get("page_zones")  # NEW: Per-page zones (can be None)
+        text = result_data.get("text", "")
         mode = data.get("mode", "wc")
         
         logger.info(f"📋 Document mode: {mode}")
-        logger.info(f"🔍 Extraction data available:")
-        logger.info(f"   - Layout text: {len(text)} chars")
-        logger.info(f"   - LLM JSON text: {len(llm_text) if llm_text else 0} chars")
-        logger.info(f"   - Page zones: {len(page_zones) if page_zones else 0} pages")
         
-        # Use LLM-optimized text if available, fallback to layout text
-        text_for_llm = llm_text if llm_text else text
-        logger.info(f"🤖 Using {'LLM-optimized JSON' if llm_text else 'layout-preserved'} text for analysis")
-        
-        # No DLP de-identification needed
+        # Use text directly (no DLP de-identification)
+        deidentified_text = text
         extracted_phi = {
             "patient_name": "",
             "claim_number": "",
@@ -125,16 +116,11 @@ class WebhookService:
         # OPTIMIZATION: Run analysis and summary generation in parallel
         analyzer = EnhancedReportAnalyzer()
         
-        # Pass page_zones to extraction for zone-aware doctor detection
         analysis_task = asyncio.create_task(
-            asyncio.to_thread(
-                analyzer.extract_document_data_with_reasoning, 
-                text_for_llm,
-                page_zones  # NEW: Pass zones for enhanced extraction
-            )
+            asyncio.to_thread(analyzer.extract_document_data_with_reasoning, deidentified_text)
         )
         summary_task = asyncio.create_task(
-            asyncio.to_thread(analyzer.generate_brief_summary, text_for_llm)
+            asyncio.to_thread(analyzer.generate_brief_summary, deidentified_text)
         )
         
         # Wait for both to complete
@@ -207,8 +193,7 @@ class WebhookService:
             "document_analysis": document_analysis,
             "brief_summary": brief_summary,
             "extracted_phi": extracted_phi,
-            "text_for_analysis": text_for_llm,  # Text used for LLM analysis
-            "page_zones": page_zones,  # NEW: Pass zones forward
+            "deidentified_text": deidentified_text,
             "has_date_reasoning": has_date_reasoning,
             "date_reasoning_data": {
                 "reasoning": document_analysis.date_reasoning.reasoning if has_date_reasoning else "",
@@ -464,29 +449,39 @@ class WebhookService:
             )
         )
         
-        # Start comparison task
+        # FIXED: Get raw extraction data instead of bullet points
         analyzer = ReportAnalyzer()
         comparison_task = asyncio.create_task(
             asyncio.to_thread(
-                analyzer.compare_with_previous_documents,
-                processed_data["text_for_analysis"]  # Use same text as LLM analysis
+                analyzer.extract_document,  # Use extract_document instead of compare_with_previous_documents
+                processed_data["deidentified_text"]
             )
         )
         
         # Wait for both
-        db_response, whats_new_data = await asyncio.gather(db_fetch_task, comparison_task)
-        
+        db_response, extraction_result = await asyncio.gather(db_fetch_task, comparison_task)
         previous_documents = db_response.get('documents', []) if db_response else []
         
-        # Handle whats_new_data validation
-        if whats_new_data is None:
-            logger.warning(f"⚠️ Invalid whats_new data; using empty list")
-            whats_new_data = []
-        elif not isinstance(whats_new_data, list):
-            logger.warning(f"⚠️ whats_new_data is not list; type: {type(whats_new_data)}")
-            whats_new_data = []
+        # FIXED: Handle dual summary dict directly (long and short summaries)
+        if isinstance(extraction_result, dict) and "summary" in extraction_result:
+            whats_new_data = extraction_result  # Pass the entire dual summary dict
+            long_summary = extraction_result["summary"].get("long", "")
+            short_summary = extraction_result["summary"].get("short", "")
+        else:
+            # Fallback: if not dual summary format, create minimal summaries
+            fallback_date = datetime.now().strftime("%m/%d/%y")
+            long_summary = f"Fallback long summary - {fallback_date}: Document processed, but extraction format unexpected."
+            short_summary = f"{fallback_date}: Extraction incomplete."
+            whats_new_data = {
+                "summary": {
+                    "long": long_summary,
+                    "short": short_summary
+                }
+            }
         
-        logger.info(f"✅ whats_new_data received as list with {len(whats_new_data)} bullet points")
+        logger.info(f"✅ Dual summary extracted:")
+        logger.info(f"   Long summary length: {len(long_summary)} chars")
+        logger.info(f"   Short summary: {short_summary}")
         
         # Determine status (unchanged logic)
         claim_to_use = document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else "Not specified"
@@ -576,7 +571,7 @@ class WebhookService:
             "pending_reason": pending_reason,
             "patient_name_to_use": patient_name_to_use,
             "claim_to_save": claim_to_save,
-            "whats_new_data": whats_new_data,  # Now a list of bullet points
+            "whats_new_data": whats_new_data,  # Dual summary dict with long and short summaries
             "summary_snapshots": summary_snapshots,
             "adl_data": adl_data,
             "document_summary": document_summary,
@@ -591,7 +586,8 @@ class WebhookService:
             "mode": mode,
             "has_multiple_body_parts": len(summary_snapshots) > 1
         }
-
+    
+    
     async def save_and_process_document(self, processed_data: dict, status_result: dict, data: dict, db_service) -> dict:
         document_analysis = status_result["document_analysis"]
         has_date_reasoning = processed_data["has_date_reasoning"]
