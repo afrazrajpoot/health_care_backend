@@ -41,12 +41,16 @@ class ConsultExtractorChained:
         self.context_analyzer = DocumentContextAnalyzer(llm)
         self.verifier = ExtractionVerifier(llm)
 
-    def extract(self, text: str, doc_type: str, fallback_date: str, page_zones: Optional[Dict] = None, context_analysis: Optional[Dict] = None) -> ExtractionResult:
-        """Extract specialist consult report with full context processing. Accepts optional page_zones and context_analysis for compatibility with context-aware routing."""
+    def extract(self, text: str, doc_type: str, fallback_date: str, page_zones: Optional[Dict] = None, context_analysis: Optional[Dict] = None) -> Dict:
+        """
+        Extract specialist consult report with full context processing. 
+        Returns dictionary with long_summary and short_summary like QME extractor.
+        """
         logger.info("=" * 80)
         logger.info("👨‍⚕️ STARTING CONSULT EXTRACTION (FULL CONTEXT + CONTEXT-AWARE)")
         logger.info("=" * 80)
         start_time = time.time()
+        
         try:
             # Step 1: Use provided context_analysis or analyze if not provided
             if context_analysis is None:
@@ -57,20 +61,36 @@ class ConsultExtractorChained:
                 logger.info(f"   Confidence: {context_analysis.get('confidence', 'medium')}")
                 logger.info(f"   Key Sections: {context_analysis.get('key_sections', [])}")
                 logger.info(f"   Critical Keywords: {context_analysis.get('critical_keywords', [])}")
+
             # Step 2: Extract raw data with full context and context_analysis guidance
             raw_data = self._extract_raw_data(text, doc_type, fallback_date, context_analysis, page_zones)
-            # Step 3: Build initial result
-            result = self._build_initial_result(raw_data, doc_type, fallback_date, context_analysis)
+
+            # Step 3: Build comprehensive long summary from ALL raw data
+            long_summary = self._build_comprehensive_long_summary(raw_data, doc_type, fallback_date)
+
+            # Step 4: Generate short summary from long summary (like QME extractor)
+            short_summary = self._generate_short_summary_from_long_summary(long_summary)
+
             elapsed_time = time.time() - start_time
             logger.info(f"⚡ Full-context consultation extraction completed in {elapsed_time:.2f}s")
             logger.info(f"✅ Extracted consultation data from complete {len(text):,} char document")
             logger.info("=" * 80)
             logger.info("✅ CONSULT EXTRACTION COMPLETE (FULL CONTEXT)")
             logger.info("=" * 80)
-            return result
+
+            # Return dictionary with both summaries like QME extractor
+            return {
+                "long_summary": long_summary,
+                "short_summary": short_summary
+            }
+
         except Exception as e:
             logger.error(f"❌ Extraction failed: {str(e)}")
-            raise
+            # Return fallback result structure
+            return {
+                "long_summary": f"Consultation extraction failed: {str(e)}",
+                "short_summary": "Consultation summary not available"
+            }
 
     def _extract_raw_data(self, text: str, doc_type: str, fallback_date: str, context_analysis: Dict, page_zones: Optional[Dict] = None) -> Dict:
         """Extract raw consultation data using LLM with full context and robust zone-aware physician detection"""
@@ -309,320 +329,705 @@ Extract into STRUCTURED JSON focusing on 8 CRITICAL FIELDS:
             logger.error(f"❌ LLM extraction failed: {str(e)}")
             return self._get_fallback_result(fallback_date)
 
-    def _build_initial_result(self, raw_data: Dict, doc_type: str, fallback_date: str, context_analysis: Dict = None) -> ExtractionResult:
-        """Build initial result from extracted consultation data"""
-        
-        if context_analysis is None:
-            context_analysis = {}
-        
-        logger.info("🔨 Building initial consultation extraction result...")
-        
-        try:
-            # Extract from 8-field structure
-            header_context = raw_data.get("field_1_header_context", {})
-            consulting_physician = header_context.get("consulting_physician", {})
-            diagnostic_impression = raw_data.get("field_3_diagnosis_assessment", {})
-            
-            # Build comprehensive consultation summary
-            summary_line = self._build_consultation_narrative_summary(raw_data, doc_type, fallback_date, context_analysis)
-            
-            # CRITICAL: Ensure summary_line is STRING
-            if not isinstance(summary_line, str):
-                summary_line = str(summary_line) if summary_line else "Consultation summary not available"
-            
-            result = ExtractionResult(
-                document_type=doc_type,
-                document_date=header_context.get("consultation_date", fallback_date),
-                summary_line=summary_line,  # MUST be STRING
-                examiner_name=consulting_physician.get("name", ""),
-                specialty=consulting_physician.get("specialty", ""),
-                body_parts=[diagnostic_impression.get("primary_diagnosis", "")],
-                raw_data=raw_data,
-            )
-            
-            logger.info(f"✅ Initial consultation result built (Physician: {result.examiner_name})")
-            return result
-        
-        except Exception as e:
-            logger.error(f"❌ Error building initial result: {str(e)}")
-            raise
-
-    def _build_consultation_narrative_summary(self, data: Dict, doc_type: str, fallback_date: str, context_analysis: Dict = None) -> str:
+    def _build_comprehensive_long_summary(self, raw_data: Dict, doc_type: str, fallback_date: str) -> str:
         """
-        Build comprehensive narrative summary for consultation report.
-        CRITICAL: Must return STRING with ALL critical elements, NO AI additions
+        Build comprehensive long summary from ALL extracted raw data with detailed headings.
+        Similar to QME extractor structure.
         """
+        logger.info("📝 Building comprehensive long summary from ALL extracted consultation data...")
         
-        if context_analysis is None:
-            context_analysis = {}
+        sections = []
         
-        try:
-            # Extract all data from 8-field structure
-            header_context = data.get("field_1_header_context", {})
-            chief_complaint = data.get("field_2_chief_complaint", {})
-            diagnostic_impression = data.get("field_3_diagnosis_assessment", {})
-            treatment_recommendations = data.get("field_7_plan_recommendations", {})
-            work_status_recommendations = data.get("field_8_work_status_impairment", {})
-            critical_findings = data.get("critical_findings", [])
-            
-            # Build narrative sections
-            narrative_parts = []
-            
-            # Section 0: PHYSICIAN CONTEXT
-            consulting_physician = header_context.get("consulting_physician", {})
-            physician_name = self._safe_str(consulting_physician.get("name", ""))
-            specialty = self._safe_str(consulting_physician.get("specialty", ""))
-            consultation_date = self._safe_str(header_context.get("consultation_date", fallback_date))
-            
-            if physician_name and physician_name.strip():
-                context_parts = [physician_name.strip()]
-                if specialty and specialty.strip():
-                    context_parts.append(f"({specialty.strip()})")
-                context_parts.append(f"on {consultation_date if consultation_date else fallback_date}")
-                context_line = " ".join(context_parts)
-                narrative_parts.append(f"**Consult:** {context_line}")
-            
-            # Section 1: COMPLETE DIAGNOSIS ASSESSMENT (CRITICAL - INCLUDE ALL)
-            diagnosis_text = self._build_complete_diagnosis_narrative(diagnostic_impression)
-            if diagnosis_text and isinstance(diagnosis_text, str) and diagnosis_text.strip():
-                narrative_parts.append(f"**Diagnosis:** {diagnosis_text.strip()}")
-            
-            # Section 2: CHIEF COMPLAINT
-            complaint = self._safe_str(chief_complaint.get("primary_complaint", ""))
-            location = self._safe_str(chief_complaint.get("location", ""))
-            duration = self._safe_str(chief_complaint.get("duration", ""))
-            
-            if complaint and complaint.strip():
-                complaint_parts = [complaint.strip()]
-                if location and location.strip():
-                    complaint_parts.append(f"({location.strip()})")
-                if duration and duration.strip():
-                    complaint_parts.append(f"- {duration.strip()}")
-                complaint_text = " ".join(complaint_parts)
-                narrative_parts.append(f"**CC:** {complaint_text}")
-            
-            # Section 3: TREATMENT RECOMMENDATIONS (CRITICAL - EXACT ONLY)
-            recommendation_text = self._build_exact_recommendations_narrative(
-                treatment_recommendations,
-                critical_findings
-            )
-            if recommendation_text and isinstance(recommendation_text, str) and recommendation_text.strip():
-                narrative_parts.append(f"**Plan:** {recommendation_text.strip()}")
-            
-            # Section 4: WORK STATUS & RESTRICTIONS (EXACT WORDING)
-            work_text = self._build_exact_work_status_narrative(work_status_recommendations)
-            if work_text and isinstance(work_text, str) and work_text.strip():
-                narrative_parts.append(f"**Work Status:** {work_text.strip()}")
-            
-            # Filter and join
-            valid_parts = [str(part) for part in narrative_parts if part and isinstance(part, str) and part.strip()]
-            full_narrative = "\n\n".join(valid_parts)
-            
-            logger.info(f"📝 Consultation Narrative summary generated: {len(full_narrative)} characters")
-            return full_narrative if full_narrative and isinstance(full_narrative, str) else "Consultation summary not available"
+        # Section 1: CONSULTATION OVERVIEW
+        sections.append("📋 CONSULTATION OVERVIEW")
+        sections.append("-" * 50)
         
-        except Exception as e:
-            logger.error(f"❌ Error building consultation narrative: {str(e)}")
-            return f"Error generating summary: {str(e)}"
-
-    def _build_complete_diagnosis_narrative(self, diagnostic_impression: Dict) -> str:
-        """
-        Build COMPLETE diagnosis narrative including ALL diagnoses.
-        CRITICAL: Do not miss any secondary diagnoses or details.
-        """
-        try:
-            diagnosis_parts = []
-            
-            # Primary diagnosis with ALL details
-            primary_dx = self._safe_str(diagnostic_impression.get("primary_diagnosis", ""))
-            certainty = self._safe_str(diagnostic_impression.get("diagnostic_certainty", ""))
-            icd10 = self._safe_str(diagnostic_impression.get("icd10_code", ""))
-            
-            if primary_dx and primary_dx.strip():
-                dx_text = primary_dx.strip()
-                
-                # Add certainty qualifier if present
-                if certainty and certainty.strip() and certainty.strip().lower() not in ["definitive", "confirmed"]:
-                    dx_text = f"{dx_text} ({certainty.strip()})"
-                
-                # Add ICD-10 if present
-                if icd10 and icd10.strip():
-                    dx_text = f"{dx_text} [{icd10.strip()}]"
-                
-                diagnosis_parts.append(dx_text)
-            
-            # CRITICAL: Include ALL secondary diagnoses (don't miss any)
-            secondary_diagnoses = diagnostic_impression.get("secondary_diagnoses", [])
-            if secondary_diagnoses and isinstance(secondary_diagnoses, list):
-                for i, sec_dx in enumerate(secondary_diagnoses):
-                    sec_dx_str = self._safe_str(sec_dx)
-                    if sec_dx_str and sec_dx_str.strip():
-                        # Mark as secondary
-                        diagnosis_parts.append(f"Secondary: {sec_dx_str.strip()}")
-            
-            # Clinical correlation/causation (important context)
-            causation = self._safe_str(diagnostic_impression.get("causation_statement", ""))
-            if causation and causation.strip():
-                diagnosis_parts.append(f"Causation: {causation.strip()}")
-            
-            # Join all diagnosis elements
-            valid_parts = [str(part).strip() for part in diagnosis_parts if part and isinstance(part, str) and part.strip()]
-            result = "; ".join(valid_parts) if valid_parts else "Diagnosis not specified"
-            
-            return str(result)
-        except Exception as e:
-            logger.error(f"Error in _build_complete_diagnosis_narrative: {str(e)}")
-            return "Diagnosis extraction error"
-
-    def _build_exact_recommendations_narrative(self, treatment_recommendations: Dict, critical_recommendations: List = None) -> str:
-        """
-        Build treatment recommendations narrative with EXACT wording from document.
-        CRITICAL: Extract ONLY what is explicitly recommended - NO AI additions.
-        """
-        try:
-            if critical_recommendations is None:
-                critical_recommendations = []
-            
-            recommendation_items = []
-            
-            if not treatment_recommendations:
-                return ""
-            
-            specific_interventions = treatment_recommendations.get("specific_interventions", {})
-            if specific_interventions:
-                # Injections (EXACT wording)
-                injections = specific_interventions.get("injections_requested", [])
-                if injections and isinstance(injections, list):
-                    for inj in injections:
-                        inj_str = self._safe_str(inj)
-                        if inj_str and inj_str.strip():
-                            recommendation_items.append(f"Injection: {inj_str.strip()}")
-                
-                # Procedures (EXACT wording)
-                procedures = specific_interventions.get("procedures_requested", [])
-                if procedures and isinstance(procedures, list):
-                    for proc in procedures:
-                        proc_str = self._safe_str(proc)
-                        if proc_str and proc_str.strip():
-                            recommendation_items.append(proc_str.strip())
-                
-                # Surgery (EXACT wording)
-                surgery = specific_interventions.get("surgery_recommended", [])
-                if surgery and isinstance(surgery, list):
-                    for surg in surgery:
-                        surg_str = self._safe_str(surg)
-                        if surg_str and surg_str.strip():
-                            recommendation_items.append(f"Surgery: {surg_str.strip()}")
-                
-                # Diagnostics (EXACT wording)
-                diagnostics = specific_interventions.get("diagnostics_ordered", [])
-                if diagnostics and isinstance(diagnostics, list):
-                    for diag in diagnostics:
-                        diag_str = self._safe_str(diag)
-                        if diag_str and diag_str.strip():
-                            recommendation_items.append(f"Order: {diag_str.strip()}")
-            
-            # Medication changes (EXACT names and doses)
-            medication_changes = treatment_recommendations.get("medication_changes", {})
-            if medication_changes:
-                # New medications
-                new_meds = medication_changes.get("new_medications", [])
-                if new_meds and isinstance(new_meds, list):
-                    for med in new_meds:
-                        if isinstance(med, dict):
-                            med_name = self._safe_str(med.get("medication", ""))
-                            med_dose = self._safe_str(med.get("dose", ""))
-                            if med_name and med_name.strip():
-                                if med_dose and med_dose.strip():
-                                    recommendation_items.append(f"Start {med_name.strip()} {med_dose.strip()}")
-                                else:
-                                    recommendation_items.append(f"Start {med_name.strip()}")
+        header_context = raw_data.get("field_1_header_context", {})
+        consulting_physician = header_context.get("consulting_physician", {})
+        
+        physician_name = consulting_physician.get("name", "")
+        specialty = consulting_physician.get("specialty", "")
+        consultation_date = header_context.get("consultation_date", fallback_date)
+        referring_physician = header_context.get("referring_physician", "")
+        
+        overview_lines = [
+            f"Document Type: {doc_type}",
+            f"Consultation Date: {consultation_date}",
+            f"Consulting Physician: {physician_name}",
+            f"Specialty: {specialty}" if specialty else "Specialty: Not specified",
+            f"Referring Physician: {referring_physician}" if referring_physician else "Referring Physician: Not specified"
+        ]
+        sections.append("\n".join(overview_lines))
+        
+        # Section 2: PATIENT INFORMATION
+        sections.append("\n👤 PATIENT INFORMATION")
+        sections.append("-" * 50)
+        
+        patient_lines = [
+            f"Name: {header_context.get('patient_name', 'Not specified')}",
+            f"Date of Birth: {header_context.get('patient_dob', 'Not specified')}",
+            f"Date of Injury: {header_context.get('date_of_injury', 'Not specified')}",
+            f"Claim Number: {header_context.get('claim_number', 'Not specified')}"
+        ]
+        sections.append("\n".join(patient_lines))
+        
+        # Section 3: CHIEF COMPLAINT
+        sections.append("\n🎯 CHIEF COMPLAINT")
+        sections.append("-" * 50)
+        
+        chief_complaint = raw_data.get("field_2_chief_complaint", {})
+        complaint_lines = [
+            f"Primary Complaint: {chief_complaint.get('primary_complaint', 'Not specified')}",
+            f"Location: {chief_complaint.get('location', 'Not specified')}",
+            f"Duration: {chief_complaint.get('duration', 'Not specified')}",
+            f"Radiation Pattern: {chief_complaint.get('radiation_pattern', 'Not specified')}"
+        ]
+        sections.append("\n".join(complaint_lines))
+        
+        # Section 4: DIAGNOSIS & ASSESSMENT
+        sections.append("\n🏥 DIAGNOSIS & ASSESSMENT")
+        sections.append("-" * 50)
+        
+        diagnosis_assessment = raw_data.get("field_3_diagnosis_assessment", {})
+        diagnosis_lines = []
+        
+        # Primary diagnosis
+        primary_dx = diagnosis_assessment.get("primary_diagnosis", "")
+        icd10_code = diagnosis_assessment.get("icd10_code", "")
+        certainty = diagnosis_assessment.get("diagnostic_certainty", "")
+        
+        if primary_dx:
+            dx_text = primary_dx
+            if icd10_code:
+                dx_text += f" [{icd10_code}]"
+            if certainty:
+                dx_text += f" ({certainty})"
+            diagnosis_lines.append(f"Primary Diagnosis: {dx_text}")
+        
+        # Secondary diagnoses
+        secondary_dx = diagnosis_assessment.get("secondary_diagnoses", [])
+        if secondary_dx:
+            diagnosis_lines.append("\nSecondary Diagnoses:")
+            for dx in secondary_dx[:5]:  # Limit to 5 secondary diagnoses
+                if isinstance(dx, dict):
+                    dx_name = dx.get("diagnosis", dx.get("name", ""))
+                    if dx_name and dx_name.strip():
+                        diagnosis_lines.append(f"  • {dx_name}")
+                elif dx and str(dx).strip():
+                    diagnosis_lines.append(f"  • {dx}")
+        
+        # Causation statement
+        causation = diagnosis_assessment.get("causation_statement", "")
+        if causation:
+            diagnosis_lines.append(f"\nCausation: {causation}")
+        
+        sections.append("\n".join(diagnosis_lines) if diagnosis_lines else "No diagnoses extracted")
+        
+        # Section 5: CLINICAL HISTORY & SYMPTOMS
+        sections.append("\n🔬 CLINICAL HISTORY & SYMPTOMS")
+        sections.append("-" * 50)
+        
+        history = raw_data.get("field_4_history_present_illness", {})
+        history_lines = []
+        
+        if history.get("pain_quality"):
+            history_lines.append(f"Pain Quality: {history['pain_quality']}")
+        if history.get("pain_location"):
+            history_lines.append(f"Pain Location: {history['pain_location']}")
+        if history.get("radiation"):
+            history_lines.append(f"Radiation: {history['radiation']}")
+        
+        # Aggravating factors
+        aggravating = history.get("aggravating_factors", [])
+        if aggravating:
+            history_lines.append("\nAggravating Factors:")
+            for factor in aggravating[:5]:
+                if isinstance(factor, dict):
+                    desc = factor.get("factor", "")
+                    if desc:
+                        history_lines.append(f"  • {desc}")
+                elif factor:
+                    history_lines.append(f"  • {factor}")
+        
+        # Alleviating factors
+        alleviating = history.get("alleviating_factors", [])
+        if alleviating:
+            history_lines.append("\nAlleviating Factors:")
+            for factor in alleviating[:5]:
+                if isinstance(factor, dict):
+                    desc = factor.get("factor", "")
+                    if desc:
+                        history_lines.append(f"  • {desc}")
+                elif factor:
+                    history_lines.append(f"  • {factor}")
+        
+        sections.append("\n".join(history_lines) if history_lines else "No clinical history details extracted")
+        
+        # Section 6: PRIOR TREATMENT & EFFICACY
+        sections.append("\n💊 PRIOR TREATMENT & EFFICACY")
+        sections.append("-" * 50)
+        
+        prior_treatment = raw_data.get("field_5_prior_treatment_efficacy", {})
+        treatment_lines = []
+        
+        # Treatments received
+        treatments = prior_treatment.get("treatments_received", [])
+        if treatments:
+            treatment_lines.append("Prior Treatments Received:")
+            for tx in treatments[:8]:
+                if isinstance(tx, dict):
+                    tx_name = tx.get("treatment", "")
+                    tx_duration = tx.get("duration", "")
+                    if tx_name:
+                        if tx_duration:
+                            treatment_lines.append(f"  • {tx_name} ({tx_duration})")
                         else:
-                            med_str = self._safe_str(med)
-                            if med_str and med_str.strip():
-                                recommendation_items.append(f"Start {med_str.strip()}")
-                
-                # Dosage adjustments
-                dose_changes = medication_changes.get("dosage_adjustments", [])
-                if dose_changes and isinstance(dose_changes, list):
-                    for change in dose_changes:
-                        change_str = self._safe_str(change)
-                        if change_str and change_str.strip():
-                            recommendation_items.append(f"Adjust: {change_str.strip()}")
+                            treatment_lines.append(f"  • {tx_name}")
+                elif tx:
+                    treatment_lines.append(f"  • {tx}")
+        
+        # Level of relief
+        relief = prior_treatment.get("level_of_relief", {})
+        if relief:
+            treatment_lines.append("\nLevel of Relief:")
+            for key, value in relief.items():
+                if value and value not in ["", "Not specified"]:
+                    treatment_lines.append(f"  • {key.replace('_', ' ').title()}: {value}")
+        
+        # Treatment failure
+        failure = prior_treatment.get("treatment_failure_statement", "")
+        if failure:
+            treatment_lines.append(f"\nTreatment Failure Statement: {failure}")
+        
+        sections.append("\n".join(treatment_lines) if treatment_lines else "No prior treatment information extracted")
+        
+        # Section 7: OBJECTIVE FINDINGS
+        sections.append("\n📊 OBJECTIVE FINDINGS")
+        sections.append("-" * 50)
+        
+        objective_findings = raw_data.get("field_6_objective_findings", {})
+        objective_lines = []
+        
+        # Physical exam
+        physical_exam = objective_findings.get("physical_exam", {})
+        if physical_exam:
+            objective_lines.append("Physical Examination:")
+            for key, value in physical_exam.items():
+                if value and value not in ["", "Not specified"]:
+                    objective_lines.append(f"  • {key.replace('_', ' ').title()}: {value}")
+        
+        # Imaging review
+        imaging = objective_findings.get("imaging_review", {})
+        if imaging:
+            objective_lines.append("\nImaging Review:")
+            for key, value in imaging.items():
+                if value and value not in ["", "Not specified"]:
+                    objective_lines.append(f"  • {key.replace('_', ' ').title()}: {value}")
+        
+        sections.append("\n".join(objective_lines) if objective_lines else "No objective findings extracted")
+        
+        # Section 8: TREATMENT RECOMMENDATIONS (MOST CRITICAL)
+        sections.append("\n🎯 TREATMENT RECOMMENDATIONS")
+        sections.append("-" * 50)
+        
+        plan_recommendations = raw_data.get("field_7_plan_recommendations", {})
+        plan_lines = []
+        
+        # Specific interventions
+        interventions = plan_recommendations.get("specific_interventions", {})
+        if interventions:
+            # Injections
+            injections = interventions.get("injections_requested", [])
+            if injections:
+                plan_lines.append("Injections Requested:")
+                for inj in injections[:5]:
+                    if isinstance(inj, dict):
+                        inj_name = inj.get("injection", "")
+                        inj_location = inj.get("location", "")
+                        if inj_name:
+                            if inj_location:
+                                plan_lines.append(f"  • {inj_name} - {inj_location}")
+                            else:
+                                plan_lines.append(f"  • {inj_name}")
+                    elif inj:
+                        plan_lines.append(f"  • {inj}")
             
-            # Therapy recommendations (EXACT details)
-            therapy = treatment_recommendations.get("therapy_recommendations", {})
-            if therapy:
-                therapy_type = self._safe_str(therapy.get("therapy_type", ""))
-                frequency = self._safe_str(therapy.get("frequency", ""))
-                duration = self._safe_str(therapy.get("duration", ""))
-                focus_areas = therapy.get("focus_areas", [])
-                
-                if therapy_type and therapy_type.strip():
-                    therapy_parts = [therapy_type.strip()]
-                    if frequency and frequency.strip():
-                        therapy_parts.append(frequency.strip())
-                    if duration and duration.strip():
-                        therapy_parts.append(f"for {duration.strip()}")
-                    if focus_areas and isinstance(focus_areas, list):
-                        focus_str = ", ".join([self._safe_str(f).strip() for f in focus_areas[:2] if f])
-                        if focus_str:
-                            therapy_parts.append(f"({focus_str})")
-                    
-                    therapy_text = " ".join(therapy_parts)
-                    recommendation_items.append(therapy_text)
+            # Procedures
+            procedures = interventions.get("procedures_requested", [])
+            if procedures:
+                plan_lines.append("\nProcedures Requested:")
+                for proc in procedures[:5]:
+                    if isinstance(proc, dict):
+                        proc_name = proc.get("procedure", "")
+                        proc_reason = proc.get("reason", "")
+                        if proc_name:
+                            if proc_reason:
+                                plan_lines.append(f"  • {proc_name} - {proc_reason}")
+                            else:
+                                plan_lines.append(f"  • {proc_name}")
+                    elif proc:
+                        plan_lines.append(f"  • {proc}")
             
-            # Join recommendations
-            result = ", ".join(recommendation_items) if recommendation_items else ""
-            return str(result)
-        except Exception as e:
-            logger.error(f"Error in _build_exact_recommendations_narrative: {str(e)}")
-            return ""
+            # Surgery
+            surgery = interventions.get("surgery_recommended", [])
+            if surgery:
+                plan_lines.append("\nSurgery Recommended:")
+                for surg in surgery[:3]:
+                    if isinstance(surg, dict):
+                        surg_name = surg.get("procedure", "")
+                        surg_urgency = surg.get("urgency", "")
+                        if surg_name:
+                            if surg_urgency:
+                                plan_lines.append(f"  • {surg_name} ({surg_urgency})")
+                            else:
+                                plan_lines.append(f"  • {surg_name}")
+                    elif surg:
+                        plan_lines.append(f"  • {surg}")
+            
+            # Diagnostics
+            diagnostics = interventions.get("diagnostics_ordered", [])
+            if diagnostics:
+                plan_lines.append("\nDiagnostics Ordered:")
+                for diag in diagnostics[:5]:
+                    if isinstance(diag, dict):
+                        diag_name = diag.get("test", "")
+                        diag_reason = diag.get("reason", "")
+                        if diag_name:
+                            if diag_reason:
+                                plan_lines.append(f"  • {diag_name} - {diag_reason}")
+                            else:
+                                plan_lines.append(f"  • {diag_name}")
+                    elif diag:
+                        plan_lines.append(f"  • {diag}")
+        
+        # Medication changes
+        med_changes = plan_recommendations.get("medication_changes", {})
+        if med_changes:
+            plan_lines.append("\nMedication Changes:")
+            
+            # New medications
+            new_meds = med_changes.get("new_medications", [])
+            if new_meds:
+                plan_lines.append("  New Medications:")
+                for med in new_meds[:5]:
+                    if isinstance(med, dict):
+                        med_name = med.get("medication", "")
+                        med_dose = med.get("dose", "")
+                        if med_name:
+                            if med_dose:
+                                plan_lines.append(f"    • {med_name} - {med_dose}")
+                            else:
+                                plan_lines.append(f"    • {med_name}")
+                    elif med:
+                        plan_lines.append(f"    • {med}")
+            
+            # Dosage adjustments
+            dose_adj = med_changes.get("dosage_adjustments", [])
+            if dose_adj:
+                plan_lines.append("  Dosage Adjustments:")
+                for adj in dose_adj[:3]:
+                    if isinstance(adj, dict):
+                        adj_name = adj.get("medication", "")
+                        adj_details = adj.get("adjustment", "")
+                        if adj_name:
+                            if adj_details:
+                                plan_lines.append(f"    • {adj_name} - {adj_details}")
+                            else:
+                                plan_lines.append(f"    • {adj_name}")
+                    elif adj:
+                        plan_lines.append(f"    • {adj}")
+        
+        # Therapy recommendations
+        therapy = plan_recommendations.get("therapy_recommendations", {})
+        if therapy:
+            plan_lines.append("\nTherapy Recommendations:")
+            therapy_type = therapy.get("therapy_type", "")
+            frequency = therapy.get("frequency", "")
+            duration = therapy.get("duration", "")
+            focus_areas = therapy.get("focus_areas", [])
+            
+            if therapy_type:
+                therapy_info = therapy_type
+                if frequency:
+                    therapy_info += f" - {frequency}"
+                if duration:
+                    therapy_info += f" for {duration}"
+                plan_lines.append(f"  • {therapy_info}")
+            
+            if focus_areas:
+                plan_lines.append("  Focus Areas:")
+                for area in focus_areas[:3]:
+                    if area:
+                        plan_lines.append(f"    • {area}")
+        
+        sections.append("\n".join(plan_lines) if plan_lines else "No treatment recommendations extracted")
+        
+        # Section 9: WORK STATUS & IMPAIRMENT
+        sections.append("\n💼 WORK STATUS & IMPAIRMENT")
+        sections.append("-" * 50)
+        
+        work_status = raw_data.get("field_8_work_status_impairment", {})
+        work_lines = []
+        
+        current_status = work_status.get("current_work_status", "")
+        if current_status:
+            work_lines.append(f"Current Work Status: {current_status}")
+        
+        restrictions = work_status.get("work_restrictions", [])
+        if restrictions:
+            work_lines.append("\nWork Restrictions:")
+            for restriction in restrictions[:10]:
+                if isinstance(restriction, dict):
+                    desc = restriction.get("restriction", "")
+                    duration = restriction.get("duration", "")
+                    if desc:
+                        if duration:
+                            work_lines.append(f"  • {desc} ({duration})")
+                        else:
+                            work_lines.append(f"  • {desc}")
+                elif restriction:
+                    work_lines.append(f"  • {restriction}")
+        
+        restriction_duration = work_status.get("restriction_duration", "")
+        if restriction_duration:
+            work_lines.append(f"\nRestriction Duration: {restriction_duration}")
+        
+        return_plan = work_status.get("return_to_work_plan", "")
+        if return_plan:
+            work_lines.append(f"Return to Work Plan: {return_plan}")
+        
+        sections.append("\n".join(work_lines) if work_lines else "No work status information extracted")
+        
+        # Section 10: CRITICAL FINDINGS
+        sections.append("\n🚨 CRITICAL FINDINGS")
+        sections.append("-" * 50)
+        
+        critical_findings = raw_data.get("critical_findings", [])
+        if critical_findings:
+            for finding in critical_findings[:8]:
+                if isinstance(finding, dict):
+                    finding_desc = finding.get("description", "")
+                    finding_priority = finding.get("priority", "")
+                    if finding_desc:
+                        if finding_priority:
+                            sections.append(f"• [{finding_priority}] {finding_desc}")
+                        else:
+                            sections.append(f"• {finding_desc}")
+                elif finding:
+                    sections.append(f"• {finding}")
+        else:
+            sections.append("No critical findings explicitly listed")
+        
+        # Join all sections
+        long_summary = "\n\n".join(sections)
+        logger.info(f"✅ Long summary built: {len(long_summary)} characters")
+        
+        return long_summary
 
-    def _build_exact_work_status_narrative(self, work_status_recommendations: Dict) -> str:
+    def _generate_short_summary_from_long_summary(self, long_summary: str) -> str:
         """
-        Build work status narrative with EXACT wording from document.
-        CRITICAL: Use exact restrictions - NO weight/time limits unless stated.
+        Generate a comprehensive 60-word short summary covering all key aspects from the long summary.
+        Includes retry mechanism with exponential backoff - same as QME extractor.
         """
-        try:
-            work_parts = []
+        logger.info("🎯 Generating comprehensive 60-word short summary from long summary...")
+        
+        system_prompt = SystemMessagePromptTemplate.from_template("""
+You are a medical-legal specialist creating PRECISE 60-word summaries of Specialist Consultation reports.
+
+CRITICAL REQUIREMENTS:
+- EXACTLY 60 words (count carefully - this is mandatory)
+- Cover ALL essential aspects in this order:
+  1. Consulting physician name and specialty
+  2. Primary diagnosis and affected body parts
+  3. Key clinical findings and symptoms
+  4. Current treatment recommendations
+  5. Work restrictions and status
+  6. Follow-up plan
+
+CONTENT RULES:
+- MUST include the consulting physician's name and specialty
+- Include specific body parts and conditions
+- Mention key symptoms and functional limitations
+- Include critical treatment recommendations
+- State work restrictions explicitly
+- Include follow-up timeline if specified
+
+WORD COUNT ENFORCEMENT:
+- Count your words precisely before responding
+
+
+FORMAT:
+- Single paragraph, no bullet points
+- Natural medical narrative flow
+- Use complete sentences
+- Include quantitative data when available
+
+
+✅ "Dr. Smith (Orthopedics) evaluated for lumbar radiculopathy. Patient reports 7/10 back pain with left leg radiation. Recommended: epidural steroid injection, physical therapy 2x/week, NSAIDs. Work restrictions: no lifting >20 lbs, limited bending. Not at MMI. Follow-up in 4 weeks for re-assessment and possible surgical consultation if no improvement."
+
+✅ "Consultation with Dr. Johnson (Neurology) for cervical radiculopathy. Symptoms: neck pain 6/10 with bilateral arm numbness. Plan: cervical MRI, gabapentin 300mg TID, PT for neck strengthening. Work restrictions: no overhead work. Follow-up in 6 weeks to review imaging and adjust treatment plan based on response to conservative care."
+
+Now create a PRECISE 60-word consultation summary from this long summary:
+""")
+
+        user_prompt = HumanMessagePromptTemplate.from_template("""
+COMPREHENSIVE LONG SUMMARY:
+
+{long_summary}
+
+Create a PRECISE 60-word consultation summary that includes:
+1. Consulting physician and specialty
+2. Primary diagnosis and body parts  
+3. Key clinical findings
+4. Treatment recommendations
+5. Work restrictions
+6. Follow-up plan
+
+60-WORD SUMMARY:
+""")
+
+        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
+        
+        # Retry configuration
+        max_retries = 3
+        retry_delay = 1  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                start_time = time.time()
+                
+                logger.info(f"🔄 Attempt {attempt + 1}/{max_retries} for short summary generation...")
+                
+                chain = chat_prompt | self.llm
+                response = chain.invoke({
+                    "long_summary": long_summary
+                })
+                
+                short_summary = response.content.strip()
+                end_time = time.time()
+                
+                # Clean and validate
+                short_summary = self._clean_and_validate_short_summary(short_summary)
+                word_count = len(short_summary.split())
+                
+                logger.info(f"⚡ Short summary generated in {end_time - start_time:.2f}s: {word_count} words")
+                
+                # Validate word count strictly
+                if word_count == 60:
+                    logger.info("✅ Perfect 60-word summary generated!")
+                    return short_summary
+                else:
+                    logger.warning(f"⚠️ Summary has {word_count} words (expected 60), attempt {attempt + 1}")
+                    
+                    if attempt < max_retries - 1:
+                        # Add word count feedback to next attempt
+                        feedback_prompt = self._get_word_count_feedback_prompt(word_count)
+                        chat_prompt = ChatPromptTemplate.from_messages([feedback_prompt, user_prompt])
+                        time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                        continue
+                    else:
+                        logger.warning(f"⚠️ Final summary has {word_count} words after {max_retries} attempts")
+                        return short_summary
+                        
+            except Exception as e:
+                logger.error(f"❌ Short summary generation attempt {attempt + 1} failed: {e}")
+                
+                if attempt < max_retries - 1:
+                    logger.info(f"🔄 Retrying in {retry_delay * (attempt + 1)} seconds...")
+                    time.sleep(retry_delay * (attempt + 1))
+                else:
+                    logger.error(f"❌ All {max_retries} attempts failed for short summary generation")
+                    # Fallback: create comprehensive short summary from long summary
+                    return self._create_comprehensive_fallback_summary(long_summary)
+        
+        # Should never reach here, but just in case
+        return self._create_comprehensive_fallback_summary(long_summary)
+
+    def _get_word_count_feedback_prompt(self, actual_word_count: int) -> SystemMessagePromptTemplate:
+        """Get feedback prompt for word count adjustment"""
+        
+        if actual_word_count > 60:
+            feedback = f"Your previous summary had {actual_word_count} words (TOO LONG). Remove less critical details to reach exactly 60 words. Prioritize: physician, diagnosis, key treatments, work restrictions."
+        else:
+            feedback = f"Your previous summary had {actual_word_count} words (TOO SHORT). Add more specific clinical details to reach exactly 60 words. Include: specific body parts, treatment frequency, exact work restrictions, follow-up timing."
+        
+        return SystemMessagePromptTemplate.from_template(f"""
+You are a medical specialist creating PRECISE 60-word consultation summaries.
+
+CRITICAL FEEDBACK: {feedback}
+
+REQUIREMENTS:
+- EXACTLY 60 words - no more, no less
+- Include consulting physician, diagnosis, key findings, treatments, work restrictions
+- Count words carefully before responding
+- Adjust length by adding/removing specific clinical details
+
+Now create a PRECISE 60-word summary:
+""")
+
+    def _clean_and_validate_short_summary(self, summary: str) -> str:
+        """Clean and validate the 60-word short summary with strict word counting"""
+        # Remove excessive whitespace, quotes, and markdown
+        summary = re.sub(r'\s+', ' ', summary).strip()
+        summary = summary.replace('"', '').replace("'", "")
+        summary = re.sub(r'[\*\#\-]', '', summary)  # Remove markdown
+        
+        # Remove common prefixes that might indicate instructions
+        summary = re.sub(r'^(60-word summary:|summary:|consultation summary:)\s*', '', summary, flags=re.IGNORECASE)
+        
+        # Count words
+        words = summary.split()
+        
+        # Strict word count enforcement
+        if len(words) != 60:
+            logger.info(f"📝 Word count adjustment needed: {len(words)} words")
             
-            if not work_status_recommendations:
-                return ""
-            
-            # Current work status (EXACT terminology)
-            current_status = self._safe_str(work_status_recommendations.get("current_work_status", ""))
-            if current_status and current_status.strip():
-                work_parts.append(current_status.strip())
-            
-            # Work restrictions (EXACT wording - CRITICAL)
-            restrictions = work_status_recommendations.get("work_restrictions", [])
-            if restrictions and isinstance(restrictions, list):
-                for restriction in restrictions:
-                    restriction_str = self._safe_str(restriction)
-                    if restriction_str and restriction_str.strip():
-                        # Add each restriction exactly as stated
-                        work_parts.append(restriction_str.strip())
-            
-            # Restriction duration (if stated)
-            duration = self._safe_str(work_status_recommendations.get("restriction_duration", ""))
-            if duration and duration.strip():
-                work_parts.append(f"for {duration.strip()}")
-            
-            # Return-to-work plan (if stated)
-            return_plan = self._safe_str(work_status_recommendations.get("return_to_work_plan", ""))
-            if return_plan and return_plan.strip():
-                # Shorten if too long
-                plan_text = return_plan.strip()
-                if len(plan_text) > 80:
-                    plan_text = plan_text[:77] + "..."
-                work_parts.append(f"Plan: {plan_text}")
-            
-            result = ", ".join(work_parts) if work_parts else ""
-            return str(result)
-        except Exception as e:
-            logger.error(f"Error in _build_exact_work_status_narrative: {str(e)}")
-            return ""
+            if len(words) > 60:
+                # Remove less critical words while preserving medical content
+                summary = self._trim_to_60_words(words)
+            else:
+                # Add padding with relevant medical context
+                summary = self._expand_to_60_words(words, summary)
+        
+        return summary
+
+    def _trim_to_60_words(self, words: List[str]) -> str:
+        """Intelligently trim words to reach exactly 60"""
+        if len(words) <= 60:
+            return ' '.join(words)
+        
+        # Priority-based trimming - remove less critical parts
+        text = ' '.join(words)
+        
+        # Remove redundant phrases
+        reductions = [
+            (r'\b(and|with|including)\s+appropriate\s+', ' '),
+            (r'\bfor\s+(a|the)\s+period\s+of\s+\w+\s+\w+', ' '),
+            (r'\bwith\s+follow[- ]?up\s+in\s+\w+\s+\w+', ' with follow-up'),
+            (r'\bcontinued\s+(treatment|therapy|management)', 'continued'),
+            (r'\bphysical\s+therapy', 'PT'),
+            (r'\bmedications?\s*:\s*', 'Meds: '),
+            (r'\brestrictions?\s*:\s*', 'Restrictions: '),
+        ]
+        
+        for pattern, replacement in reductions:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        
+        words = text.split()
+        if len(words) > 60:
+            # Remove from the middle (less critical descriptive parts)
+            excess = len(words) - 60
+            mid_point = len(words) // 2
+            start_remove = mid_point - excess // 2
+            words = words[:start_remove] + words[start_remove + excess:]
+        
+        return ' '.join(words[:60])
+
+    def _expand_to_60_words(self, words: List[str], original_text: str) -> str:
+        """Intelligently expand text to reach exactly 60 words"""
+        if len(words) >= 60:
+            return ' '.join(words)
+        
+        needed_words = 60 - len(words)
+        
+        # Extract key elements to expand upon
+        expansions = []
+        
+        # Look for physician to add details
+        if 'Dr.' in original_text:
+            expansions.append("specialist consultation")
+        
+        # Look for diagnosis to add specifics
+        if any(term in original_text.lower() for term in ['diagnosis', 'confirmed', 'consistent with']):
+            expansions.append("based on clinical evaluation")
+        
+        # Look for treatments to add frequency
+        if any(term in original_text.lower() for term in ['injection', 'therapy', 'surgery']):
+            expansions.append("with comprehensive treatment plan")
+        
+        # Look for work restrictions to add specifics
+        if 'restrictions' in original_text.lower():
+            expansions.append("with activity modifications")
+        
+        # Add generic medical context if still needed
+        while len(words) + len(expansions) < 60 and len(expansions) < 5:
+            expansions.extend([
+                "for optimal functional recovery",
+                "with ongoing clinical monitoring", 
+                "addressing current symptoms",
+                "for improved work capacity",
+                "with progressive rehabilitation"
+            ])
+        
+        # Add expansions to the text
+        expanded_text = original_text
+        for expansion in expansions[:needed_words]:
+            expanded_text += f" {expansion}"
+        
+        words = expanded_text.split()
+        return ' '.join(words[:60])
+
+    def _create_comprehensive_fallback_summary(self, long_summary: str) -> str:
+        """Create comprehensive fallback short summary directly from long summary"""
+        
+        # Extract physician information
+        physician_match = re.search(r'Consulting Physician:\s*([^\n]+)', long_summary)
+        physician = physician_match.group(1).strip() if physician_match else "Consulting Physician"
+        
+        # Extract key information using regex patterns
+        patterns = {
+            'diagnosis': r'Primary Diagnosis:\s*([^\n]+)',
+            'complaint': r'Primary Complaint:\s*([^\n]+)',
+            'recommendations': r'TREATMENT RECOMMENDATIONS(.*?)(?:\n\n|\n[A-Z]|$)',
+            'restrictions': r'Work Restrictions:(.*?)(?:\n\n|\n[A-Z]|$)'
+        }
+        
+        extracted = {}
+        for key, pattern in patterns.items():
+            match = re.search(pattern, long_summary, re.DOTALL)
+            if match:
+                extracted[key] = match.group(1).strip()
+        
+        # Build comprehensive summary
+        parts = []
+        
+        # Start with physician
+        parts.append(f"{physician} consultation")
+        
+        # Add diagnosis
+        if 'diagnosis' in extracted:
+            parts.append(f"for {extracted['diagnosis'][:80]}")
+        elif 'complaint' in extracted:
+            parts.append(f"for {extracted['complaint'][:80]}")
+        
+        # Add recommendations
+        if 'recommendations' in extracted:
+            # Take first line of recommendations
+            first_rec = extracted['recommendations'].split('\n')[0].replace('•', '').strip()[:60]
+            if first_rec:
+                parts.append(f"Recommendations: {first_rec}")
+        
+        # Add work restrictions
+        if 'restrictions' in extracted:
+            first_restrict = extracted['restrictions'].split('\n')[0].replace('•', '').strip()[:50]
+            if first_restrict:
+                parts.append(f"Restrictions: {first_restrict}")
+        
+        summary = ". ".join(parts)
+        
+        # Ensure exactly 60 words
+        words = summary.split()
+        if len(words) > 60:
+            summary = ' '.join(words[:60])
+        elif len(words) < 60:
+            # Add padding to reach 60 words
+            padding = ["with follow-up planned", "for ongoing management", "and progress evaluation"] 
+            while len(words) < 60 and padding:
+                words.extend(padding.pop(0).split())
+            summary = ' '.join(words[:60])
+        
+        logger.info(f"🔄 Used fallback summary: {len(summary.split())} words")
+        return summary
 
     def _safe_str(self, value, default="") -> str:
         """Convert any value to string safely - MUST return STRING"""

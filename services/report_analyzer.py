@@ -49,7 +49,7 @@ class ReportAnalyzer:
             timeout=120
         )
         
-    # No longer need DocumentTypeDetector instance; use detect_document_type function
+        # No longer need DocumentTypeDetector instance; use detect_document_type function
         self.verifier = ExtractionVerifier(self.llm)
         self.document_analyzer = DocumentContextAnalyzer(self.analysis_llm)
         
@@ -66,29 +66,43 @@ class ReportAnalyzer:
         self, 
         current_raw_text: str,
         page_zones: Optional[Dict[str, Dict[str, str]]] = None
-    ) -> List[str]:
+    ) -> Dict[str, str]:
         """
-        Main extraction pipeline - returns bullet-formatted summary.
-        Compatible with existing interface.
+        Main extraction pipeline - returns dictionary with both summaries.
         
         Args:
             current_raw_text: Raw document text to extract
             page_zones: Per-page zone extraction {page_num: {header, body, footer, signature}}
             
         Returns:
-            List containing single bullet-formatted summary
+            Dict with 'long_summary' and 'short_summary'
         """
         try:
-            result = self.extract_document(current_raw_text, page_zones)
-            return [f"• {result.summary_line}"]
+            # extract_document returns dict with both summaries
+            result_dict = self.extract_document(current_raw_text, page_zones)
+            
+            # Return the dictionary directly (no bullet points)
+            return result_dict
+            
         except Exception as e:
             logger.error(f"❌ Extraction pipeline failed: {e}")
             fallback_date = datetime.now().strftime("%m/%d/%y")
-            return [f"• {fallback_date}: Extraction failed - manual review required"]
+            error_msg = f"{fallback_date}: Extraction failed - manual review required"
+            return {
+                "long_summary": error_msg,
+                "short_summary": error_msg
+            }
     
-    def extract_document(self, text: str, page_zones: Optional[Dict] = None) -> ExtractionResult:
+    def extract_document(self, text: str, page_zones: Optional[Dict] = None) -> Dict[str, str]:
         """
-        Enhanced pipeline with context analysis
+        Enhanced pipeline with context analysis - returns dictionary with both summaries.
+        
+        Args:
+            text: Document text to extract
+            page_zones: Per-page zone extraction
+            
+        Returns:
+            Dict with 'long_summary' and 'short_summary'
         """
         fallback_date = datetime.now().strftime("%m/%d/%y")
         
@@ -121,30 +135,28 @@ class ReportAnalyzer:
             # Convert to DocumentType enum
             doc_type = self._parse_document_type(doc_type_str)
             
-            # Stage 2: Context-aware extraction
-            result = self._route_to_extractor_with_context(  # ✅ Use the context-aware routing!
+            # Stage 2: Context-aware extraction - get dictionary with both summaries
+            result_dict = self._route_to_extractor_with_context(
                 text=text,
                 doctype=doc_type,
                 fallback_date=fallback_date,
                 page_zones=page_zones,
-                context_analysis=context_analysis  # ✅ Pass context!
+                context_analysis=context_analysis
             )
             
-            # Stage 3: Verify
-            final_result = self._verify_result(result, doc_type)
+            logger.info(f"✅ Extraction complete")
+            logger.info(f"   Long summary: {len(result_dict.get('long_summary', ''))} chars")
+            logger.info(f"   Short summary: {result_dict.get('short_summary', '')}")
             
-            logger.info(f"✅ Extraction complete: {final_result.summary_line}")
-            return final_result
+            return result_dict
             
         except Exception as e:
             logger.error(f"❌ Extraction failed: {e}", exc_info=True)
-            return ExtractionResult(
-                document_type="Unknown",
-                document_date=fallback_date,
-                summary_line=f"{fallback_date}: Extraction failed - manual review required",
-                raw_data={}
-            )
-
+            error_msg = f"{fallback_date}: Extraction failed - manual review required"
+            return {
+                "long_summary": error_msg,
+                "short_summary": error_msg
+            }
 
     def _route_to_extractor_with_context(
         self,
@@ -152,114 +164,156 @@ class ReportAnalyzer:
         doctype: DocumentType,
         fallback_date: str,
         page_zones: Optional[Dict],
-        context_analysis: Dict  # NEW
-    ) -> ExtractionResult:
+        context_analysis: Dict
+    ) -> Dict[str, str]:
         """
         Route document to appropriate extractor WITH context analysis.
+        Returns dictionary with both summaries.
         
         Args:
             text: Document text
             doctype: Detected document type
             fallback_date: Fallback date if extraction fails
             page_zones: Per-page zone extraction
-            context_analysis: Context from DocumentContextAnalyzer (CRITICAL)
+            context_analysis: Context from DocumentContextAnalyzer
         
         Returns:
-            ExtractionResult from specialized extractor
+            Dict with 'long_summary' and 'short_summary'
         """
         
-        # QME/AME/IME - use context-aware extraction
+        # QME/AME/IME - use context-aware extraction (already returns dict)
         if doctype in [DocumentType.QME, DocumentType.AME, DocumentType.IME]:
             logger.info(f"🎯 Routing to QME extractor WITH context analysis")
-            return self.qme_extractor.extract(
+            qme_result = self.qme_extractor.extract(
                 text=text,
                 doc_type=doctype.value,
                 fallback_date=fallback_date,
                 page_zones=page_zones,
-                context_analysis=context_analysis,  # ✅ FIXED: Pass context!
+                context_analysis=context_analysis,
                 raw_text=None
             )
+            # QME extractor already returns dict with both summaries
+            if isinstance(qme_result, dict):
+                return qme_result
+            else:
+                # Fallback if not dict (backward compat)
+                return {
+                    "long_summary": str(qme_result) if qme_result else f"{fallback_date}: QME extraction completed",
+                    "short_summary": f"{fallback_date}: QME report processed"
+                }
         
-        # Imaging reports
+        # Imaging reports - convert ExtractionResult to dict
         elif doctype in [DocumentType.MRI, DocumentType.CT, DocumentType.XRAY, 
                         DocumentType.ULTRASOUND, DocumentType.EMG]:
             logger.info(f"🎯 Routing to Imaging extractor")
-            return self.imaging_extractor.extract(
+            imaging_result = self.imaging_extractor.extract(
                 text, 
                 doctype.value, 
                 fallback_date,
-                context_analysis=context_analysis,  # ✅ Pass context!
+                context_analysis=context_analysis,
                 page_zones=page_zones
             )
+            return self._convert_extraction_result_to_dict(imaging_result, fallback_date)
         
-        # Progress reports (PR-2)
+        # Progress reports (PR-2) - convert ExtractionResult to dict
         elif doctype == DocumentType.PR2:
             logger.info(f"🎯 Routing to PR-2 extractor")
-            return self.pr2_extractor.extract(
+            pr2_result = self.pr2_extractor.extract(
                 text, 
                 doctype.value, 
                 fallback_date, 
-                context_analysis=context_analysis,  # ✅ Pass context!
+                context_analysis=context_analysis,
                 page_zones=page_zones
             )
+            return self._convert_extraction_result_to_dict(pr2_result, fallback_date)
         
-        # Specialist consults
+        # Specialist consults - convert ExtractionResult to dict
         elif doctype == DocumentType.CONSULT:
             logger.info(f"🎯 Routing to Consult extractor")
-            return self.consult_extractor.extract(
+            consult_result = self.consult_extractor.extract(
                 text, 
                 doctype.value, 
                 fallback_date, 
-                context_analysis=context_analysis,  # ✅ Pass context!
+                context_analysis=context_analysis,
                 page_zones=page_zones
             )
+            return self._convert_extraction_result_to_dict(consult_result, fallback_date)
         
-        # All other simple document types
+        # All other simple document types - convert ExtractionResult to dict
         else:
             logger.info(f"🎯 Routing to Simple extractor for {doctype.value}")
-            return self.simple_extractor.extract(
+            simple_result = self.simple_extractor.extract(
                 text, 
                 doctype.value, 
                 fallback_date, 
-                context_analysis=context_analysis,  # ✅ Pass context!
+                context_analysis=context_analysis,
                 page_zones=page_zones
             )
-    
-             
-    def _route_to_extractor(self, text: str, doc_type: DocumentType, fallback_date: str, page_zones: Optional[Dict[str, Dict[str, str]]] = None) -> ExtractionResult:
+            return self._convert_extraction_result_to_dict(simple_result, fallback_date)
+
+    def _convert_extraction_result_to_dict(self, result: ExtractionResult, fallback_date: str) -> Dict[str, str]:
         """
-        Route document to appropriate specialized extractor.
+        Convert ExtractionResult to dictionary with both summaries.
         
         Args:
-            text: Document text
-            doc_type: Detected document type
-            fallback_date: Fallback date if extraction fails
-            page_zones: Per-page zone extraction {page_num: {header, body, footer, signature}}
+            result: ExtractionResult object
+            fallback_date: Fallback date for error cases
             
         Returns:
-            Initial ExtractionResult from specialized extractor
+            Dict with 'long_summary' and 'short_summary'
         """
-        # Med-Legal reports (QME/AME/IME) - uses chained extractor
-        if doc_type in [DocumentType.QME, DocumentType.AME, DocumentType.IME]:
-            return self.qme_extractor.extract(text, doc_type.value, fallback_date, page_zones=page_zones)
+        try:
+            # Use short_summary if available, otherwise generate from long_summary
+            short_summary = result.short_summary
+            if not short_summary and result.summary_line:
+                short_summary = self._generate_short_summary_from_long(result.summary_line)
+            
+            return {
+                "long_summary": result.summary_line or f"{fallback_date}: Document processed",
+                "short_summary": short_summary or f"{fallback_date}: {result.document_type} report"
+            }
+        except Exception as e:
+            logger.error(f"❌ Error converting ExtractionResult to dict: {e}")
+            return {
+                "long_summary": f"{fallback_date}: Document processed",
+                "short_summary": f"{fallback_date}: {result.document_type if hasattr(result, 'document_type') else 'Unknown'} report"
+            }
+
+    def _generate_short_summary_from_long(self, long_summary: str) -> str:
+        """
+        Generate short summary from long summary using LLM.
         
-        # Imaging reports
-        elif doc_type in [DocumentType.MRI, DocumentType.CT, DocumentType.XRAY,
-                         DocumentType.ULTRASOUND, DocumentType.EMG]:
-            return self.imaging_extractor.extract(text, doc_type.value, fallback_date, page_zones=page_zones)
-        
-        # Progress reports
-        elif doc_type == DocumentType.PR2:
-            return self.pr2_extractor.extract(text, doc_type.value, fallback_date, page_zones=page_zones)
-        
-        # Specialist consults
-        elif doc_type == DocumentType.CONSULT:
-            return self.consult_extractor.extract(text, doc_type.value, fallback_date, page_zones=page_zones)
-        
-        # All other simple document types
-        else:
-            return self.simple_extractor.extract(text, doc_type.value, fallback_date, page_zones=page_zones)
-    
+        Args:
+            long_summary: Long detailed summary
+            
+        Returns:
+            Short concise summary
+        """
+        try:
+            system_prompt = """You are a medical documentation specialist creating concise summaries.
+            Create a 1-2 sentence summary focusing on the most critical findings.
+            Be brief and focus on key medical-legal points."""
+            
+            user_prompt = f"LONG SUMMARY:\n{long_summary}\n\nCreate a 1-2 sentence concise summary:"
+            
+            from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+            
+            system_msg = SystemMessagePromptTemplate.from_template(system_prompt)
+            human_msg = HumanMessagePromptTemplate.from_template(user_prompt)
+            chat_prompt = ChatPromptTemplate.from_messages([system_msg, human_msg])
+            
+            chain = chat_prompt | self.llm
+            response = chain.invoke({"long_summary": long_summary})
+            
+            return response.content.strip()
+            
+        except Exception as e:
+            logger.error(f"❌ Short summary generation failed: {e}")
+            # Fallback: take first 100 chars or meaningful truncation
+            if len(long_summary) > 100:
+                return long_summary[:97] + "..."
+            return long_summary
+
     def _parse_document_type(self, doc_type_str: str) -> DocumentType:
         """
         Parse document type string to DocumentType enum.
@@ -341,10 +395,32 @@ class ReportAnalyzer:
             text: Document text to extract
             
         Returns:
-            Dictionary with all extraction fields
+            Dictionary with all extraction fields including both summaries
         """
-        result = self.extract_document(text)
-        return asdict(result)
+        try:
+            # Get both summaries
+            summaries_dict = self.extract_document(text)
+            
+            # Get additional metadata
+            detection_result = detect_document_type(text)
+            doc_type_str = detection_result.get("doc_type", "Unknown")
+            
+            return {
+                "document_type": doc_type_str,
+                "long_summary": summaries_dict.get("long_summary", ""),
+                "short_summary": summaries_dict.get("short_summary", ""),
+                "extracted_at": datetime.now().isoformat(),
+                "text_length": len(text)
+            }
+        except Exception as e:
+            logger.error(f"❌ Structured extraction failed: {e}")
+            fallback_date = datetime.now().strftime("%m/%d/%y")
+            return {
+                "document_type": "Unknown",
+                "long_summary": f"{fallback_date}: Extraction failed",
+                "short_summary": f"{fallback_date}: Extraction failed",
+                "error": str(e)
+            }
     
     def get_extraction_metadata(self, text: str) -> Dict[str, Any]:
         """
@@ -358,7 +434,7 @@ class ReportAnalyzer:
         """
         try:
             detection_result = detect_document_type(text)
-            doc_type_str = detection_result.get("final_doc_type", "Unknown")
+            doc_type_str = detection_result.get("doc_type", "Unknown")
             return {
                 "document_type": doc_type_str,
                 "detected_at": datetime.now().isoformat(),

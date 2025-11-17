@@ -474,19 +474,24 @@ class WebhookService:
         )
         
         # Wait for both
-        db_response, whats_new_data = await asyncio.gather(db_fetch_task, comparison_task)
-        
+        db_response, summaries_dict = await asyncio.gather(db_fetch_task, comparison_task)
+        print(summaries_dict,'what new data')
         previous_documents = db_response.get('documents', []) if db_response else []
         
-        # Handle whats_new_data validation
-        if whats_new_data is None:
-            logger.warning(f"⚠️ Invalid whats_new data; using empty list")
-            whats_new_data = []
-        elif not isinstance(whats_new_data, list):
-            logger.warning(f"⚠️ whats_new_data is not list; type: {type(whats_new_data)}")
-            whats_new_data = []
+        # Handle summaries_dict validation - now it's a dict
+        if summaries_dict is None:
+            logger.warning(f"⚠️ Invalid summaries data; using empty dict")
+            summaries_dict = {}
+        elif not isinstance(summaries_dict, dict):
+            logger.warning(f"⚠️ summaries_dict is not dict; type: {type(summaries_dict)}")
+            summaries_dict = {}
         
-        logger.info(f"✅ whats_new_data received as list with {len(whats_new_data)} bullet points")
+        logger.info(f"✅ Summaries received as dict with long_summary: {len(summaries_dict.get('long_summary', ''))} chars")
+        
+        # ✅ FIX: Use the dictionary directly for whats_new_data since db field is Json type
+        whats_new_data = summaries_dict  # This is the dictionary with both summaries
+        
+        logger.info(f"✅ whats_new_data will be saved as Json object with keys: {list(whats_new_data.keys())}")
         
         # Determine status (unchanged logic)
         claim_to_use = document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else "Not specified"
@@ -576,7 +581,7 @@ class WebhookService:
             "pending_reason": pending_reason,
             "patient_name_to_use": patient_name_to_use,
             "claim_to_save": claim_to_save,
-            "whats_new_data": whats_new_data,  # Now a list of bullet points
+            "whats_new_data": whats_new_data,  # ✅ Now the dictionary object for Json field
             "summary_snapshots": summary_snapshots,
             "adl_data": adl_data,
             "document_summary": document_summary,
@@ -591,7 +596,7 @@ class WebhookService:
             "mode": mode,
             "has_multiple_body_parts": len(summary_snapshots) > 1
         }
-
+    
     async def save_and_process_document(self, processed_data: dict, status_result: dict, data: dict, db_service) -> dict:
         document_analysis = status_result["document_analysis"]
         has_date_reasoning = processed_data["has_date_reasoning"]
@@ -930,6 +935,8 @@ class WebhookService:
                 "tasks_created": created_tasks
             }
         }
+    
+    
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
         Orchestrates the full webhook processing pipeline.

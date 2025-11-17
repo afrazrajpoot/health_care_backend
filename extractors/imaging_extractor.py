@@ -60,9 +60,10 @@ class ImagingExtractorChained:
         page_zones: Optional[Dict[str, Dict[str, str]]] = None,
         context_analysis: Optional[Dict] = None,
         raw_text: Optional[str] = None
-    ) -> ExtractionResult:
+    ) -> Dict:
         """
         Extract imaging data with FULL CONTEXT and 6-field focus.
+        Returns dictionary with long_summary and short_summary like QME extractor.
         
         Args:
             text: Complete document text (layout-preserved)
@@ -93,8 +94,11 @@ class ImagingExtractorChained:
             # Step 2: Extract raw data with full context and zone-aware radiologist detection
             raw_data = self._extract_raw_data(text, doc_type, fallback_date, context_analysis, page_zones)
             
-            # Step 3: Build initial result
-            result = self._build_initial_result(raw_data, doc_type, fallback_date, context_analysis)
+            # Step 3: Build comprehensive long summary from ALL raw data
+            long_summary = self._build_comprehensive_long_summary(raw_data, doc_type, fallback_date)
+            
+            # Step 4: Generate short summary from long summary (like QME extractor)
+            short_summary = self._generate_short_summary_from_long_summary(long_summary)
             
             elapsed_time = time.time() - start_time
             logger.info(f"⚡ Full-context imaging extraction completed in {elapsed_time:.2f}s")
@@ -104,11 +108,19 @@ class ImagingExtractorChained:
             logger.info("✅ IMAGING EXTRACTION COMPLETE (6-FIELD FOCUS)")
             logger.info("=" * 80)
             
-            return result
+            # Return dictionary with both summaries like QME extractor
+            return {
+                "long_summary": long_summary,
+                "short_summary": short_summary
+            }
         
         except Exception as e:
             logger.error(f"❌ Extraction failed: {str(e)}")
-            raise
+            # Return fallback result structure
+            return {
+                "long_summary": f"Imaging extraction failed: {str(e)}",
+                "short_summary": "Imaging summary not available"
+            }
 
     def _extract_raw_data(self, text: str, doc_type: str, fallback_date: str, context_analysis: Dict, page_zones: Optional[Dict] = None) -> Dict:
         """Extract raw imaging data using LLM with full context and robust zone-aware radiologist detection"""
@@ -186,159 +198,12 @@ Examples of INCORRECT extractions:
 
 6 CRITICAL IMAGING FIELDS:
 
-═══════════════════════════════════════════════════════════════════════
 FIELD 1: HEADER & CONTEXT (Report Identity & Date)
-═══════════════════════════════════════════════════════════════════════
-
-Critical Elements:
-- Imaging Center/Facility
-- Date of Exam (EXACT date from report)
-- Type of Exam (e.g., "MRI Lumbar Spine without contrast")
-- Patient Name and DOB
-- Referring Physician Name
-- Radiologist Name and Credentials
-
-Why Critical: Establishes authenticity, timeliness, and clinical authority
-
-═══════════════════════════════════════════════════════════════════════
 FIELD 2: CLINICAL DATA/INDICATION (Reason for the Study)
-═══════════════════════════════════════════════════════════════════════
-
-Critical Elements:
-- Clinical Indication (why study was ordered - EXACT wording)
-- Relevant Clinical History (pertinent history from report)
-- Specific Clinical Questions (if stated)
-- Chief Complaint or Symptom prompting study
-
-Why Critical: Links imaging findings to clinical context and validates medical necessity
-
-Example:
-✅ CORRECT: "Indication: Left shoulder pain, history of work injury. History: Patient reports ongoing pain with lifting activities"
-❌ WRONG: "Indicate: Shoulder evaluation" (incomplete/changed wording)
-
-═══════════════════════════════════════════════════════════════════════
 FIELD 3: TECHNIQUE/PRIOR STUDIES (Methodology & Comparison)
-═══════════════════════════════════════════════════════════════════════
-
-Critical Elements:
-- Type of Study and Specific Protocol
-- Use of Contrast (WITH or WITHOUT - EXACT)
-- Body Part Imaged and Laterality
-- Prior Studies Available for Comparison (yes/no and date if stated)
-- Technical Quality Assessment
-- Any Limitations Noted
-
-Why Critical: Understanding technique affects interpretation validity; prior comparisons show progression/regression
-
-Examples:
-✅ CORRECT: "MRI right knee with and without contrast. No prior studies available for comparison"
-✅ CORRECT: "CT chest with IV contrast - adequate study, no artifacts"
-❌ WRONG: "Study was performed" (doesn't specify modality, body part, or contrast)
-
-═══════════════════════════════════════════════════════════════════════
 FIELD 4: KEY FINDINGS - POSITIVE/NEGATIVE (Evidence of Pathology)
-═══════════════════════════════════════════════════════════════════════
-
-Critical Elements:
-- Primary Abnormality (most clinically significant finding)
-- Location and Size (ONLY if explicitly measured)
-- Specific Characteristics (e.g., disc herniation type, fracture pattern)
-- Acute vs Chronic Assessment (if stated)
-- Secondary Findings
-- Normal Findings (what is NOT present/abnormal)
-
-Why Critical: Objective evidence that supports or refutes diagnosis and treatment decisions
-
-CRITICAL ANTI-HALLUCINATION RULES FOR FINDINGS:
-
-1. SIZE/MEASUREMENTS: Include ONLY if explicitly stated
-   ✅ CORRECT: Report states "3 cm disc herniation at L5-S1" → Extract: "3 cm disc herniation at L5-S1"
-   ❌ WRONG: Report states "disc herniation at L5-S1" → DO NOT add: "3 cm" (size not stated)
-   ✅ CORRECT: Extract measurement field as EMPTY if not mentioned
-
-2. SEVERITY: Use EXACT qualifiers from report
-   ✅ CORRECT: Report states "mild degenerative changes" → Extract: "mild degenerative changes"
-   ❌ WRONG: Report states "mild degenerative changes" → DO NOT extract: "moderate changes"
-
-3. POSITIVE vs NEGATIVE: Extract exactly as stated
-   ✅ CORRECT: Report states "no acute fracture" → Mark as: negative finding
-   ❌ WRONG: Report states "no acute fracture" → DO NOT list as: "fracture present"
-
-4. CHARACTERISTIC FINDINGS: Use exact radiological language
-   ✅ CORRECT: "Anterior disc bulge compressing anterior thecal sac"
-   ❌ WRONG: "Disc compression" (loses specific detail)
-
-Examples of CORRECT Field 4 Extraction:
-- Primary Finding: "Acute L5-S1 disc herniation"
-- Location: "L5-S1 intervertebral space"
-- Size: "12mm"
-- Characteristics: "Subligamentous, compressing anterior thecal sac"
-- Acute/Chronic: "Acute"
-- Secondary Findings: ["Mild degenerative changes L4-5", "Small anterior osteophytes"]
-- Normal Findings: ["No fracture", "Normal alignment", "Patent neural foramina"]
-
-═══════════════════════════════════════════════════════════════════════
 FIELD 5: IMPRESSION/CONCLUSION (Radiologist's Final Diagnosis)
-═══════════════════════════════════════════════════════════════════════
-
-Critical Elements:
-- Overall Impression (summary statement from report)
-- Primary Diagnosis (main finding/diagnosis)
-- Differential Diagnoses (if provided by radiologist)
-- Clinical Correlation Statement
-- Final Diagnostic Statement (e.g., "Features of acute L5-S1 disc herniation")
-
-Why Critical: This is the DEFINITIVE clinical conclusion; most critical for treating physician
-
-EXACT WORDING RULE:
-- Extract radiologist's EXACT language from impression section
-- Preserve all qualifying language: "features of", "consistent with", "likely"
-- DO NOT simplify or interpret radiologist's conclusion
-
-Examples:
-✅ CORRECT: Radiologist states "Features consistent with full-thickness rotator cuff tear"
-   Extract: "Features consistent with full-thickness rotator cuff tear"
-❌ WRONG: Extract only "rotator cuff tear" (removes "features consistent with" qualifier)
-
-═══════════════════════════════════════════════════════════════════════
 FIELD 6: RECOMMENDATIONS/FOLLOW-UP (Actionable Next Steps)
-═══════════════════════════════════════════════════════════════════════
-
-Critical Elements:
-- Specific Follow-up Recommended (EXACT wording)
-- Follow-up Modality if Different (e.g., "suggest CT for better characterization")
-- Follow-up Timing if Stated (e.g., "6 month follow-up ultrasound")
-- Clinical Correlation Request
-- Any Specific Clinical Actions (e.g., "Orthopedic consultation recommended")
-
-Why Critical: Guides treating physician on next steps in care
-
-CRITICAL RULE: Extract ONLY recommendations explicitly stated
-❌ WRONG: Radiologist doesn't recommend follow-up → DO NOT suggest "routine follow-up"
-✅ CORRECT: Leave recommendations empty if none stated
-
-Example:
-✅ CORRECT: Report states "Follow-up MRI in 3 months if clinically indicated"
-   Extract: "Follow-up MRI in 3 months if clinically indicated"
-❌ WRONG: Report doesn't mention follow-up → DO NOT extract "Routine follow-up recommended"
-
-═══════════════════════════════════════════════════════════════════════
-
-EXTRACTION STRATEGY:
-
-Priority flow:
-1. WHO, WHAT, WHEN: (Field 1) Radiologist performed (Modality) on (Date)
-2. WHY: Exam was ordered for (Field 2 - Clinical Indication)
-3. THE FINDINGS: What was actually seen (Field 4 - Key Findings)
-4. THE DIAGNOSIS: What it means (Field 5 - Impression)
-5. NEXT STEPS: What to do about it (Field 6 - Recommendations)
-
-⚠️ FINAL CRITICAL REMINDER:
-- If information is NOT EXPLICITLY in report → return EMPTY ("" or [])
-- NEVER assume, infer, extrapolate, or use medical knowledge to fill gaps
-- Findings ONLY: Extract what is explicitly described
-- It is BETTER to have empty fields than INCORRECT information
-- Do NOT upgrade severity, add typical findings, or interpret beyond radiologist's statement
 
 Now analyze this COMPLETE imaging report and extract 6 critical fields:
 """)
@@ -463,251 +328,516 @@ Extract into STRUCTURED JSON focusing on 6 CRITICAL IMAGING FIELDS:
             logger.error(f"❌ LLM extraction failed: {str(e)}")
             return self._get_fallback_result(fallback_date, doc_type)
 
-    def _build_initial_result(self, raw_data: Dict, doc_type: str, fallback_date: str, context_analysis: Dict = None) -> ExtractionResult:
-        """Build initial result from extracted imaging data"""
-        
-        if context_analysis is None:
-            context_analysis = {}
-        
-        logger.info("🔨 Building initial imaging extraction result...")
-        
-        try:
-            # Extract from 6-field structure
-            header_context = raw_data.get("field_1_header_context", {})
-            radiologist = header_context.get("radiologist", {})
-            key_findings = raw_data.get("field_4_key_findings", {})
-            
-            # Build comprehensive imaging summary
-            summary_line = self._build_imaging_narrative_summary(raw_data, doc_type, fallback_date)
-            
-            # CRITICAL: Ensure summary_line is STRING
-            if not isinstance(summary_line, str):
-                summary_line = str(summary_line) if summary_line else "Imaging summary not available"
-            
-            result = ExtractionResult(
-                document_type=doc_type,
-                document_date=header_context.get("exam_date", fallback_date),
-                summary_line=summary_line,  # MUST be STRING
-                examiner_name=radiologist.get("name", ""),
-                specialty=radiologist.get("specialty", "Radiology"),
-                body_parts=[header_context.get("body_part_imaged", "")] if header_context.get("body_part_imaged") else [],
-                raw_data=raw_data,
-            )
-            
-            logger.info(f"✅ Initial imaging result built (Radiologist: {result.examiner_name})")
-            return result
-        
-        except Exception as e:
-            logger.error(f"❌ Error building initial result: {str(e)}")
-            raise
-
-    def _build_imaging_narrative_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
+    def _build_comprehensive_long_summary(self, raw_data: Dict, doc_type: str, fallback_date: str) -> str:
         """
-        Build comprehensive narrative summary for imaging reports.
-        
-        Format: WHO performed WHAT on WHEN for WHY resulting in DIAGNOSIS with RECOMMENDATIONS
+        Build comprehensive long summary from ALL extracted raw data with detailed headings.
+        Similar to QME extractor structure.
         """
+        logger.info("📝 Building comprehensive long summary from ALL extracted imaging data...")
         
-        try:
-            # Extract all data from 6-field structure
-            header_context = data.get("field_1_header_context", {})
-            clinical_data = data.get("field_2_clinical_data", {})
-            technique = data.get("field_3_technique_prior", {})
-            key_findings = data.get("field_4_key_findings", {})
-            impression = data.get("field_5_impression_conclusion", {})
-            recommendations = data.get("field_6_recommendations_followup", {})
-            
-            # Build narrative sections
-            narrative_parts = []
-            
-            # Section 0: RADIOLOGIST & DATE CONTEXT
-            radiologist = header_context.get("radiologist", {})
-            radiologist_name = self._safe_str(radiologist.get("name", ""))
-            exam_date = self._safe_str(header_context.get("exam_date", fallback_date))
-            
-            if radiologist_name:
-                context_line = f"Radiologist: {radiologist_name.strip()} on {exam_date if exam_date else fallback_date}"
-                narrative_parts.append(context_line)
-            
-            # Section 1: STUDY IDENTIFICATION & TECHNIQUE
-            study_text = self._build_study_narrative(header_context, technique, doc_type)
-            if study_text and isinstance(study_text, str) and study_text.strip():
-                narrative_parts.append(f"**Study:** {study_text.strip()}")
-            
-            # Section 2: CLINICAL INDICATION (WHY study was done)
-            indication_text = self._safe_str(clinical_data.get("clinical_indication", ""))
-            if indication_text and indication_text.strip():
-                narrative_parts.append(f"**Indication:** {indication_text.strip()}")
-            
-            # Section 3: KEY FINDINGS (WHAT was found - MOST IMPORTANT)
-            findings_text = self._build_findings_narrative(key_findings)
-            if findings_text and isinstance(findings_text, str) and findings_text.strip():
-                narrative_parts.append(f"**Findings:** {findings_text.strip()}")
-            
-            # Section 4: IMPRESSION & DIAGNOSIS (WHAT IT MEANS)
-            impression_text = self._build_impression_narrative(impression)
-            if impression_text and isinstance(impression_text, str) and impression_text.strip():
-                narrative_parts.append(f"**Impression:** {impression_text.strip()}")
-            
-            # Section 5: RECOMMENDATIONS & FOLLOW-UP (NEXT STEPS)
-            recommendations_text = self._build_recommendations_narrative(recommendations)
-            if recommendations_text and isinstance(recommendations_text, str) and recommendations_text.strip():
-                narrative_parts.append(f"**Recommendations:** {recommendations_text.strip()}")
-            
-            # Filter and join
-            valid_parts = [str(part) for part in narrative_parts if part and isinstance(part, str) and part.strip()]
-            full_narrative = "\n\n".join(valid_parts)
-            
-            logger.info(f"📝 Imaging narrative summary generated: {len(full_narrative)} characters")
-            return full_narrative if full_narrative and isinstance(full_narrative, str) else "Imaging summary not available"
+        sections = []
         
-        except Exception as e:
-            logger.error(f"❌ Error building imaging narrative: {str(e)}")
-            return f"Error generating summary: {str(e)}"
+        # Section 1: IMAGING OVERVIEW
+        sections.append("📋 IMAGING OVERVIEW")
+        sections.append("-" * 50)
+        
+        header_context = raw_data.get("field_1_header_context", {})
+        radiologist = header_context.get("radiologist", {})
+        
+        radiologist_name = radiologist.get("name", "")
+        exam_date = header_context.get("exam_date", fallback_date)
+        exam_type = header_context.get("exam_type", doc_type)
+        imaging_center = header_context.get("imaging_center", "")
+        referring_physician = header_context.get("referring_physician", "")
+        
+        overview_lines = [
+            f"Document Type: {doc_type}",
+            f"Exam Date: {exam_date}",
+            f"Exam Type: {exam_type}",
+            f"Radiologist: {radiologist_name}",
+            f"Imaging Center: {imaging_center}" if imaging_center else "Imaging Center: Not specified",
+            f"Referring Physician: {referring_physician}" if referring_physician else "Referring Physician: Not specified"
+        ]
+        sections.append("\n".join(overview_lines))
+        
+        # Section 2: PATIENT INFORMATION
+        sections.append("\n👤 PATIENT INFORMATION")
+        sections.append("-" * 50)
+        
+        patient_lines = [
+            f"Name: {header_context.get('patient_name', 'Not specified')}",
+            f"Date of Birth: {header_context.get('patient_dob', 'Not specified')}"
+        ]
+        sections.append("\n".join(patient_lines))
+        
+        # Section 3: CLINICAL INDICATION
+        sections.append("\n🎯 CLINICAL INDICATION")
+        sections.append("-" * 50)
+        
+        clinical_data = raw_data.get("field_2_clinical_data", {})
+        clinical_lines = [
+            f"Clinical Indication: {clinical_data.get('clinical_indication', 'Not specified')}",
+            f"Clinical History: {clinical_data.get('clinical_history', 'Not specified')}",
+            f"Chief Complaint: {clinical_data.get('chief_complaint', 'Not specified')}",
+            f"Specific Questions: {clinical_data.get('specific_clinical_questions', 'Not specified')}"
+        ]
+        sections.append("\n".join(clinical_lines))
+        
+        # Section 4: TECHNICAL DETAILS
+        sections.append("\n🔧 TECHNICAL DETAILS")
+        sections.append("-" * 50)
+        
+        technique = raw_data.get("field_3_technique_prior", {})
+        technique_lines = [
+            f"Study Type: {technique.get('study_type', doc_type)}",
+            f"Body Part Imaged: {technique.get('body_part_imaged', 'Not specified')}",
+            f"Laterality: {technique.get('laterality', 'Not specified')}",
+            f"Contrast Used: {technique.get('contrast_used', 'Not specified')}",
+            f"Contrast Type: {technique.get('contrast_type', 'Not specified')}",
+            f"Prior Studies Available: {technique.get('prior_studies_available', 'Not specified')}",
+            f"Technical Quality: {technique.get('technical_quality', 'Not specified')}",
+            f"Limitations: {technique.get('limitations', 'None specified')}"
+        ]
+        sections.append("\n".join(technique_lines))
+        
+        # Section 5: KEY FINDINGS (MOST IMPORTANT)
+        sections.append("\n📊 KEY FINDINGS")
+        sections.append("-" * 50)
+        
+        key_findings = raw_data.get("field_4_key_findings", {})
+        findings_lines = []
+        
+        # Primary finding
+        primary_finding = key_findings.get("primary_finding", {})
+        if isinstance(primary_finding, dict):
+            primary_desc = primary_finding.get("description", "")
+            if primary_desc:
+                findings_lines.append("Primary Finding:")
+                findings_lines.append(f"  • Description: {primary_desc}")
+                
+                location = primary_finding.get("location", "")
+                if location:
+                    findings_lines.append(f"  • Location: {location}")
+                
+                size = primary_finding.get("size", "")
+                if size:
+                    findings_lines.append(f"  • Size: {size}")
+                
+                characteristics = primary_finding.get("characteristics", "")
+                if characteristics:
+                    findings_lines.append(f"  • Characteristics: {characteristics}")
+                
+                acuity = primary_finding.get("acuity", "")
+                if acuity:
+                    findings_lines.append(f"  • Acuity: {acuity}")
+        
+        # Secondary findings
+        secondary_findings = key_findings.get("secondary_findings", [])
+        if secondary_findings:
+            findings_lines.append("\nSecondary Findings:")
+            for finding in secondary_findings[:5]:  # Limit to 5 secondary findings
+                if isinstance(finding, dict):
+                    finding_desc = finding.get("description", "")
+                    finding_location = finding.get("location", "")
+                    if finding_desc:
+                        if finding_location:
+                            findings_lines.append(f"  • {finding_location}: {finding_desc}")
+                        else:
+                            findings_lines.append(f"  • {finding_desc}")
+        
+        # Normal findings
+        normal_findings = key_findings.get("normal_findings", [])
+        if normal_findings:
+            findings_lines.append("\nNormal Findings:")
+            for normal in normal_findings[:5]:  # Limit to 5 normal findings
+                if normal and str(normal).strip():
+                    findings_lines.append(f"  • {normal}")
+        
+        sections.append("\n".join(findings_lines) if findings_lines else "No significant findings extracted")
+        
+        # Section 6: IMPRESSION & CONCLUSION
+        sections.append("\n💡 IMPRESSION & CONCLUSION")
+        sections.append("-" * 50)
+        
+        impression = raw_data.get("field_5_impression_conclusion", {})
+        impression_lines = []
+        
+        overall_impression = impression.get("overall_impression", "")
+        if overall_impression:
+            impression_lines.append(f"Overall Impression: {overall_impression}")
+        
+        primary_diagnosis = impression.get("primary_diagnosis", "")
+        if primary_diagnosis:
+            impression_lines.append(f"Primary Diagnosis: {primary_diagnosis}")
+        
+        final_diagnostic = impression.get("final_diagnostic_statement", "")
+        if final_diagnostic:
+            impression_lines.append(f"Final Diagnostic Statement: {final_diagnostic}")
+        
+        # Differential diagnoses
+        differentials = impression.get("differential_diagnoses", [])
+        if differentials:
+            impression_lines.append("\nDifferential Diagnoses:")
+            for dx in differentials[:3]:  # Limit to 3 differentials
+                if isinstance(dx, dict):
+                    dx_name = dx.get("diagnosis", "")
+                    if dx_name:
+                        impression_lines.append(f"  • {dx_name}")
+                elif dx and str(dx).strip():
+                    impression_lines.append(f"  • {dx}")
+        
+        clinical_correlation = impression.get("clinical_correlation_statement", "")
+        if clinical_correlation:
+            impression_lines.append(f"\nClinical Correlation: {clinical_correlation}")
+        
+        sections.append("\n".join(impression_lines) if impression_lines else "No impression/conclusion extracted")
+        
+        # Section 7: RECOMMENDATIONS & FOLLOW-UP
+        sections.append("\n📋 RECOMMENDATIONS & FOLLOW-UP")
+        sections.append("-" * 50)
+        
+        recommendations = raw_data.get("field_6_recommendations_followup", {})
+        rec_lines = []
+        
+        follow_up = recommendations.get("follow_up_recommended", "")
+        if follow_up:
+            rec_lines.append(f"Follow-up Recommended: {follow_up}")
+        
+        follow_up_modality = recommendations.get("follow_up_modality", "")
+        if follow_up_modality:
+            rec_lines.append(f"Follow-up Modality: {follow_up_modality}")
+        
+        follow_up_timing = recommendations.get("follow_up_timing", "")
+        if follow_up_timing:
+            rec_lines.append(f"Follow-up Timing: {follow_up_timing}")
+        
+        clinical_correlation_needed = recommendations.get("clinical_correlation_needed", "")
+        if clinical_correlation_needed:
+            rec_lines.append(f"Clinical Correlation Needed: {clinical_correlation_needed}")
+        
+        specialist_consultation = recommendations.get("specialist_consultation", "")
+        if specialist_consultation:
+            rec_lines.append(f"Specialist Consultation: {specialist_consultation}")
+        
+        sections.append("\n".join(rec_lines) if rec_lines else "No specific recommendations provided")
+        
+        # Join all sections
+        long_summary = "\n\n".join(sections)
+        logger.info(f"✅ Long summary built: {len(long_summary)} characters")
+        
+        return long_summary
 
-    def _build_study_narrative(self, header_context: Dict, technique: Dict, doc_type: str) -> str:
-        """Build study identification and technique narrative"""
-        try:
-            study_parts = []
-            
-            # Modality and body part
-            study_type = self._safe_str(technique.get("study_type", doc_type))
-            body_part = self._safe_str(technique.get("body_part_imaged", ""))
-            laterality = self._safe_str(technique.get("laterality", ""))
-            
-            if study_type:
-                study_str = study_type.strip()
-                if body_part:
-                    study_str += f" {body_part.strip()}"
-                if laterality and laterality.strip():
-                    study_str += f" ({laterality.strip()})"
-                study_parts.append(study_str)
-            
-            # Contrast status (CRITICAL - exact wording)
-            contrast = self._safe_str(technique.get("contrast_used", ""))
-            if contrast and contrast.strip():
-                study_parts.append(contrast.strip())
-            
-            # Technical quality
-            quality = self._safe_str(technique.get("technical_quality", ""))
-            if quality and quality.strip() and quality.strip().lower() != "diagnostic":
-                study_parts.append(f"Quality: {quality.strip()}")
-            
-            # Limitations
-            limitations = self._safe_str(technique.get("limitations", ""))
-            if limitations and limitations.strip():
-                study_parts.append(f"Limitations: {limitations.strip()}")
-            
-            return " - ".join(study_parts) if study_parts else f"{doc_type} study"
-        except Exception as e:
-            logger.error(f"Error in _build_study_narrative: {str(e)}")
-            return ""
+    def _generate_short_summary_from_long_summary(self, long_summary: str) -> str:
+        """
+        Generate a comprehensive 60-word short summary covering all key aspects from the long summary.
+        Includes retry mechanism with exponential backoff - same as QME extractor.
+        """
+        logger.info("🎯 Generating comprehensive 60-word short summary from long summary...")
+        
+        system_prompt = SystemMessagePromptTemplate.from_template("""
+You are a radiology specialist creating PRECISE 60-word summaries of imaging reports.
 
-    def _build_findings_narrative(self, key_findings: Dict) -> str:
-        """Build key findings narrative - CRITICAL SECTION"""
-        try:
-            findings_items = []
-            
-            # Primary finding (highest priority - MUST include)
-            primary = key_findings.get("primary_finding", {})
-            if isinstance(primary, dict):
-                primary_desc = self._safe_str(primary.get("description", ""))
-                if primary_desc and primary_desc.strip():
-                    # Add complete primary finding with details
-                    primary_text = primary_desc.strip()
+CRITICAL REQUIREMENTS:
+- EXACTLY 60 words (count carefully - this is mandatory)
+- Cover ALL essential aspects in this order:
+  1. Imaging modality and body part
+  2. Radiologist and date
+  3. Primary clinical indication
+  4. Key findings and abnormalities
+  5. Radiologist's impression/diagnosis
+  6. Recommendations if provided
+
+CONTENT RULES:
+- MUST include the imaging modality and specific body part
+- Include radiologist name and exam date
+- Mention clinical indication/reason for study
+- Describe primary abnormalities with exact terminology
+- Include radiologist's diagnostic conclusion
+- State recommendations if explicitly provided
+
+WORD COUNT ENFORCEMENT:
+- Count your words precisely before responding
+- If over 60 words, remove less critical details
+- If under 60 words, add more specific clinical details
+- Never exceed 60 words
+
+FORMAT:
+- Single paragraph, no bullet points
+- Natural radiological narrative flow
+- Use complete sentences
+- Include quantitative measurements if stated
+
+EXAMPLES (60 words each):
+
+✅ "MRI lumbar spine performed by Dr. Smith on 10/15/2024 for low back pain with radiculopathy. Findings: L5-S1 disc herniation measuring 8mm compressing anterior thecal sac. Mild degenerative changes L4-L5. Impression: Acute L5-S1 disc herniation consistent with clinical symptoms. Recommended: Orthopedic consultation and follow-up MRI in 3 months if symptoms persist."
+
+✅ "CT chest with contrast by Dr. Johnson on 11/01/2024 for lung cancer screening. Findings: 1.2 cm spiculated nodule in right upper lobe, no lymphadenopathy. Impression: Suspicious for primary lung malignancy, recommend PET-CT for further characterization. Clinical correlation and oncology consultation advised for biopsy planning and staging evaluation."
+
+Now create a PRECISE 60-word imaging summary from this long summary:
+""")
+
+        user_prompt = HumanMessagePromptTemplate.from_template("""
+COMPREHENSIVE LONG SUMMARY:
+
+{long_summary}
+
+Create a PRECISE 60-word imaging summary that includes:
+1. Imaging modality and body part
+2. Radiologist and date
+3. Clinical indication
+4. Key findings
+5. Radiologist's impression
+6. Recommendations
+
+60-WORD SUMMARY:
+""")
+
+        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
+        
+        # Retry configuration
+        max_retries = 3
+        retry_delay = 1  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                start_time = time.time()
+                
+                logger.info(f"🔄 Attempt {attempt + 1}/{max_retries} for short summary generation...")
+                
+                chain = chat_prompt | self.llm
+                response = chain.invoke({
+                    "long_summary": long_summary
+                })
+                
+                short_summary = response.content.strip()
+                end_time = time.time()
+                
+                # Clean and validate
+                short_summary = self._clean_and_validate_short_summary(short_summary)
+                word_count = len(short_summary.split())
+                
+                logger.info(f"⚡ Short summary generated in {end_time - start_time:.2f}s: {word_count} words")
+                
+                # Validate word count strictly
+                if word_count == 60:
+                    logger.info("✅ Perfect 60-word summary generated!")
+                    return short_summary
+                else:
+                    logger.warning(f"⚠️ Summary has {word_count} words (expected 60), attempt {attempt + 1}")
                     
-                    location = self._safe_str(primary.get("location", ""))
-                    if location and location.strip():
-                        primary_text += f" at {location.strip()}"
-                    
-                    size = self._safe_str(primary.get("size", ""))
-                    if size and size.strip():
-                        primary_text += f" ({size.strip()})"
-                    
-                    findings_items.append(primary_text)
-            
-            # Secondary findings (important but not critical)
-            secondary = key_findings.get("secondary_findings", [])
-            if secondary and isinstance(secondary, list):
-                for finding in secondary[:3]:  # Top 3 secondary findings
-                    if isinstance(finding, dict):
-                        finding_desc = self._safe_str(finding.get("description", ""))
-                        if finding_desc and finding_desc.strip():
-                            findings_items.append(finding_desc.strip())
-            
-            # Normal findings (what is NOT present - important for ruling out)
-            normal = key_findings.get("normal_findings", [])
-            if normal and isinstance(normal, list):
-                normal_items = [self._safe_str(n).strip() for n in normal if n and self._safe_str(n).strip()]
-                if normal_items:
-                    findings_items.append(f"Normal: {'; '.join(normal_items[:2])}")
-            
-            return "; ".join(findings_items) if findings_items else "No significant abnormalities noted"
-        except Exception as e:
-            logger.error(f"Error in _build_findings_narrative: {str(e)}")
-            return ""
+                    if attempt < max_retries - 1:
+                        # Add word count feedback to next attempt
+                        feedback_prompt = self._get_word_count_feedback_prompt(word_count)
+                        chat_prompt = ChatPromptTemplate.from_messages([feedback_prompt, user_prompt])
+                        time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                        continue
+                    else:
+                        logger.warning(f"⚠️ Final summary has {word_count} words after {max_retries} attempts")
+                        return short_summary
+                        
+            except Exception as e:
+                logger.error(f"❌ Short summary generation attempt {attempt + 1} failed: {e}")
+                
+                if attempt < max_retries - 1:
+                    logger.info(f"🔄 Retrying in {retry_delay * (attempt + 1)} seconds...")
+                    time.sleep(retry_delay * (attempt + 1))
+                else:
+                    logger.error(f"❌ All {max_retries} attempts failed for short summary generation")
+                    # Fallback: create comprehensive short summary from long summary
+                    return self._create_comprehensive_fallback_summary(long_summary)
+        
+        # Should never reach here, but just in case
+        return self._create_comprehensive_fallback_summary(long_summary)
 
-    def _build_impression_narrative(self, impression: Dict) -> str:
-        """Build impression and diagnostic conclusion narrative"""
-        try:
-            impression_parts = []
-            
-            # Primary diagnosis (most important)
-            primary_dx = self._safe_str(impression.get("primary_diagnosis", ""))
-            if primary_dx and primary_dx.strip():
-                impression_parts.append(primary_dx.strip())
-            
-            # Overall impression (radiologist's summary)
-            overall = self._safe_str(impression.get("overall_impression", ""))
-            if overall and overall.strip() and overall.strip() != primary_dx:
-                impression_parts.append(overall.strip())
-            
-            # Final diagnostic statement (radiologist's definitive conclusion)
-            final_dx = self._safe_str(impression.get("final_diagnostic_statement", ""))
-            if final_dx and final_dx.strip() and final_dx.strip() not in impression_parts:
-                impression_parts.append(final_dx.strip())
-            
-            # Differential diagnoses if provided (helps guide treatment)
-            differentials = impression.get("differential_diagnoses", [])
-            if differentials and isinstance(differentials, list):
-                diff_list = [self._safe_str(d).strip() for d in differentials[:2] if d]
-                if diff_list:
-                    impression_parts.append(f"Differential: {', '.join(diff_list)}")
-            
-            return "; ".join(impression_parts) if impression_parts else "Impression not specified"
-        except Exception as e:
-            logger.error(f"Error in _build_impression_narrative: {str(e)}")
-            return ""
+    def _get_word_count_feedback_prompt(self, actual_word_count: int) -> SystemMessagePromptTemplate:
+        """Get feedback prompt for word count adjustment"""
+        
+        if actual_word_count > 60:
+            feedback = f"Your previous summary had {actual_word_count} words (TOO LONG). Remove less critical details to reach exactly 60 words. Prioritize: modality, body part, primary findings, diagnosis."
+        else:
+            feedback = f"Your previous summary had {actual_word_count} words (TOO SHORT). Add more specific radiological details to reach exactly 60 words. Include: exact measurements, specific locations, diagnostic certainty."
+        
+        return SystemMessagePromptTemplate.from_template(f"""
+You are a radiology specialist creating PRECISE 60-word imaging summaries.
 
-    def _build_recommendations_narrative(self, recommendations: Dict) -> str:
-        """Build recommendations and follow-up narrative"""
-        try:
-            rec_items = []
+CRITICAL FEEDBACK: {feedback}
+
+REQUIREMENTS:
+- Maximum 60 words
+- Include modality, body part, radiologist, findings, diagnosis, recommendations
+- Count words carefully before responding
+- Adjust length by adding/removing specific radiological details
+
+
+""")
+
+    def _clean_and_validate_short_summary(self, summary: str) -> str:
+        """Clean and validate the 60-word short summary with strict word counting"""
+        # Remove excessive whitespace, quotes, and markdown
+        summary = re.sub(r'\s+', ' ', summary).strip()
+        summary = summary.replace('"', '').replace("'", "")
+        summary = re.sub(r'[\*\#\-]', '', summary)  # Remove markdown
+        
+        # Remove common prefixes that might indicate instructions
+        summary = re.sub(r'^(60-word summary:|summary:|imaging summary:)\s*', '', summary, flags=re.IGNORECASE)
+        
+        # Count words
+        words = summary.split()
+        
+        # Strict word count enforcement
+        if len(words) != 60:
+            logger.info(f"📝 Word count adjustment needed: {len(words)} words")
             
-            # Follow-up recommendations (what radiologist recommends)
-            follow_up = self._safe_str(recommendations.get("follow_up_recommended", ""))
-            if follow_up and follow_up.strip():
-                rec_items.append(follow_up.strip())
-            
-            # Follow-up timing (when to follow up)
-            timing = self._safe_str(recommendations.get("follow_up_timing", ""))
-            if timing and timing.strip():
-                rec_items.append(f"Timeline: {timing.strip()}")
-            
-            # Clinical correlation needed
-            correlation = self._safe_str(recommendations.get("clinical_correlation_needed", ""))
-            if correlation and correlation.strip():
-                rec_items.append(f"Correlation: {correlation.strip()}")
-            
-            # Specialist consultation
-            specialist = self._safe_str(recommendations.get("specialist_consultation", ""))
-            if specialist and specialist.strip():
-                rec_items.append(f"Consultation: {specialist.strip()}")
-            
-            return "; ".join(rec_items) if rec_items else ""
-        except Exception as e:
-            logger.error(f"Error in _build_recommendations_narrative: {str(e)}")
-            return ""
+            if len(words) > 60:
+                # Remove less critical words while preserving medical content
+                summary = self._trim_to_60_words(words)
+            else:
+                # Add padding with relevant medical context
+                summary = self._expand_to_60_words(words, summary)
+        
+        return summary
+
+    def _trim_to_60_words(self, words: List[str]) -> str:
+        """Intelligently trim words to reach exactly 60"""
+        if len(words) <= 60:
+            return ' '.join(words)
+        
+        # Priority-based trimming - remove less critical parts
+        text = ' '.join(words)
+        
+        # Remove redundant phrases
+        reductions = [
+            (r'\b(and|with|including)\s+appropriate\s+', ' '),
+            (r'\bfor\s+(a|the)\s+period\s+of\s+\w+\s+\w+', ' '),
+            (r'\bwith\s+follow[- ]?up\s+in\s+\w+\s+\w+', ' with follow-up'),
+            (r'\bcontinued\s+(imaging|evaluation|monitoring)', 'continued'),
+            (r'\bmagnetic resonance imaging', 'MRI'),
+            (r'\bcomputed tomography', 'CT'),
+            (r'\bfindings?\s*:\s*', 'Findings: '),
+            (r'\bimpression?\s*:\s*', 'Impression: '),
+        ]
+        
+        for pattern, replacement in reductions:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        
+        words = text.split()
+        if len(words) > 60:
+            # Remove from the middle (less critical descriptive parts)
+            excess = len(words) - 60
+            mid_point = len(words) // 2
+            start_remove = mid_point - excess // 2
+            words = words[:start_remove] + words[start_remove + excess:]
+        
+        return ' '.join(words[:60])
+
+    def _expand_to_60_words(self, words: List[str], original_text: str) -> str:
+        """Intelligently expand text to reach exactly 60 words"""
+        if len(words) >= 60:
+            return ' '.join(words)
+        
+        needed_words = 60 - len(words)
+        
+        # Extract key elements to expand upon
+        expansions = []
+        
+        # Look for modality to add details
+        if any(term in original_text.upper() for term in ['MRI', 'CT', 'X-RAY', 'ULTRASOUND']):
+            expansions.append("diagnostic imaging study")
+        
+        # Look for findings to add specifics
+        if any(term in original_text.lower() for term in ['herniation', 'tear', 'fracture', 'nodule']):
+            expansions.append("with characteristic radiological features")
+        
+        # Look for recommendations to add timing
+        if 'follow-up' in original_text.lower():
+            expansions.append("for ongoing clinical monitoring")
+        
+        # Look for clinical correlation
+        if 'clinical correlation' in original_text.lower():
+            expansions.append("requiring clinical-radiological correlation")
+        
+        # Add generic radiological context if still needed
+        while len(words) + len(expansions) < 60 and len(expansions) < 5:
+            expansions.extend([
+                "based on comprehensive radiological assessment",
+                "with detailed anatomical evaluation", 
+                "for accurate diagnostic interpretation",
+                "supporting clinical decision making",
+                "with appropriate technical quality"
+            ])
+        
+        # Add expansions to the text
+        expanded_text = original_text
+        for expansion in expansions[:needed_words]:
+            expanded_text += f" {expansion}"
+        
+        words = expanded_text.split()
+        return ' '.join(words[:60])
+
+    def _create_comprehensive_fallback_summary(self, long_summary: str) -> str:
+        """Create comprehensive fallback short summary directly from long summary"""
+        
+        # Extract radiologist information
+        radiologist_match = re.search(r'Radiologist:\s*([^\n]+)', long_summary)
+        radiologist = radiologist_match.group(1).strip() if radiologist_match else "Radiologist"
+        
+        # Extract key information using regex patterns
+        patterns = {
+            'modality': r'Exam Type:\s*([^\n]+)',
+            'body_part': r'Body Part Imaged:\s*([^\n]+)',
+            'indication': r'Clinical Indication:\s*([^\n]+)',
+            'findings': r'Primary Finding:(.*?)(?:\n\n|\n[A-Z]|$)',
+            'impression': r'Overall Impression:\s*([^\n]+)'
+        }
+        
+        extracted = {}
+        for key, pattern in patterns.items():
+            match = re.search(pattern, long_summary, re.DOTALL)
+            if match:
+                extracted[key] = match.group(1).strip()
+        
+        # Build comprehensive summary
+        parts = []
+        
+        # Start with modality and body part
+        if 'modality' in extracted and 'body_part' in extracted:
+            parts.append(f"{extracted['modality']} {extracted['body_part']}")
+        elif 'modality' in extracted:
+            parts.append(f"{extracted['modality']} study")
+        
+        # Add radiologist
+        parts.append(f"by {radiologist}")
+        
+        # Add indication
+        if 'indication' in extracted:
+            parts.append(f"for {extracted['indication'][:60]}")
+        
+        # Add findings
+        if 'findings' in extracted:
+            # Take first line of findings
+            first_finding = extracted['findings'].split('\n')[0].replace('•', '').replace('Description:', '').strip()[:80]
+            if first_finding:
+                parts.append(f"Findings: {first_finding}")
+        
+        # Add impression
+        if 'impression' in extracted:
+            parts.append(f"Impression: {extracted['impression'][:80]}")
+        
+        summary = ". ".join(parts)
+        
+        # Ensure exactly 60 words
+        words = summary.split()
+        if len(words) > 60:
+            summary = ' '.join(words[:60])
+        elif len(words) < 60:
+            # Add padding to reach 60 words
+            padding = ["comprehensive radiological evaluation", "with diagnostic interpretation", "and clinical implications"] 
+            while len(words) < 60 and padding:
+                words.extend(padding.pop(0).split())
+            summary = ' '.join(words[:60])
+        
+        logger.info(f"🔄 Used fallback summary: {len(summary.split())} words")
+        return summary
 
     def _safe_str(self, value, default="") -> str:
         """Convert any value to string safely - MUST return STRING"""
