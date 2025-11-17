@@ -123,33 +123,171 @@ class ExtractionVerifier:
         },
         "MRI": {
             "pattern": r"MRI",
-            "max_words": 60,
+            "max_words": 400,
             "required_elements": ["date", "MRI", "body_part"],
-            "format_template": "[DATE]: MRI{doctor_section} for [Body part] | Status → [Status] | Finding → [Primary finding]"
+          "format_template": """
+          To create an accurate, concise, and actionable summary from any imaging report (MRI, X-ray, CT, etc.), the focus should be strictly on the identifying information, the clinical question, and the diagnostic conclusion.
+
+Here are the six key fields that should be extracted, ensuring all critical details and context are captured:
+
+| Key Field                               | Focus Area                        | Details to Extract                                                                                                                                                               | Why It Is Critical to Extract                                                                                          |
+| :-------------------------------------: | :-------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------- |
+| **1. Header & Context**                 | **Report Identity & Date**        | **Imaging Center, Date of Exam, Type of Exam** (e.g., MRI L-Spine w/o contrast), **Patient Name, DOB, Referring Physician.**                                                     | Establishes the authenticity and timeliness of the results and who ordered the study.                                  |
+| **2. Clinical Data/Indication**         | **Reason for the Study**          | **The specific symptom or injury** that prompted the imaging (e.g., "Left knee pain, history of work injury," or "Rule out fracture").                                           | Provides the necessary context for the findings and links the imaging to the claim/injury.                             |
+| **3. Technique/Prior Studies**          | **Methodology**                   | **Use of contrast/dye** (With or Without Dye), **Body part imaged**, and whether **Prior Studies** were available for comparison.                                                | The use of contrast affects the interpretation; knowing about prior studies helps gauge progression/regression.        |
+| **4. Key Findings (Positive/Negative)** | **Evidence of Pathology**         | **Specific structural abnormalities related to the complaint:** (e.g., Disc herniation, fracture, nerve impingement, meniscal tear, fluid).                                      | This is the objective data that supports the physician's diagnosis and treatment plan. **Focus on positive findings.** |
+| **5. Impression/Conclusion**            | **Radiologist's Final Diagnosis** | **The official diagnostic statement** (e.g., "Features of dorsal DRUJ dislocation/subluxation," "Acute L5-S1 disc herniation," "Severe tri-compartmental degenerative changes"). | This is the final, definitive conclusion; it is the most critical piece of information for the treating physician.     |
+| **6. Recommendations/Follow-up**        | **Actionable Next Steps**         | **Any specific follow-up suggested by the Radiologist** (e.g., "Recommend clinical correlation," "Follow-up as clinically indicated," "Suggest further evaluation with CT").     | Guides the referring physician on the next steps in care.                                                              |
+
+### Summary Strategy
+
+When creating the concise summary, you should prioritize the following flow:
+
+1.  **Who, What, When:** *(Field 1)* Dr. X performed an **(Field 1) MRI of the \[Area\]** on **(Field 1) \[Date\]**.
+2.  **Why:** The exam was performed due to **(Field 2) \[Clinical Indication\]**.
+3.  **The Diagnosis:** The **(Field 5) Impression** is **\[Final Diagnosis\]**.
+4.  **Key Objective Evidence:** The **(Field 4) key findings** supporting this diagnosis included **\[Specific positive findings\]**.
+"""
         },
         "CT": {
             "pattern": r"CT",
-            "max_words": 60,
+            "max_words": 400,
             "required_elements": ["date", "CT", "body_part"],
-            "format_template": "[DATE]: CT{doctor_section} for [Body part] | Status → [Status] | Finding → [Primary finding]"
+      "format_template": """
+      To create an accurate, concise, and actionable summary from any imaging report (MRI, X-ray, CT, etc.), the focus should be strictly on the identifying information, the clinical question, and the diagnostic conclusion.
+
+Here are the six key fields that should be extracted, ensuring all critical details and context are captured:
+
+| Key Field                               | Focus Area                        | Details to Extract                                                                                                                                                               | Why It Is Critical to Extract                                                                                          |
+| :-------------------------------------: | :-------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------- |
+| **1. Header & Context**                 | **Report Identity & Date**        | **Imaging Center, Date of Exam, Type of Exam** (e.g., MRI L-Spine w/o contrast), **Patient Name, DOB, Referring Physician.**                                                     | Establishes the authenticity and timeliness of the results and who ordered the study.                                  |
+| **2. Clinical Data/Indication**         | **Reason for the Study**          | **The specific symptom or injury** that prompted the imaging (e.g., "Left knee pain, history of work injury," or "Rule out fracture").                                           | Provides the necessary context for the findings and links the imaging to the claim/injury.                             |
+| **3. Technique/Prior Studies**          | **Methodology**                   | **Use of contrast/dye** (With or Without Dye), **Body part imaged**, and whether **Prior Studies** were available for comparison.                                                | The use of contrast affects the interpretation; knowing about prior studies helps gauge progression/regression.        |
+| **4. Key Findings (Positive/Negative)** | **Evidence of Pathology**         | **Specific structural abnormalities related to the complaint:** (e.g., Disc herniation, fracture, nerve impingement, meniscal tear, fluid).                                      | This is the objective data that supports the physician's diagnosis and treatment plan. **Focus on positive findings.** |
+| **5. Impression/Conclusion**            | **Radiologist's Final Diagnosis** | **The official diagnostic statement** (e.g., "Features of dorsal DRUJ dislocation/subluxation," "Acute L5-S1 disc herniation," "Severe tri-compartmental degenerative changes"). | This is the final, definitive conclusion; it is the most critical piece of information for the treating physician.     |
+| **6. Recommendations/Follow-up**        | **Actionable Next Steps**         | **Any specific follow-up suggested by the Radiologist** (e.g., "Recommend clinical correlation," "Follow-up as clinically indicated," "Suggest further evaluation with CT").     | Guides the referring physician on the next steps in care.                                                              |
+
+### Summary Strategy
+
+When creating the concise summary, you should prioritize the following flow:
+
+1.  **Who, What, When:** *(Field 1)* Dr. X performed an **(Field 1) MRI of the \[Area\]** on **(Field 1) \[Date\]**.
+2.  **Why:** The exam was performed due to **(Field 2) \[Clinical Indication\]**.
+3.  **The Diagnosis:** The **(Field 5) Impression** is **\[Final Diagnosis\]**.
+4.  **Key Objective Evidence:** The **(Field 4) key findings** supporting this diagnosis included **\[Specific positive findings\]**.
+"""
         },
         "X-ray": {
             "pattern": r"X-ray",
-            "max_words": 60,
+            "max_words": 400,
             "required_elements": ["date", "X-ray", "body_part"],
-            "format_template": "[DATE]: X-ray{doctor_section} for [Body part] | Status → [Status] | Finding → [Primary finding]"
+            "format_template": """
+            To create an accurate, concise, and actionable summary from any imaging report (MRI, X-ray, CT, etc.), the focus should be strictly on the identifying information, the clinical question, and the diagnostic conclusion.
+
+Here are the six key fields that should be extracted, ensuring all critical details and context are captured:
+
+| Key Field                               | Focus Area                        | Details to Extract                                                                                                                                                               | Why It Is Critical to Extract                                                                                          |
+| :-------------------------------------: | :-------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------- |
+| **1. Header & Context**                 | **Report Identity & Date**        | **Imaging Center, Date of Exam, Type of Exam** (e.g., MRI L-Spine w/o contrast), **Patient Name, DOB, Referring Physician.**                                                     | Establishes the authenticity and timeliness of the results and who ordered the study.                                  |
+| **2. Clinical Data/Indication**         | **Reason for the Study**          | **The specific symptom or injury** that prompted the imaging (e.g., "Left knee pain, history of work injury," or "Rule out fracture").                                           | Provides the necessary context for the findings and links the imaging to the claim/injury.                             |
+| **3. Technique/Prior Studies**          | **Methodology**                   | **Use of contrast/dye** (With or Without Dye), **Body part imaged**, and whether **Prior Studies** were available for comparison.                                                | The use of contrast affects the interpretation; knowing about prior studies helps gauge progression/regression.        |
+| **4. Key Findings (Positive/Negative)** | **Evidence of Pathology**         | **Specific structural abnormalities related to the complaint:** (e.g., Disc herniation, fracture, nerve impingement, meniscal tear, fluid).                                      | This is the objective data that supports the physician's diagnosis and treatment plan. **Focus on positive findings.** |
+| **5. Impression/Conclusion**            | **Radiologist's Final Diagnosis** | **The official diagnostic statement** (e.g., "Features of dorsal DRUJ dislocation/subluxation," "Acute L5-S1 disc herniation," "Severe tri-compartmental degenerative changes"). | This is the final, definitive conclusion; it is the most critical piece of information for the treating physician.     |
+| **6. Recommendations/Follow-up**        | **Actionable Next Steps**         | **Any specific follow-up suggested by the Radiologist** (e.g., "Recommend clinical correlation," "Follow-up as clinically indicated," "Suggest further evaluation with CT").     | Guides the referring physician on the next steps in care.                                                              |
+
+### Summary Strategy
+
+When creating the concise summary, you should prioritize the following flow:
+
+1.  **Who, What, When:** *(Field 1)* Dr. X performed an **(Field 1) MRI of the \[Area\]** on **(Field 1) \[Date\]**.
+2.  **Why:** The exam was performed due to **(Field 2) \[Clinical Indication\]**.
+3.  **The Diagnosis:** The **(Field 5) Impression** is **\[Final Diagnosis\]**.
+4.  **Key Objective Evidence:** The **(Field 4) key findings** supporting this diagnosis included **\[Specific positive findings\]**.
+"""
         },
         "PR-2": {
             "pattern": r"PR-2",
-            "max_words": 65,
+            "max_words": 400,
             "required_elements": ["date", "PR-2"],
-            "format_template": "[DATE]: PR-2{doctor_section} for [Body part] | Clinical status → [Status] | Work status → [Work status] | Treatment → [Treatment] | Plan → [Plan]"
+            "format_template": """
+             Generally, when analyzing a Physician's Progress Report (PR-2) for **any patient**, the focus should be on the following four core areas to ensure all actionable and critical details are captured:
+
+### 1\. Work Status and Impairment
+
+The primary goal of a PR-2 in workers' compensation is to define the patient's capacity to work.
+
+  * **Key Focus:**
+      * **Work Status:** Is the patient Temporarily Total Disabled (TTD), Temporarily Partially Disabled (TPD), Permanent and Stationary (P\&S)/Maximum Medical Improvement (MMI), or Released to Work (Full/Modified)?
+      * **New/Changed Limitations:** What are the specific work restrictions (e.g., lifting, standing, repetitive tasks)?
+      * **Rationale:** Does the report clearly explain *why* the work status or limitations have changed or remained the same (e.g., patient pain level, objective exam findings)?
+
+### 2\. Treatment Authorization Requests
+
+This is the most time-sensitive and actionable section for the claims administrator.
+
+  * **Key Focus:**
+      * **Specific Request:** What exact treatment or testing is being requested (e.g., 6 weeks of PT, MRI, surgery, medication refill)?
+      * **Medical Necessity/Rationale:** Does the physician justify the request? Is the patient showing progress, or is the treatment needed to reach MMI? *Look for objective evidence of benefit from past treatment.*
+      * **Prior Authorization Status:** Was this treatment previously authorized or denied? (This requires cross-referencing with past records, but the PR-2 should lay the foundation).
+
+### 3\. Patient Progress and Current Status
+
+This provides the medical context for the claims decision and determines if the treatment plan is effective.
+
+  * **Key Focus:**
+      * **Subjective Improvement:** Has the patient's pain score (e.g., VAS) or subjective symptoms improved, worsened, or remained static since the last visit?
+      * **Objective Findings:** What are the current objective findings (e.g., range of motion, strength, physical exam results)? Compare these to the previous report to gauge progress.
+      * **Medication Changes:** Were any new medications prescribed, discontinued, or changed?
+
+### 4\. Next Steps and Planning
+
+This dictates the future management of the claim and medical necessity timeline.
+
+  * **Key Focus:**
+      * **Follow-up Date:** When is the next scheduled appointment? This helps set the date for the next expected PR-2.
+      * **Specialist Referrals:** Is a referral to a specialist (e.g., Ortho, Neuro, Pain Management) being recommended or requested?
+      * **MMI Status/Timing:** If the patient is approaching or at MMI, is a Permanent and Stationary (P\&S) report (PR-3) being prepared?
+
+"""
         },
         "Consult": {
             "pattern": r"Consult",
-            "max_words": 65,
+            "max_words": 400,
             "required_elements": ["date", "Consult"],
-            "format_template": "[DATE]: Consult{doctor_section} for [Body part] | Findings → [Findings] | Treatment → [Treatment] | Recommendations → [Recommendations]"
+            "format_template": """
+To create an accurate and concise summary of a general consultation report, the focus should be on the areas that define the patient's current medical status, the diagnostic findings, and the resulting change in the treatment plan.
+
+The following eight key fields and their contents should be extracted and highlighted:
+
+| Key Field                                  | Focus Area                                                                                                                                                                                                                                        | Why It Is Critical to Extract                                                 |
+| :----------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :---------------------------------------------------------------------------- |
+| **1. Header & Context**                    | **Report Identity**                                                                                                                                                                                                                               | Establishes the authority and relevance of the document.                      |
+|                                            | **Details to Extract:** Consulting Physician/Specialty, Date of Service, Referring Physician, Patient Name, Date of Injury (DOI), and Claim Number.                                                                                               |                                                                               |
+| **2. Chief Complaint (CC)**                | **Patient's Primary Issue**                                                                                                                                                                                                                       | Defines the core medical problem leading to the consultation.                 |
+|                                            | **Details to Extract:** The patient's exact stated pain/problem, location(s), and duration.                                                                                                                                                       |                                                                               |
+| **3. Diagnosis & Assessment**              | **Medical Conclusion**                                                                                                                                                                                                                            | The ultimate reason for the consult and the foundation for treatment.         |
+|                                            | **Details to Extract:** All official ICD-10 diagnoses (e.g., Radiculopathy, Degenerative Disc Disease, Myofascial Pain Syndrome). Include any statement on **Causation** (e.g., "Industrial causal relationship," "non-industrial contributors"). |                                                                               |
+| **4. History of Present Illness (HPI)**    | **Symptoms & Severity**                                                                                                                                                                                                                           | Provides the context for the diagnosis and justification for intervention.    |
+|                                            | **Details to Extract:** Description of the pain (quality, location, radiation), aggravating/alleviating factors, and related functional deficits (e.g., poor sleep, limited driving).                                                             |                                                                               |
+| **5. Prior Treatment & Efficacy**          | **Failure of Conservative Care**                                                                                                                                                                                                                  | Justifies the need for specialized intervention (e.g., injections, surgery).  |
+|                                            | **Details to Extract:** Specific treatments received (e.g., PT, Chiro, Medications, Injections) and the **reported level of relief** (e.g., "short-term relief," "no meaningful change," "failure of conservative management").                   |                                                                               |
+| **6. Objective Findings (Exam & Imaging)** | **Verifiable Evidence**                                                                                                                                                                                                                           | Connects the subjective complaint to objective proof and the final diagnosis. |
+|                                            | **Details to Extract:**                                                                                                                                                                                                                           |                                                                               |
+|                                            | **Physical Exam:** Key positive findings (e.g., Spasm, Reduced ROM, Positive Straight Leg Raise, Sensory deficits).                                                                                                                               |                                                                               |
+|                                            | **Imaging Review (MRI/X-ray):** Specific structural findings that correlate with the symptoms (e.g., "C5-6 disc protrusion," "L4-5 disc bulge contacting nerve root").                                                                            |                                                                               |
+| **7. Plan (Recommended Treatments)**       | **Actionable Medical Directives**                                                                                                                                                                                                                 | The most critical part for claims administration and utilization review.      |
+|                                            | **Details to Extract:** **Specific Interventions Requested** (e.g., RFA, specific Epidural Steroid Injections, Surgical Consult). Note any suggested changes to **Medication** (e.g., transition from Gabapentin to Pregabalin).                  |                                                                               |
+| **8. Work Status & Impairment**            | **Legal/Administrative Status**                                                                                                                                                                                                                   | Defines the patient's current capacity for work.                              |
+|                                            | **Details to Extract:** Current **Work Status** (e.g., TTD, Modified Duty, MMI) and **Specific Restrictions** (e.g., "No lifting greater than X lbs," "Avoid repetitive bending," "Allow postural changes").                                      |                                                                               |
+
+## General Extraction Strategy:
+
+The strategy should be to move linearly through the report, asking "Is this information directly related to the current *diagnosis*, the justification for *new treatment*, or the patient's *work status*?"
+
+  * **Focus Most Heavily On:** The **Assessment/Diagnosis** (Field 3), the **Plan/RFA Requests** (Field 7), and **Work Status** (Field 8). These are the actionable, decision-making components.
+  * **Use Other Fields To:** Provide the essential context and medical necessity for the decisions made in Fields 3, 7, and 8. (For example, use *Prior Treatment Failure* to justify the *New RFA Request*).
+
+"""
         },
         "RFA": {
             "pattern": r"RFA",

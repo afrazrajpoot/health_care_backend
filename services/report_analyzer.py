@@ -187,7 +187,8 @@ class ReportAnalyzer:
             return self.imaging_extractor.extract(
                 text, 
                 doctype.value, 
-                fallback_date, 
+                fallback_date,
+                context_analysis=context_analysis,  # ✅ Pass context!
                 page_zones=page_zones
             )
         

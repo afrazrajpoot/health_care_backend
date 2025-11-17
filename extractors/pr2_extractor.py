@@ -151,348 +151,357 @@ class PR2ExtractorChained:
             clinical_timeline = context_analysis.get("clinical_timeline", {})
             ambiguities = context_analysis.get("ambiguities_detected", [])
         
-        # Build context-aware system prompt for PR-2
+        # Final PR-2 System Prompt - Complete Workers' Compensation Focus
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are an expert medical documentation specialist analyzing a COMPLETE PR-2 Progress Report with CONTEXTUAL GUIDANCE.
+        You are an expert Workers' Compensation medical documentation specialist analyzing a COMPLETE PR-2 Progress Report.
 
-CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
-You are seeing the ENTIRE PR-2 document at once, allowing you to:
-- Track clinical progress across the entire treatment timeline
-- Understand treatment response and patient compliance
-- Identify patterns in symptom progression and functional improvement
-- Connect subjective complaints with objective findings over time
-- Provide comprehensive progress assessment without information loss
+        PRIMARY PURPOSE: Extract critical information for workers' compensation claims administrators to:
+        1. Assess work capacity and disability status
+        2. Process treatment authorization requests
+        3. Track patient progress and treatment effectiveness
+        4. Plan future care and return-to-work timeline
 
-CONTEXTUAL GUIDANCE PROVIDED:
-{context_guidance}
+        CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
+        You are seeing the ENTIRE PR-2 document at once, allowing you to:
+        - Track treatment effectiveness from baseline to current status
+        - Identify ALL treatment authorization requests
+        - Connect objective findings with work capacity changes
+        - Extract complete medication regimen and changes
 
-⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY):
+        CONTEXTUAL GUIDANCE PROVIDED:
+        {context_guidance}
 
-1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
-   - If a field/value is NOT explicitly mentioned in the document, return EMPTY string "" or empty list []
-   - DO NOT infer, assume, or extrapolate information
-   - DO NOT fill in "typical" or "common" progress patterns
-   - DO NOT use medical knowledge to "complete" incomplete information
-   
-   Examples:
-   ✅ CORRECT: If document says "Pain improved from 7/10 to 4/10", extract: "subjective_pain_improvement": "7/10 to 4/10"
-   ❌ WRONG: If document says "Pain improved", DO NOT extract: "subjective_pain_improvement": "7/10 to 4/10" (specific scores not stated)
-   ✅ CORRECT: Extract: "subjective_pain_improvement": "improved" (only what's stated)
+        ⚠️ CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY):
 
-2. **MEDICATIONS - ZERO TOLERANCE FOR ASSUMPTIONS**
-   - Extract ONLY medications explicitly listed in current medication sections
-   - Include dosage changes ONLY if explicitly stated
-   - DO NOT extract:
-     * Medications mentioned as discontinued
-     * Medications mentioned in past history only
-     * Medications recommended for future use
-   
-   Examples:
-   ✅ CORRECT: Document states "Continuing Gabapentin 300mg TID, increased Meloxicam to 15mg daily"
-   Extract: {{"current_medications": [{{"name": "Gabapentin", "dose": "300mg TID"}}, {{"name": "Meloxicam", "dose": "15mg daily"}}]}}
-   
-   ❌ WRONG: Document states "Previously took Oxycodone"
-   DO NOT extract Oxycodone in current_medications
+        1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
+        - If NOT explicitly mentioned, return EMPTY string "" or empty list []
+        - DO NOT infer, assume, extrapolate, or use medical knowledge to fill gaps
+        - DO NOT add typical values, standard dosages, or common restrictions
+        
+        2. **MEDICATIONS - ZERO TOLERANCE FOR ASSUMPTIONS**
+        - Extract ONLY medications explicitly listed as "current", "continuing", or "prescribed"
+        - Include dosage, frequency, and route ONLY if explicitly stated
+        - DO NOT extract discontinued, past, or recommended future medications (unless clearly marked as "new prescription")
+        - If document says "Patient on Gabapentin", extract ONLY: {{"name": "Gabapentin", "dose": ""}}
+        - If document says "Continue Gabapentin 300mg TID", extract: {{"name": "Gabapentin", "dose": "300mg TID"}}
 
-3. **EMPTY FIELDS ARE ACCEPTABLE - DO NOT FILL**
-   - It is BETTER to return an empty field than to guess
-   - If you cannot find information for a field, leave it empty
-   - DO NOT use phrases like "Not mentioned", "Not stated", "Unknown" - just return ""
-   
-   Examples:
-   ✅ CORRECT: If no functional improvement mentioned, return: "functional_improvement": ""
-   ❌ WRONG: Return: "functional_improvement": "Not assessed" (use empty string instead)
+        3. **WORK RESTRICTIONS - EXACT WORDING ONLY**
+        - Use EXACT phrases from document
+        - If document says "no lifting", extract "no lifting" (NOT "no lifting >10 lbs")
+        - If document says "modified duty", extract "modified duty" (NOT "modified duty with restrictions")
+        - DO NOT add weight limits, time limits, or specifics not explicitly stated
 
-4. **EXACT CLINICAL STATUS DESCRIPTORS**
-   - Use EXACT wording from document for clinical status
-   - DO NOT upgrade "stable" to "improved" or downgrade "worsened" to "stable"
-   - Capture nuanced descriptions: "slightly improved", "markedly worsened", "essentially unchanged"
-   
-   Examples:
-   ✅ CORRECT: Document says "Condition essentially unchanged"
-   Extract: "clinical_status": "essentially unchanged"
-   
-   ❌ WRONG: Document says "Condition essentially unchanged"
-   DO NOT extract: "clinical_status": "stable" (this changes the meaning)
+        4. **EMPTY FIELDS ARE BETTER THAN GUESSED FIELDS**
+        - If you cannot find information, leave field empty
+        - DO NOT use phrases like "Not mentioned", "Not stated", "Unknown" - just return ""
 
-5. **NO CLINICAL PROGNOSTICATION**
-   - DO NOT predict future progress based on current status
-   - DO NOT assume treatment effectiveness
-   - DO NOT infer patient compliance unless explicitly stated
-   
-   Examples:
-   ❌ WRONG: Document mentions "attending PT regularly"
-   DO NOT assume: "good compliance with treatment" (this is inference)
-   ✅ CORRECT: Extract: "pt_attendance": "regular" (if stated)
+        5. **NO CLINICAL ASSUMPTIONS OR PREDICTIONS**
+        - DO NOT infer patient compliance from attendance records
+        - DO NOT predict treatment effectiveness from partial data
+        - DO NOT extrapolate progress from single data points
 
-6. **VERIFICATION CHECKLIST BEFORE SUBMISSION**
-   Before returning your extraction, verify:
-   □ Every medication change has a direct quote in the document
-   □ Every status change is explicitly stated (not inferred from symptoms)
-   □ Every work status modification is directly from restrictions section
-   □ No fields are filled with "expected" or "typical" progress patterns
-   □ Empty fields are truly empty (not "Not mentioned" or "Unknown")
+        PR-2 EXTRACTION FOCUS - 4 CORE WORKERS' COMPENSATION AREAS:
 
-PR-2 SPECIFIC EXTRACTION FOCUS - 5 CRITICAL PROGRESS CATEGORIES:
+        ═══════════════════════════════════════════════════════════════════
+        I. WORK STATUS AND IMPAIRMENT (HIGHEST PRIORITY FOR WC CLAIMS)
+        ═══════════════════════════════════════════════════════════════════
 
-I. CLINICAL PROGRESS ASSESSMENT
-- Subjective improvement: Patient-reported symptom changes
-- Objective improvement: Examination findings compared to previous
-- Functional progress: ADL and mobility changes
-- Treatment response: How patient is responding to current interventions
+        This is the PRIMARY focus for claims administrators.
 
-II. CURRENT TREATMENT STATUS
-- Medication adherence and adjustments
-- Therapy attendance and participation
-- Injection/procedure responses
-- Compliance with home exercise program
+        **Key Elements to Extract:**
 
-III. WORK STATUS EVOLUTION
-- Changes in work capacity since last visit
-- Specific restriction modifications
-- Return-to-work progression timeline
-- Functional capacity evaluation results
+        A. CURRENT WORK STATUS (Use EXACT terminology from document)
+        - "Temporarily Totally Disabled (TTD)"
+        - "Temporarily Partially Disabled (TPD)"
+        - "Permanent and Stationary (P&S)" / "Maximum Medical Improvement (MMI)"
+        - "Released to Full Duty"
+        - "Released to Modified Duty"
+        - "Off work"
 
-IV. TREATMENT PLAN ADJUSTMENTS
-- Medication changes: dose adjustments, additions, discontinuations
-- Therapy modifications: frequency, duration, focus changes
-- Procedure recommendations: new injections, surgical considerations
-- Diagnostic updates: new imaging, test results
+        B. WORK LIMITATIONS/RESTRICTIONS (EXACT wording)
+        Extract SPECIFIC functional limitations as stated:
+        - Lifting: "No lifting >20 lbs" (if stated), NOT "lifting restrictions"
+        - Standing: "No prolonged standing" (exact phrase), NOT "limited standing"
+        - Sitting: "Sitting as tolerated" (if stated)
+        - Repetitive tasks: "No repetitive bending/twisting" (exact phrase)
+        - Hours: "4-hour work day" (if stated)
+        
+        ❌ WRONG: Document says "lifting restrictions" → DO NOT extract "no lifting >10 lbs"
+        ✅ CORRECT: Document says "no lifting over 25 pounds" → Extract "no lifting >25 lbs"
 
-V. FOLLOW-UP PLANNING
-- Next appointment timing and rationale
-- Milestones for next evaluation
-- Criteria for treatment success/failure
-- Contingency planning for lack of progress
+        C. WORK STATUS RATIONALE
+        - WHY has work status changed or remained the same?
+        - Link to objective findings: "Unable to return to work due to persistent 7/10 pain and limited ROM"
+        - Link to functional capacity: "Cleared for modified duty due to improved strength (4/5)"
 
-⚠️ FINAL REMINDER:
-- If information is NOT in the document, return EMPTY ("" or [])
-- NEVER assume, infer, or extrapolate progress
-- MEDICATIONS: Only extract current medications with explicit changes
-- It is BETTER to have empty fields than incorrect information
+        D. NEW OR CHANGED LIMITATIONS
+        - What changed since last report?
+        - "Lifting increased from 10 lbs to 20 lbs"
+        - "Standing tolerance improved from 2 hours to 4 hours"
 
-Now analyze this COMPLETE PR-2 Progress Report and extract ALL relevant progress information:
-""")
+        ═══════════════════════════════════════════════════════════════════
+        II. TREATMENT AUTHORIZATION REQUESTS (MOST TIME-SENSITIVE)
+        ═══════════════════════════════════════════════════════════════════
 
+        This directly impacts claims processing and must be extracted with precision.
+
+        **Key Elements to Extract:**
+
+        A. SPECIFIC TREATMENT REQUEST
+        - WHAT is being requested? Be exact.
+            * "Continue physical therapy 2x/week for 4 additional weeks"
+            * "MRI lumbar spine without contrast"
+            * "ESI L5-S1 for persistent radicular symptoms"
+            * "Increase Gabapentin from 300mg to 600mg TID"
+        
+        Include:
+        - Treatment type
+        - Frequency (if applicable)
+        - Duration (if applicable)
+        - Body part/location (if applicable)
+
+        B. MEDICAL NECESSITY/RATIONALE
+        - WHY is this treatment needed?
+        - Objective evidence: "MRI needed due to failed conservative care and positive straight leg raise"
+        - Progress evidence: "Continue PT due to 50% improvement in ROM after 6 sessions"
+        - Functional impact: "Injection recommended to enable return to work"
+
+        C. PRIOR AUTHORIZATION STATUS
+        - Was this treatment previously authorized?
+        - Is this a continuation or new request?
+
+        ═══════════════════════════════════════════════════════════════════
+        III. PATIENT PROGRESS AND CURRENT STATUS
+        ═══════════════════════════════════════════════════════════════════
+
+        Provides medical context for work capacity and treatment decisions.
+
+        **Key Elements to Extract:**
+
+        A. SUBJECTIVE IMPROVEMENT (Patient-Reported)
+        - Pain scores: "Pain decreased from 7/10 to 4/10" (exact numbers if stated)
+        - Symptom changes: "Patient reports improved sleep", "Numbness resolved"
+        - Functional improvements: "Able to walk 2 blocks vs. unable previously"
+
+        B. OBJECTIVE FINDINGS (Examination Results)
+        - ROM measurements: "L knee flexion 110° (improved from 90°)"
+        - Strength testing: "Quad strength 4/5 (improved from 3/5)"
+        - Gait: "Antalgic gait improved, now walks without limp"
+        - Physical exam: "Decreased swelling, full ROM achieved"
+
+        C. CURRENT MEDICATIONS (Complete List with Doses)
+        Extract ONLY medications explicitly listed as "current" or "continuing":
+        
+        Format: {{"name": "Drug name", "dose": "amount + frequency", "purpose": "indication if stated"}}
+        
+        Examples:
+        - "Gabapentin 300mg three times daily for neuropathic pain"
+        - "Meloxicam 15mg once daily"
+        - "Tramadol 50mg as needed for breakthrough pain"
+        
+        ❌ DO NOT include:
+        - Discontinued medications
+        - Past medications
+        - Medications mentioned in history only
+
+        D. MEDICATION CHANGES
+        - New medications prescribed
+        - Dosage adjustments
+        - Discontinued medications (with reason if stated)
+
+        ═══════════════════════════════════════════════════════════════════
+        IV. NEXT STEPS AND PLANNING
+        ═══════════════════════════════════════════════════════════════════
+
+        Dictates future claim management and timeline.
+
+        **Key Elements to Extract:**
+
+        A. FOLLOW-UP DATE
+        - When is next scheduled appointment?
+        - "Return in 4 weeks" or specific date if stated
+
+        B. SPECIALIST REFERRALS
+        - Requested referrals: "Referral to Orthopedic Surgery for surgical evaluation"
+        - Purpose of referral
+
+        C. MMI/P&S STATUS AND TIMING
+        - Is patient approaching MMI/P&S?
+        - "Anticipate P&S status in 6-8 weeks if current progress continues"
+        - Will a PR-3/PR-4 report be needed?
+
+        D. CRITICAL FINDINGS (TOP 3-5 MOST IMPORTANT ITEMS)
+        Extract ONLY the most actionable items for claims administrators:
+        
+        Priority items:
+        - Treatment authorization requests
+        - Work status changes
+        - Significant progress indicators
+        - Failed treatments requiring escalation
+        - Specialist referral needs
+        
+        DO NOT include:
+        - Routine administrative details
+        - Standard examination procedures
+        - Minor symptom fluctuations
+
+        ⚠️ EXTRACTION EXAMPLES:
+
+        Example 1 - Work Restrictions (EXACT wording):
+        ✅ CORRECT: Document states "Patient may lift up to 25 pounds occasionally, no repetitive bending"
+        Extract: ["No lifting >25 lbs occasionally", "No repetitive bending"]
+
+        ❌ WRONG: Document states "Patient has lifting restrictions"
+        DO NOT extract: ["No lifting >10 lbs"] (specific limit not stated)
+
+        Example 2 - Medication (EXACT details):
+        ✅ CORRECT: Document states "Current Medications: Gabapentin 300mg TID, Meloxicam 15mg daily"
+        Extract: [
+        {{"name": "Gabapentin", "dose": "300mg TID"}},
+        {{"name": "Meloxicam", "dose": "15mg daily"}}
+        ]
+
+        ❌ WRONG: Document states "Patient taking Gabapentin"
+        DO NOT extract: {{"name": "Gabapentin", "dose": "300mg TID"}} (dose not stated)
+
+        Example 3 - Authorization Request:
+        ✅ CORRECT: Document states "Request authorization for 6 additional PT sessions, 2x/week for 3 weeks, to continue strengthening program"
+        Extract: {{
+        "primary_request": "Continue physical therapy 2x/week for 3 weeks (6 sessions)",
+        "rationale": "Continue strengthening program"
+        }}
+
+        ⚠️ FINAL REMINDER:
+        - PRIMARY FOCUS: Work capacity, treatment authorization, patient progress, future planning
+        - MEDICATIONS: Include complete current medication list with exact doses
+        - WORK RESTRICTIONS: Use EXACT wording from document
+        - If information is NOT in document, return EMPTY ("" or [])
+        - ZERO tolerance for assumptions, inferences, or extrapolations
+
+        Now analyze this COMPLETE PR-2 Progress Report and extract ALL critical Workers' Compensation information:
+        """)
+
+        # Final PR-2 User Prompt - Complete Workers' Compensation Structure
         user_prompt = HumanMessagePromptTemplate.from_template("""
-COMPLETE PR-2 PROGRESS REPORT TEXT:
+        COMPLETE PR-2 PROGRESS REPORT TEXT:
 
-{full_document_text}
+        {full_document_text}
 
-Extract into COMPREHENSIVE structured JSON with all progress tracking details:
+        Extract into WORKERS' COMPENSATION structured JSON:
 
-{{
-  "report_metadata": {{
-    "report_type": "PR-2 Progress Report",
-    "report_date": "",
-    "evaluation_date": "",
-    "time_since_last_visit": "",
-    "next_scheduled_appointment": ""
-  }},
-  
-  "clinical_progress": {{
-    "treating_physician": {{
-      "name": "{primary_physician}",
-      "specialty": "",
-      "facility": ""
-    }},
-    "body_part_assessed": "",
-    "subjective_improvement": {{
-      "pain_level_changes": "",
-      "symptom_progression": "",
-      "patient_reported_function": "",
-      "compliance_with_treatment": ""
-    }},
-    "objective_findings": {{
-      "examination_changes": "",
-      "rom_improvement": "",
-      "strength_progress": "",
-      "functional_testing": ""
-    }},
-    "overall_clinical_status": ""
-  }},
-  
-  "current_treatment_status": {{
-    "medication_adherence": "",
-    "therapy_attendance": "",
-    "injection_procedure_response": "",
-    "home_exercise_compliance": "",
-    "treatment_barriers": ""
-  }},
-  
-  "medication_management": {{
-    "current_medications": [
-      {{
-        "name": "Gabapentin",
-        "dose": "300mg TID",
-        "change": "unchanged",
-        "effectiveness": "moderate pain relief"
-      }},
-      {{
-        "name": "Meloxicam",
-        "dose": "15mg daily",
-        "change": "increased from 7.5mg",
-        "effectiveness": "improved anti-inflammatory effect"
-      }}
-    ],
-    "recent_medication_changes": [
-      {{
-        "medication": "Meloxicam",
-        "change": "dose increased",
-        "date": "current visit",
-        "reason": "inadequate inflammation control"
-      }}
-    ],
-    "discontinued_medications": [
-      {{
-        "name": "Cyclobenzaprine",
-        "date_discontinued": "2 weeks ago",
-        "reason": "sedation side effects"
-      }}
-    ]
-  }},
-  
-  "therapy_progress": {{
-    "current_therapy_regimen": {{
-      "type": "Physical Therapy",
-      "frequency": "2x/week",
-      "focus_areas": ["L knee strengthening", "gait training"],
-      "duration_completed": "4 weeks of 6 week program"
-    }},
-    "therapy_response": {{
-      "strength_improvement": "quad strength improved from 3/5 to 4/5",
-      "mobility_gains": "gait pattern improved, less antalgic",
-      "pain_response": "pain with therapy decreased from 6/10 to 3/10",
-      "functional_improvement": "able to ascend stairs with rail vs. unable previously"
-    }},
-    "therapy_modifications": {{
-      "frequency_change": "",
-      "exercise_additions": "added balance exercises",
-      "exercise_removals": "discontinued painful squats",
-      "intensity_adjustment": "increased resistance on knee extension"
-    }}
-  }},
-  
-  "work_status_evolution": {{
-    "current_work_status": "Modified Duty",
-    "work_restrictions": [
-      "No lifting >15 lbs (increased from 10 lbs)",
-      "No prolonged standing >30 minutes",
-      "Limited stair climbing to 2 flights per day"
-    ],
-    "restriction_changes": {{
-      "lifting_improvement": "increased from 10 lbs to 15 lbs",
-      "standing_tolerance": "improved from 15 to 30 minutes",
-      "stair_climbing": "now able 2 flights vs. unable previously"
-    }},
-    "return_to_work_progression": {{
-      "current_phase": "modified duty",
-      "next_phase": "full duty with temporary restrictions",
-      "estimated_timeline": "4-6 weeks",
-      "criteria_for_advancement": "pain <3/10, full ROM, normal gait"
-    }}
-  }},
-  
-  "diagnostic_updates": {{
-    "recent_studies": [
-      {{
-        "test": "MRI L knee",
-        "date": "2 weeks ago",
-        "findings": "moderate joint effusion, meniscal tear unchanged",
-        "impact_on_treatment": "confirmed meniscal pathology, supports current conservative approach"
-      }}
-    ],
-    "pending_studies": [
-      {{
-        "test": "Follow-up x-ray",
-        "scheduled_date": "next visit",
-        "purpose": "assess arthritic progression"
-      }}
-    ]
-  }},
-  
-  "treatment_plan_adjustments": {{
-    "medication_changes": [
-      {{
-        "change": "Increase Gabapentin to 600mg TID",
-        "rationale": "inadequate neuropathic pain control",
-        "contingency": "if sedated, reduce to 300mg TID"
-      }}
-    ],
-    "therapy_modifications": [
-      {{
-        "modification": "Advance to aquatic therapy",
-        "rationale": "reduce weight-bearing stress",
-        "frequency": "1x/week for 4 weeks"
-      }}
-    ],
-    "procedure_recommendations": [
-      {{
-        "procedure": "L knee corticosteroid injection",
-        "rationale": "persistent effusion and inflammation",
-        "timing": "next 2 weeks if no improvement",
-        "contingency": "if ineffective, consider ortho consult"
-      }}
-    ]
-  }},
-  
-  "follow_up_planning": {{
-    "next_appointment": {{
-      "date": "4 weeks",
-      "purpose": "Re-evaluate progress with new medication dose",
-      "milestones_expected": "Pain <4/10, independent stair climbing, full ROM"
-    }},
-    "contingency_plans": [
-      {{
-        "scenario": "No improvement with increased Gabapentin",
-        "action": "Consider switching to Pregabalin",
-        "timing": "next appointment"
-      }},
-      {{
-        "scenario": "Worsened pain or function",
-        "action": "Move appointment sooner, consider injection",
-        "timing": "contact office immediately"
-      }}
-    ],
-    "long_term_goals": [
-      "Return to full duty work in 8-12 weeks",
-      "Independent ADLs without assistive device",
-      "Pain management without opioid medications"
-    ]
-  }},
-  
-  "critical_progress_indicators": [
-    {{
-      "indicator": "Pain reduction from 7/10 to 4/10",
-      "significance": "good medication response",
-      "action": "continue current pharmacologic approach"
-    }},
-    {{
-      "indicator": "Lifting capacity increased 10 lbs to 15 lbs",
-      "significance": "functional improvement",
-      "action": "continue strengthening program"
-    }},
-    {{
-      "indicator": "Persistent knee effusion on MRI",
-      "significance": "ongoing inflammation",
-      "action": "consider corticosteroid injection"
-    }},
-    {{
-      "indicator": "Improved gait pattern",
-      "significance": "therapy effectiveness",
-      "action": "advance gait training exercises"
-    }}
-  ],
-  
-  "overall_assessment": {{
-    "progress_rating": "good",
-    "treatment_effectiveness": "moderately effective",
-    "patient_cooperation": "good compliance",
-    "prognosis": "continued gradual improvement expected",
-    "major_concerns": "persistent effusion may require intervention"
-  }}
-}}
-""")
+        {{
+        "report_metadata": {{
+            "report_type": "PR-2 Progress Report",
+            "report_date": "",
+            "visit_date": "",
+            "time_since_injury": "",
+            "time_since_last_visit": "",
+            "reason_for_report": []
+        }},
+        
+        "patient_visit_info": {{
+            "patient_name": "",
+            "patient_dob": "",
+            "patient_age": "",
+            "date_of_injury": "",
+            "occupation": "",
+            "employer": "",
+            "claims_administrator": "",
+            "treating_physician": {{
+            "name": "{primary_physician}",
+            "specialty": "",
+            "facility": ""
+            }}
+        }},
+        
+        "chief_complaint": {{
+            "primary_complaint": "",
+            "location": "",
+            "description": ""
+        }},
+        
+        "subjective_assessment": {{
+            "pain_score_current": "",
+            "pain_score_previous": "",
+            "symptom_changes": "",
+            "functional_status_patient_reported": "",
+            "patient_compliance": ""
+        }},
+        
+        "objective_status": {{
+            "physical_exam_findings": "",
+            "rom_measurements": "",
+            "strength_testing": "",
+            "gait_assessment": "",
+            "neurological_findings": "",
+            "functional_limitations_observed": []
+        }},
+        
+        "diagnosis_icd10": {{
+            "primary_diagnosis": "",
+            "icd10_code": "",
+            "secondary_diagnoses": []
+        }},
+        
+        "current_medications": [],
+        
+        "medication_changes": {{
+            "new_medications": [],
+            "dosage_changes": [],
+            "discontinued_medications": []
+        }},
+        
+        "prior_treatment": {{
+            "completed_treatments": [],
+            "therapy_sessions_completed": "",
+            "procedures_performed": [],
+            "imaging_studies_completed": []
+        }},
+        
+        "treatment_effectiveness": {{
+            "patient_response": "",
+            "objective_improvements": [],
+            "functional_gains": "",
+            "barriers_to_progress": ""
+        }},
+        
+        "treatment_authorization_request": {{
+            "primary_request": "",
+            "secondary_requests": [],
+            "requested_frequency": "",
+            "requested_duration": "",
+            "body_part_location": "",
+            "medical_necessity_rationale": "",
+            "objective_evidence_supporting_request": ""
+        }},
+        
+        "work_status": {{
+            "current_status": "",
+            "status_effective_date": "",
+            "work_limitations": [],
+            "work_status_rationale": "",
+            "changes_from_previous_status": "",
+            "expected_return_to_work_date": ""
+        }},
+        
+        "follow_up_plan": {{
+            "next_appointment_date": "",
+            "purpose_of_next_visit": "",
+            "specialist_referrals_requested": [],
+            "mmi_ps_anticipated_date": "",
+            "return_sooner_if": ""
+        }},
+        
+        "critical_findings": []
+        }}
+
+        ⚠️ MANDATORY EXTRACTION RULES:
+        1. "current_medications": Extract ALL current medications with exact doses from document
+        2. "work_limitations": Use EXACT wording (don't add weight/time limits not stated)
+        3. "treatment_authorization_request": The MOST CRITICAL field - be specific
+        4. "critical_findings": Only 3-5 most actionable items for claims administrator
+        5. Empty fields are acceptable if information not stated in document
+        """)
 
         # Build context guidance summary
         context_guidance_text = f"""
@@ -605,255 +614,315 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
 
     def _build_progress_narrative_summary(self, data: Dict, doc_type: str, fallback_date: str) -> str:
         """
-        Build comprehensive narrative summary for PR-2 progress tracking.
-        
-        PR-2 style: "Clinical Status: [progress]. Treatment: [current interventions]. 
-        Work Status: [restrictions]. Plan: [next steps]."
+        Build a clean, readable narrative summary for PR-2 progress tracking, with clear sections and simple text formatting (not JSON/dict).
         """
-        
-        # Extract all progress data
-        report_metadata = data.get("report_metadata", {})
-        clinical_progress = data.get("clinical_progress", {})
-        current_treatment = data.get("current_treatment_status", {})
-        work_status = data.get("work_status_evolution", {})
-        treatment_plan = data.get("treatment_plan_adjustments", {})
-        follow_up = data.get("follow_up_planning", {})
-        
-        # Helper function for safe string conversion
-        def safe_str(value, default=""):
-            if not value:
-                return default
-            if isinstance(value, list):
-                return ", ".join([str(x) for x in value if x])
-            return str(value)
-        
-        # Build narrative sections
-        narrative_parts = []
-        
-        # Section 1: CLINICAL STATUS & PROGRESS
-        clinical_text = self._build_clinical_progress_narrative(clinical_progress, current_treatment)
-        if clinical_text:
-            narrative_parts.append(f"**Clinical Status:** {clinical_text}")
-        
-        # Section 2: TREATMENT RESPONSE & ADJUSTMENTS
-        treatment_text = self._build_treatment_narrative(treatment_plan, data.get("medication_management", {}))
-        if treatment_text:
-            narrative_parts.append(f"**Treatment:** {treatment_text}")
-        
-        # Section 3: WORK STATUS EVOLUTION
-        work_text = self._build_work_status_narrative(work_status)
-        if work_text:
-            narrative_parts.append(f"**Work Status:** {work_text}")
-        
-        # Section 4: FOLLOW-UP PLAN
-        plan_text = self._build_followup_plan_narrative(follow_up)
-        if plan_text:
-            narrative_parts.append(f"**Plan:** {plan_text}")
-        
-        # Section 5: PHYSICIAN & DATE CONTEXT
-        treating_physician = clinical_progress.get("treating_physician", {})
-        physician_name = safe_str(treating_physician.get("name", ""))
-        report_date = report_metadata.get("report_date", fallback_date)
-        
-        if physician_name:
-            context_line = f"PR-2 by {physician_name} on {report_date}"
-            narrative_parts.insert(0, context_line)
-        
-        # Join with proper formatting
-        full_narrative = "\n\n".join(narrative_parts)
-        
-        logger.info(f"📝 PR-2 Narrative summary generated: {len(full_narrative)} characters")
-        return full_narrative
+        def list_to_lines(lst):
+            if not lst:
+                return ""
+            return "\n".join(f"- {item}" for item in lst if item)
 
-    def _build_clinical_progress_narrative(self, clinical_progress: Dict, current_treatment: Dict) -> str:
-        """Build clinical progress narrative section"""
-        progress_parts = []
-        
-        # Overall status
-        overall_status = clinical_progress.get("overall_clinical_status", "")
-        if overall_status:
-            progress_parts.append(overall_status)
-        
-        # Subjective improvements
-        subjective = clinical_progress.get("subjective_improvement", {})
-        pain_changes = subjective.get("pain_level_changes", "")
-        symptom_progression = subjective.get("symptom_progression", "")
-        
-        if pain_changes:
-            progress_parts.append(f"Pain: {pain_changes}")
-        elif symptom_progression:
-            progress_parts.append(symptom_progression)
-        
-        # Objective findings
-        objective = clinical_progress.get("objective_findings", {})
-        rom_improvement = objective.get("rom_improvement", "")
-        strength_progress = objective.get("strength_progress", "")
-        
-        if rom_improvement:
-            progress_parts.append(f"ROM: {rom_improvement}")
-        if strength_progress:
-            progress_parts.append(f"Strength: {strength_progress}")
-        
-        # Treatment compliance
-        compliance = current_treatment.get("medication_adherence", "") or current_treatment.get("therapy_attendance", "")
-        if compliance:
-            progress_parts.append(f"Compliance: {compliance}")
-        
-        return ", ".join(progress_parts) if progress_parts else "Progress not specified"
+        # Section 1: Work Status and Impairment
+        ws = data.get('1. Work Status and Impairment', {})
+        ws_lines = []
+        if ws:
+            if ws.get('Work Status'):
+                ws_lines.append(f"Work Status: {ws['Work Status']}")
+            if ws.get('New/Changed Limitations'):
+                ws_lines.append("New/Changed Limitations:")
+                ws_lines.append(list_to_lines(ws['New/Changed Limitations']))
 
-    def _build_treatment_narrative(self, treatment_plan: Dict, medication_mgmt: Dict) -> str:
-        """Build treatment response and adjustments narrative"""
-        treatment_items = []
-        
-        # Medication changes
-        recent_changes = medication_mgmt.get("recent_medication_changes", [])
-        if recent_changes and isinstance(recent_changes, list):
-            for change in recent_changes[:2]:  # Limit to 2 most recent
-                if isinstance(change, dict):
-                    med = change.get("medication", "")
-                    change_desc = change.get("change", "")
-                    if med and change_desc:
-                        treatment_items.append(f"{med} {change_desc}")
-        
-        # Therapy modifications
-        therapy_mods = treatment_plan.get("therapy_modifications", [])
-        if therapy_mods and isinstance(therapy_mods, list):
-            for mod in therapy_mods[:2]:
-                if isinstance(mod, dict):
-                    modification = mod.get("modification", "")
-                    if modification:
-                        treatment_items.append(modification)
-        
-        # Procedure recommendations
-        procedures = treatment_plan.get("procedure_recommendations", [])
-        if procedures and isinstance(procedures, list):
-            for proc in procedures[:2]:
-                if isinstance(proc, dict):
-                    procedure = proc.get("procedure", "")
-                    if procedure:
-                        treatment_items.append(procedure)
-        
-        return "; ".join(treatment_items) if treatment_items else "Continuing current treatment"
+        # Section 2: Treatment Authorization Requests
+        ta = data.get('2. Treatment Authorization Requests', {})
+        ta_lines = []
+        if ta:
+            if ta.get('Specific Request'):
+                ta_lines.append(f"Specific Request: {ta['Specific Request']}")
+            if ta.get('Medical Necessity/Rationale'):
+                ta_lines.append(f"Medical Necessity/Rationale: {ta['Medical Necessity/Rationale']}")
+            if ta.get('Objective Evidence Supporting Request'):
+                ta_lines.append(f"Objective Evidence Supporting Request: {ta['Objective Evidence Supporting Request']}")
 
-    def _build_work_status_narrative(self, work_status: Dict) -> str:
-        """Build work status evolution narrative"""
+        # Section 3: Patient Progress and Current Status
+        pr = data.get('3. Patient Progress and Current Status', {})
+        pr_lines = []
+        if pr:
+            if pr.get('Subjective Improvement'):
+                pr_lines.append(f"Subjective Improvement: {pr['Subjective Improvement']}")
+            obj = pr.get('Objective Findings', {})
+            if obj:
+                pr_lines.append("Objective Findings:")
+                for k, v in obj.items():
+                    if isinstance(v, dict):
+                        pr_lines.append(f"- {k}: " + ", ".join(f"{sk} {sv}" for sk, sv in v.items() if sv))
+                    elif v:
+                        pr_lines.append(f"- {k}: {v}")
+            if pr.get('Functional Gains'):
+                pr_lines.append(f"Functional Gains: {pr['Functional Gains']}")
+
+        # Section 4: Next Steps and Planning
+        np = data.get('4. Next Steps and Planning', {})
+        np_lines = []
+        if np:
+            if np.get('Follow-up Date'):
+                np_lines.append(f"Follow-up Date: {np['Follow-up Date']}")
+
+        # Compose the final narrative
+        sections = []
+        if ws_lines:
+            sections.append("**1. Work Status and Impairment**\n" + "\n".join(ws_lines))
+        if ta_lines:
+            sections.append("**2. Treatment Authorization Requests**\n" + "\n".join(ta_lines))
+        if pr_lines:
+            sections.append("**3. Patient Progress and Current Status**\n" + "\n".join(pr_lines))
+        if np_lines:
+            sections.append("**4. Next Steps and Planning**\n" + "\n".join(np_lines))
+
+        narrative = "\n\n".join(sections)
+        logger.info(f"📝 PR-2 Narrative summary generated: {len(narrative)} characters (plain text)")
+        return narrative
+
+    def _build_clinical_status_narrative_new(self, subjective: Dict, objective: Dict, effectiveness: Dict) -> str:
+        """Build clinical status narrative from NEW structure"""
+        status_parts = []
+        
+        # Pain scores
+        pain_current = subjective.get("pain_score_current", "")
+        pain_previous = subjective.get("pain_score_previous", "")
+        if pain_current and pain_previous:
+            status_parts.append(f"Pain improved from {pain_previous} to {pain_current}")
+        elif pain_current:
+            status_parts.append(f"Pain: {pain_current}")
+        
+        # Symptom changes
+        symptom_changes = subjective.get("symptom_changes", "")
+        if symptom_changes:
+            status_parts.append(symptom_changes)
+        
+        # Patient response
+        patient_response = effectiveness.get("patient_response", "")
+        if patient_response:
+            status_parts.append(patient_response)
+        
+        # Objective improvements
+        obj_improvements = effectiveness.get("objective_improvements", [])
+        if obj_improvements and isinstance(obj_improvements, list):
+            status_parts.extend([str(imp) for imp in obj_improvements[:2] if imp])
+        
+        # Functional gains
+        functional_gains = effectiveness.get("functional_gains", "")
+        if functional_gains:
+            status_parts.append(f"Function: {functional_gains}")
+        
+        return ", ".join(status_parts[:5]) if status_parts else "Status unchanged"
+
+    def _build_medications_narrative_new(self, current_medications: list, medication_changes: Dict) -> str:
+        """Build medications narrative - CRITICAL for summary"""
+        med_parts = []
+        
+        # Current medications
+        if current_medications and isinstance(current_medications, list):
+            for med in current_medications[:5]:  # Max 5 in summary
+                if isinstance(med, dict):
+                    med_name = med.get("name", "")
+                    med_dose = med.get("dose", "")
+                    if med_name:
+                        if med_dose:
+                            med_parts.append(f"{med_name} {med_dose}")
+                        else:
+                            med_parts.append(med_name)
+                elif isinstance(med, str) and med:
+                    med_parts.append(med)
+        
+        # Medication changes (additions/adjustments)
+        new_meds = medication_changes.get("new_medications", [])
+        if new_meds and isinstance(new_meds, list):
+            for new_med in new_meds[:2]:
+                if isinstance(new_med, dict):
+                    name = new_med.get("name", "")
+                    if name:
+                        med_parts.append(f"NEW: {name}")
+                elif new_med:
+                    med_parts.append(f"NEW: {new_med}")
+        
+        return ", ".join(med_parts) if med_parts else ""
+
+    def _build_authorization_narrative_new(self, treatment_auth: Dict) -> str:
+        """Build treatment authorization request narrative"""
+        auth_parts = []
+        
+        # Primary request
+        primary = treatment_auth.get("primary_request", "")
+        if primary:
+            auth_parts.append(primary)
+        
+        # Secondary requests
+        secondary = treatment_auth.get("secondary_requests", [])
+        if secondary and isinstance(secondary, list):
+            for req in secondary[:2]:
+                if req:
+                    auth_parts.append(str(req))
+        
+        # Rationale if no requests
+        if not auth_parts:
+            rationale = treatment_auth.get("medical_necessity_rationale", "")
+            if rationale:
+                return f"Continue current care ({rationale})"
+        
+        return "; ".join(auth_parts) if auth_parts else ""
+
+    def _build_work_status_narrative_new(self, work_status: Dict) -> str:
+        """Build work status narrative from NEW structure"""
         parts = []
         
         # Current status
-        current = work_status.get("current_work_status", "")
+        current = work_status.get("current_status", "")
         if current:
             parts.append(current)
         
-        # Restriction changes
-        restriction_changes = work_status.get("restriction_changes", {})
-        if restriction_changes:
-            for change_type, change_desc in restriction_changes.items():
-                if change_desc and isinstance(change_desc, str):
-                    parts.append(change_desc)
-        
-        # Specific restrictions
-        restrictions = work_status.get("work_restrictions", [])
-        if restrictions and isinstance(restrictions, list):
-            # Take most significant 2 restrictions
-            significant_restrictions = []
-            for restriction in restrictions:
-                if isinstance(restriction, str) and restriction:
-                    significant_restrictions.append(restriction)
-                elif isinstance(restriction, dict) and restriction.get("restriction"):
-                    significant_restrictions.append(restriction.get("restriction"))
+        # Work limitations (EXACT wording)
+        limitations = work_status.get("work_limitations", [])
+        if limitations and isinstance(limitations, list):
+            flat_limitations = []
+            for limit in limitations:
+                if isinstance(limit, list):
+                    flat_limitations.extend([str(x) for x in limit if x])
+                elif limit:
+                    flat_limitations.append(str(limit))
             
-            if significant_restrictions:
-                parts.extend(significant_restrictions[:2])
+            if flat_limitations:
+                parts.extend(flat_limitations[:3])  # Max 3 limitations
+        
+        # Changes from previous
+        changes = work_status.get("changes_from_previous_status", "")
+        if changes:
+            parts.append(f"Change: {changes}")
         
         return ", ".join(parts) if parts else "Work status unchanged"
 
-    def _build_followup_plan_narrative(self, follow_up: Dict) -> str:
-        """Build follow-up planning narrative"""
+    def _build_followup_narrative_new(self, follow_up: Dict) -> str:
+        """Build follow-up plan narrative from NEW structure"""
         plan_items = []
         
         # Next appointment
-        next_appt = follow_up.get("next_appointment", {})
+        next_appt = follow_up.get("next_appointment_date", "")
         if next_appt:
-            timing = next_appt.get("date", "")
-            purpose = next_appt.get("purpose", "")
-            if timing:
-                plan_items.append(f"Follow-up in {timing}")
-            elif purpose:
-                plan_items.append(purpose)
+            plan_items.append(f"Follow-up: {next_appt}")
         
-        # Contingency plans
-        contingencies = follow_up.get("contingency_plans", [])
-        if contingencies and isinstance(contingencies, list):
-            for contingency in contingencies[:1]:  # Just the primary contingency
-                if isinstance(contingency, dict):
-                    scenario = contingency.get("scenario", "")
-                    action = contingency.get("action", "")
-                    if scenario and action:
-                        plan_items.append(f"If {scenario.lower()}: {action}")
+        # Purpose
+        purpose = follow_up.get("purpose_of_next_visit", "")
+        if purpose:
+            plan_items.append(purpose)
         
-        # Long-term goals
-        goals = follow_up.get("long_term_goals", [])
-        if goals and isinstance(goals, list):
-            primary_goal = goals[0] if goals else ""
-            if primary_goal and isinstance(primary_goal, str):
-                plan_items.append(f"Goal: {primary_goal}")
-            elif primary_goal and isinstance(primary_goal, dict) and primary_goal.get("goal"):
-                plan_items.append(f"Goal: {primary_goal.get('goal')}")
+        # Specialist referrals
+        referrals = follow_up.get("specialist_referrals_requested", [])
+        if referrals and isinstance(referrals, list):
+            for ref in referrals[:2]:
+                if isinstance(ref, dict):
+                    specialty = ref.get("specialty", "")
+                    if specialty:
+                        plan_items.append(f"Refer to {specialty}")
+                elif ref:
+                    plan_items.append(f"Refer to {ref}")
         
-        return "; ".join(plan_items) if plan_items else "Routine follow-up planned"
+        # MMI/P&S anticipated
+        mmi_date = follow_up.get("mmi_ps_anticipated_date", "")
+        if mmi_date:
+            plan_items.append(f"Anticipated MMI: {mmi_date}")
+        
+        return "; ".join(plan_items) if plan_items else "Routine follow-up"
 
+    
     def _get_fallback_result(self, fallback_date: str) -> Dict:
-        """Return minimal fallback result structure for PR-2"""
+        """Return minimal fallback result structure matching NEW WC structure"""
         return {
             "report_metadata": {
                 "report_type": "PR-2 Progress Report",
                 "report_date": fallback_date,
-                "evaluation_date": "",
+                "visit_date": "",
+                "time_since_injury": "",
                 "time_since_last_visit": "",
-                "next_scheduled_appointment": ""
+                "reason_for_report": []
             },
-            "clinical_progress": {
+            "patient_visit_info": {
+                "patient_name": "",
+                "patient_dob": "",
+                "patient_age": "",
+                "date_of_injury": "",
+                "occupation": "",
+                "employer": "",
+                "claims_administrator": "",
                 "treating_physician": {
                     "name": "",
                     "specialty": "",
                     "facility": ""
-                },
-                "body_part_assessed": "",
-                "subjective_improvement": {
-                    "pain_level_changes": "",
-                    "symptom_progression": "",
-                    "patient_reported_function": "",
-                    "compliance_with_treatment": ""
-                },
-                "objective_findings": {
-                    "examination_changes": "",
-                    "rom_improvement": "",
-                    "strength_progress": "",
-                    "functional_testing": ""
-                },
-                "overall_clinical_status": ""
+                }
             },
-            "current_treatment_status": {
-                "medication_adherence": "",
-                "therapy_attendance": "",
-                "injection_procedure_response": "",
-                "home_exercise_compliance": "",
-                "treatment_barriers": ""
+            "chief_complaint": {
+                "primary_complaint": "",
+                "location": "",
+                "description": ""
             },
-            "work_status_evolution": {
-                "current_work_status": "",
-                "work_restrictions": [],
-                "restriction_changes": {},
-                "return_to_work_progression": {}
+            "subjective_assessment": {
+                "pain_score_current": "",
+                "pain_score_previous": "",
+                "symptom_changes": "",
+                "functional_status_patient_reported": "",
+                "patient_compliance": ""
             },
-            "treatment_plan_adjustments": {
-                "medication_changes": [],
-                "therapy_modifications": [],
-                "procedure_recommendations": []
+            "objective_status": {
+                "physical_exam_findings": "",
+                "rom_measurements": "",
+                "strength_testing": "",
+                "gait_assessment": "",
+                "neurological_findings": "",
+                "functional_limitations_observed": []
             },
-            "follow_up_planning": {
-                "next_appointment": {},
-                "contingency_plans": [],
-                "long_term_goals": []
-            }
+            "diagnosis_icd10": {
+                "primary_diagnosis": "",
+                "icd10_code": "",
+                "secondary_diagnoses": []
+            },
+            "current_medications": [],
+            "medication_changes": {
+                "new_medications": [],
+                "dosage_changes": [],
+                "discontinued_medications": []
+            },
+            "prior_treatment": {
+                "completed_treatments": [],
+                "therapy_sessions_completed": "",
+                "procedures_performed": [],
+                "imaging_studies_completed": []
+            },
+            "treatment_effectiveness": {
+                "patient_response": "",
+                "objective_improvements": [],
+                "functional_gains": "",
+                "barriers_to_progress": ""
+            },
+            "treatment_authorization_request": {
+                "primary_request": "",
+                "secondary_requests": [],
+                "requested_frequency": "",
+                "requested_duration": "",
+                "body_part_location": "",
+                "medical_necessity_rationale": "",
+                "objective_evidence_supporting_request": ""
+            },
+            "work_status": {
+                "current_status": "",
+                "status_effective_date": "",
+                "work_limitations": [],
+                "work_status_rationale": "",
+                "changes_from_previous_status": "",
+                "expected_return_to_work_date": ""
+            },
+            "follow_up_plan": {
+                "next_appointment_date": "",
+                "purpose_of_next_visit": "",
+                "specialist_referrals_requested": [],
+                "mmi_ps_anticipated_date": "",
+                "return_sooner_if": ""
+            },
+            "critical_findings": []
         }
