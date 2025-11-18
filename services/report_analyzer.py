@@ -1,22 +1,575 @@
+"""
+Main report analyzer orchestrator with LLM chaining and verification.
+Coordinates all extractors and maintains the extraction pipeline.
+"""
+import logging
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+from dataclasses import asdict
+from langchain_openai import AzureChatOpenAI
+
+from config.settings import CONFIG
+from models.data_models import DocumentType, ExtractionResult
+from utils.document_detector import detect_document_type
+from utils.extraction_verifier import ExtractionVerifier
+from utils.document_context_analyzer import DocumentContextAnalyzer
+from extractors.qme_extractor import QMEExtractorChained
+from extractors.imaging_extractor import ImagingExtractorChained
+from extractors.pr2_extractor import PR2ExtractorChained
+from extractors.consult_extractor import ConsultExtractorChained
+from extractors.simple_extractor import SimpleExtractor
+# from extractors.decision_extractor import DecisionDocumentExtractor  # NEW: Import the decision extractor
+from extractors.ur_extractor import DecisionDocumentExtractor  # NEW: Import the decision extractor
+from extractors.formal_medical_extractor import FormalMedicalReportExtractor
+
+logger = logging.getLogger("document_ai")
+
+
+class ReportAnalyzer:
+    """
+    Enhanced orchestrator with LLM chaining and verification.
+    Maintains backward compatibility while adding robustness.
+    """
+    
+    def __init__(self):
+        """Initialize LLM and all extraction components"""
+        self.llm = AzureChatOpenAI(
+            azure_endpoint=CONFIG.get("azure_openai_endpoint"),
+            api_key=CONFIG.get("azure_openai_api_key"),
+            deployment_name=CONFIG.get("azure_openai_deployment"),
+            api_version=CONFIG.get("azure_openai_api_version"),
+            temperature=0.0,
+            timeout=120
+        )
+        
+        # Create a second LLM instance for analysis (can use same or different deployment)
+        self.analysis_llm = AzureChatOpenAI(
+            azure_endpoint=CONFIG.get("azure_openai_endpoint"),
+            api_key=CONFIG.get("azure_openai_api_key"),
+            deployment_name=CONFIG.get("azure_openai_deployment"),  # Can use same or different deployment
+            api_version=CONFIG.get("azure_openai_api_version"),
+            temperature=0.1,  # Slightly higher temperature for analysis
+            timeout=120
+        )
+        
+        # No longer need DocumentTypeDetector instance; use detect_document_type function
+        self.verifier = ExtractionVerifier(self.llm)
+        self.document_analyzer = DocumentContextAnalyzer(self.analysis_llm)
+        
+        # Initialize specialized extractors with dual LLMs
+        self.qme_extractor = QMEExtractorChained(self.llm)
+        self.imaging_extractor = ImagingExtractorChained(self.llm)
+        self.pr2_extractor = PR2ExtractorChained(self.llm)
+        self.consult_extractor = ConsultExtractorChained(self.llm)
+        self.simple_extractor = SimpleExtractor(self.llm)
+        self.decision_extractor = DecisionDocumentExtractor(self.llm)  # NEW: Initialize decision extractor
+        self.formal_medical_extractor = FormalMedicalReportExtractor(self.llm)
+        
+        logger.info("✅ ReportAnalyzer initialized with all extractors and dual-LLM support")
+    
+    def compare_with_previous_documents(
+        self, 
+        current_raw_text: str,
+        page_zones: Optional[Dict[str, Dict[str, str]]] = None
+    ) -> Dict[str, str]:
+        """
+        Main extraction pipeline - returns dictionary with both summaries.
+        
+        Args:
+            current_raw_text: Raw document text to extract
+            page_zones: Per-page zone extraction {page_num: {header, body, footer, signature}}
+            
+        Returns:
+            Dict with 'long_summary' and 'short_summary'
+        """
+        try:
+            # extract_document returns dict with both summaries
+            result_dict = self.extract_document(current_raw_text, page_zones)
+            
+            # Return the dictionary directly (no bullet points)
+            return result_dict
+            
+        except Exception as e:
+            logger.error(f"❌ Extraction pipeline failed: {e}")
+            fallback_date = datetime.now().strftime("%m/%d/%y")
+            error_msg = f"{fallback_date}: Extraction failed - manual review required"
+            return {
+                "long_summary": error_msg,
+                "short_summary": error_msg
+            }
+    
+    def extract_document(self, text: str, page_zones: Optional[Dict] = None) -> Dict[str, str]:
+        """
+        Enhanced pipeline with context analysis - returns dictionary with both summaries.
+        
+        Args:
+            text: Document text to extract
+            page_zones: Per-page zone extraction
+            
+        Returns:
+            Dict with 'long_summary' and 'short_summary'
+        """
+        fallback_date = datetime.now().strftime("%m/%d/%y")
+        
+        try:
+            # Stage 0: Analyze document context
+            logger.info("🧠 Stage 0: Analyzing document context...")
+            context_analysis = self.document_analyzer.analyze_document_structure(
+                text=text,
+                doc_type_hint=None
+            )
+            
+            # Stage 1: Detect document type
+            detection_result = detect_document_type(text)
+            doc_type_str = detection_result.get("doc_type", "Unknown")
+            
+            # Update context analysis with detected type
+            context_analysis["detected_doc_type"] = doc_type_str
+            
+            logger.info(f"📄 Document type: {doc_type_str}")
+            
+            # Log context analysis details
+            if context_analysis:
+                primary_physician = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
+                focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
+                
+                logger.info(f"🎯 Critical sections identified: {focus_sections}")
+                logger.info(f"👨‍⚕️ Primary physician: {primary_physician.get('name', 'Unknown')}")
+                logger.info(f"   Role: {primary_physician.get('role', 'Unknown')}, Confidence: {primary_physician.get('confidence', 'low')}")
+            
+            # Convert to DocumentType enum
+            doc_type = self._parse_document_type(doc_type_str)
+            
+            # Stage 2: Context-aware extraction - get dictionary with both summaries
+            result_dict = self._route_to_extractor_with_context(
+                text=text,
+                doctype=doc_type,
+                fallback_date=fallback_date,
+                page_zones=page_zones,
+                context_analysis=context_analysis
+            )
+            
+            logger.info(f"✅ Extraction complete")
+            logger.info(f"   Long summary: {len(result_dict.get('long_summary', ''))} chars")
+            logger.info(f"   Short summary: {result_dict.get('short_summary', '')}")
+            
+            return result_dict
+            
+        except Exception as e:
+            logger.error(f"❌ Extraction failed: {e}", exc_info=True)
+            error_msg = f"{fallback_date}: Extraction failed - manual review required"
+            return {
+                "long_summary": error_msg,
+                "short_summary": error_msg
+            }
+
+    def _route_to_extractor_with_context(
+            self,
+            text: str,
+            doctype: DocumentType,
+            fallback_date: str,
+            page_zones: Optional[Dict],
+            context_analysis: Dict
+        ) -> Dict[str, str]:
+            """
+            Route document to appropriate extractor WITH context analysis.
+            Returns dictionary with both summaries.
+            """
+            
+            # QME/AME/IME - use context-aware extraction (already returns dict)
+            if doctype in [DocumentType.QME, DocumentType.AME, DocumentType.IME]:
+                logger.info(f"🎯 Routing to QME extractor WITH context analysis")
+                qme_result = self.qme_extractor.extract(
+                    text=text,
+                    doc_type=doctype.value,
+                    fallback_date=fallback_date,
+                    page_zones=page_zones,
+                    context_analysis=context_analysis,
+                    raw_text=None
+                )
+                if isinstance(qme_result, dict):
+                    return qme_result
+                else:
+                    return {
+                        "long_summary": str(qme_result) if qme_result else f"{fallback_date}: QME extraction completed",
+                        "short_summary": f"{fallback_date}: QME report processed"
+                    }
+            
+            # NEW: Decision Documents - UR/IMR, Appeals, Authorizations, RFA, DFR
+            elif doctype in [DocumentType.UR, DocumentType.IMR, DocumentType.APPEAL, 
+                            DocumentType.AUTHORIZATION, DocumentType.RFA, DocumentType.DFR]:
+                logger.info(f"🎯 Routing to Decision Document extractor for {doctype.value}")
+                decision_result = self.decision_extractor.extract(
+                    text=text,
+                    doc_type=doctype.value,
+                    fallback_date=fallback_date,
+                    page_zones=page_zones,
+                    context_analysis=context_analysis,
+                    raw_text=None
+                )
+                if isinstance(decision_result, dict):
+                    return decision_result
+                else:
+                    return {
+                        "long_summary": str(decision_result) if decision_result else f"{fallback_date}: {doctype.value} extraction completed",
+                        "short_summary": f"{fallback_date}: {doctype.value} decision processed"
+                    }
+
+            # NEW: Formal Medical Reports - Using your actual enum values
+            elif doctype in [DocumentType.SURGERY_REPORT, DocumentType.ANESTHESIA_REPORT, 
+                            DocumentType.PATHOLOGY, DocumentType.BIOPSY, DocumentType.GENETIC_TESTING,
+                            DocumentType.CARDIOLOGY, DocumentType.SLEEP_STUDY, DocumentType.DISCHARGE,
+                            DocumentType.ADMISSION_NOTE, DocumentType.HOSPITAL_COURSE, DocumentType.ER_REPORT,
+                            DocumentType.EMERGENCY_ROOM, DocumentType.OPERATIVE_NOTE, DocumentType.PRE_OP,
+                            DocumentType.POST_OP, DocumentType.NEUROLOGY, DocumentType.ORTHOPEDICS,
+                            DocumentType.RHEUMATOLOGY, DocumentType.ENDOCRINOLOGY, DocumentType.GASTROENTEROLOGY,
+                            DocumentType.PULMONOLOGY, DocumentType.EKG, DocumentType.ECG, DocumentType.ECHO,
+                            DocumentType.HOLTER_MONITOR, DocumentType.STRESS_TEST, DocumentType.NERVE_CONDUCTION]:
+                logger.info(f"🎯 Routing to Formal Medical Report extractor for {doctype.value}")
+                formal_medical_result = self.formal_medical_extractor.extract(
+                    text=text,
+                    doc_type=doctype.value,
+                    fallback_date=fallback_date,
+                    page_zones=page_zones,
+                    context_analysis=context_analysis,
+                    raw_text=None
+                )
+                if isinstance(formal_medical_result, dict):
+                    return formal_medical_result
+                else:
+                    return {
+                        "long_summary": str(formal_medical_result) if formal_medical_result else f"{fallback_date}: {doctype.value} extraction completed",
+                        "short_summary": f"{fallback_date}: {doctype.value} report processed"
+                    }
+            
+            # Imaging reports - convert ExtractionResult to dict
+            elif doctype in [DocumentType.MRI, DocumentType.CT, DocumentType.XRAY, 
+                            DocumentType.ULTRASOUND, DocumentType.EMG, DocumentType.MAMMOGRAM,
+                            DocumentType.PET_SCAN, DocumentType.BONE_SCAN, DocumentType.DEXA_SCAN,
+                            DocumentType.FLUOROSCOPY, DocumentType.ANGIOGRAM]:
+                logger.info(f"🎯 Routing to Imaging extractor")
+                imaging_result = self.imaging_extractor.extract(
+                    text, 
+                    doctype.value, 
+                    fallback_date,
+                    context_analysis=context_analysis,
+                    page_zones=page_zones
+                )
+                return self._convert_extraction_result_to_dict(imaging_result, fallback_date)
+            
+            # Progress reports (PR-2) - convert ExtractionResult to dict
+            elif doctype == DocumentType.PR2:
+                logger.info(f"🎯 Routing to PR-2 extractor")
+                pr2_result = self.pr2_extractor.extract(
+                    text, 
+                    doctype.value, 
+                    fallback_date, 
+                    context_analysis=context_analysis,
+                    page_zones=page_zones
+                )
+                return self._convert_extraction_result_to_dict(pr2_result, fallback_date)
+            
+            # Specialist consults - convert ExtractionResult to dict
+            elif doctype == DocumentType.CONSULT:
+                logger.info(f"🎯 Routing to Consult extractor")
+                consult_result = self.consult_extractor.extract(
+                    text, 
+                    doctype.value, 
+                    fallback_date, 
+                    context_analysis=context_analysis,
+                    page_zones=page_zones
+                )
+                return self._convert_extraction_result_to_dict(consult_result, fallback_date)
+            
+            # All other simple document types - convert ExtractionResult to dict
+            else:
+                logger.info(f"🎯 Routing to Simple extractor for {doctype.value}")
+                simple_result = self.simple_extractor.extract(
+                    text, 
+                    doctype.value, 
+                    fallback_date, 
+                    context_analysis=context_analysis,
+                    page_zones=page_zones
+                )
+                return self._convert_extraction_result_to_dict(simple_result, fallback_date)
+    def _convert_extraction_result_to_dict(self, result, fallback_date: str) -> Dict[str, str]:
+        """
+        Convert ExtractionResult OR dict to dictionary with both summaries.
+        Handles both old ExtractionResult objects and new dict returns.
+        
+        Args:
+            result: ExtractionResult object OR dict with summaries
+            fallback_date: Fallback date for error cases
+            
+        Returns:
+            Dict with 'long_summary' and 'short_summary'
+        """
+        try:
+            # If it's already a dict (from new extractors), return it directly
+            if isinstance(result, dict):
+                # Ensure both keys exist
+                long_summary = result.get("long_summary", "")
+                short_summary = result.get("short_summary", "")
+                
+                # If short_summary is missing but long_summary exists, generate one
+                if not short_summary and long_summary:
+                    short_summary = self._generate_short_summary_from_long(long_summary)
+                
+                return {
+                    "long_summary": long_summary or f"{fallback_date}: Document processed",
+                    "short_summary": short_summary or f"{fallback_date}: Report processed"
+                }
+            
+            # If it's an ExtractionResult object (old style)
+            elif hasattr(result, 'short_summary') and hasattr(result, 'summary_line'):
+                # Use short_summary if available, otherwise generate from long_summary
+                short_summary = result.short_summary
+                if not short_summary and result.summary_line:
+                    short_summary = self._generate_short_summary_from_long(result.summary_line)
+                
+                return {
+                    "long_summary": result.summary_line or f"{fallback_date}: Document processed",
+                    "short_summary": short_summary or f"{fallback_date}: {getattr(result, 'document_type', 'Unknown')} report"
+                }
+            
+            # Fallback for any other type
+            else:
+                logger.warning(f"⚠️ Unknown result type: {type(result)}")
+                return {
+                    "long_summary": f"{fallback_date}: Document processed",
+                    "short_summary": f"{fallback_date}: Report processed"
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Error converting result to dict: {e}")
+            return {
+                "long_summary": f"{fallback_date}: Document processed",
+                "short_summary": f"{fallback_date}: Report processed"
+            }
+    def _generate_short_summary_from_long(self, long_summary: str) -> str:
+        """
+        Generate short summary from long summary using LLM.
+        
+        Args:
+            long_summary: Long detailed summary
+            
+        Returns:
+            Short concise summary
+        """
+        try:
+            system_prompt = """You are a medical documentation specialist creating concise summaries.
+            Create a 1-2 sentence summary focusing on the most critical findings.
+            Be brief and focus on key medical-legal points."""
+            
+            user_prompt = f"LONG SUMMARY:\n{long_summary}\n\nCreate a 1-2 sentence concise summary:"
+            
+            from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+            
+            system_msg = SystemMessagePromptTemplate.from_template(system_prompt)
+            human_msg = HumanMessagePromptTemplate.from_template(user_prompt)
+            chat_prompt = ChatPromptTemplate.from_messages([system_msg, human_msg])
+            
+            chain = chat_prompt | self.llm
+            response = chain.invoke({"long_summary": long_summary})
+            
+            return response.content.strip()
+            
+        except Exception as e:
+            logger.error(f"❌ Short summary generation failed: {e}")
+            # Fallback: take first 100 chars or meaningful truncation
+            if len(long_summary) > 100:
+                return long_summary[:97] + "..."
+            return long_summary
+
+    def _parse_document_type(self, doc_type_str: str) -> DocumentType:
+            """
+            Parse document type string to DocumentType enum.
+            
+            Args:
+                doc_type_str: Document type string from detection
+                
+            Returns:
+                DocumentType enum value
+            """
+            try:
+                # Normalize the string to match enum (e.g., "X-ray" -> "XRAY", "PR-2" -> "PR2")
+                normalized = doc_type_str.upper().replace("-", "").replace(" ", "_")
+                
+                # Try direct match first
+                if normalized in DocumentType.__members__:
+                    return DocumentType[normalized]
+                
+                # Handle special cases
+                if doc_type_str == "X-ray":
+                    return DocumentType.XRAY
+                elif doc_type_str in ["PR-2", "PR2"]:
+                    return DocumentType.PR2
+                elif doc_type_str in ["PR-4", "PR4"]:
+                    return DocumentType.PR4
+                # NEW: Handle decision document types
+                elif doc_type_str in ["UR", "Utilization Review"]:
+                    return DocumentType.UR
+                elif doc_type_str in ["IMR", "Independent Medical Review"]:
+                    return DocumentType.IMR
+                elif doc_type_str == "Appeal":
+                    return DocumentType.APPEAL
+                elif doc_type_str in ["Authorization", "Treatment Authorization"]:
+                    return DocumentType.AUTHORIZATION
+                elif doc_type_str in ["RFA", "Request for Authorization"]:
+                    return DocumentType.RFA
+                elif doc_type_str in ["DFR", "Doctor First Report"]:
+                    return DocumentType.DFR
+                # NEW: Handle formal medical report types
+                elif doc_type_str in ["Surgery", "Surgical Report", "Pre-Op", "Post-Op"]:
+                    return DocumentType.SURGERY
+                elif doc_type_str in ["Anesthesia", "Anesthesia Report"]:
+                    return DocumentType.ANESTHESIA
+                elif doc_type_str in ["EMG", "NCS", "EMG/NCS", "Electromyography"]:
+                    return DocumentType.EMG_NCS
+                elif doc_type_str in ["Pathology", "Biopsy", "Pathology Report"]:
+                    return DocumentType.PATHOLOGY
+                elif doc_type_str in ["Cardiology", "EKG", "ECG", "Echocardiogram"]:
+                    return DocumentType.CARDIOLOGY
+                elif doc_type_str in ["Sleep Study", "Polysomnography", "PSG"]:
+                    return DocumentType.SLEEP_STUDY
+                elif doc_type_str in ["Endoscopy", "Colonoscopy", "EGD", "Gastroscopy"]:
+                    return DocumentType.ENDOSCOPY
+                elif doc_type_str in ["Genetics", "Genetic Testing", "DNA Test"]:
+                    return DocumentType.GENETICS
+                elif doc_type_str in ["Discharge Summary", "Admission Summary", "Hospital Course"]:
+                    return DocumentType.DISCHARGE_SUMMARY
+                else:
+                    logger.warning(f"⚠️ Unknown document type '{doc_type_str}', using UNKNOWN")
+                    return DocumentType.UNKNOWN
+            except Exception as e:
+                logger.warning(f"⚠️ Error parsing document type '{doc_type_str}': {e}")
+                return DocumentType.UNKNOWN
+    def _verify_result(self, result: ExtractionResult, doc_type: DocumentType) -> ExtractionResult:
+        """
+        Verify and correct extraction result if needed.
+        """
+        # Skip verification for imaging reports to preserve physician names
+        if doc_type in [DocumentType.MRI, DocumentType.CT, DocumentType.XRAY,
+                       DocumentType.ULTRASOUND, DocumentType.EMG, DocumentType.MAMMOGRAM,
+                       DocumentType.PET_SCAN, DocumentType.BONE_SCAN, DocumentType.DEXA_SCAN,
+                       DocumentType.FLUOROSCOPY, DocumentType.ANGIOGRAM]:
+            logger.info(f"🛡️ Skipping verification for {doc_type.value} to preserve physician name")
+            return result
+        
+        # QME/AME/IME already verified in their extractor chain
+        if doc_type in [DocumentType.QME, DocumentType.AME, DocumentType.IME]:
+            return result
+        
+        # NEW: Decision documents already verified in their extractor chain
+        if doc_type in [DocumentType.UR, DocumentType.IMR, DocumentType.APPEAL,
+                       DocumentType.AUTHORIZATION, DocumentType.RFA, DocumentType.DFR]:
+            return result
+        
+        # NEW: Formal medical reports already verified in their extractor chain
+        if doc_type in [DocumentType.SURGERY_REPORT, DocumentType.ANESTHESIA_REPORT, 
+                       DocumentType.PATHOLOGY, DocumentType.BIOPSY, DocumentType.GENETIC_TESTING,
+                       DocumentType.CARDIOLOGY, DocumentType.SLEEP_STUDY, DocumentType.DISCHARGE,
+                       DocumentType.ADMISSION_NOTE, DocumentType.HOSPITAL_COURSE, DocumentType.ER_REPORT,
+                       DocumentType.EMERGENCY_ROOM, DocumentType.OPERATIVE_NOTE, DocumentType.PRE_OP,
+                       DocumentType.POST_OP, DocumentType.NEUROLOGY, DocumentType.ORTHOPEDICS,
+                       DocumentType.RHEUMATOLOGY, DocumentType.ENDOCRINOLOGY, DocumentType.GASTROENTEROLOGY,
+                       DocumentType.PULMONOLOGY, DocumentType.EKG, DocumentType.ECG, DocumentType.ECHO,
+                       DocumentType.HOLTER_MONITOR, DocumentType.STRESS_TEST, DocumentType.NERVE_CONDUCTION]:
+            return result
+        
+        # Verify all other document types
+        logger.info(f"🔍 Verifying extraction for {doc_type.value}")
+        return self.verifier.verify_and_fix(result)
+    def format_whats_new_as_highlights(self, bullet_points: List[str]) -> List[str]:
+        """
+        Format bullet points as highlights (for backward compatibility).
+        
+        Args:
+            bullet_points: List of bullet-formatted summaries
+            
+        Returns:
+            Same list or default message if empty
+        """
+        return bullet_points if bullet_points else [
+            "• No significant new findings identified in current document"
+        ]
+    
+    def get_structured_extraction(self, text: str) -> Dict[str, Any]:
+        """
+        Get full structured extraction as dictionary (for API/storage).
+        
+        Args:
+            text: Document text to extract
+            
+        Returns:
+            Dictionary with all extraction fields including both summaries
+        """
+        try:
+            # Get both summaries
+            summaries_dict = self.extract_document(text)
+            
+            # Get additional metadata
+            detection_result = detect_document_type(text)
+            doc_type_str = detection_result.get("doc_type", "Unknown")
+            
+            return {
+                "document_type": doc_type_str,
+                "long_summary": summaries_dict.get("long_summary", ""),
+                "short_summary": summaries_dict.get("short_summary", ""),
+                "extracted_at": datetime.now().isoformat(),
+                "text_length": len(text)
+            }
+        except Exception as e:
+            logger.error(f"❌ Structured extraction failed: {e}")
+            fallback_date = datetime.now().strftime("%m/%d/%y")
+            return {
+                "document_type": "Unknown",
+                "long_summary": f"{fallback_date}: Extraction failed",
+                "short_summary": f"{fallback_date}: Extraction failed",
+                "error": str(e)
+            }
+    
+    def get_extraction_metadata(self, text: str) -> Dict[str, Any]:
+        """
+        Get extraction metadata without full processing (useful for validation).
+        
+        Args:
+            text: Document text
+            
+        Returns:
+            Dictionary with document type and basic metadata
+        """
+        try:
+            detection_result = detect_document_type(text)
+            doc_type_str = detection_result.get("doc_type", "Unknown")
+            return {
+                "document_type": doc_type_str,
+                "detected_at": datetime.now().isoformat(),
+                "text_length": len(text),
+                "preview": text[:200] + "..." if len(text) > 200 else text
+            }
+        except Exception as e:
+            logger.error(f"❌ Metadata extraction failed: {e}")
+            return {
+                "document_type": "Unknown",
+                "error": str(e)
+            }
+
+
+
+
 # """
-# Main report analyzer orchestrator with LLM chaining and verification.
-# Coordinates all extractors and maintains the extraction pipeline.
+# Simplified Report Analyzer - Only uses Simple Extractor for all document types
+# Maintains consistent return structure with long and short summaries
 # """
 # import logging
-# from typing import List, Dict, Any, Optional
+# from typing import Dict, Any, Optional
 # from datetime import datetime
-# from dataclasses import asdict
 # from langchain_openai import AzureChatOpenAI
 
 # from config.settings import CONFIG
-# from models.data_models import DocumentType, ExtractionResult
+# from models.data_models import DocumentType
 # from utils.document_detector import detect_document_type
-# from utils.extraction_verifier import ExtractionVerifier
-# from utils.document_context_analyzer import DocumentContextAnalyzer
-# from extractors.qme_extractor import QMEExtractorChained
-# from extractors.imaging_extractor import ImagingExtractorChained
-# from extractors.pr2_extractor import PR2ExtractorChained
-# from extractors.consult_extractor import ConsultExtractorChained
 # from extractors.simple_extractor import SimpleExtractor
 
 # logger = logging.getLogger("document_ai")
@@ -24,12 +577,12 @@
 
 # class ReportAnalyzer:
 #     """
-#     Enhanced orchestrator with LLM chaining and verification.
-#     Maintains backward compatibility while adding robustness.
+#     Simplified orchestrator that only uses Simple Extractor for all document types.
+#     Returns consistent dictionary with long_summary and short_summary.
 #     """
     
 #     def __init__(self):
-#         """Initialize LLM and all extraction components"""
+#         """Initialize LLM and Simple Extractor only"""
 #         self.llm = AzureChatOpenAI(
 #             azure_endpoint=CONFIG.get("azure_openai_endpoint"),
 #             api_key=CONFIG.get("azure_openai_api_key"),
@@ -39,29 +592,11 @@
 #             timeout=120
 #         )
         
-#         # Create a second LLM instance for analysis (can use same or different deployment)
-#         self.analysis_llm = AzureChatOpenAI(
-#             azure_endpoint=CONFIG.get("azure_openai_endpoint"),
-#             api_key=CONFIG.get("azure_openai_api_key"),
-#             deployment_name=CONFIG.get("azure_openai_deployment"),  # Can use same or different deployment
-#             api_version=CONFIG.get("azure_openai_api_version"),
-#             temperature=0.1,  # Slightly higher temperature for analysis
-#             timeout=120
-#         )
-        
-#         # No longer need DocumentTypeDetector instance; use detect_document_type function
-#         self.verifier = ExtractionVerifier(self.llm)
-#         self.document_analyzer = DocumentContextAnalyzer(self.analysis_llm)
-        
-#         # Initialize specialized extractors with dual LLMs
-#         self.qme_extractor = QMEExtractorChained(self.llm)
-#         self.imaging_extractor = ImagingExtractorChained(self.llm)
-#         self.pr2_extractor = PR2ExtractorChained(self.llm)
-#         self.consult_extractor = ConsultExtractorChained(self.llm)
+#         # Initialize only Simple Extractor
 #         self.simple_extractor = SimpleExtractor(self.llm)
         
-#         logger.info("✅ ReportAnalyzer initialized with all extractors and dual-LLM support")
-    
+#         logger.info("✅ Simplified ReportAnalyzer initialized - Only using Simple Extractor")
+
 #     def compare_with_previous_documents(
 #         self, 
 #         current_raw_text: str,
@@ -81,7 +616,7 @@
 #             # extract_document returns dict with both summaries
 #             result_dict = self.extract_document(current_raw_text, page_zones)
             
-#             # Return the dictionary directly (no bullet points)
+#             # Return the dictionary directly
 #             return result_dict
             
 #         except Exception as e:
@@ -95,7 +630,7 @@
     
 #     def extract_document(self, text: str, page_zones: Optional[Dict] = None) -> Dict[str, str]:
 #         """
-#         Enhanced pipeline with context analysis - returns dictionary with both summaries.
+#         Simplified pipeline using only Simple Extractor.
         
 #         Args:
 #             text: Document text to extract
@@ -107,44 +642,31 @@
 #         fallback_date = datetime.now().strftime("%m/%d/%y")
         
 #         try:
-#             # Stage 0: Analyze document context
-#             logger.info("🧠 Stage 0: Analyzing document context...")
-#             context_analysis = self.document_analyzer.analyze_document_structure(
-#                 text=text,
-#                 doc_type_hint=None
-#             )
-            
 #             # Stage 1: Detect document type
 #             detection_result = detect_document_type(text)
 #             doc_type_str = detection_result.get("doc_type", "Unknown")
             
-#             # Update context analysis with detected type
-#             context_analysis["detected_doc_type"] = doc_type_str
-            
-#             logger.info(f"📄 Document type: {doc_type_str}")
-            
-#             # Log context analysis details
-#             if context_analysis:
-#                 primary_physician = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
-#                 focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
-                
-#                 logger.info(f"🎯 Critical sections identified: {focus_sections}")
-#                 logger.info(f"👨‍⚕️ Primary physician: {primary_physician.get('name', 'Unknown')}")
-#                 logger.info(f"   Role: {primary_physician.get('role', 'Unknown')}, Confidence: {primary_physician.get('confidence', 'low')}")
+#             logger.info(f"📄 Document type detected: {doc_type_str}")
             
 #             # Convert to DocumentType enum
 #             doc_type = self._parse_document_type(doc_type_str)
             
-#             # Stage 2: Context-aware extraction - get dictionary with both summaries
-#             result_dict = self._route_to_extractor_with_context(
+#             # Stage 2: Use Simple Extractor for ALL document types
+#             logger.info(f"🎯 Routing ALL document types to Simple Extractor")
+            
+#             # Simple Extractor returns ExtractionResult, convert to dict
+#             simple_result = self.simple_extractor.extract(
 #                 text=text,
-#                 doctype=doc_type,
+#                 doc_type=doc_type.value,
 #                 fallback_date=fallback_date,
 #                 page_zones=page_zones,
-#                 context_analysis=context_analysis
+#                 raw_text=None
 #             )
             
-#             logger.info(f"✅ Extraction complete")
+#             # Convert ExtractionResult to dict with both summaries
+#             result_dict = self._convert_extraction_result_to_dict(simple_result, fallback_date)
+            
+#             logger.info(f"✅ Simple extraction complete")
 #             logger.info(f"   Long summary: {len(result_dict.get('long_summary', ''))} chars")
 #             logger.info(f"   Short summary: {result_dict.get('short_summary', '')}")
             
@@ -158,125 +680,46 @@
 #                 "short_summary": error_msg
 #             }
 
-#     def _route_to_extractor_with_context(
-#         self,
-#         text: str,
-#         doctype: DocumentType,
-#         fallback_date: str,
-#         page_zones: Optional[Dict],
-#         context_analysis: Dict
-#     ) -> Dict[str, str]:
+#     def _convert_extraction_result_to_dict(self, result, fallback_date: str) -> Dict[str, str]:
 #         """
-#         Route document to appropriate extractor WITH context analysis.
-#         Returns dictionary with both summaries.
+#         Convert Simple Extractor result to dictionary with both summaries.
         
 #         Args:
-#             text: Document text
-#             doctype: Detected document type
-#             fallback_date: Fallback date if extraction fails
-#             page_zones: Per-page zone extraction
-#             context_analysis: Context from DocumentContextAnalyzer
-        
-#         Returns:
-#             Dict with 'long_summary' and 'short_summary'
-#         """
-        
-#         # QME/AME/IME - use context-aware extraction (already returns dict)
-#         if doctype in [DocumentType.QME, DocumentType.AME, DocumentType.IME]:
-#             logger.info(f"🎯 Routing to QME extractor WITH context analysis")
-#             qme_result = self.qme_extractor.extract(
-#                 text=text,
-#                 doc_type=doctype.value,
-#                 fallback_date=fallback_date,
-#                 page_zones=page_zones,
-#                 context_analysis=context_analysis,
-#                 raw_text=None
-#             )
-#             # QME extractor already returns dict with both summaries
-#             if isinstance(qme_result, dict):
-#                 return qme_result
-#             else:
-#                 # Fallback if not dict (backward compat)
-#                 return {
-#                     "long_summary": str(qme_result) if qme_result else f"{fallback_date}: QME extraction completed",
-#                     "short_summary": f"{fallback_date}: QME report processed"
-#                 }
-        
-#         # Imaging reports - convert ExtractionResult to dict
-#         elif doctype in [DocumentType.MRI, DocumentType.CT, DocumentType.XRAY, 
-#                         DocumentType.ULTRASOUND, DocumentType.EMG]:
-#             logger.info(f"🎯 Routing to Imaging extractor")
-#             imaging_result = self.imaging_extractor.extract(
-#                 text, 
-#                 doctype.value, 
-#                 fallback_date,
-#                 context_analysis=context_analysis,
-#                 page_zones=page_zones
-#             )
-#             return self._convert_extraction_result_to_dict(imaging_result, fallback_date)
-        
-#         # Progress reports (PR-2) - convert ExtractionResult to dict
-#         elif doctype == DocumentType.PR2:
-#             logger.info(f"🎯 Routing to PR-2 extractor")
-#             pr2_result = self.pr2_extractor.extract(
-#                 text, 
-#                 doctype.value, 
-#                 fallback_date, 
-#                 context_analysis=context_analysis,
-#                 page_zones=page_zones
-#             )
-#             return self._convert_extraction_result_to_dict(pr2_result, fallback_date)
-        
-#         # Specialist consults - convert ExtractionResult to dict
-#         elif doctype == DocumentType.CONSULT:
-#             logger.info(f"🎯 Routing to Consult extractor")
-#             consult_result = self.consult_extractor.extract(
-#                 text, 
-#                 doctype.value, 
-#                 fallback_date, 
-#                 context_analysis=context_analysis,
-#                 page_zones=page_zones
-#             )
-#             return self._convert_extraction_result_to_dict(consult_result, fallback_date)
-        
-#         # All other simple document types - convert ExtractionResult to dict
-#         else:
-#             logger.info(f"🎯 Routing to Simple extractor for {doctype.value}")
-#             simple_result = self.simple_extractor.extract(
-#                 text, 
-#                 doctype.value, 
-#                 fallback_date, 
-#                 context_analysis=context_analysis,
-#                 page_zones=page_zones
-#             )
-#             return self._convert_extraction_result_to_dict(simple_result, fallback_date)
-
-#     def _convert_extraction_result_to_dict(self, result: ExtractionResult, fallback_date: str) -> Dict[str, str]:
-#         """
-#         Convert ExtractionResult to dictionary with both summaries.
-        
-#         Args:
-#             result: ExtractionResult object
+#             result: Simple Extractor result (ExtractionResult or dict)
 #             fallback_date: Fallback date for error cases
             
 #         Returns:
 #             Dict with 'long_summary' and 'short_summary'
 #         """
 #         try:
-#             # Use short_summary if available, otherwise generate from long_summary
-#             short_summary = result.short_summary
-#             if not short_summary and result.summary_line:
-#                 short_summary = self._generate_short_summary_from_long(result.summary_line)
+#             # If result is already a dict (from enhanced Simple Extractor)
+#             if isinstance(result, dict) and 'long_summary' in result and 'short_summary' in result:
+#                 return result
             
-#             return {
-#                 "long_summary": result.summary_line or f"{fallback_date}: Document processed",
-#                 "short_summary": short_summary or f"{fallback_date}: {result.document_type} report"
-#             }
+#             # If result is ExtractionResult (from original Simple Extractor)
+#             elif hasattr(result, 'summary_line'):
+#                 # Use short_summary if available, otherwise generate from long_summary
+#                 short_summary = getattr(result, 'short_summary', None)
+#                 if not short_summary and hasattr(result, 'summary_line'):
+#                     short_summary = self._generate_short_summary_from_long(result.summary_line)
+                
+#                 return {
+#                     "long_summary": result.summary_line or f"{fallback_date}: Document processed",
+#                     "short_summary": short_summary or f"{fallback_date}: {getattr(result, 'document_type', 'Unknown')} report"
+#                 }
+            
+#             # Fallback for any other result type
+#             else:
+#                 return {
+#                     "long_summary": f"{fallback_date}: Document processed via Simple Extractor",
+#                     "short_summary": f"{fallback_date}: Document summary"
+#                 }
+                
 #         except Exception as e:
-#             logger.error(f"❌ Error converting ExtractionResult to dict: {e}")
+#             logger.error(f"❌ Error converting result to dict: {e}")
 #             return {
 #                 "long_summary": f"{fallback_date}: Document processed",
-#                 "short_summary": f"{fallback_date}: {result.document_type if hasattr(result, 'document_type') else 'Unknown'} report"
+#                 "short_summary": f"{fallback_date}: Document report"
 #             }
 
 #     def _generate_short_summary_from_long(self, long_summary: str) -> str:
@@ -290,13 +733,13 @@
 #             Short concise summary
 #         """
 #         try:
+#             from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+            
 #             system_prompt = """You are a medical documentation specialist creating concise summaries.
 #             Create a 1-2 sentence summary focusing on the most critical findings.
 #             Be brief and focus on key medical-legal points."""
             
 #             user_prompt = f"LONG SUMMARY:\n{long_summary}\n\nCreate a 1-2 sentence concise summary:"
-            
-#             from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
             
 #             system_msg = SystemMessagePromptTemplate.from_template(system_prompt)
 #             human_msg = HumanMessagePromptTemplate.from_template(user_prompt)
@@ -325,7 +768,7 @@
 #             DocumentType enum value
 #         """
 #         try:
-#             # Normalize the string to match enum (e.g., "X-ray" -> "XRAY", "PR-2" -> "PR2")
+#             # Normalize the string to match enum
 #             normalized = doc_type_str.upper().replace("-", "").replace(" ", "_")
             
 #             # Try direct match first
@@ -346,50 +789,9 @@
 #             logger.warning(f"⚠️ Error parsing document type '{doc_type_str}': {e}")
 #             return DocumentType.UNKNOWN
     
-#     def _verify_result(self, result: ExtractionResult, doc_type: DocumentType) -> ExtractionResult:
-#         """
-#         Verify and correct extraction result if needed.
-        
-#         Note: Skip verification for imaging reports to preserve physician names.
-        
-#         Args:
-#             result: Initial extraction result
-#             doc_type: Document type
-            
-#         Returns:
-#             Verified/corrected ExtractionResult
-#         """
-#         # Skip verification for imaging reports to preserve physician names
-#         if doc_type in [DocumentType.MRI, DocumentType.CT, DocumentType.XRAY,
-#                        DocumentType.ULTRASOUND, DocumentType.EMG]:
-#             logger.info(f"🛡️ Skipping verification for {doc_type.value} to preserve physician name")
-#             return result
-        
-#         # QME/AME/IME already verified in their extractor chain
-#         if doc_type in [DocumentType.QME, DocumentType.AME, DocumentType.IME]:
-#             return result
-        
-#         # Verify all other document types
-#         logger.info(f"🔍 Verifying extraction for {doc_type.value}")
-#         return self.verifier.verify_and_fix(result)
-    
-#     def format_whats_new_as_highlights(self, bullet_points: List[str]) -> List[str]:
-#         """
-#         Format bullet points as highlights (for backward compatibility).
-        
-#         Args:
-#             bullet_points: List of bullet-formatted summaries
-            
-#         Returns:
-#             Same list or default message if empty
-#         """
-#         return bullet_points if bullet_points else [
-#             "• No significant new findings identified in current document"
-#         ]
-    
 #     def get_structured_extraction(self, text: str) -> Dict[str, Any]:
 #         """
-#         Get full structured extraction as dictionary (for API/storage).
+#         Get full structured extraction as dictionary.
         
 #         Args:
 #             text: Document text to extract
@@ -410,7 +812,8 @@
 #                 "long_summary": summaries_dict.get("long_summary", ""),
 #                 "short_summary": summaries_dict.get("short_summary", ""),
 #                 "extracted_at": datetime.now().isoformat(),
-#                 "text_length": len(text)
+#                 "text_length": len(text),
+#                 "extractor_used": "Simple Extractor"
 #             }
 #         except Exception as e:
 #             logger.error(f"❌ Structured extraction failed: {e}")
@@ -419,12 +822,13 @@
 #                 "document_type": "Unknown",
 #                 "long_summary": f"{fallback_date}: Extraction failed",
 #                 "short_summary": f"{fallback_date}: Extraction failed",
-#                 "error": str(e)
+#                 "error": str(e),
+#                 "extractor_used": "Simple Extractor"
 #             }
     
 #     def get_extraction_metadata(self, text: str) -> Dict[str, Any]:
 #         """
-#         Get extraction metadata without full processing (useful for validation).
+#         Get extraction metadata without full processing.
         
 #         Args:
 #             text: Document text
@@ -439,327 +843,27 @@
 #                 "document_type": doc_type_str,
 #                 "detected_at": datetime.now().isoformat(),
 #                 "text_length": len(text),
-#                 "preview": text[:200] + "..." if len(text) > 200 else text
+#                 "preview": text[:200] + "..." if len(text) > 200 else text,
+#                 "extractor_used": "Simple Extractor"
 #             }
 #         except Exception as e:
 #             logger.error(f"❌ Metadata extraction failed: {e}")
 #             return {
 #                 "document_type": "Unknown",
-#                 "error": str(e)
+#                 "error": str(e),
+#                 "extractor_used": "Simple Extractor"
 #             }
 
-
-
-
-
-
-
-"""
-Simplified Report Analyzer - Only uses Simple Extractor for all document types
-Maintains consistent return structure with long and short summaries
-"""
-import logging
-from typing import Dict, Any, Optional
-from datetime import datetime
-from langchain_openai import AzureChatOpenAI
-
-from config.settings import CONFIG
-from models.data_models import DocumentType
-from utils.document_detector import detect_document_type
-from extractors.simple_extractor import SimpleExtractor
-
-logger = logging.getLogger("document_ai")
-
-
-class ReportAnalyzer:
-    """
-    Simplified orchestrator that only uses Simple Extractor for all document types.
-    Returns consistent dictionary with long_summary and short_summary.
-    """
-    
-    def __init__(self):
-        """Initialize LLM and Simple Extractor only"""
-        self.llm = AzureChatOpenAI(
-            azure_endpoint=CONFIG.get("azure_openai_endpoint"),
-            api_key=CONFIG.get("azure_openai_api_key"),
-            deployment_name=CONFIG.get("azure_openai_deployment"),
-            api_version=CONFIG.get("azure_openai_api_version"),
-            temperature=0.0,
-            timeout=120
-        )
+#     def format_whats_new_as_highlights(self, bullet_points: list) -> list:
+#         """
+#         Format bullet points as highlights (for backward compatibility).
         
-        # Initialize only Simple Extractor
-        self.simple_extractor = SimpleExtractor(self.llm)
-        
-        logger.info("✅ Simplified ReportAnalyzer initialized - Only using Simple Extractor")
-
-    def compare_with_previous_documents(
-        self, 
-        current_raw_text: str,
-        page_zones: Optional[Dict[str, Dict[str, str]]] = None
-    ) -> Dict[str, str]:
-        """
-        Main extraction pipeline - returns dictionary with both summaries.
-        
-        Args:
-            current_raw_text: Raw document text to extract
-            page_zones: Per-page zone extraction {page_num: {header, body, footer, signature}}
+#         Args:
+#             bullet_points: List of bullet-formatted summaries
             
-        Returns:
-            Dict with 'long_summary' and 'short_summary'
-        """
-        try:
-            # extract_document returns dict with both summaries
-            result_dict = self.extract_document(current_raw_text, page_zones)
-            
-            # Return the dictionary directly
-            return result_dict
-            
-        except Exception as e:
-            logger.error(f"❌ Extraction pipeline failed: {e}")
-            fallback_date = datetime.now().strftime("%m/%d/%y")
-            error_msg = f"{fallback_date}: Extraction failed - manual review required"
-            return {
-                "long_summary": error_msg,
-                "short_summary": error_msg
-            }
-    
-    def extract_document(self, text: str, page_zones: Optional[Dict] = None) -> Dict[str, str]:
-        """
-        Simplified pipeline using only Simple Extractor.
-        
-        Args:
-            text: Document text to extract
-            page_zones: Per-page zone extraction
-            
-        Returns:
-            Dict with 'long_summary' and 'short_summary'
-        """
-        fallback_date = datetime.now().strftime("%m/%d/%y")
-        
-        try:
-            # Stage 1: Detect document type
-            detection_result = detect_document_type(text)
-            doc_type_str = detection_result.get("doc_type", "Unknown")
-            
-            logger.info(f"📄 Document type detected: {doc_type_str}")
-            
-            # Convert to DocumentType enum
-            doc_type = self._parse_document_type(doc_type_str)
-            
-            # Stage 2: Use Simple Extractor for ALL document types
-            logger.info(f"🎯 Routing ALL document types to Simple Extractor")
-            
-            # Simple Extractor returns ExtractionResult, convert to dict
-            simple_result = self.simple_extractor.extract(
-                text=text,
-                doc_type=doc_type.value,
-                fallback_date=fallback_date,
-                page_zones=page_zones,
-                raw_text=None
-            )
-            
-            # Convert ExtractionResult to dict with both summaries
-            result_dict = self._convert_extraction_result_to_dict(simple_result, fallback_date)
-            
-            logger.info(f"✅ Simple extraction complete")
-            logger.info(f"   Long summary: {len(result_dict.get('long_summary', ''))} chars")
-            logger.info(f"   Short summary: {result_dict.get('short_summary', '')}")
-            
-            return result_dict
-            
-        except Exception as e:
-            logger.error(f"❌ Extraction failed: {e}", exc_info=True)
-            error_msg = f"{fallback_date}: Extraction failed - manual review required"
-            return {
-                "long_summary": error_msg,
-                "short_summary": error_msg
-            }
-
-    def _convert_extraction_result_to_dict(self, result, fallback_date: str) -> Dict[str, str]:
-        """
-        Convert Simple Extractor result to dictionary with both summaries.
-        
-        Args:
-            result: Simple Extractor result (ExtractionResult or dict)
-            fallback_date: Fallback date for error cases
-            
-        Returns:
-            Dict with 'long_summary' and 'short_summary'
-        """
-        try:
-            # If result is already a dict (from enhanced Simple Extractor)
-            if isinstance(result, dict) and 'long_summary' in result and 'short_summary' in result:
-                return result
-            
-            # If result is ExtractionResult (from original Simple Extractor)
-            elif hasattr(result, 'summary_line'):
-                # Use short_summary if available, otherwise generate from long_summary
-                short_summary = getattr(result, 'short_summary', None)
-                if not short_summary and hasattr(result, 'summary_line'):
-                    short_summary = self._generate_short_summary_from_long(result.summary_line)
-                
-                return {
-                    "long_summary": result.summary_line or f"{fallback_date}: Document processed",
-                    "short_summary": short_summary or f"{fallback_date}: {getattr(result, 'document_type', 'Unknown')} report"
-                }
-            
-            # Fallback for any other result type
-            else:
-                return {
-                    "long_summary": f"{fallback_date}: Document processed via Simple Extractor",
-                    "short_summary": f"{fallback_date}: Document summary"
-                }
-                
-        except Exception as e:
-            logger.error(f"❌ Error converting result to dict: {e}")
-            return {
-                "long_summary": f"{fallback_date}: Document processed",
-                "short_summary": f"{fallback_date}: Document report"
-            }
-
-    def _generate_short_summary_from_long(self, long_summary: str) -> str:
-        """
-        Generate short summary from long summary using LLM.
-        
-        Args:
-            long_summary: Long detailed summary
-            
-        Returns:
-            Short concise summary
-        """
-        try:
-            from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
-            
-            system_prompt = """You are a medical documentation specialist creating concise summaries.
-            Create a 1-2 sentence summary focusing on the most critical findings.
-            Be brief and focus on key medical-legal points."""
-            
-            user_prompt = f"LONG SUMMARY:\n{long_summary}\n\nCreate a 1-2 sentence concise summary:"
-            
-            system_msg = SystemMessagePromptTemplate.from_template(system_prompt)
-            human_msg = HumanMessagePromptTemplate.from_template(user_prompt)
-            chat_prompt = ChatPromptTemplate.from_messages([system_msg, human_msg])
-            
-            chain = chat_prompt | self.llm
-            response = chain.invoke({"long_summary": long_summary})
-            
-            return response.content.strip()
-            
-        except Exception as e:
-            logger.error(f"❌ Short summary generation failed: {e}")
-            # Fallback: take first 100 chars or meaningful truncation
-            if len(long_summary) > 100:
-                return long_summary[:97] + "..."
-            return long_summary
-
-    def _parse_document_type(self, doc_type_str: str) -> DocumentType:
-        """
-        Parse document type string to DocumentType enum.
-        
-        Args:
-            doc_type_str: Document type string from detection
-            
-        Returns:
-            DocumentType enum value
-        """
-        try:
-            # Normalize the string to match enum
-            normalized = doc_type_str.upper().replace("-", "").replace(" ", "_")
-            
-            # Try direct match first
-            if normalized in DocumentType.__members__:
-                return DocumentType[normalized]
-            
-            # Handle special cases
-            if doc_type_str == "X-ray":
-                return DocumentType.XRAY
-            elif doc_type_str in ["PR-2", "PR2"]:
-                return DocumentType.PR2
-            elif doc_type_str in ["PR-4", "PR4"]:
-                return DocumentType.PR4
-            else:
-                logger.warning(f"⚠️ Unknown document type '{doc_type_str}', using UNKNOWN")
-                return DocumentType.UNKNOWN
-        except Exception as e:
-            logger.warning(f"⚠️ Error parsing document type '{doc_type_str}': {e}")
-            return DocumentType.UNKNOWN
-    
-    def get_structured_extraction(self, text: str) -> Dict[str, Any]:
-        """
-        Get full structured extraction as dictionary.
-        
-        Args:
-            text: Document text to extract
-            
-        Returns:
-            Dictionary with all extraction fields including both summaries
-        """
-        try:
-            # Get both summaries
-            summaries_dict = self.extract_document(text)
-            
-            # Get additional metadata
-            detection_result = detect_document_type(text)
-            doc_type_str = detection_result.get("doc_type", "Unknown")
-            
-            return {
-                "document_type": doc_type_str,
-                "long_summary": summaries_dict.get("long_summary", ""),
-                "short_summary": summaries_dict.get("short_summary", ""),
-                "extracted_at": datetime.now().isoformat(),
-                "text_length": len(text),
-                "extractor_used": "Simple Extractor"
-            }
-        except Exception as e:
-            logger.error(f"❌ Structured extraction failed: {e}")
-            fallback_date = datetime.now().strftime("%m/%d/%y")
-            return {
-                "document_type": "Unknown",
-                "long_summary": f"{fallback_date}: Extraction failed",
-                "short_summary": f"{fallback_date}: Extraction failed",
-                "error": str(e),
-                "extractor_used": "Simple Extractor"
-            }
-    
-    def get_extraction_metadata(self, text: str) -> Dict[str, Any]:
-        """
-        Get extraction metadata without full processing.
-        
-        Args:
-            text: Document text
-            
-        Returns:
-            Dictionary with document type and basic metadata
-        """
-        try:
-            detection_result = detect_document_type(text)
-            doc_type_str = detection_result.get("doc_type", "Unknown")
-            return {
-                "document_type": doc_type_str,
-                "detected_at": datetime.now().isoformat(),
-                "text_length": len(text),
-                "preview": text[:200] + "..." if len(text) > 200 else text,
-                "extractor_used": "Simple Extractor"
-            }
-        except Exception as e:
-            logger.error(f"❌ Metadata extraction failed: {e}")
-            return {
-                "document_type": "Unknown",
-                "error": str(e),
-                "extractor_used": "Simple Extractor"
-            }
-
-    def format_whats_new_as_highlights(self, bullet_points: list) -> list:
-        """
-        Format bullet points as highlights (for backward compatibility).
-        
-        Args:
-            bullet_points: List of bullet-formatted summaries
-            
-        Returns:
-            Same list or default message if empty
-        """
-        return bullet_points if bullet_points else [
-            "• No significant new findings identified in current document"
-        ]
+#         Returns:
+#             Same list or default message if empty
+#         """
+#         return bullet_points if bullet_points else [
+#             "• No significant new findings identified in current document"
+#         ]
