@@ -21,7 +21,8 @@ from extractors.simple_extractor import SimpleExtractor
 # from extractors.decision_extractor import DecisionDocumentExtractor  # NEW: Import the decision extractor
 from extractors.ur_extractor import DecisionDocumentExtractor  # NEW: Import the decision extractor
 from extractors.formal_medical_extractor import FormalMedicalReportExtractor
-
+from extractors.clinical_extractor import ClinicalNoteExtractor  # NEW: Import clinical note extractor
+from extractors.administritive_extractor import AdministrativeExtractor  # NEW: Import administrative extractor
 logger = logging.getLogger("document_ai")
 
 
@@ -62,8 +63,10 @@ class ReportAnalyzer:
         self.pr2_extractor = PR2ExtractorChained(self.llm)
         self.consult_extractor = ConsultExtractorChained(self.llm)
         self.simple_extractor = SimpleExtractor(self.llm)
-        self.decision_extractor = DecisionDocumentExtractor(self.llm)  # NEW: Initialize decision extractor
+        self.decision_extractor = DecisionDocumentExtractor(self.llm)
         self.formal_medical_extractor = FormalMedicalReportExtractor(self.llm)
+        self.clinical_note_extractor = ClinicalNoteExtractor(self.llm)
+        self.administrative_extractor = AdministrativeExtractor(self.llm)  # NEW: Initialize administrative extractor
         
         logger.info("✅ ReportAnalyzer initialized with all extractors and dual-LLM support")
     
@@ -164,134 +167,186 @@ class ReportAnalyzer:
             }
 
     def _route_to_extractor_with_context(
-            self,
-            text: str,
-            doctype: DocumentType,
-            fallback_date: str,
-            page_zones: Optional[Dict],
-            context_analysis: Dict
-        ) -> Dict[str, str]:
-            """
-            Route document to appropriate extractor WITH context analysis.
-            Returns dictionary with both summaries.
-            """
-            
-            # QME/AME/IME - use context-aware extraction (already returns dict)
-            if doctype in [DocumentType.QME, DocumentType.AME, DocumentType.IME]:
-                logger.info(f"🎯 Routing to QME extractor WITH context analysis")
-                qme_result = self.qme_extractor.extract(
-                    text=text,
-                    doc_type=doctype.value,
-                    fallback_date=fallback_date,
-                    page_zones=page_zones,
-                    context_analysis=context_analysis,
-                    raw_text=None
-                )
-                if isinstance(qme_result, dict):
-                    return qme_result
-                else:
-                    return {
-                        "long_summary": str(qme_result) if qme_result else f"{fallback_date}: QME extraction completed",
-                        "short_summary": f"{fallback_date}: QME report processed"
-                    }
-            
-            # NEW: Decision Documents - UR/IMR, Appeals, Authorizations, RFA, DFR
-            elif doctype in [DocumentType.UR, DocumentType.IMR, DocumentType.APPEAL, 
-                            DocumentType.AUTHORIZATION, DocumentType.RFA, DocumentType.DFR]:
-                logger.info(f"🎯 Routing to Decision Document extractor for {doctype.value}")
-                decision_result = self.decision_extractor.extract(
-                    text=text,
-                    doc_type=doctype.value,
-                    fallback_date=fallback_date,
-                    page_zones=page_zones,
-                    context_analysis=context_analysis,
-                    raw_text=None
-                )
-                if isinstance(decision_result, dict):
-                    return decision_result
-                else:
-                    return {
-                        "long_summary": str(decision_result) if decision_result else f"{fallback_date}: {doctype.value} extraction completed",
-                        "short_summary": f"{fallback_date}: {doctype.value} decision processed"
-                    }
-
-            # NEW: Formal Medical Reports - Using your actual enum values
-            elif doctype in [DocumentType.SURGERY_REPORT, DocumentType.ANESTHESIA_REPORT, 
-                            DocumentType.PATHOLOGY, DocumentType.BIOPSY, DocumentType.GENETIC_TESTING,
-                            DocumentType.CARDIOLOGY, DocumentType.SLEEP_STUDY, DocumentType.DISCHARGE,
-                            DocumentType.ADMISSION_NOTE, DocumentType.HOSPITAL_COURSE, DocumentType.ER_REPORT,
-                            DocumentType.EMERGENCY_ROOM, DocumentType.OPERATIVE_NOTE, DocumentType.PRE_OP,
-                            DocumentType.POST_OP, DocumentType.NEUROLOGY, DocumentType.ORTHOPEDICS,
-                            DocumentType.RHEUMATOLOGY, DocumentType.ENDOCRINOLOGY, DocumentType.GASTROENTEROLOGY,
-                            DocumentType.PULMONOLOGY, DocumentType.EKG, DocumentType.ECG, DocumentType.ECHO,
-                            DocumentType.HOLTER_MONITOR, DocumentType.STRESS_TEST, DocumentType.NERVE_CONDUCTION]:
-                logger.info(f"🎯 Routing to Formal Medical Report extractor for {doctype.value}")
-                formal_medical_result = self.formal_medical_extractor.extract(
-                    text=text,
-                    doc_type=doctype.value,
-                    fallback_date=fallback_date,
-                    page_zones=page_zones,
-                    context_analysis=context_analysis,
-                    raw_text=None
-                )
-                if isinstance(formal_medical_result, dict):
-                    return formal_medical_result
-                else:
-                    return {
-                        "long_summary": str(formal_medical_result) if formal_medical_result else f"{fallback_date}: {doctype.value} extraction completed",
-                        "short_summary": f"{fallback_date}: {doctype.value} report processed"
-                    }
-            
-            # Imaging reports - convert ExtractionResult to dict
-            elif doctype in [DocumentType.MRI, DocumentType.CT, DocumentType.XRAY, 
-                            DocumentType.ULTRASOUND, DocumentType.EMG, DocumentType.MAMMOGRAM,
-                            DocumentType.PET_SCAN, DocumentType.BONE_SCAN, DocumentType.DEXA_SCAN,
-                            DocumentType.FLUOROSCOPY, DocumentType.ANGIOGRAM]:
-                logger.info(f"🎯 Routing to Imaging extractor")
-                imaging_result = self.imaging_extractor.extract(
-                    text, 
-                    doctype.value, 
-                    fallback_date,
-                    context_analysis=context_analysis,
-                    page_zones=page_zones
-                )
-                return self._convert_extraction_result_to_dict(imaging_result, fallback_date)
-            
-            # Progress reports (PR-2) - convert ExtractionResult to dict
-            elif doctype == DocumentType.PR2:
-                logger.info(f"🎯 Routing to PR-2 extractor")
-                pr2_result = self.pr2_extractor.extract(
-                    text, 
-                    doctype.value, 
-                    fallback_date, 
-                    context_analysis=context_analysis,
-                    page_zones=page_zones
-                )
-                return self._convert_extraction_result_to_dict(pr2_result, fallback_date)
-            
-            # Specialist consults - convert ExtractionResult to dict
-            elif doctype == DocumentType.CONSULT:
-                logger.info(f"🎯 Routing to Consult extractor")
-                consult_result = self.consult_extractor.extract(
-                    text, 
-                    doctype.value, 
-                    fallback_date, 
-                    context_analysis=context_analysis,
-                    page_zones=page_zones
-                )
-                return self._convert_extraction_result_to_dict(consult_result, fallback_date)
-            
-            # All other simple document types - convert ExtractionResult to dict
+        self,
+        text: str,
+        doctype: DocumentType,
+        fallback_date: str,
+        page_zones: Optional[Dict],
+        context_analysis: Dict
+    ) -> Dict[str, str]:
+        """
+        Route document to appropriate extractor WITH context analysis.
+        Returns dictionary with both summaries.
+        """
+        
+        # QME/AME/IME - use context-aware extraction (already returns dict)
+        if doctype in [DocumentType.QME, DocumentType.AME, DocumentType.IME]:
+            logger.info(f"🎯 Routing to QME extractor WITH context analysis")
+            qme_result = self.qme_extractor.extract(
+                text=text,
+                doc_type=doctype.value,
+                fallback_date=fallback_date,
+                page_zones=page_zones,
+                context_analysis=context_analysis,
+                raw_text=None
+            )
+            if isinstance(qme_result, dict):
+                return qme_result
             else:
-                logger.info(f"🎯 Routing to Simple extractor for {doctype.value}")
-                simple_result = self.simple_extractor.extract(
-                    text, 
-                    doctype.value, 
-                    fallback_date, 
-                    context_analysis=context_analysis,
-                    page_zones=page_zones
-                )
-                return self._convert_extraction_result_to_dict(simple_result, fallback_date)
+                return {
+                    "long_summary": str(qme_result) if qme_result else f"{fallback_date}: QME extraction completed",
+                    "short_summary": f"{fallback_date}: QME report processed"
+                }
+        
+        # NEW: Decision Documents - UR/IMR, Appeals, Authorizations, RFA, DFR
+        elif doctype in [DocumentType.UR, DocumentType.IMR, DocumentType.APPEAL, 
+                        DocumentType.AUTHORIZATION, DocumentType.RFA, DocumentType.DFR]:
+            logger.info(f"🎯 Routing to Decision Document extractor for {doctype.value}")
+            decision_result = self.decision_extractor.extract(
+                text=text,
+                doc_type=doctype.value,
+                fallback_date=fallback_date,
+                page_zones=page_zones,
+                context_analysis=context_analysis,
+                raw_text=None
+            )
+            if isinstance(decision_result, dict):
+                return decision_result
+            else:
+                return {
+                    "long_summary": str(decision_result) if decision_result else f"{fallback_date}: {doctype.value} extraction completed",
+                    "short_summary": f"{fallback_date}: {doctype.value} decision processed"
+                }
+
+        # NEW: Formal Medical Reports - Using your actual enum values
+        elif doctype in [DocumentType.SURGERY_REPORT, DocumentType.ANESTHESIA_REPORT, 
+                        DocumentType.PATHOLOGY, DocumentType.BIOPSY, DocumentType.GENETIC_TESTING,
+                        DocumentType.CARDIOLOGY, DocumentType.SLEEP_STUDY, DocumentType.DISCHARGE,
+                        DocumentType.ADMISSION_NOTE, DocumentType.HOSPITAL_COURSE, DocumentType.ER_REPORT,
+                        DocumentType.EMERGENCY_ROOM, DocumentType.OPERATIVE_NOTE, DocumentType.PRE_OP,
+                        DocumentType.POST_OP, DocumentType.NEUROLOGY, DocumentType.ORTHOPEDICS,
+                        DocumentType.RHEUMATOLOGY, DocumentType.ENDOCRINOLOGY, DocumentType.GASTROENTEROLOGY,
+                        DocumentType.PULMONOLOGY, DocumentType.EKG, DocumentType.ECG, DocumentType.ECHO,
+                        DocumentType.HOLTER_MONITOR, DocumentType.STRESS_TEST, DocumentType.NERVE_CONDUCTION]:
+            logger.info(f"🎯 Routing to Formal Medical Report extractor for {doctype.value}")
+            formal_medical_result = self.formal_medical_extractor.extract(
+                text=text,
+                doc_type=doctype.value,
+                fallback_date=fallback_date,
+                page_zones=page_zones,
+                context_analysis=context_analysis,
+                raw_text=None
+            )
+            if isinstance(formal_medical_result, dict):
+                return formal_medical_result
+            else:
+                return {
+                    "long_summary": str(formal_medical_result) if formal_medical_result else f"{fallback_date}: {doctype.value} extraction completed",
+                    "short_summary": f"{fallback_date}: {doctype.value} report processed"
+                }
+
+        # NEW: Clinical Notes - Using ALL the clinical types from your enum
+        elif doctype in [DocumentType.PROGRESS_NOTE, DocumentType.OFFICE_VISIT, DocumentType.CLINIC_NOTE,
+                        DocumentType.PHYSICAL_THERAPY, DocumentType.OCCUPATIONAL_THERAPY, DocumentType.CHIROPRACTIC,
+                        DocumentType.ACUPUNCTURE, DocumentType.PAIN_MANAGEMENT, DocumentType.PSYCHIATRY,
+                        DocumentType.PSYCHOLOGY, DocumentType.PSYCHOTHERAPY, DocumentType.BEHAVIORAL_HEALTH,
+                        DocumentType.MED_REFILL, DocumentType.PRESCRIPTION, DocumentType.TELEMEDICINE,
+                        DocumentType.MASSAGE_THERAPY, DocumentType.CLINICAL_NOTE, DocumentType.NURSING,
+                        DocumentType.NURSING_NOTE, DocumentType.VITAL_SIGNS, DocumentType.MEDICATION_ADMINISTRATION]:
+            logger.info(f"🎯 Routing to Clinical Note extractor for {doctype.value}")
+            clinical_note_result = self.clinical_note_extractor.extract(
+                text=text,
+                doc_type=doctype.value,
+                fallback_date=fallback_date,
+                page_zones=page_zones,
+                context_analysis=context_analysis,
+                raw_text=None
+            )
+            if isinstance(clinical_note_result, dict):
+                return clinical_note_result
+            else:
+                return {
+                    "long_summary": str(clinical_note_result) if clinical_note_result else f"{fallback_date}: {doctype.value} extraction completed",
+                    "short_summary": f"{fallback_date}: {doctype.value} note processed"
+                }
+
+        # NEW: Administrative Documents - Using ALL administrative types from your enum
+        elif doctype in [DocumentType.ADJUSTER, DocumentType.ATTORNEY, DocumentType.NCM,
+                        DocumentType.SIGNATURE_REQUEST, DocumentType.REFERRAL, DocumentType.CORRESPONDENCE,
+                        DocumentType.DENIAL_LETTER, DocumentType.APPROVAL_LETTER, DocumentType.WORK_STATUS,
+                        DocumentType.WORK_RESTRICTIONS, DocumentType.RETURN_TO_WORK, DocumentType.DISABILITY,
+                        DocumentType.CLAIM_FORM, DocumentType.EMPLOYER_REPORT, DocumentType.VOCATIONAL_REHAB,
+                        DocumentType.JOB_ANALYSIS, DocumentType.WORK_CAPACITY, DocumentType.PHARMACY,
+                        DocumentType.MEDICATION_LIST, DocumentType.PRIOR_AUTH, DocumentType.DEPOSITION,
+                        DocumentType.INTERROGATORY, DocumentType.SUBPOENA, DocumentType.AFFIDAVIT,
+                        DocumentType.ADMINISTRATIVE]:
+            logger.info(f"🎯 Routing to Administrative extractor for {doctype.value}")
+            administrative_result = self.administrative_extractor.extract(
+                text=text,
+                doc_type=doctype.value,
+                fallback_date=fallback_date,
+                page_zones=page_zones,
+                context_analysis=context_analysis,
+                raw_text=None
+            )
+            if isinstance(administrative_result, dict):
+                return administrative_result
+            else:
+                return {
+                    "long_summary": str(administrative_result) if administrative_result else f"{fallback_date}: {doctype.value} extraction completed",
+                    "short_summary": f"{fallback_date}: {doctype.value} document processed"
+                }
+        
+        # Imaging reports - convert ExtractionResult to dict
+        elif doctype in [DocumentType.MRI, DocumentType.CT, DocumentType.XRAY, 
+                        DocumentType.ULTRASOUND, DocumentType.EMG, DocumentType.MAMMOGRAM,
+                        DocumentType.PET_SCAN, DocumentType.BONE_SCAN, DocumentType.DEXA_SCAN,
+                        DocumentType.FLUOROSCOPY, DocumentType.ANGIOGRAM]:
+            logger.info(f"🎯 Routing to Imaging extractor")
+            imaging_result = self.imaging_extractor.extract(
+                text, 
+                doctype.value, 
+                fallback_date,
+                context_analysis=context_analysis,
+                page_zones=page_zones
+            )
+            return self._convert_extraction_result_to_dict(imaging_result, fallback_date)
+        
+        # Progress reports (PR-2) - convert ExtractionResult to dict
+        elif doctype == DocumentType.PR2:
+            logger.info(f"🎯 Routing to PR-2 extractor")
+            pr2_result = self.pr2_extractor.extract(
+                text, 
+                doctype.value, 
+                fallback_date, 
+                context_analysis=context_analysis,
+                page_zones=page_zones
+            )
+            return self._convert_extraction_result_to_dict(pr2_result, fallback_date)
+        
+        # Specialist consults - convert ExtractionResult to dict
+        elif doctype == DocumentType.CONSULT:
+            logger.info(f"🎯 Routing to Consult extractor")
+            consult_result = self.consult_extractor.extract(
+                text, 
+                doctype.value, 
+                fallback_date, 
+                context_analysis=context_analysis,
+                page_zones=page_zones
+            )
+            return self._convert_extraction_result_to_dict(consult_result, fallback_date)
+        
+        # All other simple document types - convert ExtractionResult to dict
+        else:
+            logger.info(f"🎯 Routing to Simple extractor for {doctype.value}")
+            simple_result = self.simple_extractor.extract(
+                text, 
+                doctype.value, 
+                fallback_date, 
+                context_analysis=context_analysis,
+                page_zones=page_zones
+            )
+            return self._convert_extraction_result_to_dict(simple_result, fallback_date)
     def _convert_extraction_result_to_dict(self, result, fallback_date: str) -> Dict[str, str]:
         """
         Convert ExtractionResult OR dict to dictionary with both summaries.
@@ -475,6 +530,28 @@ class ReportAnalyzer:
                        DocumentType.RHEUMATOLOGY, DocumentType.ENDOCRINOLOGY, DocumentType.GASTROENTEROLOGY,
                        DocumentType.PULMONOLOGY, DocumentType.EKG, DocumentType.ECG, DocumentType.ECHO,
                        DocumentType.HOLTER_MONITOR, DocumentType.STRESS_TEST, DocumentType.NERVE_CONDUCTION]:
+            return result
+        
+        # NEW: Clinical notes already verified in their extractor chain
+        if doc_type in [DocumentType.PROGRESS_NOTE, DocumentType.OFFICE_VISIT, DocumentType.CLINIC_NOTE,
+                       DocumentType.PHYSICAL_THERAPY, DocumentType.OCCUPATIONAL_THERAPY, DocumentType.CHIROPRACTIC,
+                       DocumentType.ACUPUNCTURE, DocumentType.PAIN_MANAGEMENT, DocumentType.PSYCHIATRY,
+                       DocumentType.PSYCHOLOGY, DocumentType.PSYCHOTHERAPY, DocumentType.BEHAVIORAL_HEALTH,
+                       DocumentType.MED_REFILL, DocumentType.PRESCRIPTION, DocumentType.TELEMEDICINE,
+                       DocumentType.MASSAGE_THERAPY, DocumentType.CLINICAL_NOTE, DocumentType.NURSING,
+                       DocumentType.NURSING_NOTE, DocumentType.VITAL_SIGNS, DocumentType.MEDICATION_ADMINISTRATION]:
+            return result
+        
+        # NEW: Administrative documents already verified in their extractor chain
+        if doc_type in [DocumentType.ADJUSTER, DocumentType.ATTORNEY, DocumentType.NCM,
+                       DocumentType.SIGNATURE_REQUEST, DocumentType.REFERRAL, DocumentType.CORRESPONDENCE,
+                       DocumentType.DENIAL_LETTER, DocumentType.APPROVAL_LETTER, DocumentType.WORK_STATUS,
+                       DocumentType.WORK_RESTRICTIONS, DocumentType.RETURN_TO_WORK, DocumentType.DISABILITY,
+                       DocumentType.CLAIM_FORM, DocumentType.EMPLOYER_REPORT, DocumentType.VOCATIONAL_REHAB,
+                       DocumentType.JOB_ANALYSIS, DocumentType.WORK_CAPACITY, DocumentType.PHARMACY,
+                       DocumentType.MEDICATION_LIST, DocumentType.PRIOR_AUTH, DocumentType.DEPOSITION,
+                       DocumentType.INTERROGATORY, DocumentType.SUBPOENA, DocumentType.AFFIDAVIT,
+                       DocumentType.ADMINISTRATIVE]:
             return result
         
         # Verify all other document types

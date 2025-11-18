@@ -68,6 +68,12 @@ class DocumentType(Enum):
     MASSAGE_THERAPY = "Massage Therapy"
     PAIN_MANAGEMENT = "Pain Management"
     
+    # NEW: Clinical Notes - Nursing and additional types
+    NURSING = "Nursing"
+    NURSING_NOTE = "Nursing Note"
+    VITAL_SIGNS = "Vital Signs"
+    MEDICATION_ADMINISTRATION = "Medication Administration"
+    
     # Surgical Documents
     SURGERY_REPORT = "Surgery Report"
     OPERATIVE_NOTE = "Operative Note"
@@ -148,7 +154,6 @@ class DocumentType(Enum):
     MEDICAL_REPORT = "Medical Report"
     ADMINISTRATIVE = "Administrative"
     UNKNOWN = "Unknown"
-
 
 @dataclass
 class ExtractionResult:
