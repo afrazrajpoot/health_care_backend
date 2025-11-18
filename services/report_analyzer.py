@@ -20,7 +20,7 @@ from extractors.consult_extractor import ConsultExtractorChained
 from extractors.simple_extractor import SimpleExtractor
 
 logger = logging.getLogger("document_ai")
-
+ 
 
 class ReportAnalyzer:
     """
