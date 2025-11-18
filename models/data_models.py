@@ -7,32 +7,146 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 
+from enum import Enum
+
 class DocumentType(Enum):
-    """All supported document types"""
+    """All supported document types - 70+ document types"""
+    
+    # Imaging Reports
     MRI = "MRI"
     CT = "CT"
     XRAY = "X-ray"
     ULTRASOUND = "Ultrasound"
     EMG = "EMG"
+    MAMMOGRAM = "Mammogram"
+    PET_SCAN = "PET Scan"
+    BONE_SCAN = "Bone Scan"
+    DEXA_SCAN = "DEXA Scan"
+    FLUOROSCOPY = "Fluoroscopy"
+    ANGIOGRAM = "Angiogram"
+    
+    # Laboratory & Diagnostics
     LABS = "Labs"
+    PATHOLOGY = "Pathology"
+    BIOPSY = "Biopsy"
+    GENETIC_TESTING = "Genetic Testing"
+    TOXICOLOGY = "Toxicology"
+    ALLERGY_TESTING = "Allergy Testing"
+    
+    # Progress Reports & Evaluations
     PR2 = "PR-2"
     PR4 = "PR-4"
     DFR = "DFR"
     CONSULT = "Consult"
+    PROGRESS_NOTE = "Progress Note"
+    OFFICE_VISIT = "Office Visit"
+    CLINIC_NOTE = "Clinic Note"
+    TELEMEDICINE = "Telemedicine"
+    
+    # Medical Evaluations
+    QME = "QME"
+    AME = "AME"
+    IME = "IME"
+    IMR = "IMR"
+    FCE = "FCE"
+    PEER_REVIEW = "Peer Review"
+    INDEPENDENT_REVIEW = "Independent Review"
+    
+    # Authorization & Utilization
     RFA = "RFA"
     UR = "UR"
     AUTHORIZATION = "Authorization"
     PEER_TO_PEER = "Peer-to-Peer"
-    QME = "QME"
-    AME = "AME"
-    IME = "IME"
+    TREATMENT_AUTH = "Treatment Authorization"
+    PROCEDURE_AUTH = "Procedure Authorization"
+    
+    # Therapy & Treatment Notes
+    PHYSICAL_THERAPY = "Physical Therapy"
+    OCCUPATIONAL_THERAPY = "Occupational Therapy"
+    CHIROPRACTIC = "Chiropractic"
+    ACUPUNCTURE = "Acupuncture"
+    MASSAGE_THERAPY = "Massage Therapy"
+    PAIN_MANAGEMENT = "Pain Management"
+    
+    # Surgical Documents
+    SURGERY_REPORT = "Surgery Report"
+    OPERATIVE_NOTE = "Operative Note"
+    ANESTHESIA_REPORT = "Anesthesia Report"
+    PRE_OP = "Pre-Op"
+    POST_OP = "Post-Op"
+    DISCHARGE = "Discharge"
+    
+    # Hospital Documents
+    ADMISSION_NOTE = "Admission Note"
+    HOSPITAL_COURSE = "Hospital Course"
+    ER_REPORT = "ER Report"
+    EMERGENCY_ROOM = "Emergency Room"
+    HOSPITAL_PROGRESS = "Hospital Progress"
+    
+    # Specialty Reports
+    CARDIOLOGY = "Cardiology"
+    NEUROLOGY = "Neurology"
+    ORTHOPEDICS = "Orthopedics"
+    PSYCHIATRY = "Psychiatry"
+    PSYCHOLOGY = "Psychology"
+    PSYCHOTHERAPY = "Psychotherapy"
+    BEHAVIORAL_HEALTH = "Behavioral Health"
+    RHEUMATOLOGY = "Rheumatology"
+    ENDOCRINOLOGY = "Endocrinology"
+    GASTROENTEROLOGY = "Gastroenterology"
+    PULMONOLOGY = "Pulmonology"
+    
+    # Diagnostic Studies
+    SLEEP_STUDY = "Sleep Study"
+    EKG = "EKG"
+    ECG = "ECG"
+    HOLTER_MONITOR = "Holter Monitor"
+    ECHO = "Echocardiogram"
+    STRESS_TEST = "Stress Test"
+    PULMONARY_FUNCTION = "Pulmonary Function"
+    NERVE_CONDUCTION = "Nerve Conduction"
+    
+    # Medications & Pharmacy
+    MED_REFILL = "Med Refill"
+    PRESCRIPTION = "Prescription"
+    PHARMACY = "Pharmacy"
+    MEDICATION_LIST = "Medication List"
+    PRIOR_AUTH = "Prior Authorization"
+    
+    # Administrative & Correspondence
     ADJUSTER = "Adjuster"
     ATTORNEY = "Attorney"
     NCM = "NCM"
     SIGNATURE_REQUEST = "Signature Request"
     REFERRAL = "Referral"
-    DISCHARGE = "Discharge"
-    MED_REFILL = "Med Refill"
+    CORRESPONDENCE = "Correspondence"
+    APPEAL = "Appeal"
+    DENIAL_LETTER = "Denial Letter"
+    APPROVAL_LETTER = "Approval Letter"
+    
+    # Work Status & Disability
+    WORK_STATUS = "Work Status"
+    WORK_RESTRICTIONS = "Work Restrictions"
+    RETURN_TO_WORK = "Return to Work"
+    DISABILITY = "Disability"
+    CLAIM_FORM = "Claim Form"
+    
+    # Legal Documents
+    DEPOSITION = "Deposition"
+    INTERROGATORY = "Interrogatory"
+    SUBPOENA = "Subpoena"
+    AFFIDAVIT = "Affidavit"
+    
+    # Employer & Vocational
+    EMPLOYER_REPORT = "Employer Report"
+    VOCATIONAL_REHAB = "Vocational Rehab"
+    JOB_ANALYSIS = "Job Analysis"
+    WORK_CAPACITY = "Work Capacity"
+    
+    # Generic Fallbacks
+    CLINICAL_NOTE = "Clinical Note"
+    MEDICAL_REPORT = "Medical Report"
+    ADMINISTRATIVE = "Administrative"
     UNKNOWN = "Unknown"
 
 

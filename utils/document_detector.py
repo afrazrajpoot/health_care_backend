@@ -41,24 +41,66 @@ Your job is to decide the primary type of document from raw extracted text.
 You will handle report types such as:
 - RFA (Request for Authorization)
 - PR2 (Progress Report)
+- PR4 (Permanent/Stationary Report)
 - DFR (Doctor’s First Report)
 - QME (Qualified Medical Evaluation)
 - AME (Agreed Medical Evaluation)
-- IMR (Independent Medical Review)
 - IME (Independent Medical Evaluation)
+- IMR (Independent Medical Review)
+- UR (Utilization Review)
+- CONSULT (Consultation or Office Visit)
+- IMAGING (Generic Imaging Report)
 - MRI (Magnetic Resonance Imaging)
 - CT (Computed Tomography)
 - X-ray (X-ray Imaging)
 - Ultrasound (Ultrasound Imaging)
-- EMG (Electromyography)
-- IMAGING (Generic Imaging Report)
-- CONSULT (Consultation or Office Visit)
-- UR (Utilization Review)
+- EMG (Electromyography / Nerve Study)
 - Progress Reports (PR2, PR4)
+- Progress Notes
+- Consult Reports
+- Radiology Reports
+- Surgery Reports
+- PT/OT/Chiro/Acupuncture Notes
+- Peer Reviews
+- UR / IMR Decisions
+- Medication / Pharmacy Documents
+- Nurse Case Manager Notes
+- Attorney Letters
+- DFR / PR-2 / PR-4 Forms
+- Treatment Plans
+- Lab Reports
+- Pathology Reports
+- Cardiology Reports
+- EMG/NCS Reports
+- FCE (Functional Capacity Evaluation)
+- Work Status Reports
+- Return-to-Work / Restriction Notes
+- Surgery Pre-Op / Post-Op Notes
+- Anesthesia Reports
+- Pain Management Notes
+- Psychological / Psychiatric Reports
+- Emergency Department Reports
+- Discharge Summaries
+- Admission Summaries
+- Hospital Course Documents
+- Nursing Notes
+- Disability / Claim Forms
+- Pharmacy Logs
+- Legal Correspondence
+- Employer Incident Reports
+- Job Requirements Reports
+- Medication Administration Records
+- Telemedicine Notes
+- Endoscopy / Colonoscopy Reports
+- Biopsy Reports
+- Genetic Testing Reports
+- Sleep Study Reports
+- Appeal / Denial Letters
+- ICD/CPT Billing Summaries
 
 Guidelines:
 - Consider the **context**, not just keywords.
-- If one form is merely mentioned (e.g., "Attach the Doctor’s First Report"), do NOT classify as that type.
+- If a form is only *mentioned* (e.g., "Attach the Doctor’s First Report"), do NOT classify as that type.
 - The **title or heading appearing first** is usually the main document, but use full context to confirm.
 - Be concise and objective. Never invent facts.
 """

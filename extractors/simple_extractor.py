@@ -1,185 +1,31 @@
 """
-Generic extractor for simple document types (RFA, UR, Auth, Admin letters, etc.)
-Enhanced with optional DoctorDetector integration and labeled summary format.
+Enhanced Simple Extractor with Type-Specific Sections from PromptManager
 """
+
 import re
 import logging
+import time
 from typing import Dict, Optional
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import AzureChatOpenAI
-
-from models.data_models import ExtractionResult
+from typing import List, Tuple
 from utils.doctor_detector import DoctorDetector
+from extractors.prompt_manager import PromptManager
 
 logger = logging.getLogger("document_ai")
 
 
 class SimpleExtractor:
-    """Generic extractor for simpler document types with optional doctor detection"""
-
-       # Updated clarity guide - shows ALL findings, avoids only non-informative placeholders
-    CLEAR_EXTRACTION_GUIDE = (
-        "Ensure all extracted information is explicit and clear. "
-        "When listing body parts, diagnoses, or findings, name each explicitly. "
-        "Avoid vague terms like '+1 more', 'etc.', or incomplete fragments. "
-        "Always produce full, meaningful, concise phrases (30-60 words for summaries). "
-        "Do NOT extract physician/doctor names - this is handled separately. "
-        "\n\nCRITICAL EXTRACTION RULES:\n"
-        "1. EXTRACT ALL KEY FINDINGS - both positive and negative clinical findings:\n"
-        "   ✓ GOOD: 'No fracture identified', 'MRI denied - insufficient medical necessity', 'Normal exam'\n"
-        "   ✓ GOOD: 'Fracture present', 'PT 6 visits approved', 'Modified duty with restrictions'\n"
-        "   ✗ BAD: 'Not provided', 'Not mentioned', 'Not specified', 'N/A'\n"
-        "2. If field has NO actual information (truly not mentioned in document), return empty string ''.\n"
-        "3. If field has clinical information (even if negative finding like 'no abnormalities'), include it.\n"
-        "4. For denials/UR: Always include the decision AND reason (e.g., 'MRI denied - insufficient medical necessity').\n"
-        "5. REASONING CHECK: Before returning each field, ask:\n"
-        "   - 'Does this contain actual clinical/administrative information from the document?'\n"
-        "   - 'Is this something a physician would want to know?'\n"
-        "   - If YES → include it (whether positive or negative finding)\n"
-        "   - If NO (placeholder/generic) → return empty string"
-    )
-
-    TEMPLATES = {
-        "RFA": {
-            "fields": ["date", "service_requested", "body_part"],
-            "format": "[DATE]: RFA{doctor_section} | Service → {service_requested} | Body part → {body_part}",
-            "prompt": (
-                "Extract: date (MM/DD/YY), service_requested (e.g., 'PT 6 visits', 'MRI L-spine'), "
-                "and body_part (list clearly; e.g., 'R shoulder', 'L knee'). "
-                "INCLUDE service_requested even if it's a resubmission or status update. "
-                + CLEAR_EXTRACTION_GUIDE
-            ),
-            "include_doctor": True,
-        },
-        "UR": {
-            "fields": ["date", "service", "decision", "reason"],
-            "format": "[DATE]: UR Decision{doctor_section} | Service → {service} | Decision → {decision} | Reason → {reason}",
-            "prompt": (
-                "Extract: date (MM/DD/YY), service (what was reviewed, e.g., 'MRI', 'PT'), "
-                "decision (Approved/Denied/Modified/Delayed), "
-                "and reason (brief rationale, max 20 words). "
-                "ALWAYS extract decision and reason - these are key findings even if decision is 'denied'. "
-                + CLEAR_EXTRACTION_GUIDE
-            ),
-            "include_doctor": True,
-        },
-        "Authorization": {
-            "fields": ["date", "service_approved", "visits_quantity", "body_part"],
-            "format": "[DATE]: Authorization{doctor_section} | Service → {service_approved} | Visits → {visits_quantity} | Body part → {body_part}",
-            "prompt": (
-                "Extract: date (MM/DD/YY), service_approved (e.g., 'MRI', 'PT'), "
-                "visits_quantity (e.g., '6 visits', '1 injection'), "
-                "and body_part (e.g., 'R shoulder'). "
-                + CLEAR_EXTRACTION_GUIDE
-            ),
-            "include_doctor": True,
-        },
-        "DFR": {
-            "fields": ["date", "doi", "diagnosis", "plan"],
-            "format": "[DATE]: DFR{doctor_section} | DOI → {doi} | Diagnosis → {diagnosis} | Plan → {plan}",
-            "prompt": (
-                "Extract: report date (MM/DD/YY), DOI (date of injury in MM/DD/YY), "
-                "primary diagnosis (include all key diagnoses), "
-                "and initial treatment plan (max 20 words). "
-                + CLEAR_EXTRACTION_GUIDE
-            ),
-            "include_doctor": True,
-        },
-        "PR-4": {
-            "fields": ["date", "mmi_status", "impairment", "future_care"],
-            "format": "[DATE]: PR-4{doctor_section} | MMI → {mmi_status} | Impairment → {impairment} | Future care → {future_care}",
-            "prompt": (
-                "Extract: date (MM/DD/YY), mmi_status (e.g., 'MMI reached', 'Not at MMI', 'Deferred'), "
-                "impairment (WPI percentage if stated, or 'None' if 0%), "
-                "and future_care (future medical needs, max 20 words, or 'None' if not needed). "
-                "INCLUDE mmi_status and impairment findings even if MMI not reached or 0% WPI. "
-                + CLEAR_EXTRACTION_GUIDE
-            ),
-            "include_doctor": True,
-        },
-        "Adjuster": {
-            "fields": ["date", "request"],
-            "format": "[DATE]: Adjuster letter | Request → {request}",
-            "prompt": (
-                "Extract: date (MM/DD/YY), and request (what is being requested, max 20 words). "
-                + CLEAR_EXTRACTION_GUIDE
-            ),
-            "include_doctor": False,
-        },
-        "Attorney": {
-            "fields": ["date", "side", "topic"],
-            "format": "[DATE]: {side} Attorney | Topic → {topic}",
-            "prompt": (
-                "Extract: date (MM/DD/YY), side ('Applicant' or 'Defense'), "
-                "and topic (main subject, max 20 words). "
-                + CLEAR_EXTRACTION_GUIDE
-            ),
-            "include_doctor": False,
-        },
-        "NCM": {
-            "fields": ["date", "topic"],
-            "format": "[DATE]: Nurse Case Manager | Topic → {topic}",
-            "prompt": (
-                "Extract: date (MM/DD/YY), and topic (main update or request, max 20 words). "
-                + CLEAR_EXTRACTION_GUIDE
-            ),
-            "include_doctor": False,
-        },
-        "Signature Request": {
-            "fields": ["date", "form_type"],
-            "format": "[DATE]: Signature Request | Form → {form_type}",
-            "prompt": (
-                "Extract: date (MM/DD/YY), and form_type (what form requires signature, max 20 words). "
-                + CLEAR_EXTRACTION_GUIDE
-            ),
-            "include_doctor": False,
-        },
-        "Referral": {
-            "fields": ["date", "specialty", "reason"],
-            "format": "[DATE]: Referral | Specialty → {specialty} | Reason → {reason}",
-            "prompt": (
-                "Extract: date (MM/DD/YY), specialty (where patient is referred, e.g., 'Orthopedics'), "
-                "and reason (brief, max 16 words). "
-                + CLEAR_EXTRACTION_GUIDE
-            ),
-            "include_doctor": True,
-        },
-        "Discharge": {
-            "fields": ["date", "diagnosis", "plan"],
-            "format": "[DATE]: Discharge{doctor_section} | Diagnosis → {diagnosis} | Plan → {plan}",
-            "prompt": (
-                "Extract: date (MM/DD/YY), primary discharge diagnosis, "
-                "and discharge plan (max 16 words). "
-                + CLEAR_EXTRACTION_GUIDE
-            ),
-            "include_doctor": True,
-        },
-        "Med Refill": {
-            "fields": ["date", "medication"],
-            "format": "[DATE]: Med Refill | Medication → {medication}",
-            "prompt": (
-                "Extract: date (MM/DD/YY), and medication (include name + dose, e.g., 'Ibuprofen 800mg'). "
-                + CLEAR_EXTRACTION_GUIDE
-            ),
-            "include_doctor": False,
-        },
-        "Labs": {
-            "fields": ["date", "key_abnormal"],
-            "format": "[DATE]: Lab Results | Key abnormal → {key_abnormal}",
-            "prompt": (
-                "Extract: date (MM/DD/YY), and key_abnormal (most critical abnormal value, max 16 words). "
-                + CLEAR_EXTRACTION_GUIDE
-            ),
-            "include_doctor": False,
-        },
-    }
+    """Enhanced extractor with type-specific sections and better error handling"""
 
     def __init__(self, llm: AzureChatOpenAI):
         self.llm = llm
         self.parser = JsonOutputParser()
         self.doctor_detector = DoctorDetector(llm)
-        logger.info("✅ SimpleExtractor initialized with DoctorDetector")
+        self.prompt_manager = PromptManager()  # Now instantiated as class instance
+        
+        logger.info("✅ SimpleExtractor initialized with type-specific sections")
 
     def extract(
         self,
@@ -188,214 +34,479 @@ class SimpleExtractor:
         fallback_date: str,
         page_zones: Optional[Dict[str, Dict[str, str]]] = None,
         raw_text: Optional[str] = None
-    ) -> ExtractionResult:
+    ) -> Dict:
         """
-        Generic extraction for simple document types with optional doctor detection.
-        
-        Args:
-            text: Layout-preserved text from Document AI
-            doc_type: Document type (RFA, UR, Authorization, etc.)
-            fallback_date: Fallback date if not found
-            page_zones: Per-page zone extraction (optional, for doctor detection)
-            raw_text: Original flat text (for backward compatibility)
+        Enhanced extraction with automatic type-specific sections and comprehensive error handling.
         """
-        template = self.TEMPLATES.get(doc_type)
-        if not template:
-            logger.warning(f"⚠️ No template for {doc_type}")
-            return ExtractionResult(
-                document_type=doc_type,
-                document_date=fallback_date,
-                summary_line=f"{doc_type} {fallback_date} = manual review required",
-                raw_data={},
-            )
-
-        # Stage 1: Extract clinical/document data (NO doctor extraction)
-        raw_result = self._extract_data(text, doc_type, template, fallback_date)
+        logger.info("=" * 80)
+        logger.info(f"🚀 EXTRACTING: {doc_type}")
+        logger.info("=" * 80)
         
-        # Stage 2: Optional doctor detection (for clinical documents)
-        physician_name = ""
-        if template.get("include_doctor", False):
-            logger.info(f"🔍 {doc_type} requires doctor detection (include_doctor=True)")
-            physician_name = self._detect_physician(text, page_zones, doc_type)
-            raw_result["physician_name"] = physician_name
-            logger.info(f"🎯 {doc_type} physician_name set to: '{physician_name}'")
-        else:
-            logger.info(f"ℹ️ {doc_type} does not require doctor detection (include_doctor=False)")
+        start_time = time.time()
         
-        # Stage 3: Build summary with labels
-        summary_line = self._build_summary(raw_result, template, doc_type, fallback_date, physician_name)
-        logger.info(f"📝 {doc_type} summary built: {summary_line}")
-        
-        return ExtractionResult(
-            document_type=doc_type,
-            document_date=raw_result.get("date", fallback_date),
-            summary_line=summary_line,
-            examiner_name=physician_name if physician_name else None,
-            raw_data=raw_result,
-        )
-
-    def _extract_data(self, text: str, doc_type: str, template: Dict, fallback_date: str) -> Dict:
-        """Extract document-specific data (NO doctor extraction)"""
-        field_json = ", ".join([f'"{field}": "value"' for field in template["fields"]])
-        
-        prompt = PromptTemplate(
-            template="""
-You are an AI Medical Assistant extracting structured data from a {doc_type} document.
-
-INSTRUCTION: {instruction}
-
-RULES:
-- Extract ALL key findings, whether positive or negative clinical information
-- Examples of what TO INCLUDE:
-  ✓ "No fracture", "Normal study", "MRI denied", "Authorization approved", "MMI not reached"
-- Examples of what NOT to include (return empty string instead):
-  ✗ "Not provided", "Not mentioned", "Not specified", "N/A", generic placeholders
-- DO NOT extract physician/doctor names - handled separately
-- Use MM/DD/YY date format
-- If field truly has no information in document, return empty string ''
-- Follow word limits strictly
-- Avoid vague terms like '+1 more', 'etc.'
-- Ensure output is clear and meaningful
-
-Document text:
-{text}
-
-Return JSON with actual findings (not placeholders):
-{{{field_json}}}
-
-{format_instructions}
-""",
-            input_variables=["text", "doc_type", "instruction", "field_json"],
-            partial_variables={"format_instructions": self.parser.get_format_instructions()},
-        )
-
         try:
+            # Validate inputs
+            if not text or not text.strip():
+                raise ValueError("Empty document text provided")
+            
+            # Get prompt and section info for logging
+            prompt_info = self.prompt_manager.get_prompt_info(doc_type)
+            section_info = self.prompt_manager.get_section_info(doc_type)
+            logger.info(f"🎯 Prompt routing: {prompt_info}")
+            logger.info(f"📋 Section mapping: {section_info}")
+            
+            # Stage 1: Extract with type-specific prompt
+            raw_data = self._extract_with_type_prompt(text, doc_type, fallback_date)
+            
+            # Stage 2: Always detect and include physician
+            physician_name = self._detect_physician(text, page_zones)
+            if physician_name:
+                raw_data["physician_name"] = physician_name
+            
+            # Stage 3: Build long summary with type-specific sections
+            long_summary = self._build_long_summary(raw_data, doc_type, fallback_date, physician_name)
+            
+            # Stage 4: Generate short summary
+            short_summary = self._generate_short_summary(long_summary, doc_type)
+            
+            elapsed_time = time.time() - start_time
+            logger.info(f"⚡ Extraction completed in {elapsed_time:.2f}s")
+            logger.info(f"📊 Results: {len(long_summary)} chars, {len(short_summary.split())} words")
+            
+            return {
+                "long_summary": long_summary,
+                "short_summary": short_summary
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Extraction failed for {doc_type}: {str(e)}")
+            return self._create_error_response(doc_type, str(e))
+
+    def _extract_with_type_prompt(self, text: str, doc_type: str, fallback_date: str) -> Dict:
+        """Extract data using universal prompt"""
+        prompt = self.prompt_manager.get_extraction_prompt(doc_type)
+        
+        try:
+            # Use appropriate context length based on document type
+            context_length = self._get_context_length(doc_type)
+            context_text = text[:context_length]
+            
             chain = prompt | self.llm | self.parser
             result = chain.invoke({
-                "text": text[:6000],
-                "doc_type": doc_type,
-                "instruction": template["prompt"],
-                "field_json": field_json,
+                "text": context_text,
+                "doc_type": doc_type,  # Pass doc_type for context
+                "format_instructions": self.parser.get_format_instructions()
             })
             
-            # Clean placeholder values
-            result = self._clean_placeholder_values(result)
+            # Validate and clean extracted data
+            result = self._clean_extracted_data(result, fallback_date)
             
-            # Use fallback date if not extracted
-            if "date" in result and not result["date"]:
-                result["date"] = fallback_date
-            
-            logger.info(f"✅ {doc_type} data extraction complete")
+            logger.info(f"✅ Universal extraction complete for {doc_type} - extracted {len(result)} fields")
             return result
+            
         except Exception as e:
-            logger.error(f"❌ {doc_type} extraction failed: {e}")
-            return {"date": fallback_date}
-    
-    def _clean_placeholder_values(self, data: Dict) -> Dict:
-        """Remove non-informative placeholder values, keep actual findings"""
-        placeholder_phrases = {
-            "not provided", "not mentioned", "not specified", "n/a", "na",
-            "not found", "not available", "not applicable", "unknown",
-            "not stated", "not documented", "not indicated", "empty",
-            "none provided", "none mentioned", "none specified"
-        }
+            logger.error(f"❌ Extraction failed for {doc_type}: {e}")
+            return self._create_fallback_data(fallback_date, doc_type)
+    def _get_context_length(self, doc_type: str) -> int:
+        """Determine appropriate context length based on document type"""
+        # Longer context for complex documents, shorter for simple ones
+        complex_docs = ["QME", "AME", "IME", "SURGERY_REPORT", "DISCHARGE"]
+        if doc_type in complex_docs:
+            return 16000  # Longer context for complex documents
+        return 12000  # Standard context for most documents
+
+    def _clean_extracted_data(self, data: Dict, fallback_date: str) -> Dict:
+        """Clean and validate extracted data"""
+        if not isinstance(data, dict):
+            return {"date": fallback_date, "key_findings": "Invalid data format"}
         
-        cleaned = {}
+        # Ensure date field exists
+        if not data.get("date"):
+            data["date"] = fallback_date
+        
+        # Remove empty or invalid fields
+        cleaned_data = {}
         for key, value in data.items():
-            if not value:
-                cleaned[key] = ""
-                continue
-            
-            value_str = str(value).strip().lower()
-            
-            # Check if it's a placeholder phrase
-            if value_str in placeholder_phrases:
-                cleaned[key] = ""
-                logger.debug(f"🧹 Removed placeholder for {key}: {value}")
-                continue
-            
-            # Keep actual findings (even negative clinical findings)
-            cleaned[key] = value
+            if self._is_valid_content(value):
+                cleaned_data[key] = value
         
-        return cleaned
+        return cleaned_data
+
+    def _detect_physician(self, text: str, page_zones: Optional[Dict]) -> str:
+        """Always detect physician from document with enhanced fallback"""
+        try:
+            detection_result = self.doctor_detector.detect_doctor(
+                text=text,
+                page_zones=page_zones
+            )
+            doctor_name = detection_result.get("doctor_name", "")
+            
+            # Validate doctor name
+            if doctor_name and len(doctor_name.strip()) > 2:  # Basic validation
+                logger.info(f"👨‍⚕️ Physician detected: {doctor_name}")
+                return doctor_name.strip()
+            else:
+                logger.warning("⚠️ No valid physician name detected")
+                return ""
+                
+        except Exception as e:
+            logger.error(f"❌ Physician detection failed: {e}")
+            return ""
     
 
-    def _detect_physician(
-        self,
-        text: str,
-        page_zones: Optional[Dict[str, Dict[str, str]]],
-        doc_type: str
-    ) -> str:
-        """Optional doctor detection for clinical documents"""
-        logger.info(f"🔍 Running DoctorDetector for {doc_type} (zone-aware)...")
-        
-        # Debug: Check if page_zones is provided
-        if page_zones:
-            logger.info(f"✅ {doc_type} extractor received page_zones with {len(page_zones)} pages: {list(page_zones.keys())}")
-        else:
-            logger.warning(f"⚠️ {doc_type} extractor did NOT receive page_zones")
-        
-        detection_result = self.doctor_detector.detect_doctor(
-            text=text,
-            page_zones=page_zones
-        )
-        
-        if detection_result["doctor_name"]:
-            logger.info(
-                f"✅ Physician detected: {detection_result['doctor_name']} "
-                f"(confidence: {detection_result['confidence']}, source: {detection_result['source']})"
-            )
-            physician_name = detection_result["doctor_name"]
-            logger.info(f"🎯 {doc_type} extractor returning physician: '{physician_name}'")
-            return physician_name
-        else:
-            logger.warning(f"⚠️ No valid physician found for {doc_type}: {detection_result['validation_notes']}")
-            logger.info(f"🎯 {doc_type} extractor returning empty physician name")
-            return ""
 
-    def _build_summary(
-        self,
-        data: Dict,
-        template: Dict,
-        doc_type: str,
-        fallback_date: str,
-        physician_name: str
-    ) -> str:
-        """Build labeled summary from template with explicit field markers"""
-        date = data.get("date", fallback_date)
+    def _generate_short_summary(self, long_summary: str, doc_type: str) -> str:
+        """Generate short summary from the comprehensive long summary"""
+        prompt = self.prompt_manager.get_short_summary_prompt(doc_type)
         
-        # Build doctor section if included
-        doctor_section = ""
+        try:
+            chain = prompt | self.llm
+            response = chain.invoke({
+                "long_summary": long_summary,  # Use the full comprehensive summary
+                "doc_type": doc_type
+            })
+            
+            short_summary = response.content.strip()
+            cleaned_summary = self._clean_and_validate_short_summary(short_summary)
+            
+            word_count = len(cleaned_summary.split())
+            logger.info(f"✅ Short summary generated from comprehensive source: {word_count} words")
+            return cleaned_summary
+            
+        except Exception as e:
+            logger.error(f"❌ Short summary generation failed: {e}")
+            return self._create_intelligent_fallback_summary(long_summary, doc_type)
+    
+    def _build_enhanced_structured_summary(self, raw_data: Dict, doc_type: str, fallback_date: str, physician_name: str = "") -> str:
+        """Build enhanced structured summary when LLM fails"""
+        sections = [f"📄 COMPREHENSIVE {doc_type} REPORT", "=" * 60]
+        
+        # Enhanced header with more context
+        info_lines = [
+            f"Report Date: {raw_data.get('date', fallback_date)}",
+            f"Document Type: {doc_type}",
+            f"Comprehensive Medical Summary"
+        ]
         if physician_name:
-            doctor_section = f" - {physician_name}"
-            logger.info(f"🩺 Building doctor_section for {doc_type}: '{doctor_section}'")
-        else:
-            logger.info(f"ℹ️ No physician name for {doc_type}, doctor_section will be empty")
+            info_lines.append(f"Evaluating Physician: {physician_name}")
+        sections.append("\n".join(info_lines))
         
-        # Start with format template
-        summary = template["format"]
-        logger.info(f"📋 Template format: {summary}")
+        # Get type-specific section mapping
+        section_mapping = self.prompt_manager.get_section_mapping(doc_type)
         
-        # Replace date
-        summary = summary.replace("[DATE]", date)
+        # Enhanced section content with more detail
+        added_sections = 0
+        for section_name, data_key in section_mapping:
+            content = raw_data.get(data_key)
+            if content and self._is_valid_content(content):
+                sections.append(f"\n{section_name}")
+                sections.append("-" * 40)
+                
+                # Enhanced content formatting
+                formatted_content = self._format_section_content(content, section_name)
+                sections.append(formatted_content)
+                added_sections += 1
         
-        # Replace doctor section
-        summary = summary.replace("{doctor_section}", doctor_section)
-        logger.info(f"📝 After doctor_section replacement: {summary}")
+        # Add clinical context section if minimal content
+        if added_sections < 3:
+            sections.append("\nCLINICAL CONTEXT")
+            sections.append("-" * 40)
+            key_findings = raw_data.get('key_findings', 'Comprehensive clinical assessment performed.')
+            sections.append(f"This {doc_type.lower()} report documents a medical evaluation with the following key aspects: {key_findings}")
+            
+            # Add any available additional context
+            if raw_data.get('diagnosis'):
+                sections.append(f"Primary diagnosis includes: {raw_data.get('diagnosis')}")
+            if raw_data.get('treatment'):
+                sections.append(f"Treatment considerations: {raw_data.get('treatment')}")
         
-        # Replace all field values
-        for field, value in data.items():
-            if field != "date" and field != "physician_name" and value:
-                summary = summary.replace(f"{{{field}}}", str(value))
+        summary = "\n\n".join(sections)
+        word_count = len(summary.split())
+        logger.info(f"📊 Enhanced structured summary: {word_count} words")
         
-        # Clean up empty placeholders and extra spacing
-        summary = re.sub(r"\{[^}]+\}\s*", "", summary)  # Remove unfilled placeholders
-        summary = re.sub(r"\|\s*\|", "|", summary)  # Remove double pipes
-        summary = re.sub(r"\s+", " ", summary)  # Normalize spacing
-        summary = summary.strip()
-        
-        # Remove trailing separators
-        summary = re.sub(r"\s*[|→]\s*$", "", summary)
-        
-        logger.info(f"✅ {doc_type} Summary: {summary}")
         return summary
+
+ 
+    def _build_structured_summary(self, raw_data: Dict, doc_type: str, fallback_date: str, physician_name: str = "") -> str:
+        """Build structured summary with type-specific sections"""
+        sections = [f"📄 {doc_type} REPORT", "=" * 50]
+        
+        # Basic info (always include physician if available)
+        info_lines = [f"Date: {raw_data.get('date', fallback_date)}"]
+        if physician_name:
+            info_lines.append(f"Physician: {physician_name}")
+        sections.append("\n".join(info_lines))
+        
+        # Get type-specific section mapping
+        section_mapping = self.prompt_manager.get_section_mapping(doc_type)
+        
+        # Track added sections for logging
+        added_sections = 0
+        
+        # Add sections based on available data
+        for section_name, data_key in section_mapping:
+            content = raw_data.get(data_key)
+            if content and self._is_valid_content(content):
+                sections.append(f"\n{section_name}")
+                sections.append("-" * 30)
+                sections.append(str(content))
+                added_sections += 1
+        
+        summary = "\n\n".join(sections)
+        
+        # If no content sections were added, create a basic summary
+        if added_sections == 0:
+            key_findings = raw_data.get('key_findings', 'No specific findings extracted')
+            summary += f"\n\nSUMMARY: {key_findings}"
+            logger.warning(f"⚠️ No detailed sections extracted for {doc_type}, using basic summary")
+        else:
+            logger.info(f"✅ Structured summary built with {added_sections} sections")
+        
+        return summary
+
+    def _is_valid_content(self, content) -> bool:
+        """Enhanced content validation"""
+        if not content:
+            return False
+        if isinstance(content, str):
+            clean_content = content.strip()
+            if not clean_content or clean_content in ['', 'None', 'Not specified', 'N/A', 'null']:
+                return False
+            # Check if content has meaningful length
+            if len(clean_content) < 10:  # Very short content might not be useful
+                return False
+        elif isinstance(content, list):
+            if len(content) == 0:
+                return False
+            # Check if list contains meaningful items
+            meaningful_items = [item for item in content if item and str(item).strip()]
+            return len(meaningful_items) > 0
+        elif isinstance(content, dict):
+            return len(content) > 0
+        return True
+
+  
+    def _clean_and_validate_short_summary(self, summary: str) -> str:
+        """Enhanced cleaning and validation for short summary"""
+        # Clean the summary
+        summary = re.sub(r'\s+', ' ', summary).strip()
+        summary = re.sub(r'[\*\#\-]', '', summary)  # Remove markdown
+        summary = re.sub(r'^(60-word summary:|summary:|medical summary:)\s*', '', summary, flags=re.IGNORECASE)
+        
+        words = summary.split()
+        word_count = len(words)
+        
+        # Strict word count enforcement with intelligent adjustment
+        if word_count != 60:
+            logger.warning(f"⚠️ Short summary word count: {word_count} (target: 60)")
+            
+            if word_count > 60:
+                # Remove less critical words from the end while preserving meaning
+                summary = self._truncate_intelligently(words, 60)
+            elif word_count < 55:
+                # Add meaningful context if too short
+                summary = self._enhance_short_summary(summary, word_count)
+        
+        return ' '.join(summary.split()[:60])  # Final enforcement
+
+    def _truncate_intelligently(self, words: list, target_length: int) -> str:
+        """Intelligently truncate summary while preserving meaning"""
+        # Keep the most important parts (usually the beginning)
+        return ' '.join(words[:target_length])
+
+    def _enhance_short_summary(self, summary: str, current_word_count: int) -> str:
+        """Enhance short summary with meaningful context"""
+        if current_word_count < 50:
+            summary = f"{summary} Additional clinical details documented in full report."
+        elif current_word_count < 55:
+            summary = f"{summary} Comprehensive evaluation completed per medical standards."
+        
+        return summary
+
+    def _create_intelligent_fallback_summary(self, long_summary: str, doc_type: str) -> str:
+        """Create intelligent fallback summary from long summary"""
+        try:
+            # Extract key sentences with priority for clinical information
+            sentences = re.split(r'[.!?]+', long_summary)
+            key_sentences = []
+            
+            # Priority keywords for different document types
+            clinical_keywords = ['diagnosis', 'findings', 'treatment', 'pain', 'symptoms', 'results']
+            evaluation_keywords = ['mmi', 'disability', 'work', 'restrictions', 'rating']
+            authorization_keywords = ['approved', 'denied', 'authorized', 'appeal', 'decision']
+            
+            all_keywords = clinical_keywords + evaluation_keywords + authorization_keywords
+            
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if not sentence or len(sentence) < 20:  # Skip very short sentences
+                    continue
+                    
+                # Prioritize sentences with key information
+                sentence_lower = sentence.lower()
+                if any(keyword in sentence_lower for keyword in all_keywords):
+                    key_sentences.append(sentence)
+                
+                if len(key_sentences) >= 4:  # Limit to 4 key sentences
+                    break
+            
+            # If no key sentences found, use first meaningful sentences
+            if not key_sentences:
+                key_sentences = [s.strip() for s in sentences[:3] if s.strip() and len(s.strip()) > 30]
+            
+            summary = ' '.join(key_sentences[:4])  # Use up to 4 sentences
+            
+            # Ensure 60 words
+            words = summary.split()
+            if len(words) > 60:
+                summary = ' '.join(words[:60])
+            elif len(words) < 50:
+                summary = f"{summary} Additional details in comprehensive report."
+            
+            logger.info(f"🔄 Using fallback summary: {len(summary.split())} words")
+            return summary
+            
+        except Exception as e:
+            logger.error(f"❌ Fallback summary creation failed: {e}")
+            return f"{doc_type} report summary - detailed extraction unavailable."
+
+    
+    def _create_fallback_data(self, fallback_date: str, doc_type: str) -> Dict:
+        """Create comprehensive fallback data structure"""
+        return {
+            "date": fallback_date,
+            "key_findings": f"Extraction incomplete for {doc_type}. Manual review recommended.",
+            "diagnosis": "Not extracted",
+            "treatment": "Not extracted",
+            "physician_name": "Not detected"
+        }
+    def _build_enhanced_section_summary(self, raw_data: Dict, doc_type: str, fallback_date: str, physician_name: str, section_mapping: List[Tuple[str, str]]) -> str:
+        """Build enhanced section-based summary with type-specific headings"""
+        sections = []
+        
+        # Document header
+        sections.append(f"📄 COMPREHENSIVE {doc_type} REPORT")
+        sections.append("=" * 60)
+        
+        # Document info
+        info_lines = [f"Report Date: {raw_data.get('date', fallback_date)}"]
+        if physician_name:
+            info_lines.append(f"Physician: {physician_name}")
+        sections.append("\n".join(info_lines))
+        sections.append("")  # Empty line for spacing
+        
+        # Add each section with content
+        for section_name, data_key in section_mapping:
+            content = raw_data.get(data_key)
+            if content and self._is_valid_content(content):
+                sections.append(section_name)
+                sections.append("-" * 40)
+                
+                formatted_content = self._format_section_content(content, section_name)
+                sections.append(formatted_content)
+                sections.append("")  # Empty line between sections
+        
+        # Add summary if minimal sections
+        if len(sections) <= 5:  # Only header and 1-2 sections
+            sections.append("CLINICAL SUMMARY")
+            sections.append("-" * 40)
+            key_info = []
+            if raw_data.get('key_findings'):
+                key_info.append(f"Key Findings: {raw_data.get('key_findings')}")
+            if raw_data.get('diagnosis'):
+                key_info.append(f"Diagnosis: {raw_data.get('diagnosis')}")
+            if raw_data.get('treatment'):
+                key_info.append(f"Treatment: {raw_data.get('treatment')}")
+            if raw_data.get('recommendations'):
+                key_info.append(f"Recommendations: {raw_data.get('recommendations')}")
+            
+            if key_info:
+                sections.append("\n".join(key_info))
+            else:
+                sections.append("Comprehensive medical evaluation completed. Detailed clinical assessment documented in full report.")
+        
+        summary = "\n".join(sections)
+        word_count = len(summary.split())
+        logger.info(f"📊 Enhanced section summary: {word_count} words, {len([s for s in sections if '=' in s or '---' in s])} sections")
+        
+        return summary
+
+    def _build_long_summary(self, raw_data: Dict, doc_type: str, fallback_date: str, physician_name: str = "") -> str:
+        """Build section-based long summary using type-specific headings"""
+        try:
+            # Get type-specific section mapping
+            section_mapping = self.prompt_manager.get_section_mapping(doc_type)
+            
+            # Prepare section headings for the prompt
+            section_headings = [section[0] for section in section_mapping]
+            headings_text = "\n".join([f"- {heading}" for heading in section_headings])
+            
+            # Prepare data for LLM with physician info
+            summary_data = raw_data.copy()
+            if physician_name and "physician_name" not in summary_data:
+                summary_data["physician_name"] = physician_name
+            
+            # Get the section-based long summary prompt
+            prompt = self.prompt_manager.get_long_summary_prompt(doc_type)
+            chain = prompt | self.llm
+            response = chain.invoke({
+                "raw_data": summary_data,
+                "doc_type": doc_type,
+                "section_headings": headings_text
+            })
+            
+            long_summary = response.content.strip()
+            word_count = len(long_summary.split())
+            
+            # Validate word count and structure
+            if word_count >= 350 and any(heading in long_summary for heading in section_headings[:3]):
+                logger.info(f"✅ Section-based long summary generated: {word_count} words, {len(section_headings)} sections")
+                return long_summary
+            else:
+                logger.warning(f"⚠️ LLM summary incomplete, using enhanced structured format")
+                return self._build_enhanced_section_summary(raw_data, doc_type, fallback_date, physician_name, section_mapping)
+                
+        except Exception as e:
+            logger.error(f"❌ Section-based long summary failed: {e}")
+            section_mapping = self.prompt_manager.get_section_mapping(doc_type)
+            return self._build_enhanced_section_summary(raw_data, doc_type, fallback_date, physician_name, section_mapping)
+
+
+    def _format_section_content(self, content, section_name: str) -> str:
+        """Format section content appropriately"""
+        if isinstance(content, list):
+            # For lists, create bullet points
+            items = [f"• {str(item).strip()}" for item in content if item and str(item).strip()]
+            return "\n".join(items) if items else "No specific information available."
+        elif isinstance(content, dict):
+            # For dictionaries, create key-value pairs
+            items = [f"• {key}: {value}" for key, value in content.items() if value]
+            return "\n".join(items) if items else "No specific information available."
+        else:
+            # For strings, ensure proper formatting
+            content_str = str(content).strip()
+            if not content_str or content_str in ['', 'None', 'Not specified']:
+                return "No specific information available."
+            
+            # Add basic formatting for long text
+            if len(content_str) > 120:
+                # Simple paragraph formatting
+                sentences = content_str.split('. ')
+                formatted = []
+                current_para = []
+                for sentence in sentences:
+                    if sentence.strip():
+                        current_para.append(sentence.strip())
+                        if len('. '.join(current_para)) > 80:
+                            formatted.append('. '.join(current_para) + '.')
+                            current_para = []
+                if current_para:
+                    formatted.append('. '.join(current_para) + '.')
+                return '\n\n'.join(formatted) if len(formatted) > 1 else content_str
+            return content_str
+    def _create_error_response(self, doc_type: str, error_msg: str) -> Dict:
+        """Create consistent error response"""
+        return {
+            "long_summary": f"Extraction failed for {doc_type}: {error_msg}",
+            "short_summary": f"{doc_type} summary unavailable due to processing error."
+        }
