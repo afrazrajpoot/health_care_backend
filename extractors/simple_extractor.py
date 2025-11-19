@@ -389,42 +389,54 @@ Create a clear administrative summary:
         logger.info("🎯 Third LLM - Generating short summary...")
         
         system_prompt = SystemMessagePromptTemplate.from_template("""
-    You create CONCISE pipe-delimited summaries for documents.
+You create CONCISE pipe-delimited summaries for documents.
 
-    STRICT REQUIREMENTS:
-        1. Word count MUST be **between 30 and 60 words**.
-        2. Output format MUST be EXACTLY:
-        [Report Title] | [Author/Physician or The person who signed the report] | [Date] | [Body parts] | [Diagnosis] | [Medication] | [MMI Status] | [Key Action Items] | [Work Status] | [Recommendation] | [Critical Finding] | Urgent Next Steps
+STRICT REQUIREMENTS:
+    1. Word count MUST be **between 30 and 60 words**.
+    2. Output format MUST be EXACTLY:
+       Report Title | Author/Physician or The person who signed the report | Date | Body Parts: VALUE | 
+       Diagnosis: VALUE | Medication: VALUE | MMI Status: VALUE | 
+       Key Action Items: VALUE | Work Status: VALUE | 
+       Recommendation: VALUE | Critical Finding: VALUE | Urgent Next Steps: VALUE
 
-        3. DO NOT fabricate or infer missing data — simply SKIP fields that do not exist.
-        4. Use ONLY information explicitly found in the long summary.
-        5. Output must be a SINGLE LINE (no line breaks).
-        6. Content priority:
-        - report title
-        - author name
-        - date
-        - affected body parts
-        - primary diagnosis
-        - medications (if present)
-        - MMI status (if present)
-        - work status (if present)
-        - key recommendation(s) (if present)
-        - one critical finding (if present)
-        - urgent next steps (if present)
-        - follow-up plan (if present)
+    ***IMPORTANT FORMAT UPDATE***
+    - Each segment must appear as **Key: Value**.
+    - If a field has NO VALUE, SKIP THE ENTIRE SEGMENT (do NOT output empty fields, do NOT output keys without values).
+    - NEVER produce double pipes (||).
+    - ONLY include segments that have real data.
+    - Keep keys EXACTLY as written above.
 
-        7. ABSOLUTE NO:
-        - assumptions
-        - clinical interpretation
-        - invented medications
-        - invented dates
-        - narrative sentences
+3. DO NOT fabricate or infer missing data — simply SKIP segments that do not exist.
+4. Use ONLY information explicitly found in the long summary.
+5. Output must be a SINGLE LINE (no line breaks).
+6. Content priority (only include if present):
+    - report title
+    - author name
+    - date
+    - affected body parts
+    - primary diagnosis
+    - medications
+    - MMI status
+    - work status
+    - key action items
+    - recommendations
+    - one critical finding
+    - urgent next steps
+    - follow-up plan (include inside Recommendation or Action Items if needed)
 
-        8. If a field is missing, SKIP IT—do NOT write "None" or "Not provided" and simply leave the field empty also donot use | for this field as if 2 fileds are missing then it shows ||
+7. ABSOLUTE NO:
+    - assumptions
+    - clinical interpretation
+    - invented medications
+    - invented dates
+    - narrative sentences
+    - empty fields or placeholders
 
-        Your final output must be 30–60 words and MUST follow the exact pipe-delimited format above.
-    """)
-        
+8. If a field is missing, SKIP IT—do NOT output the key and do NOT produce extra pipes.
+
+Your final output must be **30–60 words** and MUST follow the exact **pipe-delimited key/value style** stated above.
+""")
+
         user_prompt = HumanMessagePromptTemplate.from_template("""
     LONG SUMMARY:
     {long_summary}

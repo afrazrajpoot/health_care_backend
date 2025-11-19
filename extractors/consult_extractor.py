@@ -772,37 +772,44 @@ Extract into STRUCTURED JSON focusing on 8 CRITICAL FIELDS:
     2. Output format MUST be EXACTLY:
     [Report Title] | [Author/Physician or The person who signed the report] | [Date] | [Body parts] | [Diagnosis] | [Key Objective Findings] | [Medication] | [Treatments Provided] | [Clinical Assessment] | [Plan / Next Steps] | [MMI Status] | [Key Action Items] | [Work Status] | [Recommendation] | [Critical Finding] | Urgent Next Steps
 
-    3. DO NOT fabricate or infer missing data — simply SKIP fields that do not exist.
-    4. Use ONLY information explicitly found in the long summary.
-    5. Output must be a SINGLE LINE (no line breaks).
-    6. Content priority:
-    - report title
-    - author name
-    - date
-    - affected body parts
-    - primary diagnosis
-    - medications (if present)
-    - MMI status (if present)
-    - key objective findings (if present)
-    - treatments provided (if present)
-    - clinical assessment (if present)
-    - plan / next steps (if present)                                     
-    - work status (if present)
-    - key recommendation(s) (if present)
-    - one critical finding (if present)
-    - urgent next steps (if present)
-    - follow-up plan (if present)
+    FORMAT & RULES:
+- MUST be **30–60 words**.
+- MUST be **ONE LINE**, pipe-delimited, no line breaks.
+- NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
+- NEVER fabricate: no invented dates, meds, restrictions, exam findings, or recommendations.
+- NO narrative sentences. Use short factual fragments ONLY.
+- Use the shortest, clearest key names:
+  • Title = Report title  
+  • Author = MD/DO/PA/NP or signer  
+  • Date = Visit or exam date  
+  • Work Status = current status (if given)  
+  • Restrictions = physical restrictions (if given)  
+  • Meds = medications explicitly listed  (if given)
+  • Physical Exam = objective exam findings only (if given)
+  • Treatment Progress = progress or response  (if given)
+  • Auth Requests = items requested for authorization  (if given)
+  • Follow-up = next appointment or instruction  (if given)
+  • Critical Finding = one most clinically important finding (if given)
+CONTENT PRIORITY (only if provided in the long summary):
+1. Report Title  
+2. Author  
+3. Visit Date  
+4. Diagnosis / body parts  
+5. Work status & restrictions  
+6. Medications  
+7. Physical examination details  
+8. Treatment progress  
+9. Authorization requests  
+10. Follow-up plan  
+11. Critical finding
 
-    7. ABSOLUTE NO:
-    - assumptions
-    - clinical interpretation
-    - invented medications
-    - invented dates
-    - narrative sentences
+ABSOLUTELY FORBIDDEN:
+- assumptions, interpretations, invented medications, or inferred diagnoses
+- narrative writing
+- placeholder text or “Not provided”
+- duplicate pipes or empty pipe fields (e.g., "||")
 
-    8. If a field is missing, SKIP IT—do NOT write "None" or "Not provided" and simply leave the field empty also donot use | for this field as if 2 fileds are missing then it shows ||
-
-    Your final output must be 30–60 words and MUST follow the exact pipe-delimited format above. 
+Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
     """)
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
