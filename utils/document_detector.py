@@ -5,12 +5,20 @@ Uses GPT-4o + LangChain OutputParser (Pydantic).
 No regex, no embeddings, no rule bias.
 """
 
+import logging
 from pydantic import BaseModel, Field
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import AzureChatOpenAI
 from config.settings import CONFIG
 from utils.document_context_analyzer import DocumentContextAnalyzer
+
+# Setup logger
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 # --------------------------
 # 1. Define the output schema
@@ -19,7 +27,8 @@ from utils.document_context_analyzer import DocumentContextAnalyzer
 class DocumentTypeOut(BaseModel):
     doc_type: str = Field(
         description="The main document type inferred from the text. "
-                    "Must be one of: RFA, PR2, DFR, QME, IMAGING, CONSULT, UR, OTHER."
+                    "Must be one of the predefined types (RFA, PR2, DFR, QME, IMAGING, CONSULT, UR, etc.), "
+                    "OR if none match, use the actual title/heading from the document."
     )
     confidence: float = Field(
         description="Confidence level from 0.0 to 1.0",
@@ -43,7 +52,7 @@ You will handle report types such as:
 - RFA (Request for Authorization)
 - PR2 (Progress Report)
 - PR4 (Permanent/Stationary Report)
-- DFR (Doctor’s First Report)
+- DFR (Doctor's First Report)
 - QME (Qualified Medical Evaluation)
 - AME (Agreed Medical Evaluation)
 - IME (Independent Medical Evaluation)
@@ -99,10 +108,15 @@ You will handle report types such as:
 - Appeal / Denial Letters
 - ICD/CPT Billing Summaries
 
+**IMPORTANT**: 
+- If the document type matches one of the predefined categories above, use that category name.
+- If the document does NOT match any predefined category, extract and use the ACTUAL TITLE or HEADING from the document as the doc_type.
+- Do NOT use "OTHER" - always provide either a predefined type or the document's actual title.
+
 Guidelines:
-- Consider the *context*, not just keywords.
-- If a form is only mentioned (e.g., "Attach the Doctor’s First Report"), do NOT classify as that type.
-- The *title or heading appearing first* is usually the main document, but use full context to confirm.
+- Consider the **context**, not just keywords.
+- If a form is only *mentioned* (e.g., "Attach the Doctor's First Report"), do NOT classify as that type.
+- The **title or heading appearing first** is usually the main document, but use full context to confirm.
 - Be concise and objective. Never invent facts.
 """
 
@@ -124,72 +138,60 @@ def detect_document_type(text: str) -> dict:
     """
     Detects the most suitable document type using GPT-4o with context reasoning.
     Returns dict: {"doc_type": "...", "confidence": ..., "reasoning": "..."}
-    """
-    model = AzureChatOpenAI(
-        azure_endpoint=CONFIG.get("azure_openai_endpoint"),
-        api_key=CONFIG.get("azure_openai_api_key"),
-        deployment_name=CONFIG.get("azure_openai_deployment"),
-        api_version=CONFIG.get("azure_openai_api_version"),
-        temperature=0.0,
-        timeout=120
-    )
-
-    # First, get the initial classification
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", SYSTEM_PROMPT.strip()),
-        ("human", HUMAN_PROMPT.strip())
-    ]).partial(format_instructions=parser.get_format_instructions())
-
-    chain_input = {"text": text[:8000]}
-    messages = prompt.format_prompt(**chain_input).to_messages()
-    response = model.invoke(messages)
-    result = parser.parse(response.content)
-    result = result.model_dump()
-
-    # Define explicit types that should NOT be overridden
-    explicit_types = {
-        'RFA', 'PR2', 'DFR', 'QME', 'IMAGING', 'CONSULT', 'UR', 
-        'PR4', 'AME', 'IME', 'IMR', 'MRI', 'CT', 'X-RAY', 'ULTRASOUND', 'EMG'
-    }
-
-    # Check if result is not an explicit type
-    if result["doc_type"] not in explicit_types:
-        # Use context analyzer to extract title
-        context_analyzer = DocumentContextAnalyzer(model)
-        structural_analysis = context_analyzer.analyze_document_structure(text)
-        
-        # Extract title from first few lines
-        title = extract_document_title(text)
-        
-        if title:
-            print(f"🔄 Overriding '{result['doc_type']}' with title: '{title}'")
-            result["doc_type"] = title
-            result["reasoning"] = f"Using document title: {title}"
-            result["title_override"] = True
-        else:
-            result["title_override"] = False
-    else:
-        result["title_override"] = False
-
-    print(f'📝 Document type: {result["doc_type"]}')
-    print(f'📝 Confidence: {result["confidence"]}')
-    print(f'📝 Reasoning: {result["reasoning"]}')
-
-    return result
-
-def extract_document_title(text: str) -> str:
-    """
-    Simple title extraction from first few lines of document.
-    """
-    lines = text.split('\n')
     
-    # Look for the first meaningful line that could be a title
-    for line in lines[:10]:  # Check first 10 lines
-        line = line.strip()
-        if (len(line) > 10 and 
-            len(line) < 200 and 
-            len(line.split()) >= 2 and
-            not line.startswith(('Date:', 'Patient:', 'MRN:', 'DOB:'))):
-            return line
+    If document doesn't match predefined types, returns the actual document title.
+    """
+    logger.info("=" * 80)
+    logger.info("Starting document type detection")
+    logger.info(f"Input text length: {len(text)} characters")
+    logger.info(f"Text preview (first 200 chars): {text[:200]}...")
     
-    return ""
+    try:
+        model = AzureChatOpenAI(
+                azure_endpoint=CONFIG.get("azure_openai_endpoint"),
+                api_key=CONFIG.get("azure_openai_api_key"),
+                deployment_name=CONFIG.get("azure_openai_deployment"),
+                api_version=CONFIG.get("azure_openai_api_version"),
+                temperature=0.0,
+                timeout=120
+            )
+        logger.info("Azure OpenAI model initialized successfully")
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", SYSTEM_PROMPT.strip()),
+            ("human", HUMAN_PROMPT.strip())
+        ]).partial(format_instructions=parser.get_format_instructions())
+
+        chain_input = {"text": text[:8000]}  # cap text length for efficiency
+        logger.info(f"Capped text length for LLM: {len(chain_input['text'])} characters")
+
+        logger.info("Formatting prompt and invoking model...")
+        messages = prompt.format_prompt(**chain_input).to_messages()
+        response = model.invoke(messages)  # Use .invoke() instead of calling directly
+        
+        logger.info(f"Raw LLM response: {response.content}")
+        
+        result = parser.parse(response.content)
+        result = result.model_dump()
+
+        logger.info("=" * 80)
+        logger.info("DOCUMENT TYPE DETECTION RESULT")
+        logger.info("=" * 80)
+        logger.info(f'📝 Document type: {result["doc_type"]}')
+        logger.info(f'📊 Confidence: {result["confidence"]}')
+        logger.info(f'💡 Reasoning: {result["reasoning"]}')
+        logger.info("=" * 80)
+
+        print(f'📝 Document type: {result["doc_type"]}')
+        print(f'📝 Confidence: {result["confidence"]}')
+        print(f'📝 Reasoning: {result["reasoning"]}')
+
+        return result
+        
+    except Exception as e:
+        logger.error("=" * 80)
+        logger.error("ERROR during document type detection")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error message: {str(e)}")
+        logger.error("=" * 80)
+        raise
