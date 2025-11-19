@@ -391,22 +391,38 @@ Create a clear administrative summary:
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You create CONCISE pipe-delimited summaries for documents.
 
-OUTPUT FORMAT:
-[Document Type] | [Key Information] | [Action Items] | [Important Dates]
+ STRICT REQUIREMENTS:
+    1. Word count MUST be **between 30 and 60 words**.
+    2. Output format MUST be EXACTLY:
+    [Report Title] | [Author/Physician or The person who signed the report] | [Date] | [Body parts] | [Diagnosis] | [Medication] | [MMI Status] | [Key Action Items] | [Work Status] | [Recommendation] | [Critical Finding] | Urgent Next Steps
 
-CRITICAL RULES:
-- 15-40 words total
-- Extract ONLY information that exists in the summary
-- If a section has no data, leave it EMPTY (just the pipes)
-- NEVER include: unknown, unspecified, not provided, none
-- Focus on the most critical information
+    3. DO NOT fabricate or infer missing data — simply SKIP fields that do not exist.
+    4. Use ONLY information explicitly found in the long summary.
+    5. Output must be a SINGLE LINE (no line breaks).
+    6. Content priority:
+    - report title
+    - author name
+    - date
+    - affected body parts
+    - primary diagnosis
+    - medications (if present)
+    - MMI status (if present)
+    - work status (if present)
+    - key recommendation(s) (if present)
+    - one critical finding (if present)
+    - urgent next steps (if present)
+    - follow-up plan (if present)
 
-EXAMPLES:
-Medical: "Hospital Discharge | Full-thickness supraspinatus tear | Arthroscopic repair, medications | Report 10/26/2025, Follow-up 11/08/2025"
-Administrative: "Cover Letter | Records request for Sarah McConnell | Submit medical records | Due 11/10/2025"
-Appointment: "Appointment Notice | Follow-up with Dr. Smith | Attend scheduled visit | Appointment 11/15/2025"
+    7. ABSOLUTE NO:
+    - assumptions
+    - clinical interpretation
+    - invented medications
+    - invented dates
+    - narrative sentences
 
-Create the summary based ONLY on available information:
+    8. If a field is missing, SKIP IT—do NOT write "None" or "Not provided" and simply leave the field empty also donot use | for this field as if 2 fileds are missing then it shows ||
+
+    Your final output must be 30–60 words and MUST follow the exact pipe-delimited format above.
 """)
         
         user_prompt = HumanMessagePromptTemplate.from_template("""

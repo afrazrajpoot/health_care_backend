@@ -726,246 +726,98 @@ Extract into STRUCTURED JSON focusing on 8 CRITICAL FIELDS:
 
     def _generate_short_summary_from_long_summary(self, long_summary: str) -> str:
         """
-        Generate a comprehensive 60-word short summary covering all key aspects from the long summary.
-        Includes retry mechanism with exponential backoff - same as QME extractor.
+        Generate a precise 30–60 word consultation summary.
+        Pipe-delimited, zero hallucination, skips missing fields.
         """
-        logger.info("🎯 Generating comprehensive 60-word short summary from long summary...")
-        
+
+        logger.info("🎯 Generating 30–60 word consultation structured summary...")
+
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a medical-legal specialist creating PRECISE 60-word summaries of Specialist Consultation reports.
+    You are a medical-legal consultation specialist.
 
-CRITICAL REQUIREMENTS:
-- EXACTLY 60 words (count carefully - this is mandatory)
-- Cover ALL essential aspects in this order:
-  1. Consulting physician name and specialty
-  2. Primary diagnosis and affected body parts
-  3. Key clinical findings and symptoms
-  4. Current treatment recommendations
-  5. Work restrictions and status
-  6. Follow-up plan
+    TASK:
+    Create a concise, factual consultation summary using ONLY information explicitly stated in the long summary.
 
-CONTENT RULES:
-- MUST include the consulting physician's name and specialty
-- Include specific body parts and conditions
-- Mention key symptoms and functional limitations
-- Include critical treatment recommendations
-- State work restrictions explicitly
-- Include follow-up timeline if specified
+    STRICT REQUIREMENTS:
+    1. Word count MUST be **between 30 and 60 words**.
+    2. Output format MUST be EXACTLY:
+    [Report Title] | [Author/Physician or The person who signed the report] | [Date] | [Body parts] | [Diagnosis] | [Key Objective Findings] | [Medication] | [Treatments Provided] | [Clinical Assessment] | [Plan / Next Steps] | [MMI Status] | [Key Action Items] | [Work Status] | [Recommendation] | [Critical Finding] | Urgent Next Steps
 
-WORD COUNT ENFORCEMENT:
-- Count your words precisely before responding
+    3. DO NOT fabricate or infer missing data — simply SKIP fields that do not exist.
+    4. Use ONLY information explicitly found in the long summary.
+    5. Output must be a SINGLE LINE (no line breaks).
+    6. Content priority:
+    - report title
+    - author name
+    - date
+    - affected body parts
+    - primary diagnosis
+    - medications (if present)
+    - MMI status (if present)
+    - key objective findings (if present)
+    - treatments provided (if present)
+    - clinical assessment (if present)
+    - plan / next steps (if present)                                     
+    - work status (if present)
+    - key recommendation(s) (if present)
+    - one critical finding (if present)
+    - urgent next steps (if present)
+    - follow-up plan (if present)
 
+    7. ABSOLUTE NO:
+    - assumptions
+    - clinical interpretation
+    - invented medications
+    - invented dates
+    - narrative sentences
 
-FORMAT:
-- Single paragraph, no bullet points
-- Natural medical narrative flow
-- Use complete sentences
-- Include quantitative data when available
+    8. If a field is missing, SKIP IT—do NOT write "None" or "Not provided" and simply leave the field empty also donot use | for this field as if 2 fileds are missing then it shows ||
 
-
-✅ "Dr. Smith (Orthopedics) evaluated for lumbar radiculopathy. Patient reports 7/10 back pain with left leg radiation. Recommended: epidural steroid injection, physical therapy 2x/week, NSAIDs. Work restrictions: no lifting >20 lbs, limited bending. Not at MMI. Follow-up in 4 weeks for re-assessment and possible surgical consultation if no improvement."
-
-✅ "Consultation with Dr. Johnson (Neurology) for cervical radiculopathy. Symptoms: neck pain 6/10 with bilateral arm numbness. Plan: cervical MRI, gabapentin 300mg TID, PT for neck strengthening. Work restrictions: no overhead work. Follow-up in 6 weeks to review imaging and adjust treatment plan based on response to conservative care."
-
-Now create a PRECISE 60-word consultation summary from this long summary:
-""")
+    Your final output must be 30–60 words and MUST follow the exact pipe-delimited format above. 
+    """)
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
-COMPREHENSIVE LONG SUMMARY:
+    CONSULTATION LONG SUMMARY:
 
-{long_summary}
+    {long_summary}
 
-Create a PRECISE 60-word consultation summary that includes:
-1. Consulting physician and specialty
-2. Primary diagnosis and body parts  
-3. Key clinical findings
-4. Treatment recommendations
-5. Work restrictions
-6. Follow-up plan
-
-60-WORD SUMMARY:
-""")
+    Now produce a 30–60 word structured consultation summary following ALL rules.
+    """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-        
-        # Retry configuration
-        max_retries = 3
-        retry_delay = 1  # seconds
-        
-        for attempt in range(max_retries):
-            try:
-                start_time = time.time()
-                
-                logger.info(f"🔄 Attempt {attempt + 1}/{max_retries} for short summary generation...")
-                
-                chain = chat_prompt | self.llm
-                response = chain.invoke({
-                    "long_summary": long_summary
-                })
-                
-                short_summary = response.content.strip()
-                end_time = time.time()
-                
-                # Clean and validate
-                short_summary = self._clean_and_validate_short_summary(short_summary)
-                word_count = len(short_summary.split())
-                
-                logger.info(f"⚡ Short summary generated in {end_time - start_time:.2f}s: {word_count} words")
-                
-                # Validate word count strictly
-                if word_count == 60:
-                    logger.info("✅ Perfect 60-word summary generated!")
-                    return short_summary
-                else:
-                    logger.warning(f"⚠️ Summary has {word_count} words (expected 60), attempt {attempt + 1}")
-                    
-                    if attempt < max_retries - 1:
-                        # Add word count feedback to next attempt
-                        feedback_prompt = self._get_word_count_feedback_prompt(word_count)
-                        chat_prompt = ChatPromptTemplate.from_messages([feedback_prompt, user_prompt])
-                        time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
-                        continue
-                    else:
-                        logger.warning(f"⚠️ Final summary has {word_count} words after {max_retries} attempts")
-                        return short_summary
-                        
-            except Exception as e:
-                logger.error(f"❌ Short summary generation attempt {attempt + 1} failed: {e}")
-                
-                if attempt < max_retries - 1:
-                    logger.info(f"🔄 Retrying in {retry_delay * (attempt + 1)} seconds...")
-                    time.sleep(retry_delay * (attempt + 1))
-                else:
-                    logger.error(f"❌ All {max_retries} attempts failed for short summary generation")
-                    # Fallback: create comprehensive short summary from long summary
-                    return self._create_comprehensive_fallback_summary(long_summary)
-        
-        # Should never reach here, but just in case
-        return self._create_comprehensive_fallback_summary(long_summary)
 
-    def _get_word_count_feedback_prompt(self, actual_word_count: int) -> SystemMessagePromptTemplate:
-        """Get feedback prompt for word count adjustment"""
-        
-        if actual_word_count > 60:
-            feedback = f"Your previous summary had {actual_word_count} words (TOO LONG). Remove less critical details to reach exactly 60 words. Prioritize: physician, diagnosis, key treatments, work restrictions."
-        else:
-            feedback = f"Your previous summary had {actual_word_count} words (TOO SHORT). Add more specific clinical details to reach exactly 60 words. Include: specific body parts, treatment frequency, exact work restrictions, follow-up timing."
-        
-        return SystemMessagePromptTemplate.from_template(f"""
-You are a medical specialist creating PRECISE 60-word consultation summaries.
+        try:
+            chain = chat_prompt | self.llm
+            response = chain.invoke({
+                "long_summary": long_summary
+            })
+            summary = response.content.strip()
 
-CRITICAL FEEDBACK: {feedback}
+            # Normalize whitespace
+            summary = re.sub(r"\s+", " ", summary).strip()
 
-REQUIREMENTS:
-- EXACTLY 60 words - no more, no less
-- Include consulting physician, diagnosis, key findings, treatments, work restrictions
-- Count words carefully before responding
-- Adjust length by adding/removing specific clinical details
+            # Validate word count
+            wc = len(summary.split())
+            if wc < 30 or wc > 60:
+                logger.warning(f"⚠️ Consultation summary out of range ({wc} words). Fixing...")
 
-Now create a PRECISE 60-word summary:
-""")
+                fix_prompt = ChatPromptTemplate.from_messages([
+                    SystemMessagePromptTemplate.from_template(
+                        f"Your previous summary contained {wc} words. Rewrite it to be **between 30 and 60** words. "
+                        "Do NOT add fabricated data. Preserve all factual elements. Maintain the pipe-delimited format."
+                    ),
+                    HumanMessagePromptTemplate.from_template(summary)
+                ])
 
-    def _clean_and_validate_short_summary(self, summary: str) -> str:
-        """Clean and validate the 60-word short summary with strict word counting"""
-        # Remove excessive whitespace, quotes, and markdown
-        summary = re.sub(r'\s+', ' ', summary).strip()
-        summary = summary.replace('"', '').replace("'", "")
-        summary = re.sub(r'[\*\#\-]', '', summary)  # Remove markdown
-        
-        # Remove common prefixes that might indicate instructions
-        summary = re.sub(r'^(60-word summary:|summary:|consultation summary:)\s*', '', summary, flags=re.IGNORECASE)
-        
-        # Count words
-        words = summary.split()
-        
-        # Strict word count enforcement
-        if len(words) != 60:
-            logger.info(f"📝 Word count adjustment needed: {len(words)} words")
-            
-            if len(words) > 60:
-                # Remove less critical words while preserving medical content
-                summary = self._trim_to_60_words(words)
-            else:
-                # Add padding with relevant medical context
-                summary = self._expand_to_60_words(words, summary)
-        
-        return summary
+                chain2 = fix_prompt | self.llm
+                fixed = chain2.invoke({})
+                summary = re.sub(r"\s+", " ", fixed.content.strip())
 
-    def _trim_to_60_words(self, words: List[str]) -> str:
-        """Intelligently trim words to reach exactly 60"""
-        if len(words) <= 60:
-            return ' '.join(words)
-        
-        # Priority-based trimming - remove less critical parts
-        text = ' '.join(words)
-        
-        # Remove redundant phrases
-        reductions = [
-            (r'\b(and|with|including)\s+appropriate\s+', ' '),
-            (r'\bfor\s+(a|the)\s+period\s+of\s+\w+\s+\w+', ' '),
-            (r'\bwith\s+follow[- ]?up\s+in\s+\w+\s+\w+', ' with follow-up'),
-            (r'\bcontinued\s+(treatment|therapy|management)', 'continued'),
-            (r'\bphysical\s+therapy', 'PT'),
-            (r'\bmedications?\s*:\s*', 'Meds: '),
-            (r'\brestrictions?\s*:\s*', 'Restrictions: '),
-        ]
-        
-        for pattern, replacement in reductions:
-            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-        
-        words = text.split()
-        if len(words) > 60:
-            # Remove from the middle (less critical descriptive parts)
-            excess = len(words) - 60
-            mid_point = len(words) // 2
-            start_remove = mid_point - excess // 2
-            words = words[:start_remove] + words[start_remove + excess:]
-        
-        return ' '.join(words[:60])
+            return summary
 
-    def _expand_to_60_words(self, words: List[str], original_text: str) -> str:
-        """Intelligently expand text to reach exactly 60 words"""
-        if len(words) >= 60:
-            return ' '.join(words)
-        
-        needed_words = 60 - len(words)
-        
-        # Extract key elements to expand upon
-        expansions = []
-        
-        # Look for physician to add details
-        if 'Dr.' in original_text:
-            expansions.append("specialist consultation")
-        
-        # Look for diagnosis to add specifics
-        if any(term in original_text.lower() for term in ['diagnosis', 'confirmed', 'consistent with']):
-            expansions.append("based on clinical evaluation")
-        
-        # Look for treatments to add frequency
-        if any(term in original_text.lower() for term in ['injection', 'therapy', 'surgery']):
-            expansions.append("with comprehensive treatment plan")
-        
-        # Look for work restrictions to add specifics
-        if 'restrictions' in original_text.lower():
-            expansions.append("with activity modifications")
-        
-        # Add generic medical context if still needed
-        while len(words) + len(expansions) < 60 and len(expansions) < 5:
-            expansions.extend([
-                "for optimal functional recovery",
-                "with ongoing clinical monitoring", 
-                "addressing current symptoms",
-                "for improved work capacity",
-                "with progressive rehabilitation"
-            ])
-        
-        # Add expansions to the text
-        expanded_text = original_text
-        for expansion in expansions[:needed_words]:
-            expanded_text += f" {expansion}"
-        
-        words = expanded_text.split()
-        return ' '.join(words[:60])
+        except Exception as e:
+            logger.error(f"❌ Consultation summary generation failed: {e}")
+            return "Summary unavailable due to processing error."
 
     def _create_comprehensive_fallback_summary(self, long_summary: str) -> str:
         """Create comprehensive fallback short summary directly from long summary"""

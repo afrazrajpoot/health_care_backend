@@ -868,29 +868,68 @@ class WebhookService:
             logger.info(f"ℹ️ No tasks needed for document {processed_data['filename']} - skipping task creation")
 
         # Update previous documents' fields (skip for first-time claim-only as there are no previous)
-        # FIXED: Only update if lookup found previous documents for this specific patient/claim (total_documents > 0)
-        # This prevents updating docs for other patients when has_claim_number=True but no match
+        # UPDATED LOGIC: Match by claim number if present, otherwise match by BOTH name AND dob exactly
         total_previous_docs = status_result["lookup_data"].get("total_documents", 0) if status_result["lookup_data"] else 0
+        
+        # Check if we have valid claim number to match on
+        has_valid_claim_for_update = (
+            status_result["claim_to_save"] and 
+            str(status_result["claim_to_save"]).lower() not in ["not specified", "unknown", ""]
+        )
+        
+        # Check if we have valid name AND dob to match on
+        has_valid_name_dob_for_update = (
+            status_result["patient_name_to_use"] and 
+            str(status_result["patient_name_to_use"]).lower() not in ["not specified", "unknown", ""] and
+            updated_dob_for_query is not None and
+            dob_str and
+            str(dob_str).lower() not in ["not specified", "unknown", ""]
+        )
+        
+        # Decide if we should update
+        # Rule: Update ONLY if (claim number matches) OR (no claim number BUT name AND dob both match)
         should_update_previous = (
             document_status not in ["failed"] and
-            total_previous_docs > 0 and  # Require confirmed previous docs for this patient
+            total_previous_docs > 0 and
             not status_result["has_conflicting_claims"] and
-            status_result["patient_name_to_use"] != "Not specified" and
-            updated_dob_for_query is not None and
-            not is_first_time_claim_only
+            not is_first_time_claim_only and
+            (has_valid_claim_for_update or has_valid_name_dob_for_update)  # Either claim OR (name AND dob)
         )
 
         if should_update_previous:
-            updated_count = await db_service.update_previous_fields(
-                patient_name=status_result["patient_name_to_use"],
-                dob=dob_str,
-                physician_id=physician_id,
-                claim_number=status_result["claim_to_save"],
-                doi=document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else None
-            )
-            logger.info(f"🔄 Updated {updated_count} previous documents' fields for patient '{status_result['patient_name_to_use']}' using new data")
+            logger.info("🔄 Updating previous documents with strict matching logic:")
+            
+            if has_valid_claim_for_update:
+                # Priority 1: Match by claim number
+                logger.info(f"   ✅ MATCHING BY CLAIM NUMBER: '{status_result['claim_to_save']}'")
+                updated_count = await db_service.update_previous_fields(
+                    patient_name=status_result["patient_name_to_use"],
+                    dob=dob_str,
+                    physician_id=physician_id,
+                    claim_number=status_result["claim_to_save"],  # Match by claim number
+                    doi=document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else None
+                )
+                logger.info(f"🔄 Updated {updated_count} previous documents matched by claim number '{status_result['claim_to_save']}'")
+            elif has_valid_name_dob_for_update:
+                # Priority 2: Match by BOTH name AND dob (only if no claim number)
+                logger.info(f"   ✅ MATCHING BY NAME + DOB: '{status_result['patient_name_to_use']}' + '{dob_str}'")
+                logger.info(f"   ⚠️ No claim number available - using strict name+dob matching")
+                updated_count = await db_service.update_previous_fields(
+                    patient_name=status_result["patient_name_to_use"],
+                    dob=dob_str,
+                    physician_id=physician_id,
+                    claim_number=None,  # No claim number to match, will match by name+dob in DB service
+                    doi=document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else None
+                )
+                logger.info(f"🔄 Updated {updated_count} previous documents matched by name+dob ('{status_result['patient_name_to_use']}' + '{dob_str}')")
         else:
-            logger.info(f"ℹ️ Skipping previous update: status={document_status}, total_previous={total_previous_docs}, has_conflicts={status_result['has_conflicting_claims']}, patient={status_result['patient_name_to_use']}, has_dob={updated_dob_for_query is not None}, is_first_time_claim_only={is_first_time_claim_only}")
+            logger.info(f"ℹ️ Skipping previous update:")
+            logger.info(f"   - status={document_status}")
+            logger.info(f"   - total_previous={total_previous_docs}")
+            logger.info(f"   - has_conflicts={status_result['has_conflicting_claims']}")
+            logger.info(f"   - is_first_time_claim_only={is_first_time_claim_only}")
+            logger.info(f"   - has_valid_claim_for_update={has_valid_claim_for_update} (claim='{status_result.get('claim_to_save')}')")
+            logger.info(f"   - has_valid_name_dob_for_update={has_valid_name_dob_for_update} (name='{status_result.get('patient_name_to_use')}', dob='{dob_str}')")
 
         logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}, filename: {processed_data['filename']}")
 

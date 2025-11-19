@@ -745,236 +745,90 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
 
     def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
         """
-        Generate a comprehensive 60-word short summary covering all key administrative aspects.
+        Generate a precise 30–60 word administrative summary.
+        Pipe-delimited, zero hallucination, skips missing fields.
         """
-        logger.info("🎯 Generating comprehensive 60-word administrative short summary from long summary...")
-        
+
+        logger.info("🎯 Generating 30–60 word administrative structured summary...")
+
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are an administrative specialist creating PRECISE 60-word summaries of {doc_type} documents.
+    You are an administrative and legal-document extraction specialist.
 
-CRITICAL REQUIREMENTS:
-- EXACTLY 60 words (count carefully - this is mandatory)
-- Cover ALL essential aspects in this order:
-  1. Document type and date
-  2. Key parties involved (sender/recipient)
-  3. Primary subject and purpose
-  4. Critical deadlines and response requirements
-  5. Key action items or legal demands
-  6. Contact information for follow-up
-  7. Urgent next steps if applicable
+    TASK:
+    Create a concise, accurate administrative summary using ONLY information explicitly present in the long summary.
 
-CONTENT RULES:
-- MUST include response deadlines if specified
-- Include key legal or administrative demands
-- Mention required documentation or actions
-- Include critical contact information
-- Be specific about time-sensitive requirements
+    STRICT REQUIREMENTS:
+    1. Word count MUST be **between 30 and 60 words**.
+    2. Output format MUST be EXACTLY:
+    [Report Title] | [Author/Physician or The person who signed the report] | [Date] | [Body parts] | [Diagnosis] | [Medication] | [MMI Status] | [Key Action Items] | [Work Status] | [Recommendation] | [Critical Finding] | Urgent Next Steps
 
-WORD COUNT ENFORCEMENT:
-- Count your words precisely before responding
-- If over 60 words, remove less critical details
-- If under 60 words, add more specific administrative details
-- Never exceed 60 words
+    3. DO NOT fabricate or infer missing data — simply SKIP fields that do not exist.
+    4. Use ONLY information explicitly found in the long summary.
+    5. Output must be a SINGLE LINE (no line breaks).
+    6. Content priority:
+    - report title
+    - author name
+    - date
+    - affected body parts
+    - primary diagnosis
+    - medications (if present)
+    - MMI status (if present)
+    - work status (if present)
+    - key recommendation(s) (if present)
+    - one critical finding (if present)
+    - urgent next steps (if present)
+    - follow-up plan (if present)
 
-FORMAT:
-- Single paragraph, no bullet points
-- Natural administrative narrative flow
-- Use complete sentences
-- Include specific dates and requirements
+    7. ABSOLUTE NO:
+    - assumptions
+    - clinical interpretation
+    - invented medications
+    - invented dates
+    - narrative sentences
 
-EXAMPLES (60 words each):
+    8. If a field is missing, SKIP IT—do NOT write "None" or "Not provided" and simply leave the field empty also donot use | for this field as if 2 fileds are missing then it shows ||
 
-✅ "Attorney letter dated 10/15/2024 from Smith & Associates to claimant regarding settlement offer. Response required within 30 days. Demands medical documentation and wage statements. Includes deposition schedule for November 2024. Contact: John Smith at 555-0123. Urgent: Settlement conference scheduled for 11/20/2024 requiring client attendance and financial documentation."
-
-✅ "NCM note from Nurse Johnson on 10/15/2024: Case review for lumbar strain claim. Required: updated functional capacity evaluation by 11/01/2024. Treatment authorization for PT extended. Work restrictions: no lifting >20 lbs. Follow-up with adjuster scheduled. Contact: 555-0123. Next IME scheduled for December 2024."
-
-Now create a PRECISE 60-word administrative summary from this long summary:
-""")
+    Your final output must be 30–60 words and MUST follow the exact pipe-delimited format above. 
+    """)
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
-COMPREHENSIVE ADMINISTRATIVE DOCUMENT LONG SUMMARY:
+    LONG ADMINISTRATIVE SUMMARY:
 
-{long_summary}
+    {long_summary}
 
-Create a PRECISE 60-word administrative summary that includes:
-1. Document type and date
-2. Key parties involved
-3. Primary subject/purpose
-4. Critical deadlines
-5. Key action items
-6. Contact information
-7. Urgent next steps
-
-60-WORD ADMINISTRATIVE SUMMARY:
-""")
+    Now produce a 30–60 word administrative structured summary following ALL rules.
+    """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-        
-        # Retry configuration
-        max_retries = 3
-        retry_delay = 1
-        
-        for attempt in range(max_retries):
-            try:
-                start_time = time.time()
-                
-                logger.info(f"🔄 Attempt {attempt + 1}/{max_retries} for administrative short summary generation...")
-                
-                chain = chat_prompt | self.llm
-                response = chain.invoke({
-                    "doc_type": doc_type,
-                    "long_summary": long_summary
-                })
-                
-                short_summary = response.content.strip()
-                end_time = time.time()
-                
-                # Clean and validate
-                short_summary = self._clean_and_validate_short_summary(short_summary)
-                word_count = len(short_summary.split())
-                
-                logger.info(f"⚡ Administrative short summary generated in {end_time - start_time:.2f}s: {word_count} words")
-                
-                # Validate word count strictly
-                if word_count == 60:
-                    logger.info("✅ Perfect 60-word administrative summary generated!")
-                    return short_summary
-                else:
-                    logger.warning(f"⚠️ Administrative summary has {word_count} words (expected 60), attempt {attempt + 1}")
-                    
-                    if attempt < max_retries - 1:
-                        # Add word count feedback to next attempt
-                        feedback_prompt = self._get_word_count_feedback_prompt(word_count, doc_type)
-                        chat_prompt = ChatPromptTemplate.from_messages([feedback_prompt, user_prompt])
-                        time.sleep(retry_delay * (attempt + 1))
-                        continue
-                    else:
-                        logger.warning(f"⚠️ Final administrative summary has {word_count} words after {max_retries} attempts")
-                        return short_summary
-                        
-            except Exception as e:
-                logger.error(f"❌ Administrative short summary generation attempt {attempt + 1} failed: {e}")
-                
-                if attempt < max_retries - 1:
-                    logger.info(f"🔄 Retrying in {retry_delay * (attempt + 1)} seconds...")
-                    time.sleep(retry_delay * (attempt + 1))
-                else:
-                    logger.error(f"❌ All {max_retries} attempts failed for administrative summary generation")
-                    return self._create_admin_fallback_summary(long_summary, doc_type)
-        
-        return self._create_admin_fallback_summary(long_summary, doc_type)
 
-    def _get_word_count_feedback_prompt(self, actual_word_count: int, doc_type: str) -> SystemMessagePromptTemplate:
-        """Get feedback prompt for word count adjustment for administrative documents"""
-        
-        if actual_word_count > 60:
-            feedback = f"Your previous {doc_type} summary had {actual_word_count} words (TOO LONG). Remove less critical details to reach exactly 60 words. Prioritize: deadlines, action items, contact info, legal demands."
-        else:
-            feedback = f"Your previous {doc_type} summary had {actual_word_count} words (TOO SHORT). Add more specific administrative details to reach exactly 60 words. Include: specific dates, required documentation, contact methods, procedural steps."
-        
-        return SystemMessagePromptTemplate.from_template(f"""
-You are an administrative specialist creating PRECISE 60-word summaries of {doc_type} documents.
+        try:
+            chain = chat_prompt | self.llm
+            response = chain.invoke({"long_summary": long_summary, "doc_type": doc_type})
+            summary = response.content.strip()
 
-CRITICAL FEEDBACK: {feedback}
+            # Clean formatting
+            summary = re.sub(r"\s+", " ", summary).strip()
 
-REQUIREMENTS:
-- EXACTLY 60 words
-- Include: deadlines, action items, contact info, key demands
-- Count words carefully before responding
-- Adjust length by adding/removing specific administrative details
+            # Word count validation
+            wc = len(summary.split())
+            if wc < 30 or wc > 60:
+                logger.warning(f"⚠️ Administrative summary out of bounds ({wc} words). Auto-correcting...")
 
-""")
+                fix_prompt = ChatPromptTemplate.from_messages([
+                    SystemMessagePromptTemplate.from_template(
+                        f"Your prior output contained {wc} words. Rewrite it to be STRICTLY between 30 and 60 words while keeping all facts accurate and pipe-delimited. DO NOT add fabricated details."
+                    ),
+                    HumanMessagePromptTemplate.from_template(summary)
+                ])
+                chain2 = fix_prompt | self.llm
+                fixed = chain2.invoke({})
+                summary = re.sub(r"\s+", " ", fixed.content.strip())
 
-    def _clean_and_validate_short_summary(self, summary: str) -> str:
-        """Clean and validate the 60-word short summary"""
-        # Remove excessive whitespace, quotes, and markdown
-        summary = re.sub(r'\s+', ' ', summary).strip()
-        summary = summary.replace('"', '').replace("'", "")
-        summary = re.sub(r'[\*\#\-]', '', summary)
-        
-        # Remove common prefixes
-        summary = re.sub(r'^(60-word summary:|summary:|administrative summary:)\s*', '', summary, flags=re.IGNORECASE)
-        
-        # Count words
-        words = summary.split()
-        
-        # Strict word count enforcement
-        if len(words) != 60:
-            logger.info(f"📝 Administrative word count adjustment needed: {len(words)} words")
-            
-            if len(words) > 60:
-                summary = self._trim_to_60_words(words)
-            else:
-                summary = self._expand_to_60_words(words, summary)
-        
-        return summary
+            return summary
 
-    def _trim_to_60_words(self, words: List[str]) -> str:
-        """Intelligently trim words to reach exactly 60"""
-        if len(words) <= 60:
-            return ' '.join(words)
-        
-        text = ' '.join(words)
-        
-        # Administrative-specific reductions
-        reductions = [
-            (r'\b(and|with|including)\s+appropriate\s+', ' '),
-            (r'\bfor\s+(a|the)\s+period\s+of\s+\w+\s+\w+', ' '),
-            (r'\bwith\s+follow[- ]?up\s+in\s+\w+\s+\w+', ' with follow-up'),
-            (r'\bcontact\s+information', 'contact info'),
-            (r'\brequired\s+documentation', 'required docs'),
-            (r'\bresponse\s+deadline', 'deadline'),
-            (r'\blegal\s+representation', 'legal rep'),
-        ]
-        
-        for pattern, replacement in reductions:
-            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-        
-        words = text.split()
-        if len(words) > 60:
-            excess = len(words) - 60
-            mid_point = len(words) // 2
-            start_remove = mid_point - excess // 2
-            words = words[:start_remove] + words[start_remove + excess:]
-        
-        return ' '.join(words[:60])
-
-    def _expand_to_60_words(self, words: List[str], original_text: str) -> str:
-        """Intelligently expand text to reach exactly 60 words"""
-        if len(words) >= 60:
-            return ' '.join(words)
-        
-        needed_words = 60 - len(words)
-        
-        # Administrative-specific expansions
-        expansions = []
-        
-        if 'deadline' in original_text.lower():
-            expansions.append("with specified submission requirements")
-        
-        if 'legal' in original_text.lower():
-            expansions.append("per legal procedural guidelines")
-        
-        if 'contact' in original_text.lower():
-            expansions.append("for additional information or clarification")
-        
-        # Add generic administrative context
-        while len(words) + len(expansions) < 60 and len(expansions) < 5:
-            expansions.extend([
-                "following established administrative procedures",
-                "with required compliance documentation", 
-                "per standard submission guidelines",
-                "with specified response format",
-                "through designated communication channels"
-            ])
-        
-        # Add expansions to the text
-        expanded_text = original_text
-        for expansion in expansions[:needed_words]:
-            expanded_text += f" {expansion}"
-        
-        words = expanded_text.split()
-        return ' '.join(words[:60])
+        except Exception as e:
+            logger.error(f"❌ Administrative summary generation failed: {e}")
+            return "Summary unavailable due to processing error."
 
     def _create_admin_fallback_summary(self, long_summary: str, doc_type: str) -> str:
         """Create comprehensive fallback administrative summary directly from long summary"""
