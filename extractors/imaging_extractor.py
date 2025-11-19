@@ -545,7 +545,7 @@ Extract into STRUCTURED JSON focusing on 6 CRITICAL IMAGING FIELDS:
     1. Word count MUST be **between 30 and 60 words**.
     2. Output format MUST be EXACTLY:
 
-    PR-2 Progress Report | [Author/Physician or The person who signed the report] | [Visit Date] | [Affected Body Parts] | [Impression] | [Medications] | [Primary Diagnosis] | [Work Status] | [Restrictions] | [Treatment Progress] | [Authorization Requests] | [Follow-up Plan] | [Critical Finding]
+    [Report Title] | [Author/Physician or The person who signed the report] | [Visit Date] | [Affected Body Parts] | [Impression] | [Medications] | [Primary Diagnosis] | [Work Status] | [Restrictions] | [Treatment Progress] | [Authorization Requests] | [Follow-up Plan] | [Critical Finding]
 
     3. DO NOT generate narrative sentences.
      3. DO NOT fabricate or infer missing data — simply SKIP fields that do not exist.
