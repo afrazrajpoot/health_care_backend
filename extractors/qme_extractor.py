@@ -1015,6 +1015,9 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
 
             # Clean whitespace
             summary = re.sub(r'\s+', ' ', summary).strip()
+            
+            # Apply pipe cleaning function
+            summary = self._clean_pipes_from_summary(summary)
 
             # Word count check
             wc = len(summary.split())
@@ -1031,14 +1034,45 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
                 chain2 = fix_prompt | self.llm
                 fixed = chain2.invoke({})
                 summary = re.sub(r'\s+', ' ', fixed.content.strip())
+                summary = self._clean_pipes_from_summary(summary)  # Clean pipes again after fix
                 logger.info(f"🔧 Fixed summary word count: {len(summary.split())} words")
 
+            logger.info(f"✅ Final short summary: {len(summary.split())} words")
             return summary
 
         except Exception as e:
             logger.error(f"❌ Short summary generation failed: {e}")
             return "Summary unavailable due to processing error."
 
+    def _clean_pipes_from_summary(self, short_summary: str) -> str:
+        """
+        Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.
+        
+        Args:
+            short_summary: The pipe-delimited short summary string
+            
+        Returns:
+            Cleaned summary with proper pipe formatting
+        """
+        if not short_summary or '|' not in short_summary:
+            return short_summary
+        
+        # Split by pipe and clean each part
+        parts = short_summary.split('|')
+        cleaned_parts = []
+        
+        for part in parts:
+            # Remove whitespace and check if part has meaningful content
+            stripped_part = part.strip()
+            # Keep part if it has actual content (not just empty or whitespace)
+            if stripped_part:
+                cleaned_parts.append(stripped_part)
+        
+        # Join back with pipes - only include parts with actual content
+        cleaned_summary = ' . '.join(cleaned_parts)
+        
+        logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
+        return cleaned_summary
     def _create_comprehensive_fallback_summary(self, long_summary: str) -> str:
         """Create comprehensive fallback short summary directly from long summary with physician inclusion"""
         

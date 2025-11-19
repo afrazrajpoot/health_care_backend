@@ -786,7 +786,36 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         logger.info(f"✅ Long summary built: {len(long_summary)} characters")
         
         return long_summary
-
+    def _clean_pipes_from_summary(self, short_summary: str) -> str:
+            """
+            Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.
+            
+            Args:
+                short_summary: The pipe-delimited short summary string
+                
+            Returns:
+                Cleaned summary with proper pipe formatting
+            """
+            if not short_summary or '|' not in short_summary:
+                return short_summary
+            
+            # Split by pipe and clean each part
+            parts = short_summary.split('|')
+            cleaned_parts = []
+            
+            for part in parts:
+                # Remove whitespace and check if part has meaningful content
+                stripped_part = part.strip()
+                # Keep part if it has actual content (not just empty or whitespace)
+                if stripped_part:
+                    cleaned_parts.append(stripped_part)
+            
+            # Join back with pipes - only include parts with actual content
+            cleaned_summary = ' . '.join(cleaned_parts)
+            
+            logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
+            return cleaned_summary
+    
     def _generate_short_summary_from_long_summary(self, long_summary: str) -> str:
         """
         Generate a precise 30–60 word PR-2 structured summary.
@@ -808,10 +837,10 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
     [Report Title] | [Author/Physician or The person who signed the report] | [Visit Date] | [Work Status] | [Restrictions] | [Treatment Progress] | [Authorization Requests] | [Follow-up Plan] | [Critical Finding]
 
     3. DO NOT generate narrative sentences.
-     3. DO NOT fabricate or infer missing data — simply SKIP fields that do not exist.
-    4. Use ONLY information explicitly found in the long summary.
-    5. Output must be a SINGLE LINE (no line breaks).
-    6. Content priority:
+    4. DO NOT fabricate or infer missing data — simply SKIP fields that do not exist.
+    5. Use ONLY information explicitly found in the long summary.
+    6. Output must be a SINGLE LINE (no line breaks).
+    7. Content priority:
     - report title
     - author name
     - date
@@ -824,16 +853,15 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
     - one critical finding (if present)
     - urgent next steps (if present)
     - follow-up plan (if present)
-    
 
-    7. ABSOLUTE NO:
+    8. ABSOLUTE NO:
     - assumptions
     - clinical interpretation
     - invented medications
     - invented dates
     - narrative sentences
 
-    8. If a field is missing, SKIP IT—do NOT write "None" or "Not provided" and simply leave the field empty also donot use | for this field as if 2 fileds are missing then it shows ||
+    9. If a field is missing, SKIP IT—do NOT write "None" or "Not provided" and simply leave the field empty also donot use | for this field as if 2 fileds are missing then it shows ||
 
     Your final output must be 30–60 words and MUST follow the exact pipe-delimited format above.
     """)
@@ -855,6 +883,9 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
 
             # Clean output
             summary = re.sub(r'\s+', ' ', summary).strip()
+            
+            # Apply pipe cleaning function
+            summary = self._clean_pipes_from_summary(summary)
 
             # Word count check
             wc = len(summary.split())
@@ -871,13 +902,16 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
                 chain2 = fix_prompt | self.llm
                 fixed = chain2.invoke({})
                 summary = re.sub(r'\s+', ' ', fixed.content.strip())
+                summary = self._clean_pipes_from_summary(summary)  # Clean pipes again after fix
 
+            logger.info(f"✅ PR-2 summary generated: {len(summary.split())} words")
             return summary
 
         except Exception as e:
             logger.error(f"❌ PR-2 short summary generation failed: {e}")
             return "Summary unavailable due to processing error."
 
+   
     def _create_comprehensive_fallback_summary(self, long_summary: str) -> str:
         """Create comprehensive fallback short summary directly from long summary"""
         
