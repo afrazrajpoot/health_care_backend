@@ -10,6 +10,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import AzureChatOpenAI
 from config.settings import CONFIG
+from utils.document_context_analyzer import DocumentContextAnalyzer
 
 # --------------------------
 # 1. Define the output schema
@@ -99,9 +100,9 @@ You will handle report types such as:
 - ICD/CPT Billing Summaries
 
 Guidelines:
-- Consider the **context**, not just keywords.
-- If a form is only *mentioned* (e.g., "Attach the Doctor’s First Report"), do NOT classify as that type.
-- The **title or heading appearing first** is usually the main document, but use full context to confirm.
+- Consider the *context*, not just keywords.
+- If a form is only mentioned (e.g., "Attach the Doctor’s First Report"), do NOT classify as that type.
+- The *title or heading appearing first* is usually the main document, but use full context to confirm.
 - Be concise and objective. Never invent facts.
 """
 
@@ -116,7 +117,7 @@ TEXT:
 """
 
 # --------------------------
-# 3. Detector function
+# 3. Detector function with title override
 # --------------------------
 
 def detect_document_type(text: str) -> dict:
@@ -125,29 +126,70 @@ def detect_document_type(text: str) -> dict:
     Returns dict: {"doc_type": "...", "confidence": ..., "reasoning": "..."}
     """
     model = AzureChatOpenAI(
-            azure_endpoint=CONFIG.get("azure_openai_endpoint"),
-            api_key=CONFIG.get("azure_openai_api_key"),
-            deployment_name=CONFIG.get("azure_openai_deployment"),
-            api_version=CONFIG.get("azure_openai_api_version"),
-            temperature=0.0,
-            timeout=120
-        )
+        azure_endpoint=CONFIG.get("azure_openai_endpoint"),
+        api_key=CONFIG.get("azure_openai_api_key"),
+        deployment_name=CONFIG.get("azure_openai_deployment"),
+        api_version=CONFIG.get("azure_openai_api_version"),
+        temperature=0.0,
+        timeout=120
+    )
 
-
+    # First, get the initial classification
     prompt = ChatPromptTemplate.from_messages([
         ("system", SYSTEM_PROMPT.strip()),
         ("human", HUMAN_PROMPT.strip())
     ]).partial(format_instructions=parser.get_format_instructions())
 
-    chain_input = {"text": text[:8000]}  # cap text length for efficiency
-
+    chain_input = {"text": text[:8000]}
     messages = prompt.format_prompt(**chain_input).to_messages()
-    response = model.invoke(messages)  # Use .invoke() instead of calling directly
+    response = model.invoke(messages)
     result = parser.parse(response.content)
     result = result.model_dump()
+
+    # Define explicit types that should NOT be overridden
+    explicit_types = {
+        'RFA', 'PR2', 'DFR', 'QME', 'IMAGING', 'CONSULT', 'UR', 
+        'PR4', 'AME', 'IME', 'IMR', 'MRI', 'CT', 'X-RAY', 'ULTRASOUND', 'EMG'
+    }
+
+    # Check if result is not an explicit type
+    if result["doc_type"] not in explicit_types:
+        # Use context analyzer to extract title
+        context_analyzer = DocumentContextAnalyzer(model)
+        structural_analysis = context_analyzer.analyze_document_structure(text)
+        
+        # Extract title from first few lines
+        title = extract_document_title(text)
+        
+        if title:
+            print(f"🔄 Overriding '{result['doc_type']}' with title: '{title}'")
+            result["doc_type"] = title
+            result["reasoning"] = f"Using document title: {title}"
+            result["title_override"] = True
+        else:
+            result["title_override"] = False
+    else:
+        result["title_override"] = False
 
     print(f'📝 Document type: {result["doc_type"]}')
     print(f'📝 Confidence: {result["confidence"]}')
     print(f'📝 Reasoning: {result["reasoning"]}')
 
     return result
+
+def extract_document_title(text: str) -> str:
+    """
+    Simple title extraction from first few lines of document.
+    """
+    lines = text.split('\n')
+    
+    # Look for the first meaningful line that could be a title
+    for line in lines[:10]:  # Check first 10 lines
+        line = line.strip()
+        if (len(line) > 10 and 
+            len(line) < 200 and 
+            len(line.split()) >= 2 and
+            not line.startswith(('Date:', 'Patient:', 'MRN:', 'DOB:'))):
+            return line
+    
+    return ""

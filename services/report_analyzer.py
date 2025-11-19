@@ -494,7 +494,7 @@ class ReportAnalyzer:
                 elif doc_type_str in ["Discharge Summary", "Admission Summary", "Hospital Course"]:
                     return DocumentType.DISCHARGE_SUMMARY
                 else:
-                    logger.warning(f"⚠️ Unknown document type '{doc_type_str}', using UNKNOWN")
+                    logger.warning(f"⚠️ document type '{doc_type_str}', using")
                     return DocumentType.UNKNOWN
             except Exception as e:
                 logger.warning(f"⚠️ Error parsing document type '{doc_type_str}': {e}")
