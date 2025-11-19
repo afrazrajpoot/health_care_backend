@@ -389,48 +389,48 @@ Create a clear administrative summary:
         logger.info("🎯 Third LLM - Generating short summary...")
         
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You create CONCISE pipe-delimited summaries for documents.
+    You create CONCISE pipe-delimited summaries for documents.
 
- STRICT REQUIREMENTS:
-    1. Word count MUST be **between 30 and 60 words**.
-    2. Output format MUST be EXACTLY:
-    [Report Title] | [Author/Physician or The person who signed the report] | [Date] | [Body parts] | [Diagnosis] | [Medication] | [MMI Status] | [Key Action Items] | [Work Status] | [Recommendation] | [Critical Finding] | Urgent Next Steps
+    STRICT REQUIREMENTS:
+        1. Word count MUST be **between 30 and 60 words**.
+        2. Output format MUST be EXACTLY:
+        [Report Title] | [Author/Physician or The person who signed the report] | [Date] | [Body parts] | [Diagnosis] | [Medication] | [MMI Status] | [Key Action Items] | [Work Status] | [Recommendation] | [Critical Finding] | Urgent Next Steps
 
-    3. DO NOT fabricate or infer missing data — simply SKIP fields that do not exist.
-    4. Use ONLY information explicitly found in the long summary.
-    5. Output must be a SINGLE LINE (no line breaks).
-    6. Content priority:
-    - report title
-    - author name
-    - date
-    - affected body parts
-    - primary diagnosis
-    - medications (if present)
-    - MMI status (if present)
-    - work status (if present)
-    - key recommendation(s) (if present)
-    - one critical finding (if present)
-    - urgent next steps (if present)
-    - follow-up plan (if present)
+        3. DO NOT fabricate or infer missing data — simply SKIP fields that do not exist.
+        4. Use ONLY information explicitly found in the long summary.
+        5. Output must be a SINGLE LINE (no line breaks).
+        6. Content priority:
+        - report title
+        - author name
+        - date
+        - affected body parts
+        - primary diagnosis
+        - medications (if present)
+        - MMI status (if present)
+        - work status (if present)
+        - key recommendation(s) (if present)
+        - one critical finding (if present)
+        - urgent next steps (if present)
+        - follow-up plan (if present)
 
-    7. ABSOLUTE NO:
-    - assumptions
-    - clinical interpretation
-    - invented medications
-    - invented dates
-    - narrative sentences
+        7. ABSOLUTE NO:
+        - assumptions
+        - clinical interpretation
+        - invented medications
+        - invented dates
+        - narrative sentences
 
-    8. If a field is missing, SKIP IT—do NOT write "None" or "Not provided" and simply leave the field empty also donot use | for this field as if 2 fileds are missing then it shows ||
+        8. If a field is missing, SKIP IT—do NOT write "None" or "Not provided" and simply leave the field empty also donot use | for this field as if 2 fileds are missing then it shows ||
 
-    Your final output must be 30–60 words and MUST follow the exact pipe-delimited format above.
-""")
+        Your final output must be 30–60 words and MUST follow the exact pipe-delimited format above.
+    """)
         
         user_prompt = HumanMessagePromptTemplate.from_template("""
-LONG SUMMARY:
-{long_summary}
+    LONG SUMMARY:
+    {long_summary}
 
-Create a clean pipe-delimited short summary with ONLY available information:
-""")
+    Create a clean pipe-delimited short summary with ONLY available information:
+    """)
         
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
         
@@ -440,6 +440,8 @@ Create a clean pipe-delimited short summary with ONLY available information:
             short_summary = response.content.strip()
             
             short_summary = self._clean_short_summary(short_summary)
+            short_summary = self._clean_pipes_from_summary(short_summary)  # NEW CLEANUP
+            
             word_count = len(short_summary.split())
             logger.info(f"✅ Short summary: {word_count} words")
             
@@ -452,8 +454,7 @@ Create a clean pipe-delimited short summary with ONLY available information:
             
         except Exception as e:
             logger.error(f"❌ Short summary generation failed: {e}")
-            return f"{doc_type} | | |"
-    
+            return self._clean_pipes_from_summary(f"{doc_type} | | |")  # CLEANED ERROR RESPONSE
     def _clean_empty_fields(self, data: Dict, fallback_date: str) -> Dict:
         """Remove all empty fields and ensure clean structure."""
         cleaned = {}
@@ -576,7 +577,35 @@ Create a clean pipe-delimited short summary with ONLY available information:
             header += f"\nDocument Date: {report_date}"
         
         return f"{header}\n\nAdministrative document processed. No clinical content identified."
-    
+    def _clean_pipes_from_summary(self, short_summary: str) -> str:
+        """
+        Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.
+        
+        Args:
+            short_summary: The pipe-delimited short summary string
+            
+        Returns:
+            Cleaned summary with proper pipe formatting
+        """
+        if not short_summary or '|' not in short_summary:
+            return short_summary
+        
+        # Split by pipe and clean each part
+        parts = short_summary.split('|')
+        cleaned_parts = []
+        
+        for part in parts:
+            # Remove whitespace and check if part has meaningful content
+            stripped_part = part.strip()
+            # Keep part if it has actual content (not just empty or whitespace)
+            if stripped_part:
+                cleaned_parts.append(stripped_part)
+        
+        # Join back with pipes - only include parts with actual content
+        cleaned_summary = ' | '.join(cleaned_parts)
+        
+        logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
+        return cleaned_summary
     def _create_fallback_extraction(self, fallback_date: str, doc_type: str) -> Dict:
         """Create fallback extraction data with clean empty fields."""
         return {

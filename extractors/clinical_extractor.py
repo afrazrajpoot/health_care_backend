@@ -823,7 +823,36 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         logger.info(f"✅ Clinical note long summary built: {len(long_summary)} characters")
         
         return long_summary
-
+    def _clean_pipes_from_summary(self, short_summary: str) -> str:
+        """
+        Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.
+        
+        Args:
+            short_summary: The pipe-delimited short summary string
+            
+        Returns:
+            Cleaned summary with proper pipe formatting
+        """
+        if not short_summary or '|' not in short_summary:
+            return short_summary
+        
+        # Split by pipe and clean each part
+        parts = short_summary.split('|')
+        cleaned_parts = []
+        
+        for part in parts:
+            # Remove whitespace and check if part has meaningful content
+            stripped_part = part.strip()
+            # Keep part if it has actual content (not just empty or whitespace)
+            if stripped_part:
+                cleaned_parts.append(stripped_part)
+        
+        # Join back with pipes - only include parts with actual content
+        cleaned_summary = ' . '.join(cleaned_parts)
+        
+        logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
+        return cleaned_summary
+    
     def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
         """
         Generate a precise 30–60 word clinical note summary.
@@ -896,6 +925,9 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
 
             # Normalize whitespace
             summary = re.sub(r"\s+", " ", summary).strip()
+            
+            # Apply pipe cleaning function
+            summary = self._clean_pipes_from_summary(summary)
 
             # Validate word count
             wc = len(summary.split())
@@ -913,12 +945,15 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
                 chain2 = fix_prompt | self.llm
                 fixed = chain2.invoke({})
                 summary = re.sub(r"\s+", " ", fixed.content.strip())
+                summary = self._clean_pipes_from_summary(summary)  # Clean pipes again after auto-fix
 
+            logger.info(f"✅ Clinical summary generated: {len(summary.split())} words")
             return summary
 
         except Exception as e:
             logger.error(f"❌ Clinical summary generation failed: {e}")
             return "Summary unavailable due to processing error."
+
 
     def _create_clinical_fallback_summary(self, long_summary: str, doc_type: str) -> str:
         """Create comprehensive fallback clinical summary directly from long summary"""
