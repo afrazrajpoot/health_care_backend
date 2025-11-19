@@ -558,11 +558,11 @@ Extract into STRUCTURED JSON focusing on 6 CRITICAL IMAGING FIELDS:
     
     def _generate_short_summary_from_long_summary(self, long_summary: str) -> str:
         """
-        Generate a precise 30–60 word structured imaging summary.
+        Generate a precise 30–60 word structured imaging summary in key-value format.
         Zero hallucinations. Pipe-delimited. Skips missing fields.
         """
 
-        logger.info("🎯 Generating 30–60 word structured imaging summary...")
+        logger.info("🎯 Generating 30–60 word structured imaging summary (key-value format)...")
 
         system_prompt = SystemMessagePromptTemplate.from_template("""
     You are a radiology-report summarization specialist.
@@ -574,46 +574,37 @@ Extract into STRUCTURED JSON focusing on 6 CRITICAL IMAGING FIELDS:
     1. Word count MUST be **between 30 and 60 words**.
     2. Output format MUST be EXACTLY:
 
-    [Report Title] | [Author/Physician or The person who signed the report] | [Visit Date] | [Affected Body Parts] | [Impression] | [Medications] | [Primary Diagnosis] | [Work Status] | [Restrictions] | [Treatment Progress] | [Authorization Requests] | [Follow-up Plan] | [Critical Finding]
+    [Report Title] | [Radiologist] | [Study Date] | Body Parts:[value] | Findings:[value] | Impression:[value] | Comparison:[value] | Critical Finding:[value] | Recommendations:[value]
 
     FORMAT & RULES:
-- MUST be **30–60 words**.
-- MUST be **ONE LINE**, pipe-delimited, no line breaks.
-- NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
-- NEVER fabricate: no invented dates, meds, restrictions, exam findings, or recommendations.
-- NO narrative sentences. Use short factual fragments ONLY.
-- Use the shortest, clearest key names:
-  • Title = Report title  
-  • Author = MD/DO/PA/NP or signer  
-  • Date = Visit or exam date  
-  • Work Status = current status (if given)  
-  • Restrictions = physical restrictions (if given)  
-  • Meds = medications explicitly listed  (if given)
-  • Physical Exam = objective exam findings only (if given)
-  • Treatment Progress = progress or response  (if given)
-  • Auth Requests = items requested for authorization  (if given)
-  • Follow-up = next appointment or instruction  (if given)
-  • Critical Finding = one most clinically important finding (if given)
-CONTENT PRIORITY (only if provided in the long summary):
-1. Report Title  
-2. Author  
-3. Visit Date  
-4. Diagnosis / body parts  
-5. Work status & restrictions  
-6. Medications  
-7. Physical examination details  
-8. Treatment progress  
-9. Authorization requests  
-10. Follow-up plan  
-11. Critical finding
+    - MUST be **30–60 words**.
+    - MUST be **ONE LINE**, pipe-delimited, no line breaks.
+    - NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
+    - NEVER fabricate: no invented dates, findings, or recommendations.
+    - NO narrative sentences. Use short factual fragments ONLY.
+    - First three fields (Report Title, Radiologist, Study Date) appear without keys
+    - All other fields use key-value format: Key:[value]
+    - Focus on radiology-specific elements: findings, impressions, comparisons
 
-ABSOLUTELY FORBIDDEN:
-- assumptions, interpretations, invented medications, or inferred diagnoses
-- narrative writing
-- placeholder text or “Not provided”
-- duplicate pipes or empty pipe fields (e.g., "||")
+    CONTENT PRIORITY (only if provided in the long summary):
+    1. Report Title  
+    2. Radiologist  
+    3. Study Date  
+    4. Body parts studied  
+    5. Key imaging findings  
+    6. Radiologist's impression  
+    7. Comparison to prior studies  
+    8. Critical/urgent findings  
+    9. Recommendations for follow-up
 
-Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
+    ABSOLUTELY FORBIDDEN:
+    - assumptions, interpretations, or invented findings
+    - narrative writing
+    - placeholder text or "Not provided"
+    - duplicate pipes or empty pipe fields (e.g., "||")
+    - Including non-radiology fields (medications, work status, etc.)
+
+    Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
     """)
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
@@ -633,8 +624,7 @@ Your final output MUST be between 30–60 words and follow the exact pipe-delimi
             summary = response.content.strip()
             summary = re.sub(r"\s+", " ", summary).strip()
             
-            # Apply pipe cleaning function
-            summary = self._clean_pipes_from_summary(summary)
+            # No pipe cleaning - keep pipes as generated
 
             # Validate 30–60 word requirement
             wc = len(summary.split())
@@ -643,7 +633,7 @@ Your final output MUST be between 30–60 words and follow the exact pipe-delimi
 
                 fix_prompt = ChatPromptTemplate.from_messages([
                     SystemMessagePromptTemplate.from_template(
-                        f"Your prior output was {wc} words. Rewrite it to be between 30–60 words, preserving only factual content, keeping the exact pipe format, and adding NO fabricated details."
+                        f"Your prior output was {wc} words. Rewrite it to be between 30–60 words, preserving only factual content, keeping the exact key-value pipe format, and adding NO fabricated details. Maintain format: [Report Title] | [Radiologist] | [Study Date] | Body Parts:[value] | Findings:[value] | etc."
                     ),
                     HumanMessagePromptTemplate.from_template(summary)
                 ])
@@ -651,7 +641,7 @@ Your final output MUST be between 30–60 words and follow the exact pipe-delimi
                 chain2 = fix_prompt | self.llm
                 fixed = chain2.invoke({})
                 summary = re.sub(r"\s+", " ", fixed.content.strip())
-                summary = self._clean_pipes_from_summary(summary)  # Clean pipes again after fix
+                # No pipe cleaning after fix
 
             logger.info(f"✅ Imaging summary generated: {len(summary.split())} words")
             return summary
@@ -659,7 +649,6 @@ Your final output MUST be between 30–60 words and follow the exact pipe-delimi
         except Exception as e:
             logger.error(f"❌ Imaging summary generation failed: {e}")
             return "Summary unavailable due to processing error."
-
   
     def _create_comprehensive_fallback_summary(self, long_summary: str) -> str:
         """Create comprehensive fallback short summary directly from long summary"""

@@ -743,72 +743,57 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
 
     def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
         """
-        Generate a comprehensive 60-word short summary covering all key decision aspects.
+        Generate a precise 30–60 word, pipe-delimited actionable summary in key-value format.
+        No hallucination, no assumptions. Missing fields are omitted.
         """
-        logger.info("🎯 Generating comprehensive 60-word decision short summary from long summary...")
-        
+        logger.info("🎯 Generating 30–60 word actionable short summary (key-value format)...")
+
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a medical-legal specialist creating PRECISE 60-word summaries of {doc_type} decision documents.
+    You are a medical-legal extraction specialist.
 
-CRITICAL REQUIREMENTS:
-- EXACTLY 60 words (count carefully - this is mandatory)
-- Cover ALL essential aspects in this order:
-  1. Document type and decision date
-  2. Requesting provider and patient context
-  3. Services/treatments requested
-  4. Final decision outcome (APPROVED/DENIED/PARTIAL)
-  5. Medical necessity determination
-  6. Key rationale for decision
-  7. Appeal deadline if applicable
+    Your task: Generate a short, highly actionable summary from a VERIFIED long medical summary.
 
-CONTENT RULES:
-- MUST include the final decision status
-- Include key services/treatments decided upon
-- Mention medical necessity determination
-- Include appeal deadlines if specified
-- Be specific about partial approvals
+    STRICT REQUIREMENTS:
+    1. Word count MUST be between **30 and 60 words** (min 30, max 60).
+    2. Format MUST be EXACTLY:
 
-WORD COUNT ENFORCEMENT:
-- Count your words precisely before responding
-- If over 60 words, remove less critical details
-- If under 60 words, add more specific decision details
-- Never exceed 60 words
+    [Document Type] | [Decision Date] | Requesting Provider:[value] | Services:[value] | Decision:[value] | Medical Necessity:[value] | Rationale:[value] | Appeal Info:[value]
 
-FORMAT:
-- Single paragraph, no bullet points
-- Natural medical-legal narrative flow
-- Use complete sentences
-- Include quantitative data when available
+    3. DO NOT fabricate or infer missing data — simply SKIP entire key-value pairs that do not exist.
+    4. Use ONLY information explicitly found in the long summary.
+    5. Output must be a SINGLE LINE (no line breaks).
+    6. Content priority:
+    - document type
+    - decision date
+    - requesting provider
+    - key services/treatments decided
+    - final decision outcome (APPROVED/DENIED/PARTIAL)
+    - medical necessity determination
+    - key rationale for decision
+    - appeal deadline if applicable
 
-EXAMPLES (60 words each):
+    7. ABSOLUTE NO:
+    - assumptions
+    - clinical interpretation
+    - invented information
+    - narrative sentences
 
-✅ "UR Decision dated 10/15/2024 for Dr. Smith's request for lumbar epidural steroid injection for patient with chronic back pain. Decision: NOT MEDICALLY NECESSARY per ODG guidelines. Rationale: insufficient conservative treatment trial. Appeal deadline: 30 days from receipt. Required: documentation of failed physical therapy and medication management."
+    8. If a field is missing, SKIP THE ENTIRE KEY-VALUE PAIR—do NOT include empty key-value pairs.
 
-✅ "IMR Appeal determination approved partial request for pain management. Approved: 8 physical therapy sessions. Denied: continued opioid medication. Medical necessity: PT supported, opioids not indicated per MTUS. Decision effective 11/01/2024. No further appeal rights available for this determination."
-
-Now create a PRECISE 60-word medical-legal decision summary from this long summary:
-""")
+    Your final output must be 30–60 words and MUST follow the exact format above.
+    """)
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
-COMPREHENSIVE DECISION LONG SUMMARY:
+    LONG SUMMARY:
 
-{long_summary}
+    {long_summary}
 
-Create a PRECISE 60-word decision summary that includes:
-1. Document type and decision date
-2. Requesting provider context  
-3. Key services/treatments decided
-4. Final decision outcome
-5. Medical necessity determination
-6. Key rationale
-7. Appeal information if applicable
-
-60-WORD DECISION SUMMARY:
-""")
+    Now produce the 30–60 word single-line summary following the strict rules.
+    """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
         
-        # Retry configuration (same as QME extractor)
+        # Retry configuration
         max_retries = 3
         retry_delay = 1
         
@@ -816,7 +801,7 @@ Create a PRECISE 60-word decision summary that includes:
             try:
                 start_time = time.time()
                 
-                logger.info(f"🔄 Attempt {attempt + 1}/{max_retries} for decision short summary generation...")
+                logger.info(f"🔄 Attempt {attempt + 1}/{max_retries} for short summary generation...")
                 
                 chain = chat_prompt | self.llm
                 response = chain.invoke({
@@ -824,44 +809,46 @@ Create a PRECISE 60-word decision summary that includes:
                     "long_summary": long_summary
                 })
                 
-                short_summary = response.content.strip()
+                summary = response.content.strip()
                 end_time = time.time()
                 
-                # Clean and validate
-                short_summary = self._clean_and_validate_short_summary(short_summary)
-                word_count = len(short_summary.split())
+                # Clean whitespace only
+                summary = re.sub(r'\s+', ' ', summary).strip()
                 
-                logger.info(f"⚡ Decision short summary generated in {end_time - start_time:.2f}s: {word_count} words")
+                word_count = len(summary.split())
                 
-                # Validate word count strictly
-                if word_count == 60:
-                    logger.info("✅ Perfect 60-word decision summary generated!")
-                    return short_summary
+                logger.info(f"⚡ Short summary generated in {end_time - start_time:.2f}s: {word_count} words")
+                
+                # Validate word count
+                if 30 <= word_count <= 60:
+                    logger.info("✅ Perfect 30-60 word summary generated!")
+                    return summary
                 else:
-                    logger.warning(f"⚠️ Decision summary has {word_count} words (expected 60), attempt {attempt + 1}")
+                    logger.warning(f"⚠️ Summary has {word_count} words (expected 30-60), attempt {attempt + 1}")
                     
                     if attempt < max_retries - 1:
                         # Add word count feedback to next attempt
-                        feedback_prompt = self._get_word_count_feedback_prompt(word_count, doc_type)
+                        feedback_prompt = SystemMessagePromptTemplate.from_template(
+                            f"Your previous summary had {word_count} words. Rewrite it to be STRICTLY between 30 and 60 words while preserving accuracy and key-value format. DO NOT add invented data. Maintain the exact format: [Document Type] | [Decision Date] | Requesting Provider:[value] | Services:[value] | Decision:[value] | Medical Necessity:[value] | Rationale:[value] | Appeal Info:[value]"
+                        )
                         chat_prompt = ChatPromptTemplate.from_messages([feedback_prompt, user_prompt])
                         time.sleep(retry_delay * (attempt + 1))
                         continue
                     else:
-                        logger.warning(f"⚠️ Final decision summary has {word_count} words after {max_retries} attempts")
-                        return short_summary
+                        logger.warning(f"⚠️ Final summary has {word_count} words after {max_retries} attempts")
+                        return summary
                         
             except Exception as e:
-                logger.error(f"❌ Decision short summary generation attempt {attempt + 1} failed: {e}")
+                logger.error(f"❌ Short summary generation attempt {attempt + 1} failed: {e}")
                 
                 if attempt < max_retries - 1:
                     logger.info(f"🔄 Retrying in {retry_delay * (attempt + 1)} seconds...")
                     time.sleep(retry_delay * (attempt + 1))
                 else:
-                    logger.error(f"❌ All {max_retries} attempts failed for decision summary generation")
-                    return self._create_decision_fallback_summary(long_summary, doc_type)
+                    logger.error(f"❌ All {max_retries} attempts failed for short summary generation")
+                    return "Summary unavailable due to processing error."
         
-        return self._create_decision_fallback_summary(long_summary, doc_type)
-
+        return "Summary unavailable due to processing error."
     def _get_word_count_feedback_prompt(self, actual_word_count: int, doc_type: str) -> SystemMessagePromptTemplate:
         """Get feedback prompt for word count adjustment for decision documents"""
         

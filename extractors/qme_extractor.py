@@ -953,11 +953,11 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
 
     def _generate_short_summary_from_long_summary(self, long_summary: str) -> str:
         """
-        Generate a precise 30–60 word, pipe-delimited actionable summary.
+        Generate a precise 30–60 word, pipe-delimited actionable summary in key-value format.
         No hallucination, no assumptions. Missing fields are omitted.
         """
 
-        logger.info("🎯 Generating 30–60 word actionable short summary...")
+        logger.info("🎯 Generating 30–60 word actionable short summary (key-value format)...")
 
         system_prompt = SystemMessagePromptTemplate.from_template("""
     You are a medical-legal extraction specialist.
@@ -968,14 +968,14 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
     1. Word count MUST be between **30 and 60 words** (min 30, max 60).
     2. Format MUST be EXACTLY:
 
-    [Report Title] | [Author/Physician or The person who signed the report] | [Date] | [Body parts] | [Diagnosis] | [Medication] | [MMI Status] | [Work Status] | [Recommendation] | [Critical Finding]
+    [Report Title] | [Author] | Date:[value] | Body Parts:[value] | Diagnosis:[value] | Medication:[value] | MMI Status:[value] | Work Status:[value] | Recommendation:[value] | Critical Finding:[value]
 
-    3. DO NOT fabricate or infer missing data — simply SKIP fields that do not exist.
+    3. DO NOT fabricate or infer missing data — simply SKIP entire key-value pairs that do not exist.
     4. Use ONLY information explicitly found in the long summary.
     5. Output must be a SINGLE LINE (no line breaks).
     6. Content priority:
-    - report title
-    - author name
+    - report title (without "Report Title:" key)
+    - author name (without "Author:" key)  
     - date
     - affected body parts
     - primary diagnosis
@@ -992,9 +992,9 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
     - invented dates
     - narrative sentences
 
-    8. If a field is missing, SKIP IT—do NOT write "None" or "Not provided" and simply leave the field empty also donot use | for this field as if 2 fileds are missing then it shows ||
+    8. If a field is missing, SKIP THE ENTIRE KEY-VALUE PAIR—do NOT include empty key-value pairs.
 
-    Your final output must be 30–60 words and MUST follow the exact pipe-delimited format above.
+    Your final output must be 30–60 words and MUST follow the exact format above.
     """)
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
@@ -1013,11 +1013,8 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
             response = chain.invoke({"long_summary": long_summary})
             summary = response.content.strip()
 
-            # Clean whitespace
+            # Clean whitespace only (no pipe cleaning)
             summary = re.sub(r'\s+', ' ', summary).strip()
-            
-            # Apply pipe cleaning function
-            summary = self._clean_pipes_from_summary(summary)
 
             # Word count check
             wc = len(summary.split())
@@ -1034,7 +1031,6 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
                 chain2 = fix_prompt | self.llm
                 fixed = chain2.invoke({})
                 summary = re.sub(r'\s+', ' ', fixed.content.strip())
-                summary = self._clean_pipes_from_summary(summary)  # Clean pipes again after fix
                 logger.info(f"🔧 Fixed summary word count: {len(summary.split())} words")
 
             logger.info(f"✅ Final short summary: {len(summary.split())} words")
@@ -1043,7 +1039,6 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         except Exception as e:
             logger.error(f"❌ Short summary generation failed: {e}")
             return "Summary unavailable due to processing error."
-
     def _clean_pipes_from_summary(self, short_summary: str) -> str:
         """
         Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.

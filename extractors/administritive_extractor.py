@@ -745,11 +745,11 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
 
     def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
         """
-        Generate a precise 30–60 word administrative summary.
+        Generate a precise 30–60 word administrative summary in key-value format.
         Pipe-delimited, zero hallucination, skips missing fields.
         """
 
-        logger.info("🎯 Generating 30–60 word administrative structured summary...")
+        logger.info("🎯 Generating 30–60 word administrative structured summary (key-value format)...")
 
         system_prompt = SystemMessagePromptTemplate.from_template("""
     You are an administrative and legal-document extraction specialist.
@@ -760,46 +760,38 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
     STRICT REQUIREMENTS:
     1. Word count MUST be **between 30 and 60 words**.
     2. Output format MUST be EXACTLY:
-    [Report Title] | [Author/Physician or The person who signed the report] | [Date] | [Body parts] | [Diagnosis] | [Medication] | [MMI Status] | [Key Action Items] | [Work Status] | [Recommendation] | [Critical Finding] | Urgent Next Steps
+
+    [Document Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Medication:[value] | MMI Status:[value] | Work Status:[value] | Restrictions:[value] | Action Items:[value] | Critical Finding:[value] | Follow-up:[value]
 
     FORMAT & RULES:
-- MUST be **30–60 words**.
-- MUST be **ONE LINE**, pipe-delimited, no line breaks.
-- NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
-- NEVER fabricate: no invented dates, meds, restrictions, exam findings, or recommendations.
-- NO narrative sentences. Use short factual fragments ONLY.
-- Use the shortest, clearest key names:
-  • Title = Report title  
-  • Author = MD/DO/PA/NP or signer  
-  • Date = Visit or exam date  
-  • Work Status = current status (if given)  
-  • Restrictions = physical restrictions (if given)  
-  • Meds = medications explicitly listed  (if given)
-  • Physical Exam = objective exam findings only (if given)
-  • Treatment Progress = progress or response  (if given)
-  • Auth Requests = items requested for authorization  (if given)
-  • Follow-up = next appointment or instruction  (if given)
-  • Critical Finding = one most clinically important finding (if given)
-CONTENT PRIORITY (only if provided in the long summary):
-1. Report Title  
-2. Author  
-3. Visit Date  
-4. Diagnosis / body parts  
-5. Work status & restrictions  
-6. Medications  
-7. Physical examination details  
-8. Treatment progress  
-9. Authorization requests  
-10. Follow-up plan  
-11. Critical finding
+    - MUST be **30–60 words**.
+    - MUST be **ONE LINE**, pipe-delimited, no line breaks.
+    - NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
+    - NEVER fabricate: no invented dates, meds, restrictions, or findings.
+    - NO narrative sentences. Use short factual fragments ONLY.
+    - First three fields (Document Title, Author, Date) appear without keys
+    - All other fields use key-value format: Key:[value]
 
-ABSOLUTELY FORBIDDEN:
-- assumptions, interpretations, invented medications, or inferred diagnoses
-- narrative writing
-- placeholder text or “Not provided”
-- duplicate pipes or empty pipe fields (e.g., "||")
+    CONTENT PRIORITY (only if provided in the long summary):
+    1. Document Title  
+    2. Author  
+    3. Document Date  
+    4. Body parts  
+    5. Diagnosis  
+    6. Medications  
+    7. MMI status  
+    8. Work status & restrictions  
+    9. Key action items  
+    10. Critical finding  
+    11. Follow-up requirements
 
-Your final output MUST be between 30–60 words and follow the exact pipe-delimited style. 
+    ABSOLUTELY FORBIDDEN:
+    - assumptions, interpretations, invented medications, or inferred diagnoses
+    - narrative writing
+    - placeholder text or "Not provided"
+    - duplicate pipes or empty pipe fields (e.g., "||")
+
+    Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
     """)
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
@@ -817,7 +809,7 @@ Your final output MUST be between 30–60 words and follow the exact pipe-delimi
             response = chain.invoke({"long_summary": long_summary, "doc_type": doc_type})
             summary = response.content.strip()
 
-            # Clean formatting
+            # Clean formatting - only whitespace, no pipe cleaning
             summary = re.sub(r"\s+", " ", summary).strip()
 
             # Word count validation
@@ -827,20 +819,21 @@ Your final output MUST be between 30–60 words and follow the exact pipe-delimi
 
                 fix_prompt = ChatPromptTemplate.from_messages([
                     SystemMessagePromptTemplate.from_template(
-                        f"Your prior output contained {wc} words. Rewrite it to be STRICTLY between 30 and 60 words while keeping all facts accurate and pipe-delimited. DO NOT add fabricated details."
+                        f"Your prior output contained {wc} words. Rewrite it to be STRICTLY between 30 and 60 words while keeping all facts accurate and key-value pipe-delimited format. DO NOT add fabricated details. Maintain format: [Document Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | etc."
                     ),
                     HumanMessagePromptTemplate.from_template(summary)
                 ])
                 chain2 = fix_prompt | self.llm
                 fixed = chain2.invoke({})
                 summary = re.sub(r"\s+", " ", fixed.content.strip())
+                # No pipe cleaning after correction
 
+            logger.info(f"✅ Administrative summary generated: {len(summary.split())} words")
             return summary
 
         except Exception as e:
             logger.error(f"❌ Administrative summary generation failed: {e}")
             return "Summary unavailable due to processing error."
-
     def _create_admin_fallback_summary(self, long_summary: str, doc_type: str) -> str:
         """Create comprehensive fallback administrative summary directly from long summary"""
         

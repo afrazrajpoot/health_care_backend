@@ -855,11 +855,11 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
     
     def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
         """
-        Generate a precise 30–60 word clinical note summary.
+        Generate a precise 30–60 word clinical note summary in key-value format.
         Pipe-delimited, zero hallucination, skips missing fields.
         """
 
-        logger.info("🎯 Generating 30–60 word clinical structured summary...")
+        logger.info("🎯 Generating 30–60 word clinical structured summary (key-value format)...")
 
         system_prompt = SystemMessagePromptTemplate.from_template("""
     You are a clinical documentation specialist.
@@ -870,46 +870,40 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
     STRICT REQUIREMENTS:
     1. Word count MUST be **between 30 and 60 words**.
     2. Output format MUST be EXACTLY:
-    [Report Title] | [Author/Physician or The person who signed the report] | [Date] | [Body parts] | [Diagnosis] | [Key Objective Findings] | [Medication] | [Treatments Provided] | [Clinical Assessment] | [Plan / Next Steps] | [MMI Status] | [Key Action Items] | [Work Status] | [Recommendation] | [Critical Finding] | Urgent Next Steps
+
+    [Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Key Findings:[value] | Medication:[value] | Treatments:[value] | Clinical Assessment:[value] | Plan:[value] | MMI Status:[value] | Work Status:[value] | Critical Finding:[value]
 
     FORMAT & RULES:
-- MUST be **30–60 words**.
-- MUST be **ONE LINE**, pipe-delimited, no line breaks.
-- NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
-- NEVER fabricate: no invented dates, meds, restrictions, exam findings, or recommendations.
-- NO narrative sentences. Use short factual fragments ONLY.
-- Use the shortest, clearest key names:
-  • Title = Report title  
-  • Author = MD/DO/PA/NP or signer  
-  • Date = Visit or exam date  
-  • Work Status = current status (if given)  
-  • Restrictions = physical restrictions (if given)  
-  • Meds = medications explicitly listed  (if given)
-  • Physical Exam = objective exam findings only (if given)
-  • Treatment Progress = progress or response  (if given)
-  • Auth Requests = items requested for authorization  (if given)
-  • Follow-up = next appointment or instruction  (if given)
-  • Critical Finding = one most clinically important finding (if given)
-CONTENT PRIORITY (only if provided in the long summary):
-1. Report Title  
-2. Author  
-3. Visit Date  
-4. Diagnosis / body parts  
-5. Work status & restrictions  
-6. Medications  
-7. Physical examination details  
-8. Treatment progress  
-9. Authorization requests  
-10. Follow-up plan  
-11. Critical finding
+    - MUST be **30–60 words**.
+    - MUST be **ONE LINE**, pipe-delimited, no line breaks.
+    - NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
+    - NEVER fabricate: no invented dates, meds, findings, or recommendations.
+    - NO narrative sentences. Use short factual fragments ONLY.
+    - First three fields (Report Title, Author, Date) appear without keys
+    - All other fields use key-value format: Key:[value]
 
-ABSOLUTELY FORBIDDEN:
-- assumptions, interpretations, invented medications, or inferred diagnoses
-- narrative writing
-- placeholder text or “Not provided”
-- duplicate pipes or empty pipe fields (e.g., "||")
+    CONTENT PRIORITY (only if provided in the long summary):
+    1. Report Title  
+    2. Author  
+    3. Visit Date  
+    4. Body parts  
+    5. Diagnosis  
+    6. Key objective findings  
+    7. Medications  
+    8. Treatments provided  
+    9. Clinical assessment  
+    10. Plan/next steps  
+    11. MMI status  
+    12. Work status  
+    13. Critical finding
 
-Your final output MUST be between 30–60 words and follow the exact pipe-delimited style. 
+    ABSOLUTELY FORBIDDEN:
+    - assumptions, interpretations, invented medications, or inferred diagnoses
+    - narrative writing
+    - placeholder text or "Not provided"
+    - duplicate pipes or empty pipe fields (e.g., "||")
+
+    Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
     """)
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
@@ -930,11 +924,8 @@ Your final output MUST be between 30–60 words and follow the exact pipe-delimi
             })
             summary = response.content.strip()
 
-            # Normalize whitespace
+            # Normalize whitespace only - no pipe cleaning
             summary = re.sub(r"\s+", " ", summary).strip()
-            
-            # Apply pipe cleaning function
-            summary = self._clean_pipes_from_summary(summary)
 
             # Validate word count
             wc = len(summary.split())
@@ -944,7 +935,7 @@ Your final output MUST be between 30–60 words and follow the exact pipe-delimi
                 fix_prompt = ChatPromptTemplate.from_messages([
                     SystemMessagePromptTemplate.from_template(
                         f"Your prior summary contained {wc} words. Rewrite it to be between 30 and 60 words. "
-                        "DO NOT add fabricated details. Preserve all factual elements. Maintain pipe-delimited format."
+                        "DO NOT add fabricated details. Preserve all factual elements. Maintain key-value pipe-delimited format: [Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | etc."
                     ),
                     HumanMessagePromptTemplate.from_template(summary)
                 ])
@@ -952,7 +943,7 @@ Your final output MUST be between 30–60 words and follow the exact pipe-delimi
                 chain2 = fix_prompt | self.llm
                 fixed = chain2.invoke({})
                 summary = re.sub(r"\s+", " ", fixed.content.strip())
-                summary = self._clean_pipes_from_summary(summary)  # Clean pipes again after auto-fix
+                # No pipe cleaning after auto-fix
 
             logger.info(f"✅ Clinical summary generated: {len(summary.split())} words")
             return summary
@@ -960,7 +951,6 @@ Your final output MUST be between 30–60 words and follow the exact pipe-delimi
         except Exception as e:
             logger.error(f"❌ Clinical summary generation failed: {e}")
             return "Summary unavailable due to processing error."
-
 
     def _create_clinical_fallback_summary(self, long_summary: str, doc_type: str) -> str:
         """Create comprehensive fallback clinical summary directly from long summary"""

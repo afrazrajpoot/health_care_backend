@@ -818,60 +818,60 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
     
     def _generate_short_summary_from_long_summary(self, long_summary: str) -> str:
         """
-        Generate a precise 30–60 word PR-2 structured summary.
+        Generate a precise 30–60 word PR-2 structured summary in key-value format.
         Pipe-delimited, zero hallucination, skips missing fields.
         """
 
-        logger.info("🎯 Generating 30–60 word PR-2 structured summary...")
+        logger.info("🎯 Generating 30–60 word PR-2 structured summary (key-value format)...")
 
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a Workers' Compensation medical-legal extraction specialist.
+    You are a Workers' Compensation medical-legal extraction specialist.
 
-TASK:
-Create a concise, accurate PR-2 Progress Report summary using ONLY the information explicitly present in the long summary.
+    TASK:
+    Create a concise, accurate PR-2 Progress Report summary using ONLY the information explicitly present in the long summary.
 
-STRICT OUTPUT FORMAT (include fields only when data exists):
-[Title] | [Author] | [Date] | [Work Status] | [Restrictions] | [Meds] | [Physical Exam] | [Treatment Progress] | [Auth Requests] | [Follow-up] | [Critical Finding]
+    STRICT OUTPUT FORMAT (include fields only when data exists):
+    [Title] | [Author] | [Date] | Work Status:[value] | Restrictions:[value] | Meds:[value] | Physical Exam:[value] | Treatment Progress:[value] | Auth Requests:[value] | Follow-up:[value] | Critical Finding:[value]
 
-FORMAT & RULES:
-- MUST be **30–60 words**.
-- MUST be **ONE LINE**, pipe-delimited, no line breaks.
-- NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
-- NEVER fabricate: no invented dates, meds, restrictions, exam findings, or recommendations.
-- NO narrative sentences. Use short factual fragments ONLY.
-- Use the shortest, clearest key names:
-  • Title = Report title  
-  • Author = MD/DO/PA/NP or signer  
-  • Date = Visit or exam date  
-  • Work Status = current status (if given)  
-  • Restrictions = physical restrictions (if given)  
-  • Meds = medications explicitly listed  (if given)
-  • Physical Exam = objective exam findings only (if given)
-  • Treatment Progress = progress or response  (if given)
-  • Auth Requests = items requested for authorization  (if given)
-  • Follow-up = next appointment or instruction  (if given)
-  • Critical Finding = one most clinically important finding (if given)
-CONTENT PRIORITY (only if provided in the long summary):
-1. Report Title  
-2. Author  
-3. Visit Date  
-4. Diagnosis / body parts  
-5. Work status & restrictions  
-6. Medications  
-7. Physical examination details  
-8. Treatment progress  
-9. Authorization requests  
-10. Follow-up plan  
-11. Critical finding
+    FORMAT & RULES:
+    - MUST be **30–60 words**.
+    - MUST be **ONE LINE**, pipe-delimited, no line breaks.
+    - NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
+    - NEVER fabricate: no invented dates, meds, restrictions, exam findings, or recommendations.
+    - NO narrative sentences. Use short factual fragments ONLY.
+    - Use the shortest, clearest key names:
+    • Title = Report title (without key)
+    • Author = MD/DO/PA/NP or signer (without key)  
+    • Date = Visit or exam date (without key)
+    • Work Status:[value] = current status (if given)  
+    • Restrictions:[value] = physical restrictions (if given)  
+    • Meds:[value] = medications explicitly listed (if given)
+    • Physical Exam:[value] = objective exam findings only (if given)
+    • Treatment Progress:[value] = progress or response (if given)
+    • Auth Requests:[value] = items requested for authorization (if given)
+    • Follow-up:[value] = next appointment or instruction (if given)
+    • Critical Finding:[value] = one most clinically important finding (if given)
 
-ABSOLUTELY FORBIDDEN:
-- assumptions, interpretations, invented medications, or inferred diagnoses
-- narrative writing
-- placeholder text or “Not provided”
-- duplicate pipes or empty pipe fields (e.g., "||")
+    CONTENT PRIORITY (only if provided in the long summary):
+    1. Report Title  
+    2. Author  
+    3. Visit Date  
+    4. Work status & restrictions  
+    5. Medications  
+    6. Physical examination details  
+    7. Treatment progress  
+    8. Authorization requests  
+    9. Follow-up plan  
+    10. Critical finding
 
-Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
-""")
+    ABSOLUTELY FORBIDDEN:
+    - assumptions, interpretations, invented medications, or inferred diagnoses
+    - narrative writing
+    - placeholder text or "Not provided"
+    - duplicate pipes or empty pipe fields (e.g., "||")
+
+    Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
+    """)
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
     LONG SUMMARY:
@@ -888,11 +888,8 @@ Your final output MUST be between 30–60 words and follow the exact pipe-delimi
             response = chain.invoke({"long_summary": long_summary})
             summary = response.content.strip()
 
-            # Clean output
+            # Clean output - only whitespace, no pipe cleaning
             summary = re.sub(r'\s+', ' ', summary).strip()
-            
-            # Apply pipe cleaning function
-            summary = self._clean_pipes_from_summary(summary)
 
             # Word count check
             wc = len(summary.split())
@@ -901,7 +898,7 @@ Your final output MUST be between 30–60 words and follow the exact pipe-delimi
 
                 fix_prompt = ChatPromptTemplate.from_messages([
                     SystemMessagePromptTemplate.from_template(
-                        f"Your previous output contained {wc} words. Rewrite it to be STRICTLY between 30 and 60 words while preserving accuracy and pipe-delimited format. Do NOT add fabricated content."
+                        f"Your previous output contained {wc} words. Rewrite it to be STRICTLY between 30 and 60 words while preserving accuracy and key-value pipe-delimited format. Do NOT add fabricated content."
                     ),
                     HumanMessagePromptTemplate.from_template(summary)
                 ])
@@ -909,7 +906,7 @@ Your final output MUST be between 30–60 words and follow the exact pipe-delimi
                 chain2 = fix_prompt | self.llm
                 fixed = chain2.invoke({})
                 summary = re.sub(r'\s+', ' ', fixed.content.strip())
-                summary = self._clean_pipes_from_summary(summary)  # Clean pipes again after fix
+                # No pipe cleaning after fix
 
             logger.info(f"✅ PR-2 summary generated: {len(summary.split())} words")
             return summary
@@ -917,7 +914,6 @@ Your final output MUST be between 30–60 words and follow the exact pipe-delimi
         except Exception as e:
             logger.error(f"❌ PR-2 short summary generation failed: {e}")
             return "Summary unavailable due to processing error."
-
    
     def _create_comprehensive_fallback_summary(self, long_summary: str) -> str:
         """Create comprehensive fallback short summary directly from long summary"""
