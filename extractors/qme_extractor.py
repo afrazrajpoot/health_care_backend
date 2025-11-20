@@ -141,384 +141,427 @@ class QMEExtractorChained:
         }
 
     def _extract_full_context_with_guidance(
-        self,
-        text: str,
-        doc_type: str,
-        fallback_date: str,
-        context_analysis: Optional[Dict]
-    ) -> Dict:
-        """
-        Extract with FULL document context + contextual guidance from DocumentContextAnalyzer.
-        This mimics Gemini's approach of processing the entire document at once.
-        """
-        logger.info("🔍 Processing ENTIRE document in single context window with guidance...")
-        
-        # Extract guidance from context analysis
-        primary_physician = ""
-        focus_sections = []
-        critical_locations = {}
-        physician_reasoning = ""
-        ambiguities = []
-        
-        if context_analysis:
-            phys_analysis = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
-            primary_physician = phys_analysis.get("name", "")
-            physician_reasoning = phys_analysis.get("reasoning", "")
-            focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
-            critical_locations = context_analysis.get("critical_findings_map", {})
-            ambiguities = context_analysis.get("ambiguities_detected", [])
-        
-        # Build context-aware system prompt
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are an expert medical-legal documentation specialist analyzing a COMPLETE QME/AME/IME report with CONTEXTUAL GUIDANCE.
+            self,
+            text: str,
+            doc_type: str,
+            fallback_date: str,
+            context_analysis: Optional[Dict]
+        ) -> Dict:
+            """
+            Extract with FULL document context + contextual guidance from DocumentContextAnalyzer.
+            This mimics Gemini's approach of processing the entire document at once.
+            """
+            logger.info("🔍 Processing ENTIRE document in single context window with guidance...")
+            
+            # Extract guidance from context analysis
+            primary_physician = ""
+            focus_sections = []
+            critical_locations = {}
+            physician_reasoning = ""
+            ambiguities = []
+            
+            if context_analysis:
+                phys_analysis = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
+                primary_physician = phys_analysis.get("name", "")
+                physician_reasoning = phys_analysis.get("reasoning", "")
+                focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
+                critical_locations = context_analysis.get("critical_findings_map", {})
+                ambiguities = context_analysis.get("ambiguities_detected", [])
+            
+            # Build context-aware system prompt
+            system_prompt = SystemMessagePromptTemplate.from_template("""
+    You are an expert medical-legal documentation specialist analyzing a COMPLETE QME/AME/IME report with CONTEXTUAL GUIDANCE.
 
-CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
-You are seeing the ENTIRE document at once, allowing you to:
-- Understand the complete case narrative from start to finish
-- Connect findings across all sections (history → examination → conclusions)
-- Identify relationships between symptoms, diagnoses, and recommendations
-- Provide comprehensive, context-aware extraction without information loss
+    CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
+    You are seeing the ENTIRE document at once, allowing you to:
+    - Understand the complete case narrative from start to finish
+    - Connect findings across all sections (history → examination → conclusions)
+    - Identify relationships between symptoms, diagnoses, and recommendations
+    - Provide comprehensive, context-aware extraction without information loss
 
-CONTEXTUAL GUIDANCE PROVIDED:
-{context_guidance}
+    CONTEXTUAL GUIDANCE PROVIDED:
+    {context_guidance}
 
-⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY):
+    ⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY):
 
-1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
-   - If a field/value is NOT explicitly mentioned in the document, return EMPTY string "" or empty list []
-   - DO NOT infer, assume, or extrapolate information
-   - DO NOT fill in "typical" or "common" values
-   - DO NOT use medical knowledge to "complete" incomplete information
-   
-   Examples:
-   ✅ CORRECT: If document says "Patient takes Gabapentin 300mg TID", extract: {{"name": "Gabapentin", "dose": "300mg TID"}}
-   ❌ WRONG: If document says "Patient takes Gabapentin", DO NOT extract: {{"name": "Gabapentin", "dose": "300mg TID"}} (dose not stated)
-   ✅ CORRECT: Extract: {{"name": "Gabapentin", "dose": ""}} (dose field empty)
+    1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
+    - If a field/value is NOT explicitly mentioned in the document, return EMPTY string "" or empty list []
+    - DO NOT infer, assume, or extrapolate information
+    - DO NOT fill in "typical" or "common" values
+    - DO NOT use medical knowledge to "complete" incomplete information
+    
+    Examples:
+    ✅ CORRECT: If document says "Patient takes Gabapentin 300mg TID", extract: {{"name": "Gabapentin", "dose": "300mg TID"}}
+    ❌ WRONG: If document says "Patient takes Gabapentin", DO NOT extract: {{"name": "Gabapentin", "dose": "300mg TID"}} (dose not stated)
+    ✅ CORRECT: Extract: {{"name": "Gabapentin", "dose": ""}} (dose field empty)
 
-2. **MEDICATIONS - ZERO TOLERANCE FOR ASSUMPTIONS**
-   - Extract ONLY medications explicitly listed in the "Current Medications" or "Medications" section
-   - Include dosage ONLY if explicitly stated
-   - DO NOT extract:
-     * Medications mentioned as discontinued
-     * Medications mentioned in past medical history
-     * Medications recommended for future use (put those in future_medications)
-     * Medications you "think" the patient should be taking
-   
-   Examples:
-   ✅ CORRECT: Document states "Current Medications: Gabapentin 300mg TID, Meloxicam 15mg daily"
-   Extract: {{"current_medications": [{{"name": "Gabapentin", "dose": "300mg TID"}}, {{"name": "Meloxicam", "dose": "15mg daily"}}]}}
-   
-   ❌ WRONG: Document states "Patient previously took Oxycodone but discontinued 6 months ago"
-   DO NOT extract Oxycodone in current_medications
-   
-   ❌ WRONG: Document states "Consider adding Amitriptyline for sleep"
-   DO NOT extract Amitriptyline in current_medications (put in future_medications)
+    2. **MEDICATIONS - ZERO TOLERANCE FOR ASSUMPTIONS**
+    - Extract ONLY medications explicitly listed in the "Current Medications" or "Medications" section
+    - Include dosage ONLY if explicitly stated
+    - DO NOT extract:
+        * Medications mentioned as discontinued
+        * Medications mentioned in past medical history
+        * Medications recommended for future use (put those in future_medications)
+        * Medications you "think" the patient should be taking
+    
+    Examples:
+    ✅ CORRECT: Document states "Current Medications: Gabapentin 300mg TID, Meloxicam 15mg daily"
+    Extract: {{"current_medications": [{{"name": "Gabapentin", "dose": "300mg TID"}}, {{"name": "Meloxicam", "dose": "15mg daily"}}]}}
+    
+    ❌ WRONG: Document states "Patient previously took Oxycodone but discontinued 6 months ago"
+    DO NOT extract Oxycodone in current_medications
+    
+    ❌ WRONG: Document states "Consider adding Amitriptyline for sleep"
+    DO NOT extract Amitriptyline in current_medications (put in future_medications)
 
-3. **EMPTY FIELDS ARE ACCEPTABLE - DO NOT FILL**
-   - It is BETTER to return an empty field than to guess
-   - If you cannot find information for a field, leave it empty
-   - DO NOT use phrases like "Not mentioned", "Not stated", "Unknown" - just return ""
-   
-   Examples:
-   ✅ CORRECT: If no pain score mentioned, return: "pain_score_current": ""
-   ❌ WRONG: Return: "pain_score_current": "Not mentioned" (use empty string instead)
+    3. **EMPTY FIELDS ARE ACCEPTABLE - DO NOT FILL**
+    - It is BETTER to return an empty field than to guess
+    - If you cannot find information for a field, leave it empty
+    - DO NOT use phrases like "Not mentioned", "Not stated", "Unknown" - just return ""
+    
+    Examples:
+    ✅ CORRECT: If no pain score mentioned, return: "pain_score_current": ""
+    ❌ WRONG: Return: "pain_score_current": "Not mentioned" (use empty string instead)
 
-4. **EXACT QUOTES FOR CRITICAL FIELDS**
-   - For MMI status, WPI, Work Restrictions: use EXACT wording from document
-   - DO NOT paraphrase or interpret
-   - If exact value not found, return empty
-   
-   Examples:
-   ✅ CORRECT: Document says "Patient has reached MMI as of 10/15/2024"
-   Extract: "mmi_status": {{"status": "Patient has reached MMI as of 10/15/2024"}}
-   
-   ❌ WRONG: Document says "Patient improving with treatment"
-   DO NOT extract: "mmi_status": {{"status": "Not at MMI"}} (this is inference, not stated)
+    4. **EXACT QUOTES FOR CRITICAL FIELDS**
+    - For MMI status, WPI, Work Restrictions: use EXACT wording from document
+    - DO NOT paraphrase or interpret
+    - If exact value not found, return empty
+    
+    Examples:
+    ✅ CORRECT: Document says "Patient has reached MMI as of 10/15/2024"
+    Extract: "mmi_status": {{"status": "Patient has reached MMI as of 10/15/2024"}}
+    
+    ❌ WRONG: Document says "Patient improving with treatment"
+    DO NOT extract: "mmi_status": {{"status": "Not at MMI"}} (this is inference, not stated)
 
-5. **NO CLINICAL ASSUMPTIONS**
-   - DO NOT assume typical dosages, frequencies, or durations
-   - DO NOT assume standard procedures or treatments
-   - DO NOT assume body parts if not explicitly stated
-   
-   Examples:
-   ❌ WRONG: Document mentions "knee injection"
-   DO NOT assume: "corticosteroid injection" (steroid type not stated)
-   ✅ CORRECT: Extract: "knee injection" (exact wording)
+    5. **NO CLINICAL ASSUMPTIONS**
+    - DO NOT assume typical dosages, frequencies, or durations
+    - DO NOT assume standard procedures or treatments
+    - DO NOT assume body parts if not explicitly stated
+    
+    Examples:
+    ❌ WRONG: Document mentions "knee injection"
+    DO NOT assume: "corticosteroid injection" (steroid type not stated)
+    ✅ CORRECT: Extract: "knee injection" (exact wording)
 
-6. **VERIFICATION CHECKLIST BEFORE SUBMISSION**
-   Before returning your extraction, verify:
-   □ Every medication has a direct quote in the document
-   □ Every diagnosis is explicitly stated (not inferred from symptoms)
-   □ Every recommendation is directly from "Recommendations" or "Plan" section
-   □ No fields are filled with "typical" or "standard" values
-   □ Empty fields are truly empty (not "Not mentioned" or "Unknown")
+    6. **VERIFICATION CHECKLIST BEFORE SUBMISSION**
+    Before returning your extraction, verify:
+    □ Every medication has a direct quote in the document
+    □ Every diagnosis is explicitly stated (not inferred from symptoms)
+    □ Every recommendation is directly from "Recommendations" or "Plan" section
+    □ No fields are filled with "typical" or "standard" values
+    □ Empty fields are truly empty (not "Not mentioned" or "Unknown")
 
-EXTRACTION FOCUS - 6 CRITICAL MEDICAL-LEGAL CATEGORIES:
+    EXTRACTION FOCUS - 7 CRITICAL MEDICAL-LEGAL CATEGORIES:
 
-I. CORE IDENTITY
-- Patient name, age, DOB
-- Date of Injury (DOI) - often in history section
-- Report date - check header and conclusion
-- QME Physician: **USE THE PRIMARY PHYSICIAN IDENTIFIED IN CONTEXT GUIDANCE ABOVE**
-  * This is the REPORT AUTHOR, not treating physicians mentioned in history
-  * Reasoning: {physician_reasoning}
+    I. CORE IDENTITY
+    - Patient name, age, DOB
+    - Date of Injury (DOI) - often in history section
+    - Report date - check header and conclusion
+    - QME Physician: **USE THE PRIMARY PHYSICIAN IDENTIFIED IN CONTEXT GUIDANCE ABOVE**
+    * This is the REPORT AUTHOR, not treating physicians mentioned in history
+    * Reasoning: {physician_reasoning}
 
-II. DIAGNOSIS
-- Primary diagnosis(es) - synthesize from examination findings AND conclusion
-- ICD-10 codes if mentioned anywhere in document
-- Affected body part(s) - consolidate all mentions throughout document
+    II. DIAGNOSIS
+    - Primary diagnosis(es) - synthesize from examination findings AND conclusion
+    - ICD-10 codes if mentioned anywhere in document
+    - Affected body part(s) - consolidate all mentions throughout document
 
-III. CLINICAL STATUS
-- Past surgeries - scan entire history section for surgical history
-- Current chief complaint - patient's own words from subjective section
-- Pain score (current/max on 0-10 scale) - look in subjective complaints
-- Objective findings:
-  * ROM limitations - from physical examination section
-  * Gait abnormalities - from observation/ambulation section
-  * Positive tests - from clinical tests section (e.g., Hawkins, Neer, McMurray)
-  * Effusion/swelling - from inspection/palpation findings
+    III. PHYSICAL EXAMINATION (NEW FOCUS AREA)
+    **CRITICAL: Extract DETAILED physical examination findings:**
 
-IV. MEDICATIONS ⚠️ CRITICAL - ZERO ASSUMPTIONS
-- Current medications - from medication list or current medications section
-- **ONLY extract medications EXPLICITLY listed as "current" or "taking"**
-- **DO NOT extract discontinued, past, or recommended future medications**
-- Categorize into: narcotics/opioids, nerve pain meds, anti-inflammatories, other
-- Include dosages ONLY if explicitly stated (e.g., "Gabapentin 300mg TID")
-- If dosage not stated, leave dose field empty
-- Focus on CURRENT medications, not historical discontinued meds
+    - Range of Motion (ROM): Look for specific measurements (degrees), comparisons to contralateral side
+    Examples: "Shoulder flexion 90 degrees (normal 180)", "Lumbar flexion 50% of normal"
+    - Gait & Station: "Antalgic gait", "Normal gait", "Uses cane for ambulation"
+    - Strength Testing: "5/5 strength bilateral upper extremities", "4/5 strength left grip"
+    - Sensory Examination: "Decreased sensation to light touch in L5 distribution"
+    - Reflexes: "2+ bilateral patellar reflexes", "Absent ankle jerks"
+    - Special Tests: "Positive Neer test", "Negative Straight Leg Raise", "Positive McMurray test"
+    - Palpation Findings: "Tenderness over lumbar paraspinals", "No joint effusion"
+    - Inspection: "Muscle atrophy in right thigh", "Surgical scar well-healed"
 
-Example extraction:
-Document states: "Current Medications: 1. Gabapentin 300mg three times daily, 2. Meloxicam 15mg once daily, 3. Tramadol 50mg as needed for pain. Patient discontinued Oxycodone 3 months ago."
+    IV. CLINICAL STATUS
+    - Past surgeries - scan entire history section for surgical history
+    - Current chief complaint - patient's own words from subjective section
+    - Pain score (current/max on 0-10 scale) - look in subjective complaints
+    - Functional limitations - specific activities patient cannot perform
 
-✅ CORRECT extraction:
-{{
-  "medications": {{
-    "current_medications": [
-      {{"name": "Gabapentin", "dose": "300mg TID", "purpose": "nerve pain"}},
-      {{"name": "Meloxicam", "dose": "15mg daily", "purpose": "anti-inflammatory"}},
-      {{"name": "Tramadol", "dose": "50mg PRN", "purpose": "pain"}}
-    ]
-  }}
-}}
+    V. MEDICATIONS ⚠️ CRITICAL - ZERO ASSUMPTIONS
+    **NOW EXTRACTING: CURRENT vs PREVIOUS MEDICATIONS**
 
-❌ WRONG - DO NOT include:
-- Oxycodone (discontinued)
-- Any medications not explicitly listed
+    - **CURRENT MEDICATIONS**: 
+    * ONLY from "Current Medications" section or explicitly stated as "currently taking"
+    * Include dosage ONLY if explicitly stated
+    * Categorize by type: narcotics/opioids, nerve pain meds, anti-inflammatories, other
 
-V. MEDICAL-LEGAL CONCLUSIONS (MOST CRITICAL - HIGHEST PRIORITY)
-**FOCUS ON THESE SECTIONS:** {focus_sections}
-**CRITICAL LOCATIONS:** {critical_locations}
+    - **PREVIOUS/DISCONTINUED MEDICATIONS**:
+    * Look for keywords: "discontinued", "previously took", "prior medication", "stopped", "no longer taking"
+    * Extract discontinuation reason if stated: "due to side effects", "ineffective", "completed course"
+    * Include duration if stated: "taken for 6 months", "used for 2 weeks"
 
-- MMI/P&S Status:
-  * Look for explicit statement (e.g., "Patient has reached MMI as of [date]")
-  * If MMI deferred, extract SPECIFIC REASON (e.g., "pending MRI results", "awaiting surgical outcome")
-  * Location hint: {mmi_location}
+    - **FUTURE MEDICATIONS**: Medications recommended but not yet started
 
-- WPI (Whole Person Impairment):
-  * Look for percentage WITH body part (e.g., "15% WPI to left shoulder")
-  * Include method used (e.g., "per AMA Guides 5th Edition")
-  * If WPI deferred, extract SPECIFIC REASON
-  * Location hint: {wpi_location}
+    Example extraction:
+    Document states: 
+    "Current Medications: 1. Gabapentin 300mg three times daily, 2. Meloxicam 15mg once daily. 
+    Previously took Oxycodone 5mg PRN but discontinued due to constipation. 
+    Consider adding Amitriptyline 25mg at bedtime for sleep."
 
-
-VI. ACTIONABLE RECOMMENDATIONS (SECOND HIGHEST PRIORITY)
-**These are critical for immediate clinical action:**
-
-- Future treatment: Be SPECIFIC
-  * Surgeries: Include procedure name and body part (e.g., "total knee arthroplasty")
-  * Injections: Include type and location (e.g., "ESI C5-6", "corticosteroid injection R shoulder")
-  * Therapy: Include type and frequency (e.g., "PT 2x/week for 6 weeks")
-  * Diagnostics: Include test type and body part (e.g., "MRI L-spine without contrast")
-
-- Work restrictions: Extract EXACT functional limitations
-  * Be specific: "no lifting >10 lbs" not "modified duty"
-  * Include positional restrictions: "no overhead reaching", "no kneeling/squatting"
-  * Include duration if stated: "restrictions for 8 weeks"
-  * Location hint: {work_restrictions_location}
-
-⚠️ FINAL REMINDER:
-- If information is NOT in the document, return EMPTY ("" or [])
-- NEVER assume, infer, or extrapolate
-- MEDICATIONS: Only extract what is explicitly listed as current
-- It is BETTER to have empty fields than incorrect information
-
-Now analyze this COMPLETE QME report and extract ALL relevant information:
-""")
-
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-COMPLETE QME/AME/IME DOCUMENT TEXT:
-
-{full_document_text}
-
-Extract into COMPREHENSIVE structured JSON with all critical details:
-
-{{
-  "patient_information": {{
-    "patient_name": "",
-    "patient_age": "",
-    "patient_dob": "",
-    "date_of_injury": "",
-    "claim_number": "",
-    "employer": ""
-  }},
-  
-  "report_metadata": {{
-    "report_title": "",
-    "report_date": "",
-    "evaluation_date": "",
-    "report_type": "QME/AME/IME"
-  }},
-  
-  "physicians": {{
-    "qme_physician": {{
-      "name": "{primary_physician}",
-      "specialty": "",
-      "credentials": "",
-      "role": "Evaluating Physician/QME/AME"
-    }},
-    "treating_physicians": [],
-    "consulting_physicians": [],
-    "referring_source": {{
-      "name": "",
-      "type": ""
+    ✅ CORRECT extraction:
+    {{
+    "medications": {{
+        "current_medications": [
+        {{"name": "Gabapentin", "dose": "300mg TID", "purpose": "nerve pain"}},
+        {{"name": "Meloxicam", "dose": "15mg daily", "purpose": "anti-inflammatory"}}
+        ],
+        "previous_medications": [
+        {{"name": "Oxycodone", "dose": "5mg PRN", "discontinuation_reason": "constipation"}}
+        ],
+        "future_medications": [
+        {{"name": "Amitriptyline", "dose": "25mg at bedtime", "purpose": "sleep"}}
+        ]
     }}
-  }},
-  
-  "diagnosis": {{
-    "primary_diagnoses": [],
-    "secondary_diagnoses": [],
-    "historical_conditions": []
-  }},
-  
-  "clinical_status": {{
-    "chief_complaint": "",
-    "pain_scores": {{
-      "current": "",
-      "maximum": "",
-      "location": ""
-    }},
-    "functional_limitations": [],
-    "past_surgeries": [],
-    "objective_findings": {{
-      "rom_limitations": "",
-      "gait": "",
-      "positive_tests": "",
-      "other_findings": ""
     }}
-  }},
-  
-  "medications": {{
-    "current_medications": [],
-    "future_medications": []
-  }},
-  
-  "treatment_history": {{
-    "past_treatments": [],
-    "current_treatments": []
-  }},
-  
-  "medical_legal_conclusions": {{
-    "mmi_status": {{
-      "status": "",
-      "reason": "",
-      "reasoning": ""
+
+    VI. MEDICAL-LEGAL CONCLUSIONS (MOST CRITICAL - HIGHEST PRIORITY)
+    **FOCUS ON THESE SECTIONS:** {focus_sections}
+    **CRITICAL LOCATIONS:** {critical_locations}
+
+    - MMI/P&S Status:
+    * Look for explicit statement (e.g., "Patient has reached MMI as of [date]")
+    * If MMI deferred, extract SPECIFIC REASON (e.g., "pending MRI results", "awaiting surgical outcome")
+    * Location hint: {mmi_location}
+
+    - WPI (Whole Person Impairment):
+    * Look for percentage WITH body part (e.g., "15% WPI to left shoulder")
+    * Include method used (e.g., "per AMA Guides 5th Edition")
+    * If WPI deferred, extract SPECIFIC REASON
+    * Location hint: {wpi_location}
+
+    VII. ACTIONABLE RECOMMENDATIONS (SECOND HIGHEST PRIORITY)
+    **These are critical for immediate clinical action:**
+
+    - Future treatment: Be SPECIFIC
+    * Surgeries: Include procedure name and body part (e.g., "total knee arthroplasty")
+    * Injections: Include type and location (e.g., "ESI C5-6", "corticosteroid injection R shoulder")
+    * Therapy: Include type and frequency (e.g., "PT 2x/week for 6 weeks")
+    * Diagnostics: Include test type and body part (e.g., "MRI L-spine without contrast")
+
+    - Work restrictions: Extract EXACT functional limitations
+    * Be specific: "no lifting >10 lbs" not "modified duty"
+    * Include positional restrictions: "no overhead reaching", "no kneeling/squatting"
+    * Include duration if stated: "restrictions for 8 weeks"
+    * Location hint: {work_restrictions_location}
+
+    ⚠️ FINAL REMINDER:
+    - If information is NOT in the document, return EMPTY ("" or [])
+    - NEVER assume, infer, or extrapolate
+    - MEDICATIONS: Only extract what is explicitly listed as current
+    - PHYSICAL EXAM: Extract detailed objective findings with measurements when available
+    - It is BETTER to have empty fields than incorrect information
+
+    Now analyze this COMPLETE QME report and extract ALL relevant information:
+    """)
+
+            user_prompt = HumanMessagePromptTemplate.from_template("""
+    COMPLETE QME/AME/IME DOCUMENT TEXT:
+
+    {full_document_text}
+
+    Extract into COMPREHENSIVE structured JSON with all critical details:
+
+    {{
+    "patient_information": {{
+        "patient_name": "",
+        "patient_age": "",
+        "patient_dob": "",
+        "date_of_injury": "",
+        "claim_number": "",
+        "employer": ""
     }},
-    "wpi_impairment": {{
-      "total_wpi": "",
-      "breakdown": [],
-      "reasoning": ""
+    
+    "report_metadata": {{
+        "report_title": "",
+        "report_date": "",
+        "evaluation_date": "",
+        "report_type": "QME/AME/IME"
     }},
-  }},
-  
-  "work_status": {{
-    "current_status": "",
-    "work_restrictions": [],
-    "prognosis_for_return_to_work": ""
-  }},
-  
-  "recommendations": {{
-    "diagnostic_tests": [],
-    "interventional_procedures": [],
-    "specialist_referrals": [],
-    "therapy": [],
-    "future_surgical_needs": []
-  }},
-  
-  "critical_findings": []
-}}
+    
+    "physicians": {{
+        "qme_physician": {{
+        "name": "{primary_physician}",
+        "specialty": "",
+        "credentials": "",
+        "role": "Evaluating Physician/QME/AME"
+        }},
+        "treating_physicians": [],
+        "consulting_physicians": [],
+        "referring_source": {{
+        "name": "",
+        "type": ""
+        }}
+    }},
+    
+    "diagnosis": {{
+        "primary_diagnoses": [],
+        "secondary_diagnoses": [],
+        "historical_conditions": []
+    }},
+    
+    "physical_examination": {{
+        "range_of_motion": [],
+        "gait_and_station": "",
+        "strength_testing": "",
+        "sensory_examination": "",
+        "reflexes": "",
+        "special_tests": [],
+        "palpation_findings": "",
+        "inspection_findings": "",
+        "other_objective_findings": ""
+    }},
+    
+    "clinical_status": {{
+        "chief_complaint": "",
+        "pain_scores": {{
+        "current": "",
+        "maximum": "",
+        "location": ""
+        }},
+        "functional_limitations": [],
+        "past_surgeries": []
+    }},
+    
+    "medications": {{
+        "current_medications": [],
+        "previous_medications": [],
+        "future_medications": []
+    }},
+    
+    "treatment_history": {{
+        "past_treatments": [],
+        "current_treatments": []
+    }},
+    
+    "medical_legal_conclusions": {{
+        "mmi_status": {{
+        "status": "",
+        "reason": "",
+        "reasoning": ""
+        }},
+        "wpi_impairment": {{
+        "total_wpi": "",
+        "breakdown": [],
+        "reasoning": ""
+        }}
+    }},
+    
+    "work_status": {{
+        "current_status": "",
+        "work_restrictions": [],
+        "prognosis_for_return_to_work": ""
+    }},
+    
+    "recommendations": {{
+        "diagnostic_tests": [],
+        "interventional_procedures": [],
+        "specialist_referrals": [],
+        "therapy": [],
+        "future_surgical_needs": []
+    }},
+    
+    "critical_findings": []
+    }}
 
-⚠️ CRITICAL REMINDERS:
-1. For "work_restrictions": Extract EXACT wording from document
-   - If document says "no lifting", extract: "no lifting" (NOT "no lifting >10 lbs")
-   - If document says "no standing", extract: "no standing" (NOT "no prolonged standing >15 min")
-   - DO NOT add weight limits, time limits, or specifics not stated
+    ⚠️ CRITICAL REMINDERS:
 
-2. For "current_medications": Extract ONLY from "Current Medications" section
-   - Include dosage ONLY if explicitly stated
-   - DO NOT extract discontinued medications
-   - DO NOT extract recommended future medications (use future_medications for those)
+    1. **PHYSICAL EXAMINATION DETAILS:**
+    - Extract SPECIFIC measurements: "Shoulder abduction 90° (normal 180°)"
+    - List POSITIVE findings: "Positive Spurling test", "Tenderness over L4-L5"
+    - Include COMPARISONS: "Right grip strength 4/5 vs left 5/5"
+    - Document ASSISTIVE DEVICES: "Uses cane for community ambulation"
 
-3. For "critical_findings": Include MAIN actionable points only (max 5-8 items)
-   - Focus on: MMI status, required procedures, required QMEs, important diagnostic tests
-   - DO NOT include minor details or routine follow-ups
-""")
+    2. **MEDICATIONS - CURRENT VS PREVIOUS:**
+    - CURRENT: Only medications explicitly listed as "current" or "taking"
+    - PREVIOUS: Look for "discontinued", "stopped", "previously took"
+    - Include DISCONTINUATION REASONS: "due to side effects", "ineffective"
+    - FUTURE: Medications recommended but not yet started
 
-        # Build context guidance summary
-        context_guidance_text = f"""
-PRIMARY PHYSICIAN (Report Author): {primary_physician or 'Not identified in context'}
-REASONING: {physician_reasoning or 'See document for identification'}
+    3. **WORK RESTRICTIONS:** Extract EXACT wording from document
+    - If document says "no lifting", extract: "no lifting" (NOT "no lifting >10 lbs")
+    - If document says "no standing", extract: "no standing" (NOT "no prolonged standing >15 min")
+    - DO NOT add weight limits, time limits, or specifics not stated
 
-FOCUS ON THESE SECTIONS: {', '.join(focus_sections) if focus_sections else 'All sections equally'}
+    4. **CURRENT MEDICATIONS:** Extract ONLY from "Current Medications" section
+    - Include dosage ONLY if explicitly stated
+    - DO NOT extract discontinued medications in current_medications
+    - DO NOT extract recommended future medications in current_medications
 
-CRITICAL FINDING LOCATIONS:
-- MMI Status: {critical_locations.get('mmi_location', 'Search entire document')}
-- WPI Percentage: {critical_locations.get('wpi_location', 'Search entire document')}
-- Work Restrictions: {critical_locations.get('work_restrictions_location', 'Search entire document')}
+    5. **CRITICAL FINDINGS:** Include MAIN actionable points only (max 5-8 items)
+    - Focus on: MMI status, required procedures, important diagnostic tests
+    - Include significant physical exam findings that impact disability rating
+    - DO NOT include minor details or routine follow-ups
+    """)
 
-KNOWN AMBIGUITIES: {len(ambiguities)} detected
-{chr(10).join([f"- {amb.get('type')}: {amb.get('description')}" for amb in ambiguities]) if ambiguities else 'None detected'}
-"""
+            # Build context guidance summary
+            context_guidance_text = f"""
+    PRIMARY PHYSICIAN (Report Author): {primary_physician or 'Not identified in context'}
+    REASONING: {physician_reasoning or 'See document for identification'}
 
-        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-        
-        try:
-            start_time = time.time()
+    FOCUS ON THESE SECTIONS: {', '.join(focus_sections) if focus_sections else 'All sections equally'}
+
+    CRITICAL FINDING LOCATIONS:
+    - MMI Status: {critical_locations.get('mmi_location', 'Search entire document')}
+    - WPI Percentage: {critical_locations.get('wpi_location', 'Search entire document')}
+    - Work Restrictions: {critical_locations.get('work_restrictions_location', 'Search entire document')}
+    - Physical Examination: {critical_locations.get('physical_exam_location', 'Physical Exam/Objective Findings section')}
+    - Medications: {critical_locations.get('medications_location', 'Current Medications/Medications section')}
+
+    KNOWN AMBIGUITIES: {len(ambiguities)} detected
+    {chr(10).join([f"- {amb.get('type')}: {amb.get('description')}" for amb in ambiguities]) if ambiguities else 'None detected'}
+    """
+
+            chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
             
-            logger.info("🤖 Invoking LLM for full-context extraction...")
-            
-            # Single LLM call with FULL document context and guidance
-            chain = chat_prompt | self.llm | self.parser
-            result = chain.invoke({
-                "full_document_text": text,
-                "context_guidance": context_guidance_text,
-                "primary_physician": primary_physician or "Extract from document",
-                "physician_reasoning": physician_reasoning or "Use credentials and signature section",
-                "focus_sections": ', '.join(focus_sections) if focus_sections else "All sections",
-                "critical_locations": str(critical_locations),
-                "mmi_location": critical_locations.get('mmi_location', 'Search document'),
-                "wpi_location": critical_locations.get('wpi_location', 'Search document'),
-                "work_restrictions_location": critical_locations.get('work_restrictions_location', 'Search document'),
-                "ambiguities": str(ambiguities)
-            })
-            
-            end_time = time.time()
-            processing_time = end_time - start_time
-            
-            logger.info(f"⚡ Full-context extraction completed in {processing_time:.2f}s")
-            logger.info(f"✅ Extracted data from complete {len(text):,} char document")
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"❌ Full-context extraction failed: {e}", exc_info=True)
-            
-            # Check if context length exceeded
-            if "context_length_exceeded" in str(e).lower() or "maximum context" in str(e).lower():
-                logger.error("❌ Document exceeds GPT-4o 128K context window")
-                logger.error("❌ Consider implementing chunked fallback for very large documents")
-            
-            return self._get_fallback_result(fallback_date)
-
+            try:
+                start_time = time.time()
+                
+                logger.info("🤖 Invoking LLM for full-context extraction...")
+                
+                # Single LLM call with FULL document context and guidance
+                chain = chat_prompt | self.llm | self.parser
+                result = chain.invoke({
+                    "full_document_text": text,
+                    "context_guidance": context_guidance_text,
+                    "primary_physician": primary_physician or "Extract from document",
+                    "physician_reasoning": physician_reasoning or "Use credentials and signature section",
+                    "focus_sections": ', '.join(focus_sections) if focus_sections else "All sections",
+                    "critical_locations": str(critical_locations),
+                    "mmi_location": critical_locations.get('mmi_location', 'Search document'),
+                    "wpi_location": critical_locations.get('wpi_location', 'Search document'),
+                    "work_restrictions_location": critical_locations.get('work_restrictions_location', 'Search document'),
+                    "physical_exam_location": critical_locations.get('physical_exam_location', 'Physical Exam section'),
+                    "medications_location": critical_locations.get('medications_location', 'Medications section'),
+                    "ambiguities": str(ambiguities)
+                })
+                
+                end_time = time.time()
+                processing_time = end_time - start_time
+                
+                logger.info(f"⚡ Full-context extraction completed in {processing_time:.2f}s")
+                logger.info(f"✅ Extracted data from complete {len(text):,} char document")
+                
+                return result
+                
+            except Exception as e:
+                logger.error(f"❌ Full-context extraction failed: {e}", exc_info=True)
+                
+                # Check if context length exceeded
+                if "context_length_exceeded" in str(e).lower() or "maximum context" in str(e).lower():
+                    logger.error("❌ Document exceeds GPT-4o 128K context window")
+                    logger.error("❌ Consider implementing chunked fallback for very large documents")
+                
+                return self._get_fallback_result(fallback_date)
     def _detect_examiner(
         self,
         text: str,
@@ -649,11 +692,61 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         
         sections.append("\n".join(diagnosis_lines) if diagnosis_lines else "No diagnoses extracted")
         
-        # Section 4: CLINICAL STATUS
-        sections.append("\n🔬 CLINICAL STATUS")
+        # Section 4: PHYSICAL EXAMINATION (NEW SECTION)
+        sections.append("\n🔍 PHYSICAL EXAMINATION")
         sections.append("-" * 50)
         
         clinical_status = raw_data.get("clinical_status", {})
+        objective_findings = clinical_status.get("objective_findings", {})
+        physical_exam_lines = []
+        
+        # Extract specific physical examination components
+        if objective_findings:
+            # Range of Motion (ROM)
+            rom_limitations = objective_findings.get("rom_limitations", "")
+            if rom_limitations and rom_limitations not in ["", "Not specified"]:
+                physical_exam_lines.append(f"Range of Motion: {rom_limitations}")
+            
+            # Gait
+            gait = objective_findings.get("gait", "")
+            if gait and gait not in ["", "Not specified"]:
+                physical_exam_lines.append(f"Gait: {gait}")
+            
+            # Positive Tests
+            positive_tests = objective_findings.get("positive_tests", "")
+            if positive_tests and positive_tests not in ["", "Not specified"]:
+                physical_exam_lines.append(f"Positive Tests: {positive_tests}")
+            
+            # Other Findings
+            other_findings = objective_findings.get("other_findings", "")
+            if other_findings and other_findings not in ["", "Not specified"]:
+                physical_exam_lines.append(f"Other Findings: {other_findings}")
+            
+            # Additional physical exam details from clinical_status
+            functional_limitations = clinical_status.get("functional_limitations", [])
+            if functional_limitations:
+                physical_exam_lines.append("\nFunctional Limitations:")
+                for limitation in functional_limitations[:5]:
+                    if isinstance(limitation, dict):
+                        desc = limitation.get("description", "")
+                        if desc:
+                            physical_exam_lines.append(f"  • {desc}")
+                    elif limitation:
+                        physical_exam_lines.append(f"  • {limitation}")
+        
+        # If no specific physical exam data found, check for general objective findings
+        if not physical_exam_lines and objective_findings:
+            physical_exam_lines.append("Objective Findings:")
+            for key, value in objective_findings.items():
+                if value and value not in ["", "Not specified"]:
+                    physical_exam_lines.append(f"  • {key.replace('_', ' ').title()}: {value}")
+        
+        sections.append("\n".join(physical_exam_lines) if physical_exam_lines else "No physical examination details extracted")
+        
+        # Section 5: CLINICAL STATUS
+        sections.append("\n🔬 CLINICAL STATUS")
+        sections.append("-" * 50)
+        
         clinical_lines = []
         
         # Chief complaint
@@ -677,18 +770,6 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
                 pain_info.append(f"Location: {pain_location}")
             clinical_lines.append(f"Pain Scores: {', '.join(pain_info)}")
         
-        # Functional limitations
-        functional_limitations = clinical_status.get("functional_limitations", [])
-        if functional_limitations:
-            clinical_lines.append("\nFunctional Limitations:")
-            for limitation in functional_limitations[:5]:
-                if isinstance(limitation, dict):
-                    desc = limitation.get("description", "")
-                    if desc:
-                        clinical_lines.append(f"  • {desc}")
-                elif limitation:
-                    clinical_lines.append(f"  • {limitation}")
-        
         # Past surgeries
         past_surgeries = clinical_status.get("past_surgeries", [])
         if past_surgeries:
@@ -705,27 +786,20 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
                 elif surgery:
                     clinical_lines.append(f"  • {surgery}")
         
-        # Objective findings
-        objective_findings = clinical_status.get("objective_findings", {})
-        if objective_findings:
-            clinical_lines.append("\nObjective Findings:")
-            for key, value in objective_findings.items():
-                if value and value not in ["", "Not specified"]:
-                    clinical_lines.append(f"  • {key.replace('_', ' ').title()}: {value}")
-        
         sections.append("\n".join(clinical_lines) if clinical_lines else "No clinical status details extracted")
         
-        # Section 5: MEDICATIONS
-        sections.append("\n💊 MEDICATIONS")
+        # Section 6: MEDICATIONS - CURRENT VS PREVIOUS (UPDATED)
+        sections.append("\n💊 MEDICATIONS - CURRENT VS PREVIOUS")
         sections.append("-" * 50)
         
         medications = raw_data.get("medications", {})
+        treatment_history = raw_data.get("treatment_history", {})
         medication_lines = []
         
         # Current medications
         current_meds = medications.get("current_medications", [])
         if current_meds:
-            medication_lines.append("Current Medications:")
+            medication_lines.append("🟢 CURRENT MEDICATIONS:")
             for med in current_meds[:10]:  # Limit to 10 medications
                 if isinstance(med, dict):
                     med_name = med.get("name", "")
@@ -742,12 +816,51 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
                 elif med:
                     medication_lines.append(f"  • {med}")
         else:
-            medication_lines.append("No current medications listed")
+            medication_lines.append("🟢 CURRENT MEDICATIONS: None listed")
+        
+        # Previous/Discontinued medications
+        past_treatments = treatment_history.get("past_treatments", [])
+        previous_meds = []
+        
+        # Extract medications from past treatments
+        for treatment in past_treatments:
+            if isinstance(treatment, dict):
+                treatment_type = treatment.get("type", "").lower()
+                treatment_name = treatment.get("treatment", treatment.get("name", ""))
+                
+                # Look for medication-related treatments
+                if any(keyword in treatment_type for keyword in ['medication', 'med', 'drug', 'pharmaceutical']) or \
+                (treatment_name and any(keyword in treatment_name.lower() for keyword in ['discontinued', 'previous', 'prior', 'past'])):
+                    previous_meds.append(treatment)
+        
+        # Also check if there's a specific previous medications field
+        if not previous_meds and medications.get("previous_medications"):
+            previous_meds = medications.get("previous_medications", [])
+        
+        if previous_meds:
+            medication_lines.append("\n🔴 PREVIOUS/DISCONTINUED MEDICATIONS:")
+            for med in previous_meds[:8]:  # Limit to 8 previous medications
+                if isinstance(med, dict):
+                    med_name = med.get("name", med.get("treatment", ""))
+                    med_reason = med.get("reason", med.get("discontinuation_reason", ""))
+                    med_duration = med.get("duration", "")
+                    
+                    if med_name:
+                        med_info = med_name
+                        if med_reason:
+                            med_info += f" - Discontinued: {med_reason}"
+                        if med_duration:
+                            med_info += f" (Duration: {med_duration})"
+                        medication_lines.append(f"  • {med_info}")
+                elif med:
+                    medication_lines.append(f"  • {med}")
+        else:
+            medication_lines.append("\n🔴 PREVIOUS/DISCONTINUED MEDICATIONS: None explicitly listed")
         
         # Future medications
         future_meds = medications.get("future_medications", [])
         if future_meds:
-            medication_lines.append("\nRecommended Future Medications:")
+            medication_lines.append("\n🔵 RECOMMENDED FUTURE MEDICATIONS:")
             for med in future_meds[:5]:
                 if isinstance(med, dict):
                     med_name = med.get("name", "")
@@ -762,7 +875,7 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         
         sections.append("\n".join(medication_lines))
         
-        # Section 6: MEDICAL-LEGAL CONCLUSIONS
+        # Section 7: MEDICAL-LEGAL CONCLUSIONS
         sections.append("\n⚖️ MEDICAL-LEGAL CONCLUSIONS")
         sections.append("-" * 50)
         
@@ -801,7 +914,7 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         
         sections.append("\n".join(legal_lines) if legal_lines else "No medical-legal conclusions extracted")
         
-        # Section 7: WORK STATUS
+        # Section 8: WORK STATUS
         sections.append("\n💼 WORK STATUS")
         sections.append("-" * 50)
         
@@ -833,7 +946,7 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         
         sections.append("\n".join(work_lines) if work_lines else "No work status information extracted")
         
-        # Section 8: RECOMMENDATIONS
+        # Section 9: RECOMMENDATIONS
         sections.append("\n🎯 RECOMMENDATIONS")
         sections.append("-" * 50)
         
@@ -925,7 +1038,7 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         
         sections.append("\n".join(rec_lines) if rec_lines else "No specific recommendations extracted")
         
-        # Section 9: CRITICAL FINDINGS
+        # Section 10: CRITICAL FINDINGS
         sections.append("\n🚨 CRITICAL FINDINGS")
         sections.append("-" * 50)
         
@@ -950,7 +1063,6 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         logger.info(f"✅ Long summary built: {len(long_summary)} characters")
         
         return long_summary
-
     def _generate_short_summary_from_long_summary(self, long_summary: str) -> str:
         """
         Generate a precise 30–60 word, pipe-delimited actionable summary in key-value format.
