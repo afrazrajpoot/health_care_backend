@@ -1134,7 +1134,70 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"❌ Error saving document analysis: {str(e)}")
             raise
-
+    async def check_duplicate_document(self, patient_name: str, doi: Optional[str], report_date: Optional[str], 
+                                            document_type: Optional[str], physician_id: str) -> bool:
+            """
+            Check if a document with the same patient name, DOI, report date, and document type already exists.
+            Returns True if duplicate found, False otherwise.
+            """
+            try:
+                prisma = Prisma()
+                await prisma.connect()
+                
+                # Build where conditions - using correct field names from your schema
+                where_conditions = {
+                    "patientName": patient_name,
+                    "physicianId": physician_id,
+                }
+                
+                # Add date conditions if available
+                date_conditions = []
+                
+                if doi and doi.lower() != "not specified":
+                    date_conditions.append({"doi": doi})
+                    
+                if report_date and report_date.lower() != "not specified":
+                    # Convert string date to DateTime object for reportDate field
+                    try:
+                        report_date_obj = datetime.strptime(report_date, "%Y-%m-%d")
+                        date_conditions.append({"reportDate": report_date_obj})
+                    except ValueError:
+                        # If date parsing fails, skip this condition
+                        logger.warning(f"⚠️ Could not parse report date: {report_date}")
+                
+                # If we have date conditions, add them as OR conditions
+                if date_conditions:
+                    where_conditions["OR"] = date_conditions
+                
+                # Query for existing documents with document type check
+                existing_docs = await prisma.document.find_many(
+                    where={
+                        **where_conditions,
+                        "documentSummary": {
+                            "is": {
+                                "type": document_type
+                            } if document_type and document_type.lower() != "not specified" else None
+                        }
+                    } if document_type and document_type.lower() != "not specified" else where_conditions,
+                    include={
+                        "documentSummary": True
+                    },
+                    take=1
+                )
+                
+                await prisma.disconnect()
+                
+                is_duplicate = len(existing_docs) > 0
+                
+                if is_duplicate:
+                    logger.info(f"🔍 Duplicate document found: Patient={patient_name}, DOI={doi}, Report Date={report_date}, Document Type={document_type}")
+                
+                return is_duplicate
+                
+            except Exception as e:
+                logger.error(f"❌ Error checking for duplicate document: {str(e)}", exc_info=True)
+                # In case of error, allow the document to be saved (fail open)
+                return False
     def decrypt_patient_token(self, token: str) -> Dict[str, Any]:
         """
         Decrypts the token and returns patient data.

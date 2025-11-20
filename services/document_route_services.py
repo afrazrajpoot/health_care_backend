@@ -91,46 +91,13 @@ class DocumentExtractorService:
             logger.info(f"📁 Processing: {document.filename}")
             logger.info(f"📏 Size: {file_size/(1024*1024):.2f} MB | MIME: {document.content_type}")
             
-            # Step 2: Early duplicate check (unchanged)
-            file_hash = self._compute_file_hash(content)
-            existing_doc = await self.db_service.prisma.document.find_first(
-                where={
-                    "physicianId": physician_id,
-                    "originalName": document.filename,
-                }
-            )
+            # REMOVED: Early duplicate check - files are always processed
             
-            if existing_doc:
-                logger.warning(f"⚠️ Document already exists: {document.filename}")
-                
-                # Emit skipped event (unchanged)
-                emit_data = {
-                    'document_id': existing_doc.id or 'unknown',
-                    'filename': document.filename,
-                    'status': 'skipped',
-                    'reason': 'Document already processed',
-                    'user_id': user_id,
-                    'blob_path': blob_path,
-                    'physician_id': physician_id,
-                    'message': f'Document "{document.filename}" was already processed and will be skipped'
-                }
-                
-                if user_id:
-                    await sio.emit('document_skipped', emit_data, room=f"user_{user_id}")
-                else:
-                    await sio.emit('document_skipped', emit_data)
-                
-                return {
-                    "success": False,
-                    "reason": "Document already processed",
-                    "filename": document.filename
-                }
-            
-            # Step 3: Save to temp (unchanged)
+            # Step 2: Save to temp (unchanged)
             temp_path = self.file_service.save_temp_file(content, document.filename)
             processing_path = temp_path
             
-            # Step 4: OPTIMIZATION - Async conversion using serialized thread pool
+            # Step 3: OPTIMIZATION - Async conversion using serialized thread pool
             if DocumentConverter.needs_conversion(temp_path):
                 logger.info(f"🔄 Converting: {temp_path}")
                 
@@ -158,7 +125,7 @@ class DocumentExtractorService:
                     logger.error(f"❌ Fallback failed: {fallback_exc}")
                     raise
             
-            # Step 5: OPTIMIZATION - Async Document AI processing
+            # Step 4: OPTIMIZATION - Async Document AI processing
             processor = get_document_ai_processor()
             
             # FIXED: Use existing loop; handle fallback text
@@ -214,7 +181,7 @@ class DocumentExtractorService:
             processing_time = (datetime.now() - document_start_time).total_seconds() * 1000
             logger.info(f"⏱️ Document AI time: {processing_time:.0f}ms")
             
-            # Step 6: Check if text was extracted (unchanged)
+            # Step 5: Check if text was extracted (unchanged)
             if not result.text:
                 reason = "No text extracted from document"
                 logger.warning(f"⚠️ {reason}")
@@ -226,15 +193,15 @@ class DocumentExtractorService:
             
             logger.info(f"✅ Document analysis completed for {document.filename}")
             
-            # Step 7: OPTIMIZATION - Async GCS upload (non-blocking I/O)
+            # Step 6: OPTIMIZATION - Async GCS upload (non-blocking I/O)
             gcs_url, blob_path = await self._async_gcs_upload(content, document.filename)
             logger.info(f"✅ GCS upload: {gcs_url} | Blob: {blob_path}")
             
-            # Step 8: Update result (unchanged)
+            # Step 7: Update result (unchanged)
             result.gcs_file_link = gcs_url
             result.fileInfo["gcsUrl"] = gcs_url
             
-            # Step 9: Prepare webhook payload (unchanged)
+            # Step 8: Prepare webhook payload (unchanged)
             webhook_payload = {
                 "result": result.model_dump(mode='json', exclude_none=False) if hasattr(result, 'model_dump') else result.dict(exclude_none=False),  # Include all fields including page_zones
                 "page_zones": result.page_zones,
@@ -244,7 +211,7 @@ class DocumentExtractorService:
                 "processing_time_ms": int(processing_time),
                 "gcs_url": gcs_url,
                 "blob_path": blob_path,
-                "file_hash": file_hash,
+                "file_hash": self._compute_file_hash(content),
                 "document_id": result.document_id,
                 "physician_id": physician_id,
                 "user_id": user_id,
