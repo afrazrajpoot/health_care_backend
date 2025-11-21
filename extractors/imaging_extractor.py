@@ -17,20 +17,17 @@ from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
-from utils.doctor_detector import DoctorDetector
-from utils.document_context_analyzer import DocumentContextAnalyzer
 
 logger = logging.getLogger("document_ai")
 
 
 class ImagingExtractorChained:
     """
-    Enhanced Imaging extractor with FULL CONTEXT processing and contextual awareness.
+    Enhanced Imaging extractor with FULL CONTEXT processing.
     
     Key Features:
     - Full document context (no chunking) = No information loss
     - 6-FIELD IMAGING FOCUS (Header, Clinical Data, Technique, Key Findings, Impression, Recommendations)
-    - Context-aware extraction using DocumentContextAnalyzer
     - ZERO tolerance for hallucination, assumptions, or self-additions
     - Only extracts EXPLICITLY STATED information from imaging reports
     """
@@ -39,8 +36,6 @@ class ImagingExtractorChained:
         self.llm = llm
         self.parser = JsonOutputParser()
         self.verifier = ExtractionVerifier(llm)
-        self.doctor_detector = DoctorDetector(llm)
-        self.context_analyzer = DocumentContextAnalyzer(llm)
         
         # Pre-compile regex patterns for imaging specific content
         self.imaging_patterns = {
@@ -58,7 +53,6 @@ class ImagingExtractorChained:
         doc_type: str,
         fallback_date: str,
         page_zones: Optional[Dict[str, Dict[str, str]]] = None,
-        context_analysis: Optional[Dict] = None,
         raw_text: Optional[str] = None
     ) -> Dict:
         """
@@ -70,34 +64,23 @@ class ImagingExtractorChained:
             doc_type: Document type (MRI, CT, X-ray, Ultrasound, etc.)
             fallback_date: Fallback date if not found
             page_zones: Per-page zone extraction
-            context_analysis: Document context from DocumentContextAnalyzer
             raw_text: Original flat text (optional)
         """
         
         logger.info("=" * 80)
-        logger.info("📊 STARTING IMAGING EXTRACTION (6-FIELD FOCUS + CONTEXT-AWARE)")
+        logger.info("📊 STARTING IMAGING EXTRACTION (6-FIELD FOCUS)")
         logger.info("=" * 80)
         
         start_time = time.time()
         
         try:
-            # Step 1: Analyze document context using DocumentContextAnalyzer
-            if not context_analysis:
-                logger.info("🔍 Analyzing document context for guidance...")
-                context_analysis = self.context_analyzer.analyze(text, doc_type)
+            # Step 1: Extract raw data with full context and zone-aware radiologist detection
+            raw_data = self._extract_raw_data(text, doc_type, fallback_date, page_zones)
             
-            logger.info("🎯 Context Guidance Received:")
-            logger.info(f"   Document Type: {context_analysis.get('document_type', 'Unknown')}")
-            logger.info(f"   Confidence: {context_analysis.get('confidence', 'medium')}")
-            logger.info(f"   Key Sections: {context_analysis.get('key_sections', [])}")
-            
-            # Step 2: Extract raw data with full context and zone-aware radiologist detection
-            raw_data = self._extract_raw_data(text, doc_type, fallback_date, context_analysis, page_zones)
-            
-            # Step 3: Build comprehensive long summary from ALL raw data
+            # Step 2: Build comprehensive long summary from ALL raw data
             long_summary = self._build_comprehensive_long_summary(raw_data, doc_type, fallback_date)
             
-            # Step 4: Generate short summary from long summary (like QME extractor)
+            # Step 3: Generate short summary from long summary (like QME extractor)
             short_summary = self._generate_short_summary_from_long_summary(long_summary)
             
             elapsed_time = time.time() - start_time
@@ -122,37 +105,9 @@ class ImagingExtractorChained:
                 "short_summary": "Imaging summary not available"
             }
 
-    def _extract_raw_data(self, text: str, doc_type: str, fallback_date: str, context_analysis: Dict, page_zones: Optional[Dict] = None) -> Dict:
-        """Extract raw imaging data using LLM with full context and robust zone-aware radiologist detection"""
-        # Detect radiologist using zone-aware logic
-        detection_result = self.doctor_detector.detect_doctor(
-            text=text,
-            page_zones=page_zones
-        )
-        radiologist_name = detection_result.get("doctor_name")
-        radiologist_confidence = detection_result.get("confidence")
-        if not radiologist_name:
-            radiologist_name = context_analysis.get("identified_professionals", {}).get("primary_provider", "")
-        
-        # Build comprehensive context guidance for LLM
-        context_str = f"""
-DOCUMENT CONTEXT ANALYSIS (from DocumentContextAnalyzer):
-- Document Type: {context_analysis.get('document_type', 'Unknown')}
-- Confidence Level: {context_analysis.get('confidence', 'medium')}
-- Key Sections: {', '.join(context_analysis.get('key_sections', ['Findings', 'Impression']))}
-- Critical Keywords: {', '.join(context_analysis.get('critical_keywords', [])[:10])}
-
-RADIOLOGIST: {radiologist_name or 'Extract from document'}
-
-CRITICAL EXTRACTION RULES FOR IMAGING:
-1. Extract ONLY explicitly stated findings - NO assumptions
-2. Include measurements ONLY if explicitly stated in report
-3. For work/treatment implications: Use EXACT radiologist wording
-4. Empty fields are BETTER than guessed fields
-5. Do NOT upgrade severity (mild→moderate) or add typical findings
-"""
-        
-        # Build system prompt with 6-field imaging focus
+    def _extract_raw_data(self, text: str, doc_type: str, fallback_date: str, page_zones: Optional[Dict] = None) -> Dict:
+        """Extract raw imaging data using LLM with full context and integrated author detection"""
+        # Build system prompt with 6-field imaging focus, including instructions for detecting the signing author
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are an expert radiological report specialist analyzing a COMPLETE imaging report.
 
@@ -196,6 +151,12 @@ Examples of INCORRECT extractions:
    - DO NOT remove nuanced descriptions: "subtle", "questionable", "mild enhancement"
    - DO NOT interpret radiological significance beyond what's stated
 
+6. **RADIOLOGIST/AUTHOR DETECTION**:
+   - Identify the author who signed the report as the "radiologist" name (e.g., from signature block, "Dictated by:", or closing statement).
+   - It is NOT mandatory that this author is a qualified doctor; extract the name as explicitly signed, regardless of credentials.
+   - Extract credentials only if explicitly stated near the signature.
+   - If no clear signer is found, leave "name" empty.
+
 6 CRITICAL IMAGING FIELDS:
 
 FIELD 1: HEADER & CONTEXT (Report Identity & Date)
@@ -225,7 +186,7 @@ Extract into STRUCTURED JSON focusing on 6 CRITICAL IMAGING FIELDS:
     "patient_dob": "",
     "referring_physician": "",
     "radiologist": {{
-      "name": "{primary_radiologist}",
+      "name": "",
       "credentials": "",
       "specialty": "Radiology"
     }}
@@ -310,15 +271,13 @@ Extract into STRUCTURED JSON focusing on 6 CRITICAL IMAGING FIELDS:
         
         logger.info(f"📄 Document size: {len(text):,} chars (~{len(text) // 4:,} tokens)")
         logger.info("🔍 Processing ENTIRE imaging report in single context window with 6-field focus...")
-        logger.info("🤖 Invoking LLM for full-context imaging extraction...")
+        logger.info("🤖 Invoking LLM for full-context imaging extraction (with integrated author detection)...")
         
         # Invoke LLM
         try:
             raw_data = chain.invoke({
                 "full_document_text": text,
-                "context_guidance": context_str,
-                "doc_type": doc_type,
-                "primary_radiologist": radiologist_name or ""
+                "doc_type": doc_type
             })
             
             logger.info("✅ Extracted imaging data from complete document")

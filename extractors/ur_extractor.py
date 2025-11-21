@@ -1,6 +1,6 @@
 """
 DecisionDocumentExtractor - Enhanced Extractor for UR/IMR Decisions, Appeals, Authorizations
-Optimized for accuracy using Gemini-style full-document processing with contextual guidance
+Optimized for accuracy using Gemini-style full-document processing
 """
 import logging
 import re
@@ -18,7 +18,7 @@ logger = logging.getLogger("document_ai")
 
 class DecisionDocumentExtractor:
     """
-    Enhanced Decision Document extractor with FULL CONTEXT processing and contextual awareness.
+    Enhanced Decision Document extractor with FULL CONTEXT processing.
     
     Key Features:
     - Full document context (no chunking) = No information loss
@@ -51,49 +51,34 @@ class DecisionDocumentExtractor:
             'denial': re.compile(r'\b(Denial|Notice of Denial|Determination of Denial)\b', re.IGNORECASE)
         }
         
-        logger.info("✅ DecisionDocumentExtractor initialized (Full Context + Context-Aware)")
+        logger.info("✅ DecisionDocumentExtractor initialized (Full Context)")
 
     def extract(
         self,
         text: str,
         doc_type: str,
         fallback_date: str,
-        page_zones: Optional[Dict[str, Dict[str, str]]] = None,
-        context_analysis: Optional[Dict] = None,
         raw_text: Optional[str] = None
     ) -> Dict:
         """
-        Extract Decision Document data with FULL CONTEXT and contextual awareness.
+        Extract Decision Document data with FULL CONTEXT.
         
         Args:
             text: Complete document text (layout-preserved)
             doc_type: Document type (UR/IMR/Appeal/Authorization/RFA/DFR)
             fallback_date: Fallback date if not found
-            page_zones: Per-page zone extraction
-            context_analysis: Document context from DocumentContextAnalyzer
             raw_text: Original flat text (optional)
             
         Returns:
             Dict with long_summary and short_summary
         """
         logger.info("=" * 80)
-        logger.info("⚖️ STARTING DECISION DOCUMENT EXTRACTION (FULL CONTEXT + CONTEXT-AWARE)")
+        logger.info("⚖️ STARTING DECISION DOCUMENT EXTRACTION (FULL CONTEXT)")
         logger.info("=" * 80)
         
         # Auto-detect document type if not specified
         detected_type = self._detect_document_type(text, doc_type)
         logger.info(f"📋 Document Type: {detected_type} (original: {doc_type})")
-        
-        # Log context guidance if available
-        if context_analysis:
-            focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
-            critical_locations = context_analysis.get("critical_findings_map", {})
-            
-            logger.info(f"🎯 Context Guidance Received:")
-            logger.info(f"   Focus Sections: {focus_sections}")
-            logger.info(f"   Critical Locations: {list(critical_locations.keys())}")
-        else:
-            logger.warning("⚠️ No context analysis provided - proceeding without guidance")
         
         # Check document size
         text_length = len(text)
@@ -104,12 +89,11 @@ class DecisionDocumentExtractor:
             logger.warning(f"⚠️ Document very large ({token_estimate:,} tokens)")
             logger.warning("⚠️ May exceed GPT-4o context window (128K tokens)")
         
-        # Stage 1: Extract with FULL CONTEXT and contextual guidance
-        raw_result = self._extract_full_context_with_guidance(
+        # Stage 1: Extract with FULL CONTEXT
+        raw_result = self._extract_full_context(
             text=text,
             doc_type=detected_type,
-            fallback_date=fallback_date,
-            context_analysis=context_analysis
+            fallback_date=fallback_date
         )
 
         # Stage 2: Build long summary from ALL raw data
@@ -162,31 +146,20 @@ class DecisionDocumentExtractor:
         logger.info(f"🔍 Could not auto-detect document type, using: {original_type}")
         return original_type or "UNKNOWN"
 
-    def _extract_full_context_with_guidance(
+    def _extract_full_context(
         self,
         text: str,
         doc_type: str,
-        fallback_date: str,
-        context_analysis: Optional[Dict]
+        fallback_date: str
     ) -> Dict:
         """
-        Extract with FULL document context + contextual guidance from DocumentContextAnalyzer.
+        Extract with FULL document context.
         """
-        logger.info("🔍 Processing ENTIRE decision document in single context window with guidance...")
+        logger.info("🔍 Processing ENTIRE decision document in single context window...")
         
-        # Extract guidance from context analysis
-        focus_sections = []
-        critical_locations = {}
-        ambiguities = []
-        
-        if context_analysis:
-            focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
-            critical_locations = context_analysis.get("critical_findings_map", {})
-            ambiguities = context_analysis.get("ambiguities_detected", [])
-        
-        # Build context-aware system prompt
+        # Build system prompt
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are an expert medical-legal documentation specialist analyzing a COMPLETE {doc_type} decision document with CONTEXTUAL GUIDANCE.
+You are an expert medical-legal documentation specialist analyzing a COMPLETE {doc_type} decision document.
 
 CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
 You are seeing the ENTIRE document at once, allowing you to:
@@ -194,9 +167,6 @@ You are seeing the ENTIRE document at once, allowing you to:
 - Connect request details with decision criteria and justification
 - Identify all services/treatments being decided upon
 - Provide comprehensive extraction without information loss
-
-CONTEXTUAL GUIDANCE PROVIDED:
-{context_guidance}
 
 ⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY):
 
@@ -409,20 +379,6 @@ Extract into COMPREHENSIVE structured JSON with all critical details:
    - Time-limited authorizations
 """)
 
-        # Build context guidance summary
-        context_guidance_text = f"""
-DOCUMENT TYPE: {doc_type}
-FOCUS ON THESE SECTIONS: {', '.join(focus_sections) if focus_sections else 'All sections equally'}
-
-CRITICAL FINDING LOCATIONS:
-- Decision Outcome: {critical_locations.get('decision_location', 'Search entire document')}
-- Appeal Information: {critical_locations.get('appeal_location', 'Search entire document')}
-- Requested Services: {critical_locations.get('services_location', 'Search entire document')}
-
-KNOWN AMBIGUITIES: {len(ambiguities)} detected
-{chr(10).join([f"- {amb.get('type')}: {amb.get('description')}" for amb in ambiguities]) if ambiguities else 'None detected'}
-"""
-
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
         
         try:
@@ -430,12 +386,11 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
             
             logger.info("🤖 Invoking LLM for full-context decision extraction...")
             
-            # Single LLM call with FULL document context and guidance
+            # Single LLM call with FULL document context
             chain = chat_prompt | self.llm | self.parser
             result = chain.invoke({
                 "doc_type": doc_type,
-                "full_document_text": text,
-                "context_guidance": context_guidance_text
+                "full_document_text": text
             })
             
             end_time = time.time()

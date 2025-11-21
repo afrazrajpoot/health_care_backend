@@ -14,7 +14,6 @@ import logging
 
 # Import our modular document detector (kept for hybrid approach)
 from utils.document_detector import detect_document_type
-from utils.doctor_detector import DoctorDetector
 from config.settings import CONFIG
 
 logger = logging.getLogger("document_ai")
@@ -47,8 +46,6 @@ class EnhancedReportAnalyzer:
         self.parser = JsonOutputParser(pydantic_object=DocumentAnalysis)
         self.brief_summary_parser = JsonOutputParser(pydantic_object=BriefSummary)
         
-        # NEW: Initialize layout-aware doctor detector
-        self.doctor_detector = DoctorDetector(self.llm)
         logger.info("✅ MODE-AWARE EnhancedReportAnalyzer initialized (WC/GM support)")
 
     def detect_document_type(self, document_text: str) -> str:
@@ -65,33 +62,6 @@ class EnhancedReportAnalyzer:
         except Exception as e:
             logger.error(f"❌ Document type detection failed: {str(e)}")
             return "medical_document"
-
-    def validate_doctor_name(self, name: str, document_text: str = None) -> Tuple[bool, str]:
-        """
-        Uses doctor_detector to validate and correct doctor names. Falls back to 'Not specified' if invalid or not found.
-        """
-        try:
-            if not name or name == "Not specified":
-                return True, name
-            # Use doctor_detector to validate/correct
-            if hasattr(self, "doctor_detector"):
-                detection_result = self.doctor_detector.detect_doctor(document_text or name)
-                detected_name = detection_result.get("doctor_name", "")
-                confidence_str = detection_result.get("confidence", "none")
-                # Map string confidence to numeric for thresholding
-                confidence_map = {"high": 1.0, "medium": 0.7, "low": 0.4, "none": 0.0}
-                confidence = confidence_map.get(confidence_str, 0.0)
-                if detected_name and confidence >= 0.5:
-                    return True, detected_name
-                else:
-                    logger.warning(f"⚠️ Doctor name not confidently detected: {name}")
-                    return False, "Not specified"
-            else:
-                logger.warning("⚠️ doctor_detector not initialized; fallback to Not specified")
-                return False, "Not specified"
-        except Exception as e:
-            logger.error(f"❌ Doctor name validation failed: {e}")
-            return False, "Not specified"
 
     def extract_signature_context(self, page_zones: Optional[Dict[int, Dict[str, str]]]) -> str:
         """
@@ -233,6 +203,12 @@ class EnhancedReportAnalyzer:
     ━━━ STAGE 3: WORKERS COMP KEYWORD EXTRACTION ━━━
     - EXTRACTED UR DECISION: Scan for 'Utilization Review', 'UR', 'prior authorization'
     - WORKERS COMP SUMMARY FORMAT: [Body Part] [Work Restrictions] [MMI Status]
+
+    ━━━ CONSULTING PHYSICIAN/AUTHOR DETECTION ━━━
+    - Identify the author who signed the report as the "consulting_doctor" name (e.g., from signature block, "Dictated by:", or closing statement).
+    - It is NOT mandatory that this author is a qualified doctor; extract the name as explicitly signed, regardless of credentials.
+    - Extract specialty only if explicitly stated near the signature.
+    - If no clear signer is found, leave empty.
     """
 
     def _get_gm_specific_instructions(self) -> str:
@@ -251,6 +227,12 @@ class EnhancedReportAnalyzer:
     ━━━ STAGE 3: GENERAL MEDICINE KEYWORD EXTRACTION ━━━
     - EXTRACTED AUTHORIZATION DECISION: Scan for 'prior auth', 'authorization'
     - GENERAL MEDICINE SUMMARY FORMAT: [Condition] [Medications] [Follow-up]
+
+    ━━━ CONSULTING PHYSICIAN/AUTHOR DETECTION ━━━
+    - Identify the author who signed the report as the "consulting_doctor" name (e.g., from signature block, "Dictated by:", or closing statement).
+    - It is NOT mandatory that this author is a qualified doctor; extract the name as explicitly signed, regardless of credentials.
+    - Extract specialty only if explicitly stated near the signature.
+    - If no clear signer is found, leave empty.
     """
     def extract_document_data_with_reasoning(
         self,
@@ -319,39 +301,6 @@ class EnhancedReportAnalyzer:
 
             analysis = DocumentAnalysis(**result)
             
-            # Enhanced: Zone-aware doctor validation
-            logger.info("✅ Stage 3: Zone-aware doctor validation")
-            
-            if analysis.consulting_doctor and analysis.consulting_doctor != "Not specified":
-                logger.info("🔍 Running zone-aware doctor detection...")
-                detection_result = self.doctor_detector.detect_doctor(
-                    text=document_text,
-                    page_zones=page_zones
-                )
-                
-                if detection_result["doctor_name"]:
-                    if detection_result["confidence"] in ["high", "medium"]:
-                        analysis.consulting_doctor = detection_result["doctor_name"]
-                        analysis.verification_notes.append(
-                            f"Zone-aware detection: {detection_result['doctor_name']} "
-                            f"(confidence: {detection_result['confidence']}, "
-                            f"source: {detection_result['source']})"
-                        )
-                        logger.info(f"✅ Consulting doctor: {detection_result['doctor_name']} "
-                                f"from {detection_result['source']}")
-                else:
-                    analysis.consulting_doctor = "Not specified"
-                    analysis.verification_notes.append(
-                        "No valid main/treating doctor detected with required title (Dr./MD/DO)"
-                    )
-                    logger.warning("⚠️ No valid consulting doctor found")
-
-            # Validate referral doctor
-            if analysis.referral_doctor and analysis.referral_doctor != "Not specified":
-                if not self._has_medical_title(analysis.referral_doctor):
-                    analysis.referral_doctor = "Not specified"
-                    analysis.verification_notes.append("Referral doctor rejected: no title")
-
             # Set verified flag
             analysis.verified = True
 
@@ -368,13 +317,6 @@ class EnhancedReportAnalyzer:
         except Exception as e:
             logger.error(f"❌ {mode.upper()} mode extraction failed: {str(e)}")
             return self.create_fallback_analysis(mode)
-    def _has_medical_title(self, name: str) -> bool:
-        """Helper to check if name has medical title."""
-        if not name:
-            return False
-        t = name.upper()
-        return any(title in t for title in ["DR.", " MD", " DO", "M.D.", "D.O.", "MBBS", "MBCHB"])
-
     def generate_brief_summary(self, document_text: str, mode: str = "wc") -> str:
         """
         Generate a brief summary of the medical document.
@@ -419,7 +361,7 @@ Focus: Patient condition, key findings, recommendations. Use clinical language a
 
         except Exception as e:
             logger.error(f"❌ {mode.upper()} summary generation failed: {str(e)}")
-            return f"{mode.upper()} brief summary unavailable"
+            return f"{mode_upper()} brief summary unavailable"
 
     def create_fallback_analysis(self, mode: str = "wc") -> DocumentAnalysis:
         """Create mode-aware fallback analysis when extraction fails"""

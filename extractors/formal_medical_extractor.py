@@ -1,6 +1,6 @@
 """
 FormalMedicalReportExtractor - Enhanced Extractor for Comprehensive Medical Reports
-Optimized for accuracy using Gemini-style full-document processing with contextual guidance
+Optimized for accuracy using Gemini-style full-document processing
 """
 import logging
 import re
@@ -18,11 +18,10 @@ logger = logging.getLogger("document_ai")
 
 class FormalMedicalReportExtractor:
     """
-    Enhanced Formal Medical Report extractor with FULL CONTEXT processing and contextual awareness.
+    Enhanced Formal Medical Report extractor with FULL CONTEXT processing.
     
     Key Features:
     - Full document context (no chunking) = No information loss
-    - Context-aware extraction for different medical specialties
     - Chain-of-thought reasoning = Explains decisions
     - Optimized for accuracy matching Gemini's approach
     - Supports Surgery, Anesthesia, EMG/NCS, Pathology, Cardiology, Sleep Studies, Endoscopy, Genetics, Discharge Summaries
@@ -53,7 +52,7 @@ class FormalMedicalReportExtractor:
             'medications': re.compile(r'\b(\d+\s*(mg|mcg|g|ml)\s*[\w\s]+\s*(PO|IV|IM|SC|QD|BID|TID|QID|PRN))', re.IGNORECASE)
         }
         
-        logger.info("✅ FormalMedicalReportExtractor initialized (Full Context + Context-Aware)")
+        logger.info("✅ FormalMedicalReportExtractor initialized (Full Context)")
 
     def extract(
         self,
@@ -61,44 +60,35 @@ class FormalMedicalReportExtractor:
         doc_type: str,
         fallback_date: str,
         page_zones: Optional[Dict[str, Dict[str, str]]] = None,
-        context_analysis: Optional[Dict] = None,
         raw_text: Optional[str] = None
     ) -> Dict:
         """
-        Extract Formal Medical Report data with FULL CONTEXT and contextual awareness.
+        Extract Formal Medical Report data with FULL CONTEXT.
         
         Args:
             text: Complete document text (layout-preserved)
             doc_type: Document type (Surgery, Anesthesia, EMG, Pathology, etc.)
             fallback_date: Fallback date if not found
             page_zones: Per-page zone extraction
-            context_analysis: Document context from DocumentContextAnalyzer
             raw_text: Original flat text (optional)
             
         Returns:
             Dict with long_summary and short_summary
         """
         logger.info("=" * 80)
-        logger.info("🏥 STARTING FORMAL MEDICAL REPORT EXTRACTION (FULL CONTEXT + CONTEXT-AWARE)")
+        logger.info("🏥 STARTING FORMAL MEDICAL REPORT EXTRACTION (FULL CONTEXT)")
         logger.info("=" * 80)
         
+        # Use text directly for LLM extraction
+        text_to_use = text
+        logger.info("📄 Using text for LLM extraction")
+        
         # Auto-detect specific report type if not specified
-        detected_type = self._detect_report_type(text, doc_type)
+        detected_type = self._detect_report_type(text_to_use, doc_type)
         logger.info(f"📋 Report Type: {detected_type} (original: {doc_type})")
         
-        # Log context guidance if available
-        if context_analysis:
-            focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
-            critical_locations = context_analysis.get("critical_findings_map", {})
-            
-            logger.info(f"🎯 Context Guidance Received:")
-            logger.info(f"   Focus Sections: {focus_sections}")
-            logger.info(f"   Critical Locations: {list(critical_locations.keys())}")
-        else:
-            logger.warning("⚠️ No context analysis provided - proceeding without guidance")
-        
         # Check document size
-        text_length = len(text)
+        text_length = len(text_to_use)
         token_estimate = text_length // 4
         logger.info(f"📄 Document size: {text_length:,} chars (~{token_estimate:,} tokens)")
         
@@ -106,12 +96,11 @@ class FormalMedicalReportExtractor:
             logger.warning(f"⚠️ Document very large ({token_estimate:,} tokens)")
             logger.warning("⚠️ May exceed GPT-4o context window (128K tokens)")
         
-        # Stage 1: Extract with FULL CONTEXT and contextual guidance
-        raw_result = self._extract_full_context_with_guidance(
-            text=text,
+        # Stage 1: Extract with FULL CONTEXT
+        raw_result = self._extract_full_context(
+            text=text_to_use,
             doc_type=detected_type,
-            fallback_date=fallback_date,
-            context_analysis=context_analysis
+            fallback_date=fallback_date
         )
 
         # Stage 2: Build long summary from ALL raw data
@@ -164,31 +153,20 @@ class FormalMedicalReportExtractor:
         logger.info(f"🔍 Could not auto-detect report type, using: {original_type}")
         return original_type or "MEDICAL_REPORT"
 
-    def _extract_full_context_with_guidance(
+    def _extract_full_context(
         self,
         text: str,
         doc_type: str,
-        fallback_date: str,
-        context_analysis: Optional[Dict]
+        fallback_date: str
     ) -> Dict:
         """
-        Extract with FULL document context + contextual guidance from DocumentContextAnalyzer.
+        Extract with FULL document context.
         """
-        logger.info("🔍 Processing ENTIRE medical report in single context window with guidance...")
+        logger.info("🔍 Processing ENTIRE medical report in single context window...")
         
-        # Extract guidance from context analysis
-        focus_sections = []
-        critical_locations = {}
-        ambiguities = []
-        
-        if context_analysis:
-            focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
-            critical_locations = context_analysis.get("critical_findings_map", {})
-            ambiguities = context_analysis.get("ambiguities_detected", [])
-        
-        # Build context-aware system prompt
+        # Build system prompt
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are an expert medical documentation specialist analyzing a COMPLETE {doc_type} report with CONTEXTUAL GUIDANCE.
+You are an expert medical documentation specialist analyzing a COMPLETE {doc_type} report.
 
 CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
 You are seeing the ENTIRE medical report at once, allowing you to:
@@ -196,9 +174,6 @@ You are seeing the ENTIRE medical report at once, allowing you to:
 - Connect pre-procedure assessments with intraoperative findings and post-procedure outcomes
 - Identify relationships between clinical indications, procedures performed, and results
 - Provide comprehensive extraction without information loss
-
-CONTEXTUAL GUIDANCE PROVIDED:
-{context_guidance}
 
 ⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY):
 
@@ -433,20 +408,6 @@ Extract into COMPREHENSIVE structured JSON with all critical medical details:
    - Life-threatening conditions
 """)
 
-        # Build context guidance summary
-        context_guidance_text = f"""
-REPORT TYPE: {doc_type}
-FOCUS ON THESE SECTIONS: {', '.join(focus_sections) if focus_sections else 'All sections equally'}
-
-CRITICAL FINDING LOCATIONS:
-- Procedure Details: {critical_locations.get('procedure_location', 'Search entire document')}
-- Results/Findings: {critical_locations.get('results_location', 'Search entire document')}
-- Conclusions: {critical_locations.get('conclusions_location', 'Search entire document')}
-
-KNOWN AMBIGUITIES: {len(ambiguities)} detected
-{chr(10).join([f"- {amb.get('type')}: {amb.get('description')}" for amb in ambiguities]) if ambiguities else 'None detected'}
-"""
-
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
         
         try:
@@ -454,12 +415,11 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
             
             logger.info("🤖 Invoking LLM for full-context medical report extraction...")
             
-            # Single LLM call with FULL document context and guidance
+            # Single LLM call with FULL document context
             chain = chat_prompt | self.llm | self.parser
             result = chain.invoke({
                 "doc_type": doc_type,
-                "full_document_text": text,
-                "context_guidance": context_guidance_text
+                "full_document_text": text
             })
             
             end_time = time.time()
@@ -746,35 +706,36 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         logger.info(f"✅ Medical report long summary built: {len(long_summary)} characters")
         
         return long_summary
+
     def _clean_pipes_from_summary(self, short_summary: str) -> str:
-            """
-            Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.
+        """
+        Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.
+        
+        Args:
+            short_summary: The pipe-delimited short summary string
             
-            Args:
-                short_summary: The pipe-delimited short summary string
-                
-            Returns:
-                Cleaned summary with proper pipe formatting
-            """
-            if not short_summary or '|' not in short_summary:
-                return short_summary
-            
-            # Split by pipe and clean each part
-            parts = short_summary.split('|')
-            cleaned_parts = []
-            
-            for part in parts:
-                # Remove whitespace and check if part has meaningful content
-                stripped_part = part.strip()
-                # Keep part if it has actual content (not just empty or whitespace)
-                if stripped_part:
-                    cleaned_parts.append(stripped_part)
-            
-            # Join back with pipes - only include parts with actual content
-            cleaned_summary = ' . '.join(cleaned_parts)
-            
-            logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
-            return cleaned_summary
+        Returns:
+            Cleaned summary with proper pipe formatting
+        """
+        if not short_summary or '|' not in short_summary:
+            return short_summary
+        
+        # Split by pipe and clean each part
+        parts = short_summary.split('|')
+        cleaned_parts = []
+        
+        for part in parts:
+            # Remove whitespace and check if part has meaningful content
+            stripped_part = part.strip()
+            # Keep part if it has actual content (not just empty or whitespace)
+            if stripped_part:
+                cleaned_parts.append(stripped_part)
+        
+        # Join back with pipes - only include parts with actual content
+        cleaned_summary = ' . '.join(cleaned_parts)
+        
+        logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
+        return cleaned_summary
     
     def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
         """
@@ -785,55 +746,55 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         logger.info("🎯 Generating 30–60 word medical structured summary (key-value format)...")
 
         system_prompt = SystemMessagePromptTemplate.from_template("""
-    You are a medical-report summarization specialist.
+You are a medical-report summarization specialist.
 
-    TASK:
-    Create a concise, factual summary of a medical report using ONLY information explicitly present in the long summary.
+TASK:
+Create a concise, factual summary of a medical report using ONLY information explicitly present in the long summary.
 
-    STRICT REQUIREMENTS:
-    1. Word count MUST be **between 30 and 60 words**.
-    2. Output format MUST be EXACTLY:
+STRICT REQUIREMENTS:
+1. Word count MUST be **between 30 and 60 words**.
+2. Output format MUST be EXACTLY:
 
-    [Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Medication:[value] | MMI Status:[value] | Work Status:[value] | Restrictions:[value] | Treatment Progress:[value] | Critical Finding:[value] | Follow-up:[value]
+[Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Medication:[value] | MMI Status:[value] | Work Status:[value] | Restrictions:[value] | Treatment Progress:[value] | Critical Finding:[value] | Follow-up:[value]
 
-    FORMAT & RULES:
-    - MUST be **30–60 words**.
-    - MUST be **ONE LINE**, pipe-delimited, no line breaks.
-    - NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
-    - NEVER fabricate: no invented dates, meds, restrictions, exam findings, or recommendations.
-    - NO narrative sentences. Use short factual fragments ONLY.
-    - First three fields (Report Title, Author, Date) appear without keys
-    - All other fields use key-value format: Key:[value]
+FORMAT & RULES:
+- MUST be **30–60 words**.
+- MUST be **ONE LINE**, pipe-delimited, no line breaks.
+- NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
+- NEVER fabricate: no invented dates, meds, restrictions, exam findings, or recommendations.
+- NO narrative sentences. Use short factual fragments ONLY.
+- First three fields (Report Title, Author, Date) appear without keys
+- All other fields use key-value format: Key:[value]
 
-    CONTENT PRIORITY (only if provided in the long summary):
-    1. Report Title  
-    2. Author  
-    3. Visit Date  
-    4. Body parts  
-    5. Diagnosis  
-    6. Medications  
-    7. MMI status  
-    8. Work status & restrictions  
-    9. Treatment progress  
-    10. Critical finding  
-    11. Follow-up plan
+CONTENT PRIORITY (only if provided in the long summary):
+1. Report Title  
+2. Author  
+3. Visit Date  
+4. Body parts  
+5. Diagnosis  
+6. Medications  
+7. MMI status  
+8. Work status & restrictions  
+9. Treatment progress  
+10. Critical finding  
+11. Follow-up plan
 
-    ABSOLUTELY FORBIDDEN:
-    - assumptions, interpretations, invented medications, or inferred diagnoses
-    - narrative writing
-    - placeholder text or "Not provided"
-    - duplicate pipes or empty pipe fields (e.g., "||")
+ABSOLUTELY FORBIDDEN:
+- assumptions, interpretations, invented medications, or inferred diagnoses
+- narrative writing
+- placeholder text or "Not provided"
+- duplicate pipes or empty pipe fields (e.g., "||")
 
-    Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
-    """)
+Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
+""")
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
-    MEDICAL REPORT LONG SUMMARY:
+MEDICAL REPORT LONG SUMMARY:
 
-    {long_summary}
+{long_summary}
 
-    Produce a 30–60 word structured medical summary following ALL rules.
-    """)
+Produce a 30–60 word structured medical summary following ALL rules.
+""")
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
 

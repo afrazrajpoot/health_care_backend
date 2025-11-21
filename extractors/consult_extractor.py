@@ -1,7 +1,6 @@
 """
-Specialist Consult Enhanced Extractor - Full Context with Context-Awareness & Document Analysis
-
-Optimized for accuracy using Gemini-style full-document processing with contextual guidance
+Specialist Consult Enhanced Extractor - Full Context
+Optimized for accuracy using Gemini-style full-document processing
 8 CRITICAL FIELDS FOCUSED (NO HALLUCINATION, ONLY EXPLICIT INFORMATION)
 """
 
@@ -16,19 +15,16 @@ from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
-from utils.doctor_detector import DoctorDetector
-from utils.document_context_analyzer import DocumentContextAnalyzer
 
 logger = logging.getLogger("document_ai")
 
 
 class ConsultExtractorChained:
     """
-    Enhanced Consult extractor with FULL CONTEXT processing and contextual awareness.
+    Enhanced Consult extractor with FULL CONTEXT processing.
     
     Key Features:
     - Full document context (no chunking) = No information loss
-    - Context-aware extraction using DocumentContextAnalyzer guidance
     - Chain-of-thought reasoning for specialist recommendation evaluation
     - 8-FIELD FOCUSED extraction for zero hallucination
     - Optimized for Workers' Compensation consultation analysis
@@ -37,33 +33,21 @@ class ConsultExtractorChained:
     def __init__(self, llm: AzureChatOpenAI):
         self.llm = llm
         self.parser = JsonOutputParser()
-        self.doctor_detector = DoctorDetector(llm)
-        self.context_analyzer = DocumentContextAnalyzer(llm)
         self.verifier = ExtractionVerifier(llm)
 
-    def extract(self, text: str, doc_type: str, fallback_date: str, page_zones: Optional[Dict] = None, context_analysis: Optional[Dict] = None) -> Dict:
+    def extract(self, text: str, doc_type: str, fallback_date: str) -> Dict:
         """
         Extract specialist consult report with full context processing. 
         Returns dictionary with long_summary and short_summary like QME extractor.
         """
         logger.info("=" * 80)
-        logger.info("👨‍⚕️ STARTING CONSULT EXTRACTION (FULL CONTEXT + CONTEXT-AWARE)")
+        logger.info("👨‍⚕️ STARTING CONSULT EXTRACTION (FULL CONTEXT)")
         logger.info("=" * 80)
         start_time = time.time()
         
         try:
-            # Step 1: Use provided context_analysis or analyze if not provided
-            if context_analysis is None:
-                logger.info("🔍 Analyzing document context for guidance...")
-                context_analysis = self.context_analyzer.analyze(text, doc_type)
-                logger.info(f"📊 Context Analysis Complete:")
-                logger.info(f"   Document Type: {context_analysis.get('document_type', 'Unknown')}")
-                logger.info(f"   Confidence: {context_analysis.get('confidence', 'medium')}")
-                logger.info(f"   Key Sections: {context_analysis.get('key_sections', [])}")
-                logger.info(f"   Critical Keywords: {context_analysis.get('critical_keywords', [])}")
-
-            # Step 2: Extract raw data with full context and context_analysis guidance
-            raw_data = self._extract_raw_data(text, doc_type, fallback_date, context_analysis, page_zones)
+            # Step 2: Extract raw data with full context
+            raw_data = self._extract_raw_data(text, doc_type, fallback_date)
 
             # Step 3: Build comprehensive long summary from ALL raw data
             long_summary = self._build_comprehensive_long_summary(raw_data, doc_type, fallback_date)
@@ -92,43 +76,9 @@ class ConsultExtractorChained:
                 "short_summary": "Consultation summary not available"
             }
 
-    def _extract_raw_data(self, text: str, doc_type: str, fallback_date: str, context_analysis: Dict, page_zones: Optional[Dict] = None) -> Dict:
-        """Extract raw consultation data using LLM with full context and robust zone-aware physician detection"""
-        # Detect consulting physician using zone-aware logic
-        detection_result = self.doctor_detector.detect_doctor(
-            text=text,
-            page_zones=page_zones
-        )
-        physician_name = detection_result.get("doctor_name")
-        physician_confidence = detection_result.get("confidence")
-        if not physician_name:
-            physician_name = context_analysis.get("identified_professionals", {}).get("primary_provider", "")
-        
-        # Build comprehensive context guidance for LLM
-        context_str = f"""
-DOCUMENT CONTEXT ANALYSIS (from DocumentContextAnalyzer):
-- Document Type: {context_analysis.get('document_type', 'Unknown')}
-- Confidence Level: {context_analysis.get('confidence', 'medium')}
-- Key Sections: {', '.join(context_analysis.get('key_sections', ['Assessment', 'Plan']))}
-- Critical Keywords: {', '.join(context_analysis.get('critical_keywords', [])[:10])}
-
-CONSULTING PHYSICIAN: {physician_name or 'Not identified'}
-IDENTIFIED PROFESSIONALS:
-  - Primary Provider: {context_analysis.get('identified_professionals', {}).get('primary_provider', 'Not identified')}
-  - Referring Provider: {context_analysis.get('identified_professionals', {}).get('referring_provider', 'Not identified')}
-
-DIAGNOSTIC FOCUS:
-- Primary Diagnoses Focus: {', '.join(context_analysis.get('diagnostic_focus', {}).get('primary_diagnoses', [])[:3]) if context_analysis.get('diagnostic_focus') else 'Not specified'}
-
-CRITICAL EXTRACTION RULES:
-1. Extract ONLY explicitly stated information - NO assumptions
-2. For work restrictions: Use EXACT wording from document
-3. For recommendations: Extract ONLY what is explicitly recommended in Plan/Assessment
-4. For medications: Include dosage ONLY if explicitly stated
-5. For diagnoses: Include ALL secondary diagnoses with qualifying language preserved
-"""
-        
-        # Build system prompt with 8-field focus
+    def _extract_raw_data(self, text: str, doc_type: str, fallback_date: str) -> Dict:
+        """Extract raw consultation data using LLM with full context and integrated author detection"""
+        # Build system prompt with 8-field focus, including instructions for detecting the signing author
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are an expert Workers' Compensation consultation report specialist analyzing a COMPLETE Specialist Consultation Report.
 
@@ -141,9 +91,6 @@ You are seeing the ENTIRE consultation report at once, allowing you to:
 - Assess specialist's diagnostic reasoning and treatment justifications
 - Identify ALL treatment recommendations with medical necessity rationale
 - Extract complete work capacity and restriction changes
-
-CONTEXTUAL GUIDANCE PROVIDED:
-{context_guidance}
 
 ⚠️ CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY):
 
@@ -173,6 +120,12 @@ CONTEXTUAL GUIDANCE PROVIDED:
    - Leave fields empty if information not found
    - DO NOT use "Not mentioned", "Not stated", "Unknown" - just return ""
 
+6. **CONSULTING PHYSICIAN/AUTHOR DETECTION**:
+   - Identify the author who signed the report as the "consulting_physician" name (e.g., from signature block, "Dictated by:", or closing statement).
+   - It is NOT mandatory that this author is a qualified doctor; extract the name as explicitly signed, regardless of credentials.
+   - Extract specialty, credentials, and facility only if explicitly stated near the signature.
+   - If no clear signer is found, leave "name" empty.
+
 CONSULTATION EXTRACTION FOCUS - 8 CRITICAL FIELDS FOR CLAIMS ADMINISTRATION:
 
 FIELD 1: HEADER & CONTEXT - Report Identity & Authority
@@ -198,7 +151,7 @@ Extract into STRUCTURED JSON focusing on 8 CRITICAL FIELDS:
 {{
   "field_1_header_context": {{
     "consulting_physician": {{
-      "name": "{primary_physician}",
+      "name": "",
       "specialty": "",
       "credentials": "",
       "facility": ""
@@ -311,15 +264,13 @@ Extract into STRUCTURED JSON focusing on 8 CRITICAL FIELDS:
         chain = prompt | self.llm | self.parser
         
         logger.info(f"📄 Document size: {len(text):,} chars (~{len(text) // 4:,} tokens)")
-        logger.info("🔍 Processing ENTIRE consultation report in single context window with context_analysis guidance...")
-        logger.info("🤖 Invoking LLM for full-context consultation extraction...")
+        logger.info("🔍 Processing ENTIRE consultation report in single context window...")
+        logger.info("🤖 Invoking LLM for full-context consultation extraction (with integrated author detection)...")
         
         # Invoke LLM
         try:
             raw_data = chain.invoke({
-                "full_document_text": text,
-                "context_guidance": context_str,
-                "primary_physician": physician_name or ""
+                "full_document_text": text
             })
             
             logger.info("✅ Extracted consultation data from complete document")

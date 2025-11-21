@@ -1,6 +1,6 @@
 """
-PR-2 Progress Report Enhanced Extractor - Full Context with Context-Awareness
-Optimized for accuracy using Gemini-style full-document processing with contextual guidance
+PR-2 Progress Report Enhanced Extractor - Full Context
+Optimized for accuracy using Gemini-style full-document processing
 """
 import logging
 import re
@@ -13,18 +13,16 @@ from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
-from utils.doctor_detector import DoctorDetector
 
 logger = logging.getLogger("document_ai")
 
 
 class PR2ExtractorChained:
     """
-    Enhanced PR-2 extractor with FULL CONTEXT processing and contextual awareness.
+    Enhanced PR-2 extractor with FULL CONTEXT processing.
     
     Key Features:
     - Full document context (no chunking) = No information loss
-    - Context-aware extraction using DocumentContextAnalyzer guidance
     - Chain-of-thought reasoning for clinical progress tracking
     - Optimized for PR-2 specific clinical workflow patterns
     """
@@ -33,7 +31,6 @@ class PR2ExtractorChained:
         self.llm = llm
         self.parser = JsonOutputParser()
         self.verifier = ExtractionVerifier(llm)
-        self.doctor_detector = DoctorDetector(llm)
         
         # Pre-compile regex patterns for PR-2 specific content
         self.progress_patterns = {
@@ -42,48 +39,32 @@ class PR2ExtractorChained:
             'treatment': re.compile(r'\b(pt|physical therapy|injection|medication|therapy|exercise)\b', re.IGNORECASE)
         }
         
-        logger.info("✅ PR2ExtractorChained initialized (Full Context + Context-Aware)")
+        logger.info("✅ PR2ExtractorChained initialized (Full Context)")
 
     def extract(
         self,
         text: str,
         doc_type: str,
         fallback_date: str,
-        page_zones: Optional[Dict[str, Dict[str, str]]] = None,
-        context_analysis: Optional[Dict] = None,  # NEW: from DocumentContextAnalyzer
         raw_text: Optional[str] = None
     ) -> Dict:
         """
-        Extract PR-2 data with FULL CONTEXT and contextual awareness.
+        Extract PR-2 data with FULL CONTEXT.
         Returns dictionary with long_summary and short_summary like QME extractor.
         
         Args:
             text: Complete document text (layout-preserved)
             doc_type: Document type (PR-2 Progress Report)
             fallback_date: Fallback date if not found
-            page_zones: Per-page zone extraction
-            context_analysis: Document context from DocumentContextAnalyzer
             raw_text: Original flat text (optional)
         """
         logger.info("=" * 80)
-        logger.info("📋 STARTING PR-2 EXTRACTION (FULL CONTEXT + CONTEXT-AWARE)")
+        logger.info("📋 STARTING PR-2 EXTRACTION (FULL CONTEXT)")
         logger.info("=" * 80)
         
         start_time = time.time()
         
         try:
-            if context_analysis:
-                primary_physician = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
-                focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
-                critical_locations = context_analysis.get("critical_findings_map", {})
-                logger.info(f"🎯 Context Guidance Received:")
-                logger.info(f"   Primary Physician: {primary_physician.get('name', 'Unknown')}")
-                logger.info(f"   Confidence: {primary_physician.get('confidence', 'Unknown')}")
-                logger.info(f"   Focus Sections: {focus_sections}")
-                logger.info(f"   Critical Locations: {list(critical_locations.keys())}")
-            else:
-                logger.warning("⚠️ No context analysis provided - proceeding without guidance")
-
             # Check document size
             text_length = len(text)
             token_estimate = text_length // 4
@@ -93,31 +74,17 @@ class PR2ExtractorChained:
                 logger.warning(f"⚠️ Document very large ({token_estimate:,} tokens)")
                 logger.warning("⚠️ May exceed GPT-4o context window (128K tokens)")
             
-            # Stage 1: Extract with FULL CONTEXT and contextual guidance
-            raw_data = self._extract_full_context_with_guidance(
+            # Stage 1: Extract with FULL CONTEXT
+            raw_data = self._extract_full_context(
                 text=text,
                 doc_type=doc_type,
-                fallback_date=fallback_date,
-                context_analysis=context_analysis
+                fallback_date=fallback_date
             )
             
-            # Stage 2: Override physician if context identified one with high confidence
-            if context_analysis:
-                context_physician = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
-                if context_physician.get("name") and context_physician.get("confidence") in ["high", "medium"]:
-                    logger.info(f"🎯 Using context-identified physician: {context_physician.get('name')}")
-                    raw_data["treating_physician_name"] = context_physician.get("name")
-            
-            # Stage 3: Fallback to DoctorDetector if no physician identified
-            if not raw_data.get("treating_physician_name"):
-                logger.info("🔍 No physician from context/extraction, using DoctorDetector...")
-                physician_name = self._detect_treating_physician(text, page_zones)
-                raw_data["treating_physician_name"] = physician_name
-            
-            # Stage 4: Build comprehensive long summary from ALL raw data
+            # Stage 3: Build comprehensive long summary from ALL raw data
             long_summary = self._build_comprehensive_long_summary(raw_data, doc_type, fallback_date)
             
-            # Stage 5: Generate short summary from long summary (like QME extractor)
+            # Stage 4: Generate short summary from long summary (like QME extractor)
             short_summary = self._generate_short_summary_from_long_summary(long_summary)
             
             elapsed_time = time.time() - start_time
@@ -142,33 +109,17 @@ class PR2ExtractorChained:
                 "short_summary": "PR-2 summary not available"
             }
 
-    def _extract_full_context_with_guidance(
+    def _extract_full_context(
         self,
         text: str,
         doc_type: str,
-        fallback_date: str,
-        context_analysis: Optional[Dict]
+        fallback_date: str
     ) -> Dict:
         """
-        Extract with FULL document context + contextual guidance from DocumentContextAnalyzer.
+        Extract with FULL document context.
         Optimized for PR-2 Progress Report specific patterns and clinical workflow.
         """
-        logger.info("🔍 Processing ENTIRE PR-2 document in single context window with guidance...")
-        
-        # Extract guidance from context analysis
-        primary_physician = ""
-        focus_sections = []
-        clinical_timeline = {}
-        physician_reasoning = ""
-        ambiguities = []
-        
-        if context_analysis:
-            phys_analysis = context_analysis.get("physician_analysis", {}).get("primary_physician", {})
-            primary_physician = phys_analysis.get("name", "")
-            physician_reasoning = phys_analysis.get("reasoning", "")
-            focus_sections = context_analysis.get("extraction_guidance", {}).get("focus_on_sections", [])
-            clinical_timeline = context_analysis.get("clinical_timeline", {})
-            ambiguities = context_analysis.get("ambiguities_detected", [])
+        logger.info("🔍 Processing ENTIRE PR-2 document in single context window...")
         
         # Final PR-2 System Prompt - Complete Workers' Compensation Focus
         system_prompt = SystemMessagePromptTemplate.from_template("""
@@ -186,9 +137,6 @@ You are seeing the ENTIRE PR-2 document at once, allowing you to:
 - Identify ALL treatment authorization requests
 - Connect objective findings with work capacity changes
 - Extract complete medication regimen and changes
-
-CONTEXTUAL GUIDANCE PROVIDED:
-{context_guidance}
 
 ⚠️ CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY):
 
@@ -218,6 +166,12 @@ CONTEXTUAL GUIDANCE PROVIDED:
 - DO NOT infer patient compliance from attendance records
 - DO NOT predict treatment effectiveness from partial data
 - DO NOT extrapolate progress from single data points
+
+6. **TREATING PHYSICIAN/AUTHOR DETECTION**:
+   - Identify the author who signed the report as the "treating_physician" name (e.g., from signature block, "Dictated by:", or closing statement).
+   - It is NOT mandatory that this author is a qualified doctor; extract the name as explicitly signed, regardless of credentials.
+   - Extract specialty and facility only if explicitly stated near the signature.
+   - If no clear signer is found, leave "name" empty.
 
 PR-2 EXTRACTION FOCUS - 4 CORE WORKERS' COMPENSATION AREAS:
 
@@ -256,7 +210,7 @@ Extract into WORKERS' COMPENSATION structured JSON:
     "employer": "",
     "claims_administrator": "",
     "treating_physician": {{
-    "name": "{primary_physician}",
+    "name": "",
     "specialty": "",
     "facility": ""
     }}
@@ -351,20 +305,6 @@ Extract into WORKERS' COMPENSATION structured JSON:
 5. Empty fields are acceptable if information not stated in document
 """)
 
-        # Build context guidance summary
-        context_guidance_text = f"""
-PRIMARY TREATING PHYSICIAN: {primary_physician or 'Not identified in context'}
-REASONING: {physician_reasoning or 'See document for identification'}
-
-FOCUS ON THESE SECTIONS: {', '.join(focus_sections) if focus_sections else 'Subjective, Objective, Assessment, Plan (SOAP format)'}
-
-CLINICAL TIMELINE CONTEXT:
-{self._format_clinical_timeline(clinical_timeline)}
-
-KNOWN AMBIGUITIES: {len(ambiguities)} detected
-{chr(10).join([f"- {amb.get('type')}: {amb.get('description')}" for amb in ambiguities]) if ambiguities else 'None detected'}
-"""
-
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
         
         try:
@@ -372,16 +312,10 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
             
             logger.info("🤖 Invoking LLM for full-context PR-2 extraction...")
             
-            # Single LLM call with FULL document context and guidance
+            # Single LLM call with FULL document context
             chain = chat_prompt | self.llm | self.parser
             result = chain.invoke({
-                "full_document_text": text,
-                "context_guidance": context_guidance_text,
-                "primary_physician": primary_physician or "Extract from document",
-                "physician_reasoning": physician_reasoning or "Use signature and documentation sections",
-                "focus_sections": ', '.join(focus_sections) if focus_sections else "SOAP format sections",
-                "clinical_timeline": str(clinical_timeline),
-                "ambiguities": str(ambiguities)
+                "full_document_text": text
             })
             
             end_time = time.time()
@@ -402,40 +336,6 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
             
             return self._get_fallback_result(fallback_date)
 
-    def _format_clinical_timeline(self, timeline: Dict) -> str:
-        """Format clinical timeline for context guidance"""
-        if not timeline:
-            return "No clinical timeline available"
-        
-        formatted = []
-        for event_type, events in timeline.items():
-            if events:
-                formatted.append(f"{event_type.upper()}:")
-                for event in events[:3]:  # Show top 3 events per type
-                    formatted.append(f"  - {event.get('date', 'Unknown')}: {event.get('description', '')}")
-        
-        return "\n".join(formatted) if formatted else "No significant timeline events"
-
-    def _detect_treating_physician(
-        self,
-        text: str,
-        page_zones: Optional[Dict[str, Dict[str, str]]] = None
-    ) -> str:
-        """Fallback: Detect treating physician using DoctorDetector"""
-        logger.info("🔍 Fallback: Running DoctorDetector for treating physician...")
-        
-        detection_result = self.doctor_detector.detect_doctor(
-            text=text,
-            page_zones=page_zones
-        )
-        
-        if detection_result["doctor_name"]:
-            logger.info(f"✅ Treating Physician detected: {detection_result['doctor_name']}")
-            return detection_result["doctor_name"]
-        else:
-            logger.warning("⚠️ No valid treating physician found")
-            return ""
-
     def _build_comprehensive_long_summary(self, raw_data: Dict, doc_type: str, fallback_date: str) -> str:
         """
         Build comprehensive long summary from ALL extracted raw data with detailed headings.
@@ -453,7 +353,7 @@ KNOWN AMBIGUITIES: {len(ambiguities)} detected
         patient_visit_info = raw_data.get("patient_visit_info", {})
         treating_physician = patient_visit_info.get("treating_physician", {})
         
-        physician_name = treating_physician.get("name", raw_data.get("treating_physician_name", ""))
+        physician_name = treating_physician.get("name", "")
         specialty = treating_physician.get("specialty", "")
         report_date = report_metadata.get("report_date", fallback_date)
         visit_date = report_metadata.get("visit_date", "")

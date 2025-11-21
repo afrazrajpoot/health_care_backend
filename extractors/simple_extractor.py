@@ -10,6 +10,11 @@ from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTempla
 from langchain_openai import AzureChatOpenAI
 from langchain_core.runnables import RunnableLambda, RunnableBranch
 
+
+
+
+
+
 logger = logging.getLogger("document_ai")
 
 class SimpleExtractor:

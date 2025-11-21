@@ -103,18 +103,16 @@ class WebhookService:
         result_data = data["result"]
         text = result_data.get("text", "")  # Layout-preserved text (fallback)
         llm_text = result_data.get("llm_text")  # NEW: Structured JSON for LLM (can be None)
-        page_zones = result_data.get("page_zones")  # NEW: Per-page zones (can be None)
         mode = data.get("mode", "wc")  # Default to WC mode
         
         logger.info(f"📋 Document mode: {mode}")
         logger.info(f"🔍 Extraction data available:")
         logger.info(f"   - Layout text: {len(text)} chars")
         logger.info(f"   - LLM JSON text: {len(llm_text) if llm_text else 0} chars")
-        logger.info(f"   - Page zones: {len(page_zones) if page_zones else 0} pages")
         
-        # Use LLM-optimized text if available, fallback to layout text
-        text_for_llm = llm_text if llm_text else text
-        logger.info(f"🤖 Using {'LLM-optimized JSON' if llm_text else 'layout-preserved'} text for analysis")
+        # Use raw text for analysis
+        text_for_llm = text
+        logger.info(f"🤖 Using raw text for analysis")
         
         # No DLP de-identification needed
         extracted_phi = {
@@ -126,12 +124,11 @@ class WebhookService:
         # OPTIMIZATION: Run analysis and summary generation in parallel
         analyzer = EnhancedReportAnalyzer()
         
-        # Pass page_zones and mode to extraction for mode-aware processing
+        # Pass raw text and mode to extraction for mode-aware processing
         analysis_task = asyncio.create_task(
             asyncio.to_thread(
                 analyzer.extract_document_data_with_reasoning, 
                 text_for_llm,
-                page_zones,  # NEW: Pass zones for enhanced extraction
                 None,  # raw_text parameter
                 mode     # NEW: Pass mode for mode-aware extraction
             )
@@ -211,7 +208,6 @@ class WebhookService:
             "brief_summary": brief_summary,
             "extracted_phi": extracted_phi,
             "text_for_analysis": text_for_llm,  # Text used for LLM analysis
-            "page_zones": page_zones,  # NEW: Pass zones forward
             "has_date_reasoning": has_date_reasoning,
             "date_reasoning_data": {
                 "reasoning": document_analysis.date_reasoning.reasoning if has_date_reasoning else "",
