@@ -969,7 +969,7 @@ class DatabaseService:
         rd: datetime,
         status: str,
         brief_summary: str,
-        summary_snapshots: List[Dict[str, Any]],  # ✅ Now accepts list of snapshots
+        summary_snapshots: List[Dict[str, Any]],
         whats_new: Dict[str, Any],
         adl_data: Dict[str, Any],
         document_summary: Dict[str, Any],
@@ -978,42 +978,26 @@ class DatabaseService:
         file_hash: Optional[str] = None,
         mode: Optional[str] = None,
         ur_denial_reason: Optional[str] = None,
-        original_name: Optional[str] = None  # ✅ New parameter for original filename
+        original_name: Optional[str] = None
     ) -> str:
         """
         Save document analysis results to the database.
-        Now supports multiple summary snapshots for multiple body parts using bodyPartSnapshots relation.
-
-        - Stores extracted metadata and relationships in Prisma models.
-        - Handles JSON fields and optional relations.
-        - Checks for duplicate documents based on file name.
+        FIXED: bodyPart is ALWAYS required in SummarySnapshot, even in GM mode
         """
         try:
-            print(f"📊 Saving {len(summary_snapshots)} summary snapshots for document")
+            print(f"📊 Saving {len(summary_snapshots)} summary snapshots for document in {mode.upper()} mode")
 
-            # ✅ Step 1: Check if document already exists (using filename)
-            # if await self.document_exists(file_name, file_size):
-            #     existing_doc = await self.prisma.document.find_first(
-            #         where={"gcsFileLink": {"contains": file_name}},
-            #         order={"createdAt": "desc"}
-            #     )
-            #     logger.warning(
-            #         f"⚠️ Document already exists: {file_name} "
-            #         f"(ID: {existing_doc.id if existing_doc else 'N/A'}). Skipping save."
-            #     )
-            #     return existing_doc.id if existing_doc else "unknown"
-
-            # ✅ Step 2: Ensure document_summary has 'date'
+            # ✅ Step 1: Ensure document_summary has 'date'
             if "createdAt" in document_summary and "date" not in document_summary:
                 document_summary["date"] = document_summary["createdAt"]
 
-            # ✅ Step 3: Handle whatsNew as JSON string (for scalar Json field)
+            # ✅ Step 2: Handle whatsNew as JSON string (for scalar Json field)
             whats_new_json = json.dumps(whats_new) if whats_new else None
 
-            # ✅ Step 4: Use the FIRST snapshot as primary summarySnapshot (for backward compatibility)
+            # ✅ Step 3: Use the FIRST snapshot as primary summarySnapshot (for backward compatibility)
             primary_snapshot = summary_snapshots[0] if summary_snapshots else {}
             
-            # ✅ Step 5: Create Document with nested relations including bodyPartSnapshots
+            # ✅ Step 4: Create Document with nested relations including bodyPartSnapshots
             document_data = {
                 "patientName": patient_name,
                 "claimNumber": claim_number,
@@ -1027,64 +1011,154 @@ class DatabaseService:
                 "reportDate": rd if rd else datetime.now(),
                 "blobPath": blob_path,
                 "fileName": file_name,
-                "originalName": original_name,  # ✅ Save the original name
+                "originalName": original_name,
                 "mode": mode,
                 "ur_denial_reason": ur_denial_reason,
                 **({"fileHash": file_hash} if file_hash else {}),
             }
 
-            # ✅ Primary summary snapshot (for backward compatibility)
+            # ✅ Step 5: Primary summary snapshot (for backward compatibility)
+            # 🚨 CRITICAL FIX: bodyPart is ALWAYS required in SummarySnapshot!
             if summary_snapshots:
+                # For GM mode, use the condition as bodyPart, or fallback to "General"
+                body_part_value = primary_snapshot.get("body_part", "")
+                if mode == "gm" and not body_part_value:
+                    body_part_value = primary_snapshot.get("condition", "General Condition")
+                
+                summary_snapshot_data = {
+                    # BASIC FIELDS ONLY - these exist in SummarySnapshot model
+                    "dx": primary_snapshot.get("dx", ""),
+                    "keyConcern": primary_snapshot.get("key_concern", ""),
+                    "nextStep": primary_snapshot.get("next_step", ""),
+                    "bodyPart": body_part_value,  # 🚨 ALWAYS provide a value - never None!
+                    "urDecision": primary_snapshot.get("ur_decision"),
+                    "recommended": primary_snapshot.get("recommended"),
+                    "aiOutcome": primary_snapshot.get("ai_outcome"),
+                    "consultingDoctor": primary_snapshot.get("consulting_doctor", ""),
+                    # Basic detail fields
+                    "keyFindings": primary_snapshot.get("key_findings"),
+                    "treatmentApproach": primary_snapshot.get("treatment_approach"),
+                    "clinicalSummary": primary_snapshot.get("clinical_summary"),
+                    "referralDoctor": primary_snapshot.get("referral_doctor")
+                }
+                
+                # Remove None values for optional fields, but ensure required fields have values
+                required_fields = ["dx", "keyConcern", "nextStep", "bodyPart"]
+                for field in required_fields:
+                    if not summary_snapshot_data[field]:
+                        summary_snapshot_data[field] = "Not specified"  # Fallback value
+                
+                # Remove None values from optional fields
+                summary_snapshot_data = {k: v for k, v in summary_snapshot_data.items() if v is not None}
+                
                 document_data["summarySnapshot"] = {
-                    "create": {
-                        "dx": primary_snapshot.get("dx", ""),
-                        "keyConcern": primary_snapshot.get("key_concern", ""),
-                        "nextStep": primary_snapshot.get("next_step", ""),
-                        "bodyPart": primary_snapshot.get("body_part", ""),
-                        "urDecision": primary_snapshot.get("ur_decision", None),
-                        "recommended": primary_snapshot.get("recommended", None),
-                        "aiOutcome": primary_snapshot.get("ai_outcome", None),
-                        "consultingDoctor": primary_snapshot.get("consulting_doctor", ""),
-                        # New fields for BodyPartSnapshot schema
-                        "keyFindings": primary_snapshot.get("key_findings", None),
-                        "treatmentApproach": primary_snapshot.get("treatment_approach", None),
-                        "clinicalSummary": primary_snapshot.get("clinical_summary", None),
-                        "referralDoctor": primary_snapshot.get("referral_doctor", None)
-                    }
+                    "create": summary_snapshot_data
                 }
 
-            # ✅ Multiple body part snapshots using the bodyPartSnapshots relation
+            # ✅ Step 6: Multiple body part snapshots using the bodyPartSnapshots relation
+            # THIS IS WHERE ALL MODE-SPECIFIC FIELDS GO!
             if summary_snapshots:
-                document_data["bodyPartSnapshots"] = {
-                    "create": [
-                        {
-                            "bodyPart": snapshot.get("body_part", ""),
-                            "dx": snapshot.get("dx", ""),
-                            "keyConcern": snapshot.get("key_concern", ""),
-                            "nextStep": snapshot.get("next_step", ""),
-                            "urDecision": snapshot.get("ur_decision", None),
-                            "recommended": snapshot.get("recommended", None),
-                            "aiOutcome": snapshot.get("ai_outcome", None),
-                            "consultingDoctor": snapshot.get("consulting_doctor", ""),
-                            # New fields for BodyPartSnapshot schema
-                            "keyFindings": snapshot.get("key_findings", None),
-                            "treatmentApproach": snapshot.get("treatment_approach", None),
-                            "clinicalSummary": snapshot.get("clinical_summary", None),
-                            "referralDoctor": snapshot.get("referral_doctor", None)
+                body_part_snapshots_data = []
+                
+                for snapshot in summary_snapshots:
+                    # For GM mode, use condition field; for WC mode, use body_part field
+                    body_part_value = snapshot.get("body_part")
+                    condition_value = snapshot.get("condition")
+                    
+                    if mode == "gm":
+                        # In GM mode, condition is primary, bodyPart can be None
+                        condition_value = condition_value or body_part_value or "General Condition"
+                        body_part_value = None
+                    else:
+                        # In WC mode, bodyPart is primary, condition can be None
+                        body_part_value = body_part_value or "Not specified"
+                        condition_value = None
+                    
+                    # Start with basic fields that exist in BodyPartSnapshot
+                    snapshot_data = {
+                        "mode": mode,  # Critical: include mode in each snapshot
+                        "bodyPart": body_part_value,
+                        "condition": condition_value,
+                        "dx": snapshot.get("dx", ""),
+                        "keyConcern": snapshot.get("key_concern", ""),
+                        "nextStep": snapshot.get("next_step"),
+                        "urDecision": snapshot.get("ur_decision"),
+                        "recommended": snapshot.get("recommended"),
+                        "aiOutcome": snapshot.get("ai_outcome"),
+                        "consultingDoctor": snapshot.get("consulting_doctor", ""),
+                        # Shared detail fields
+                        "keyFindings": snapshot.get("key_findings"),
+                        "treatmentApproach": snapshot.get("treatment_approach"),
+                        "clinicalSummary": snapshot.get("clinical_summary"),
+                        "referralDoctor": snapshot.get("referral_doctor"),
+                        # Quality of life impact fields
+                        "adlsAffected": snapshot.get("adls_affected"),
+                        "painLevel": snapshot.get("pain_level"),
+                        "functionalLimitations": snapshot.get("functional_limitations"),
+                    }
+                    
+                    # 🆕 WC-SPECIFIC FIELDS - ONLY IN BODY PART SNAPSHOTS!
+                    if mode == "wc":
+                        # Workers Comp specific fields
+                        wc_fields = {
+                            "injuryType": snapshot.get("injury_type"),
+                            "workRelatedness": snapshot.get("work_relatedness"),
+                            "permanentImpairment": snapshot.get("permanent_impairment"),
+                            "mmiStatus": snapshot.get("mmi_status"),
+                            "returnToWorkPlan": snapshot.get("return_to_work_plan"),
                         }
-                        for snapshot in summary_snapshots
-                    ]
+                        snapshot_data.update({k: v for k, v in wc_fields.items() if v is not None})
+                    else:
+                        # General Medicine specific fields
+                        gm_fields = {
+                            "conditionSeverity": snapshot.get("condition_severity"),
+                            "symptoms": snapshot.get("symptoms"),
+                            "medications": snapshot.get("medications"),
+                            "chronicCondition": snapshot.get("chronic_condition", False),
+                            "comorbidities": snapshot.get("comorbidities"),
+                            "lifestyleRecommendations": snapshot.get("lifestyle_recommendations"),
+                        }
+                        snapshot_data.update({k: v for k, v in gm_fields.items() if v is not None})
+                    
+                    # Remove None values to avoid Prisma errors
+                    snapshot_data = {k: v for k, v in snapshot_data.items() if v is not None}
+                    body_part_snapshots_data.append(snapshot_data)
+                
+                document_data["bodyPartSnapshots"] = {
+                    "create": body_part_snapshots_data
                 }
 
-            # ✅ ADL (Activities of Daily Living)
-            document_data["adl"] = {
-                "create": {
-                    "adlsAffected": adl_data.get("adls_affected", ""),
-                    "workRestrictions": adl_data.get("work_restrictions", "")
+            # ✅ Step 7: ADL (Activities of Daily Living) with mode-specific fields
+            adl_create_data = {
+                "mode": mode,  # Critical: include mode in ADL
+                "adlsAffected": adl_data.get("adls_affected", ""),
+                "workRestrictions": adl_data.get("work_restrictions", ""),
+            }
+            
+            # 🆕 MODE-SPECIFIC ADL FIELDS
+            if mode == "wc":
+                # Workers Comp specific ADL fields
+                wc_adl_fields = {
+                    "workImpact": adl_data.get("work_impact"),
+                    "physicalDemands": adl_data.get("physical_demands"),
+                    "workCapacity": adl_data.get("work_capacity"),
                 }
+                adl_create_data.update({k: v for k, v in wc_adl_fields.items() if v is not None})
+            else:
+                # General Medicine specific ADL fields
+                gm_adl_fields = {
+                    "dailyLivingImpact": adl_data.get("daily_living_impact"),
+                    "functionalLimitations": adl_data.get("functional_limitations"),
+                    "symptomImpact": adl_data.get("symptom_impact"),
+                    "qualityOfLife": adl_data.get("quality_of_life"),
+                }
+                adl_create_data.update({k: v for k, v in gm_adl_fields.items() if v is not None})
+            
+            document_data["adl"] = {
+                "create": adl_create_data
             }
 
-            # ✅ Document Summary
+            # ✅ Step 8: Document Summary
             document_data["documentSummary"] = {
                 "create": {
                     "type": document_summary.get("type", ""),
@@ -1093,47 +1167,32 @@ class DatabaseService:
                 }
             }
 
-            # ✅ Step 6: Create the document with all nested relations
+            # ✅ Step 9: Create the document with all nested relations
             document = await self.prisma.document.create(
                 data=document_data,
                 include={
                     "summarySnapshot": True,
                     "adl": True,
                     "documentSummary": True,
-                    "bodyPartSnapshots": True  # Include body part snapshots in response
+                    "bodyPartSnapshots": True
                 }
             )
 
-            # ✅ Step 7: Logging and response
-            logger.info(f"✅ Document saved with ID: {document.id}")
+            # ✅ Step 10: Logging and response
+            logger.info(f"✅ Document saved with ID: {document.id} in {mode.upper()} mode")
             logger.info(f"📊 Created {len(summary_snapshots)} body part snapshots")
             
-            if len(summary_snapshots) > 1:
-                body_parts = [snapshot.get("body_part", "unknown") for snapshot in summary_snapshots]
-                logger.info(f"🔍 Body parts processed: {', '.join(body_parts)}")
-            
-            # Log the new fields for verification
-            for i, snapshot in enumerate(summary_snapshots):
-                logger.info(f"📋 Body Part {i+1}: {snapshot.get('body_part')}")
-                if snapshot.get('clinical_summary'):
-                    logger.info(f"   Clinical Summary: {snapshot.get('clinical_summary')[:100]}...")
-                if snapshot.get('treatment_approach'):
-                    logger.info(f"   Treatment Approach: {snapshot.get('treatment_approach')[:100]}...")
-                if snapshot.get('referral_doctor'):
-                    logger.info(f"   Referral Doctor: {snapshot.get('referral_doctor')}")
-                    
-            if whats_new_json:
-                logger.info(f"📊 WhatsNew JSON: {whats_new_json[:100]}...")
-            if ur_denial_reason:
-                logger.info(f"📋 UR Denial Reason saved: {ur_denial_reason[:100]}...")
-            if original_name:
-                logger.info(f"📁 Original name saved: {original_name}")
+            # Log what was saved
+            if summary_snapshots:
+                logger.info(f"🔍 SummarySnapshot saved with bodyPart: {summary_snapshot_data.get('bodyPart', 'Not specified')}")
+                logger.info(f"🔍 BodyPartSnapshots saved with {len(body_part_snapshots_data)} records")
                 
             return document.id
 
         except Exception as e:
-            logger.error(f"❌ Error saving document analysis: {str(e)}")
+            logger.error(f"❌ Error saving document analysis in {mode.upper()} mode: {str(e)}")
             raise
+    
     async def check_duplicate_document(self, patient_name: str, doi: Optional[str], report_date: Optional[str], 
                                         document_type: Optional[str], physician_id: str, 
                                         patient_dob: Optional[str] = None, claim_number: Optional[str] = None) -> bool:

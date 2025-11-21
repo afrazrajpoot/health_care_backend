@@ -1,6 +1,6 @@
 """
-OPTIMIZED Webhook Service with Batch DB Queries
-Performance: 30-60 sec → 5-10 sec DB overhead per 100 docs (6-10x faster)
+OPTIMIZED Webhook Service with Mode-Aware Processing (WC/GM)
+Complete implementation with all functions
 """
 
 from fastapi import HTTPException
@@ -18,25 +18,26 @@ import asyncio
 import json
 from google.cloud import storage
 import re
+
 BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
 
-
 # ============================================================================
-# OPTIMIZED WEBHOOK SERVICE (NO CACHING)
+# COMPLETE WEBHOOK SERVICE WITH MODE-AWARE PROCESSING
 # ============================================================================
 
 class WebhookService:
     """
-    OPTIMIZED Service with batch DB operations and parallel processing.
+    OPTIMIZED Service with batch DB operations, parallel processing, and mode-aware saving.
     
     Performance improvements:
     - 6-10x faster patient lookups (batch queries)
     - Parallel LLM + DB operations
     - No Redis caching to ensure fresh data
+    - WC/GM mode-aware data extraction and saving
     """
     
     def __init__(self):
-        logger.info("✅ WebhookService initialized - Caching DISABLED for fresh data")
+        logger.info("✅ WebhookService initialized - Mode-aware processing (WC/GM)")
     
     async def rename_gcs_file(self, old_blob_path: str, new_filename: str, old_gcs_url: str) -> tuple[str, str]:
         """
@@ -92,7 +93,7 @@ class WebhookService:
     async def process_document_data(self, data: dict) -> dict:
         """
         OPTIMIZED: Step 1 with parallel LLM operations.
-        Runs analysis and summary generation concurrently.
+        Runs analysis and summary generation concurrently with mode-awareness.
         """
         logger.info(f"📥 Processing document data for: {data.get('document_id', 'unknown')}")
         
@@ -103,7 +104,7 @@ class WebhookService:
         text = result_data.get("text", "")  # Layout-preserved text (fallback)
         llm_text = result_data.get("llm_text")  # NEW: Structured JSON for LLM (can be None)
         page_zones = result_data.get("page_zones")  # NEW: Per-page zones (can be None)
-        mode = data.get("mode", "wc")
+        mode = data.get("mode", "wc")  # Default to WC mode
         
         logger.info(f"📋 Document mode: {mode}")
         logger.info(f"🔍 Extraction data available:")
@@ -125,16 +126,18 @@ class WebhookService:
         # OPTIMIZATION: Run analysis and summary generation in parallel
         analyzer = EnhancedReportAnalyzer()
         
-        # Pass page_zones to extraction for zone-aware doctor detection
+        # Pass page_zones and mode to extraction for mode-aware processing
         analysis_task = asyncio.create_task(
             asyncio.to_thread(
                 analyzer.extract_document_data_with_reasoning, 
                 text_for_llm,
-                page_zones  # NEW: Pass zones for enhanced extraction
+                page_zones,  # NEW: Pass zones for enhanced extraction
+                None,  # raw_text parameter
+                mode     # NEW: Pass mode for mode-aware extraction
             )
         )
         summary_task = asyncio.create_task(
-            asyncio.to_thread(analyzer.generate_brief_summary, text_for_llm)
+            asyncio.to_thread(analyzer.generate_brief_summary, text_for_llm, mode)  # Pass mode to summary
         )
         
         # Wait for both to complete
@@ -444,15 +447,17 @@ class WebhookService:
             "is_first_time_claim_only": is_first_time_claim_only,
             "mode": processed_data.get("mode")
         }
+
     async def compare_and_determine_status(self, processed_data: dict, lookup_result: dict, db_service, physician_id: str) -> dict:
         """
         OPTIMIZED: Step 3 with parallel DB fetch + comparison.
         Runs document comparison while fetching previous documents.
+        Now includes mode-aware summary snapshot creation.
         """
         document_analysis = lookup_result["document_analysis"]
         lookup_data = lookup_result["lookup_data"]
         is_first_time_claim_only = lookup_result.get("is_first_time_claim_only", False)
-        mode = lookup_result.get("mode")
+        mode = lookup_result.get("mode", "wc")  # Get mode, default to "wc"
         
         # OPTIMIZATION: Start DB fetch and comparison in parallel
         db_fetch_task = asyncio.create_task(
@@ -465,17 +470,16 @@ class WebhookService:
         )
         
         # Start comparison task
-        analyzer = ReportAnalyzer()
+        analyzer = ReportAnalyzer(mode)
         comparison_task = asyncio.create_task(
             asyncio.to_thread(
                 analyzer.compare_with_previous_documents,
-                processed_data["text_for_analysis"]  # Use same text as LLM analysis
+                processed_data["text_for_analysis"]
             )
         )
         
         # Wait for both
         db_response, summaries_dict = await asyncio.gather(db_fetch_task, comparison_task)
-        print(summaries_dict,'what new data')
         previous_documents = db_response.get('documents', []) if db_response else []
         
         # Handle summaries_dict validation - now it's a dict
@@ -522,14 +526,17 @@ class WebhookService:
             patient_name_to_use = f"Claim_{claim_to_save}_Patient"
             logger.info(f"🔄 Using placeholder patient name: {patient_name_to_use}")
         
-        # Create summary snapshots (unchanged)
+        # 🆕 MODE-AWARE SUMMARY SNAPSHOT CREATION
         summary_snapshots = []
         
         if hasattr(document_analysis, 'body_parts_analysis') and document_analysis.body_parts_analysis:
-            logger.info(f"📊 Creating {len(document_analysis.body_parts_analysis)} summary snapshots")
+            logger.info(f"📊 Creating {len(document_analysis.body_parts_analysis)} {mode.upper()} summary snapshots")
             for body_part_analysis in document_analysis.body_parts_analysis:
+                # Base snapshot with mode
                 snapshot = {
-                    "body_part": body_part_analysis.body_part,
+                    "mode": mode,  # Critical: include mode in snapshot
+                    "body_part": body_part_analysis.body_part if mode == "wc" else None,
+                    "condition": None if mode == "wc" else body_part_analysis.body_part,  # For GM, use body_part field for condition
                     "dx": body_part_analysis.diagnosis,
                     "key_concern": body_part_analysis.key_concern,
                     "next_step": body_part_analysis.extracted_recommendation or None,
@@ -541,12 +548,46 @@ class WebhookService:
                     "treatment_approach": body_part_analysis.treatment_plan or None,
                     "clinical_summary": body_part_analysis.clinical_summary or None,
                     "referral_doctor": document_analysis.referral_doctor or None,
+                    "adls_affected": body_part_analysis.adls_affected or None,
                 }
+                
+                # 🆕 MODE-SPECIFIC FIELDS
+                if mode == "wc":
+                    # Workers Comp specific fields
+                    snapshot.update({
+                        "injury_type": getattr(body_part_analysis, 'injury_type', None),
+                        "work_relatedness": getattr(body_part_analysis, 'work_relatedness', None),
+                        "permanent_impairment": getattr(body_part_analysis, 'permanent_impairment', None),
+                        "mmi_status": getattr(body_part_analysis, 'mmi_status', None),
+                        "return_to_work_plan": getattr(body_part_analysis, 'return_to_work_plan', None),
+                        "work_impact": getattr(body_part_analysis, 'work_impact', None),
+                        "physical_demands": getattr(body_part_analysis, 'physical_demands', None),
+                        "work_capacity": getattr(body_part_analysis, 'work_capacity', None),
+                    })
+                else:
+                    # General Medicine specific fields
+                    snapshot.update({
+                        "condition_severity": getattr(body_part_analysis, 'condition_severity', None),
+                        "symptoms": getattr(body_part_analysis, 'symptoms', None),
+                        "medications": getattr(body_part_analysis, 'medications', None),
+                        "chronic_condition": getattr(body_part_analysis, 'chronic_condition', False),
+                        "comorbidities": getattr(body_part_analysis, 'comorbidities', None),
+                        "lifestyle_recommendations": getattr(body_part_analysis, 'lifestyle_recommendations', None),
+                        "daily_living_impact": getattr(body_part_analysis, 'daily_living_impact', None),
+                        "functional_limitations": getattr(body_part_analysis, 'functional_limitations', None),
+                        "symptom_impact": getattr(body_part_analysis, 'symptom_impact', None),
+                        "quality_of_life": getattr(body_part_analysis, 'quality_of_life', None),
+                        "pain_level": getattr(body_part_analysis, 'pain_level', None),
+                    })
+                
                 summary_snapshots.append(snapshot)
         else:
-            logger.info("📊 Creating single summary snapshot")
+            logger.info(f"📊 Creating single {mode.upper()} summary snapshot")
+            # Base snapshot with mode
             snapshot = {
-                "body_part": document_analysis.body_part,
+                "mode": mode,  # Critical: include mode in snapshot
+                "body_part": document_analysis.body_part if mode == "wc" else None,
+                "condition": None if mode == "wc" else document_analysis.body_part,  # For GM, use body_part field for condition
                 "dx": document_analysis.diagnosis,
                 "key_concern": document_analysis.key_concern,
                 "next_step": document_analysis.extracted_recommendation or None,
@@ -558,16 +599,50 @@ class WebhookService:
                 "treatment_approach": document_analysis.extracted_recommendation or None,
                 "clinical_summary": f"{document_analysis.diagnosis} - {document_analysis.key_concern}" or None,
                 "referral_doctor": document_analysis.referral_doctor or None,
+                "adls_affected": document_analysis.adls_affected or None,
             }
+            
+            # 🆕 MODE-SPECIFIC FIELDS
+            if mode == "wc":
+                snapshot.update({
+                    "work_impact": getattr(document_analysis, 'work_impact', None),
+                    "physical_demands": getattr(document_analysis, 'physical_demands', None),
+                    "work_capacity": getattr(document_analysis, 'work_capacity', None),
+                })
+            else:
+                snapshot.update({
+                    "daily_living_impact": getattr(document_analysis, 'daily_living_impact', None),
+                    "functional_limitations": getattr(document_analysis, 'functional_limitations', None),
+                    "symptom_impact": getattr(document_analysis, 'symptom_impact', None),
+                    "quality_of_life": getattr(document_analysis, 'quality_of_life', None),
+                })
+            
             summary_snapshots.append(snapshot)
         
+        # 🆕 MODE-AWARE ADL DATA
         adl_data = {
+            "mode": mode,  # Critical: include mode in ADL data
             "adls_affected": document_analysis.adls_affected,
             "work_restrictions": document_analysis.work_restrictions
         }
         
+        # Add mode-specific ADL fields
+        if mode == "wc":
+            adl_data.update({
+                "work_impact": getattr(document_analysis, 'work_impact', None),
+                "physical_demands": getattr(document_analysis, 'physical_demands', None),
+                "work_capacity": getattr(document_analysis, 'work_capacity', None),
+            })
+        else:
+            adl_data.update({
+                "daily_living_impact": getattr(document_analysis, 'daily_living_impact', None),
+                "functional_limitations": getattr(document_analysis, 'functional_limitations', None),
+                "symptom_impact": getattr(document_analysis, 'symptom_impact', None),
+                "quality_of_life": getattr(document_analysis, 'quality_of_life', None),
+            })
+        
         if len(summary_snapshots) > 1:
-            logger.info("🔄 Multiple body parts detected - using shared ADL data")
+            logger.info(f"🔄 Multiple {'body parts' if mode == 'wc' else 'conditions'} detected - using shared ADL data")
         
         summary_text = " | ".join(document_analysis.summary_points) if document_analysis.summary_points else "No summary"
         document_summary = {
@@ -581,7 +656,7 @@ class WebhookService:
             "pending_reason": pending_reason,
             "patient_name_to_use": patient_name_to_use,
             "claim_to_save": claim_to_save,
-            "whats_new_data": whats_new_data,  # ✅ Now the dictionary object for Json field
+            "whats_new_data": whats_new_data,
             "summary_snapshots": summary_snapshots,
             "adl_data": adl_data,
             "document_summary": document_summary,
@@ -589,436 +664,440 @@ class WebhookService:
             "has_missing_required_fields": lookup_result["has_missing_required_fields"],
             "has_conflicting_claims": lookup_result["has_conflicting_claims"],
             "conflicting_claims_reason": lookup_result["conflicting_claims_reason"],
-            "lookup_data": lookup_data,
+            "lookup_data": lookup_result,
             "previous_documents": previous_documents,
             "document_analysis": document_analysis,
             "is_first_time_claim_only": is_first_time_claim_only,
             "mode": mode,
             "has_multiple_body_parts": len(summary_snapshots) > 1
         }
-    
+
     async def save_and_process_document(self, processed_data: dict, status_result: dict, data: dict, db_service) -> dict:
-            document_analysis = status_result["document_analysis"]
-            has_date_reasoning = processed_data["has_date_reasoning"]
-            physician_id = processed_data["physician_id"]
-            user_id = processed_data["user_id"]
-            document_status = status_result["document_status"]
-            pending_reason = status_result["pending_reason"]
-            is_first_time_claim_only = status_result.get("is_first_time_claim_only", False)
-            mode = status_result.get("mode")
-            has_multiple_body_parts = status_result.get("has_multiple_body_parts", False)
-            
-            # Get summary snapshots (now a list)
-            summary_snapshots = status_result["summary_snapshots"]
+        """
+        Step 4: Save and process document with mode-aware data storage.
+        Handles both WC and GM mode data with appropriate field mapping.
+        """
+        document_analysis = status_result["document_analysis"]
+        has_date_reasoning = processed_data["has_date_reasoning"]
+        physician_id = processed_data["physician_id"]
+        user_id = processed_data["user_id"]
+        document_status = status_result["document_status"]
+        pending_reason = status_result["pending_reason"]
+        is_first_time_claim_only = status_result.get("is_first_time_claim_only", False)
+        mode = status_result.get("mode", "wc")
+        has_multiple_body_parts = status_result.get("has_multiple_body_parts", False)
+        
+        # Get summary snapshots (now a list)
+        summary_snapshots = status_result["summary_snapshots"]
 
-            # UPDATED FAILURE LOGIC: Allow first-time claim-only documents to pass
-            if document_status == "failed" and not is_first_time_claim_only:
-                # Fail: save to FailDocs, no further processing
-                fail_reason = pending_reason if pending_reason else f"Missing required fields: {', '.join(status_result['updated_missing_fields'])}"
-                logger.warning(f"⚠️ Failing document {processed_data['filename']}: {fail_reason}")
+        # UPDATED FAILURE LOGIC: Allow first-time claim-only documents to pass
+        if document_status == "failed" and not is_first_time_claim_only:
+            # Fail: save to FailDocs, no further processing
+            fail_reason = pending_reason if pending_reason else f"Missing required fields: {', '.join(status_result['updated_missing_fields'])}"
+            logger.warning(f"⚠️ Failing document {processed_data['filename']}: {fail_reason}")
 
-                await db_service.save_fail_doc(
-                    reason=fail_reason,
-                    db=processed_data["dob"],
-                    doi=processed_data["doi"],
-                    claim_number=status_result["claim_to_save"],
-                    patient_name=status_result["patient_name_to_use"],
-                    document_text=processed_data["result_data"].get("text", ""),
-                    physician_id=physician_id,
-                    gcs_file_link=processed_data["gcs_url"],
-                    file_name=processed_data["filename"],
-                    file_hash=processed_data["file_hash"],
-                    blob_path=processed_data["blob_path"],
-                    mode=mode
-                )
-
-                logger.info(f"📡 Failed event processed for document: {processed_data['document_id']}")
-
-                return {
-                    "status": "failed",
-                    "document_id": processed_data.get('document_id'),
-                    "reason": fail_reason,
-                    "missing_fields": status_result['updated_missing_fields'] if status_result['has_missing_required_fields'] else None,
-                    "pending_reason": pending_reason
-                }
-
-            # ✅ DUPLICATE VALIDATION - Check before saving
-            logger.info(f"🔍 Checking for duplicate documents before saving: {processed_data['filename']}")
-
-            # Prepare data for duplicate check
-            patient_name = status_result["patient_name_to_use"]
-            doi = document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else None
-            report_date = document_analysis.rd if document_analysis.rd and str(document_analysis.rd).lower() != "not specified" else None
-            document_type = document_analysis.document_type if document_analysis.document_type else None
-
-            # Check for duplicates using DB service
-            is_duplicate = await db_service.check_duplicate_document(
-                patient_name=patient_name,
-                doi=doi,
-                report_date=report_date,
-                document_type=document_type,
-                physician_id=physician_id
-            )
-
-            if is_duplicate:
-                logger.warning(f"🚫 DUPLICATE DOCUMENT DETECTED - Skipping save for: {processed_data['filename']}")
-                logger.info(f"   📋 Duplicate criteria - Patient: {patient_name}, DOI: {doi}, Report Date: {report_date}, Document Type: {document_type}")
-                
-                # Still decrement parse count since processing happened
-                parse_decremented = await db_service.decrement_parse_count(physician_id)
-                if not parse_decremented:
-                    logger.warning(f"⚠️ Could not decrement parse count for physician {physician_id}")
-                
-                return {
-                    "status": "skipped",
-                    "document_id": processed_data.get('document_id'),
-                    "reason": "Duplicate document detected",
-                    "missing_fields": None,
-                    "pending_reason": "Duplicate document - skipping save",
-                    "is_duplicate": True,
-                    "parse_count_decremented": parse_decremented
-                }
-
-            logger.info(f"✅ No duplicate found - proceeding with document save: {processed_data['filename']}")
-
-            # Success: Proceed with saving (including first-time claim-only documents)
-            logger.info(f"💾 Proceeding to save document {processed_data['filename']} - status: {document_status}")
-            if has_multiple_body_parts:
-                logger.info(f"📊 Saving {len(summary_snapshots)} body part snapshots")
-
-            # Prepare dob_str for update
-            dob_str = None
-            updated_dob_for_query = None
-            if document_analysis.dob and str(document_analysis.dob).lower() != "not specified":
-                try:
-                    updated_dob_for_query = datetime.strptime(document_analysis.dob, "%Y-%m-%d")
-                    dob_str = updated_dob_for_query.strftime("%Y-%m-%d")
-                except ValueError:
-                    updated_dob_for_query = processed_data["dob_for_query"]
-                    if updated_dob_for_query:
-                        dob_str = updated_dob_for_query.strftime("%Y-%m-%d")
-
-            # RENAME GCS FILE BEFORE SAVING
-            old_filename = processed_data["filename"]
-            old_blob_path = processed_data["blob_path"]
-            old_gcs_url = processed_data["gcs_url"]
-
-            # Prepare components for new filename
-            patient_name_safe = "" if status_result["patient_name_to_use"] == "Not specified" else status_result["patient_name_to_use"].replace(" ", "_").replace("/", "_").replace("\\", "_")
-            dob_safe = dob_str if dob_str else ""
-            claim_safe = "" if status_result["claim_to_save"] == "Not specified" else status_result["claim_to_save"].replace(" ", "_").replace("/", "_").replace("\\", "_")
-            document_type = document_analysis.document_type.replace(" ", "_").replace("/", "_").replace("\\", "_") if document_analysis.document_type else "document"
-            # Extract file extension
-            ext = "." + old_filename.split(".")[-1] if "." in old_filename and len(old_filename.split(".")) > 1 else ""
-
-            new_filename = f"{patient_name_safe}_{dob_safe}_{claim_safe}_{document_type}{ext}"
-            logger.info(f"🔄 Preparing to rename file to: {new_filename} (old: {old_filename})")
-
-            # Perform rename if blob_path exists
-            renamed = False
-            if old_blob_path:
-                new_blob_path, new_gcs_url = await self.rename_gcs_file(old_blob_path, new_filename, old_gcs_url)
-                if new_blob_path != old_blob_path:
-                    processed_data["blob_path"] = new_blob_path
-                    processed_data["gcs_url"] = new_gcs_url
-                    processed_data["filename"] = new_filename
-                    renamed = True
-                    logger.info(f"✅ GCS file renamed successfully to {new_filename} (new path: {new_blob_path}, new URL: {new_gcs_url})")
-                else:
-                    logger.warning(f"⚠️ GCS rename attempted but no change detected (using original: {old_filename})")
-            else:
-                # If no blob_path, just update local filename (though unlikely for GCS upload)
-                processed_data["filename"] = new_filename
-                renamed = True
-                logger.info(f"ℹ️ No blob_path provided; updated local filename only to {new_filename}")
-
-            logger.info(f"📁 Final filename for DB: {processed_data['filename']}, GCS URL: {processed_data['gcs_url']}")
-
-            # Mock ExtractionResult
-            extraction_result = ExtractionResult(
-                text=processed_data["result_data"].get("text", ""),
-                pages=processed_data["result_data"].get("pages", 0),
-                entities=processed_data["result_data"].get("entities", []),
-                tables=processed_data["result_data"].get("tables", []),
-                formFields=processed_data["result_data"].get("formFields", []),
-                confidence=processed_data["result_data"].get("confidence", 0.0),
-                success=processed_data["result_data"].get("success", False),
-                gcs_file_link=processed_data["result_data"].get("gcs_file_link", processed_data["gcs_url"]),
-                fileInfo=processed_data["result_data"].get("fileInfo", {}),
-                summary=status_result["document_summary"]["summary"],
-                comprehensive_analysis=processed_data["result_data"].get("comprehensive_analysis"),
-                document_id=processed_data["result_data"].get("document_id", f"webhook_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),
-                date_reasoning=processed_data["date_reasoning_data"]
-            )
-
-            # Save the document to get the document_id
-            # MODIFIED: Pass summary_snapshots (list) instead of summary_snapshot (single)
-            document_id = await db_service.save_document_analysis(
-                extraction_result=extraction_result,
-                file_name=processed_data["filename"],  # Now uses new filename
-                file_size=processed_data["file_size"],
-                mime_type=processed_data["mime_type"],
-                processing_time_ms=processed_data["processing_time_ms"],
-                blob_path=processed_data["blob_path"],  # Updated if renamed
-                file_hash=processed_data["file_hash"],
-                gcs_file_link=processed_data["gcs_url"],  # Updated if renamed
-                patient_name=status_result["patient_name_to_use"],
-                claim_number=status_result["claim_to_save"],
-                dob=processed_data["dob"],
+            await db_service.save_fail_doc(
+                reason=fail_reason,
+                db=processed_data["dob"],
                 doi=processed_data["doi"],
-                status=document_status,
-                brief_summary=processed_data["brief_summary"],
-                summary_snapshots=summary_snapshots,  # Changed to plural
-                whats_new=status_result["whats_new_data"],
-                adl_data=status_result["adl_data"],
-                document_summary=status_result["document_summary"],
-                rd=processed_data["rd_for_db"],
+                claim_number=status_result["claim_to_save"],
+                patient_name=status_result["patient_name_to_use"],
+                document_text=processed_data["result_data"].get("text", ""),
                 physician_id=physician_id,
-                mode=mode,
-                ur_denial_reason=document_analysis.ur_denial_reason,
-                original_name=old_filename  # Pass the original filename
+                gcs_file_link=processed_data["gcs_url"],
+                file_name=processed_data["filename"],
+                file_hash=processed_data["file_hash"],
+                blob_path=processed_data["blob_path"],
+                mode=mode
             )
 
-            # ✅ DECREMENT PARSE COUNT AFTER SUCCESSFUL DOCUMENT SAVE
+            logger.info(f"📡 Failed event processed for document: {processed_data['document_id']}")
+
+            return {
+                "status": "failed",
+                "document_id": processed_data.get('document_id'),
+                "reason": fail_reason,
+                "missing_fields": status_result['updated_missing_fields'] if status_result['has_missing_required_fields'] else None,
+                "pending_reason": pending_reason
+            }
+
+        # ✅ DUPLICATE VALIDATION - Check before saving
+        logger.info(f"🔍 Checking for duplicate documents before saving: {processed_data['filename']}")
+
+        # Prepare data for duplicate check
+        patient_name = status_result["patient_name_to_use"]
+        doi = document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else None
+        report_date = document_analysis.rd if document_analysis.rd and str(document_analysis.rd).lower() != "not specified" else None
+        document_type = document_analysis.document_type if document_analysis.document_type else None
+
+        # Check for duplicates using DB service
+        is_duplicate = await db_service.check_duplicate_document(
+            patient_name=patient_name,
+            doi=doi,
+            report_date=report_date,
+            document_type=document_type,
+            physician_id=physician_id
+        )
+
+        if is_duplicate:
+            logger.warning(f"🚫 DUPLICATE DOCUMENT DETECTED - Skipping save for: {processed_data['filename']}")
+            logger.info(f"   📋 Duplicate criteria - Patient: {patient_name}, DOI: {doi}, Report Date: {report_date}, Document Type: {document_type}")
+            
+            # Still decrement parse count since processing happened
             parse_decremented = await db_service.decrement_parse_count(physician_id)
             if not parse_decremented:
                 logger.warning(f"⚠️ Could not decrement parse count for physician {physician_id}")
-
-            # ✅ ENHANCED TASK CREATION - Check physician role and name matching consulting_doctor
-            created_tasks = 0
-            if document_analysis.is_task_needed:
-                logger.info(f"🔧 Task needed - checking physician authorization for document {processed_data['filename']}")
-                
-                # Step 1: Get all users from DB using physician_id
-                try:
-                    prisma = Prisma()
-                    await prisma.connect()
-                    
-                    users = await prisma.user.find_many(where={
-                        "OR": [
-                            {
-                                "physicianId": physician_id,
-                                "role": "Physician"
-                            },
-                            {
-                                "id": physician_id,  # Match by user ID if it's an admin physician
-                                "role": "Physician"
-                            }
-                        ]
-                    })
-                    
-                    await prisma.disconnect()
-
-                    if not users:
-                        logger.warning(f"⚠️ No physician users found with physician_id: {physician_id} - skipping task creation")
-                    else:
-                        # Step 2: Check if any user's name matches consulting_doctor (ignoring titles)
-                        consulting_doctor = document_analysis.consulting_doctor or ""
-                        matching_user = None
-
-                        # Function to remove titles and normalize names
-                        def normalize_name(name):
-                            if not name:
-                                return ""
-                            # Remove common titles
-                            name = re.sub(r'^(Dr\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?)\s*', '', name, flags=re.IGNORECASE)
-                            # Remove extra spaces and convert to lowercase
-                            return name.strip().lower()
-
-                        normalized_consulting_doctor = normalize_name(consulting_doctor)
-
-                        for user in users:
-                            user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
-                            normalized_user_name = normalize_name(user_full_name)
-                            
-                            logger.info(f"🔍 Checking physician match - User: '{user_full_name}' (normalized: '{normalized_user_name}'), Consulting Doctor: '{consulting_doctor}' (normalized: '{normalized_consulting_doctor}')")
-                            
-                            if normalized_user_name and normalized_consulting_doctor and normalized_user_name == normalized_consulting_doctor:
-                                matching_user = user
-                                logger.info(f"✅ Physician name matches consulting doctor (after normalization) - User ID: {user.id}")
-                                break
-                        
-                        # Step 3: Create tasks only if names match
-                        if matching_user:
-                            logger.info(f"✅ Physician name matches consulting doctor - proceeding with task creation")
-                            
-                            task_creator = TaskCreator()
-                            
-                            try:
-                                # Prepare document data for task generation
-                                document_data = document_analysis.dict()
-                                document_data["filename"] = processed_data["filename"]
-                                document_data["document_id"] = document_id
-                                document_data["physician_id"] = physician_id
-                                
-                                # Generate tasks based on document analysis
-                                tasks = await task_creator.generate_tasks(document_data, processed_data["filename"])
-                                logger.info(f"📋 Generated {len(tasks)} tasks for document {processed_data['filename']}")
-
-                                # Save tasks to DB
-                                prisma = Prisma()
-                                await prisma.connect()
-                                
-                                for task in tasks:
-                                    try:
-                                        # Map task fields
-                                        mapped_task = {
-                                            "description": task.get("description"),
-                                            "department": task.get("department"),
-                                            "status": "Open",
-                                            "dueDate": None,
-                                            "patient": task.get("patient", "Unknown"),
-                                            "actions": task.get("actions") if isinstance(task.get("actions"), list) else [],
-                                            "sourceDocument": task.get("source_document") or task.get("sourceDocument") or processed_data.get("filename"),
-                                            "documentId": document_id,
-                                            "physicianId": physician_id,
-                                        }
-
-                                        # Normalize due date
-                                        due_raw = task.get("due_date") or task.get("dueDate")
-                                        if due_raw:
-                                            if isinstance(due_raw, str):
-                                                try:
-                                                    mapped_task["dueDate"] = datetime.strptime(due_raw, "%Y-%m-%d")
-                                                except Exception:
-                                                    mapped_task["dueDate"] = datetime.now() + timedelta(days=3)
-                                            else:
-                                                mapped_task["dueDate"] = due_raw
-
-                                        await prisma.task.create(data=mapped_task)
-                                        created_tasks += 1
-                                        logger.info(f"✅ Created task: {task.get('description', 'Unknown task')}")
-                                        
-                                    except Exception as task_err:
-                                        logger.error(f"❌ Failed to create task for document {processed_data['filename']}: {task_err}", exc_info=True)
-                                        continue
-
-                                await prisma.disconnect()
-                                logger.info(f"✅ {created_tasks} / {len(tasks)} tasks created for document {processed_data['filename']}")
-                                
-                            except Exception as e:
-                                logger.error(f"❌ Task generation failed for document {processed_data['filename']}: {str(e)}", exc_info=True)
-                        else:
-                            logger.warning(f"⚠️ No physician user name matches consulting doctor '{consulting_doctor}' - skipping task creation")
-                            
-                except Exception as user_err:
-                    logger.error(f"❌ Error fetching user for physician_id {physician_id}: {user_err}", exc_info=True)
-            else:
-                logger.info(f"ℹ️ No tasks needed for document {processed_data['filename']} - skipping task creation")
-
-            # Update previous documents' fields (skip for first-time claim-only as there are no previous)
-            # UPDATED LOGIC: Match by claim number if present, otherwise match by BOTH name AND dob exactly
-            total_previous_docs = status_result["lookup_data"].get("total_documents", 0) if status_result["lookup_data"] else 0
             
-            # Check if we have valid claim number to match on
-            has_valid_claim_for_update = (
-                status_result["claim_to_save"] and 
-                str(status_result["claim_to_save"]).lower() not in ["not specified", "unknown", ""]
-            )
-            
-            # Check if we have valid name AND dob to match on
-            has_valid_name_dob_for_update = (
-                status_result["patient_name_to_use"] and 
-                str(status_result["patient_name_to_use"]).lower() not in ["not specified", "unknown", ""] and
-                updated_dob_for_query is not None and
-                dob_str and
-                str(dob_str).lower() not in ["not specified", "unknown", ""]
-            )
-            
-            # Decide if we should update
-            # Rule: Update ONLY if (claim number matches) OR (no claim number BUT name AND dob both match)
-            should_update_previous = (
-                document_status not in ["failed"] and
-                total_previous_docs > 0 and
-                not status_result["has_conflicting_claims"] and
-                not is_first_time_claim_only and
-                (has_valid_claim_for_update or has_valid_name_dob_for_update)  # Either claim OR (name AND dob)
-            )
-
-            if should_update_previous:
-                logger.info("🔄 Updating previous documents with strict matching logic:")
-                
-                if has_valid_claim_for_update:
-                    # Priority 1: Match by claim number
-                    logger.info(f"   ✅ MATCHING BY CLAIM NUMBER: '{status_result['claim_to_save']}'")
-                    updated_count = await db_service.update_previous_fields(
-                        patient_name=status_result["patient_name_to_use"],
-                        dob=dob_str,
-                        physician_id=physician_id,
-                        claim_number=status_result["claim_to_save"],  # Match by claim number
-                        doi=document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else None
-                    )
-                    logger.info(f"🔄 Updated {updated_count} previous documents matched by claim number '{status_result['claim_to_save']}'")
-                elif has_valid_name_dob_for_update:
-                    # Priority 2: Match by BOTH name AND dob (only if no claim number)
-                    logger.info(f"   ✅ MATCHING BY NAME + DOB: '{status_result['patient_name_to_use']}' + '{dob_str}'")
-                    logger.info(f"   ⚠️ No claim number available - using strict name+dob matching")
-                    updated_count = await db_service.update_previous_fields(
-                        patient_name=status_result["patient_name_to_use"],
-                        dob=dob_str,
-                        physician_id=physician_id,
-                        claim_number=None,  # No claim number to match, will match by name+dob in DB service
-                        doi=document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else None
-                    )
-                    logger.info(f"🔄 Updated {updated_count} previous documents matched by name+dob ('{status_result['patient_name_to_use']}' + '{dob_str}')")
-            else:
-                logger.info(f"ℹ️ Skipping previous update:")
-                logger.info(f"   - status={document_status}")
-                logger.info(f"   - total_previous={total_previous_docs}")
-                logger.info(f"   - has_conflicts={status_result['has_conflicting_claims']}")
-                logger.info(f"   - is_first_time_claim_only={is_first_time_claim_only}")
-                logger.info(f"   - has_valid_claim_for_update={has_valid_claim_for_update} (claim='{status_result.get('claim_to_save')}')")
-                logger.info(f"   - has_valid_name_dob_for_update={has_valid_name_dob_for_update} (name='{status_result.get('patient_name_to_use')}', dob='{dob_str}')")
-
-            logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}, filename: {processed_data['filename']}")
-
-            logger.info(f"📡 Success event processed for document: {document_id}")
-
             return {
-                "status": document_status,
-                "document_id": document_id,
-                "missing_fields": status_result['updated_missing_fields'] if status_result['has_missing_required_fields'] else None,
-                "pending_reason": pending_reason,
-                "is_first_time_claim_only": is_first_time_claim_only,
-                "parse_count_decremented": parse_decremented,  # Add this field
-                "filename": processed_data["filename"],  # Include the (possibly new) filename
-                "gcs_url": processed_data["gcs_url"],  # Updated if renamed
-                "blob_path": processed_data["blob_path"],  # Updated if renamed
-                "file_renamed": renamed,
-                "date_reasoning_summary": {
-                    "used_reasoning": has_date_reasoning,
-                    "confidence_scores": processed_data["date_reasoning_data"]["confidence_scores"],
-                    "dates_extracted": len(processed_data["date_reasoning_data"]["extracted_dates"])
-                },
-                "lookup_summary": {
-                    "documents_found": status_result["lookup_data"].get("total_documents", 0),
-                    "has_conflicting_claims": status_result["has_conflicting_claims"],
-                    "unique_valid_claims": status_result["lookup_data"].get("unique_valid_claims", []) if status_result["lookup_data"] else [],
-                    "fields_fetched": {
-                        "patient_name": bool(status_result["lookup_data"].get("patient_name")),
-                        "dob": bool(status_result["lookup_data"].get("dob")),
-                        "doi": bool(status_result["lookup_data"].get("doi")),
-                        "claim_number": bool(status_result["lookup_data"].get("claim_number"))
-                    }
-                },
-                "mode": mode,
-                "ur_denial_reason": document_analysis.ur_denial_reason or None,
-                "body_parts_analysis": {
-                    "total_body_parts": len(summary_snapshots),
-                    "has_multiple_body_parts": has_multiple_body_parts,
-                    "body_parts": [snapshot["body_part"] for snapshot in summary_snapshots]
-                },
-                "task_analysis": {  # Changed from rfa_task_analysis to task_analysis
-                    "is_task_needed": document_analysis.is_task_needed,  # Changed from is_rfa_task_needed
-                    "tasks_created": created_tasks
-                }
+                "status": "skipped",
+                "document_id": processed_data.get('document_id'),
+                "reason": "Duplicate document detected",
+                "missing_fields": None,
+                "pending_reason": "Duplicate document - skipping save",
+                "is_duplicate": True,
+                "parse_count_decremented": parse_decremented
             }
+
+        logger.info(f"✅ No duplicate found - proceeding with document save: {processed_data['filename']}")
+
+        # Success: Proceed with saving (including first-time claim-only documents)
+        logger.info(f"💾 Proceeding to save document {processed_data['filename']} - status: {document_status}, mode: {mode}")
+        if has_multiple_body_parts:
+            logger.info(f"📊 Saving {len(summary_snapshots)} body part snapshots")
+
+        # Prepare dob_str for update
+        dob_str = None
+        updated_dob_for_query = None
+        if document_analysis.dob and str(document_analysis.dob).lower() != "not specified":
+            try:
+                updated_dob_for_query = datetime.strptime(document_analysis.dob, "%Y-%m-%d")
+                dob_str = updated_dob_for_query.strftime("%Y-%m-%d")
+            except ValueError:
+                updated_dob_for_query = processed_data["dob_for_query"]
+                if updated_dob_for_query:
+                    dob_str = updated_dob_for_query.strftime("%Y-%m-%d")
+
+        # RENAME GCS FILE BEFORE SAVING
+        old_filename = processed_data["filename"]
+        old_blob_path = processed_data["blob_path"]
+        old_gcs_url = processed_data["gcs_url"]
+
+        # Prepare components for new filename
+        patient_name_safe = "" if status_result["patient_name_to_use"] == "Not specified" else status_result["patient_name_to_use"].replace(" ", "_").replace("/", "_").replace("\\", "_")
+        dob_safe = dob_str if dob_str else ""
+        claim_safe = "" if status_result["claim_to_save"] == "Not specified" else status_result["claim_to_save"].replace(" ", "_").replace("/", "_").replace("\\", "_")
+        document_type = document_analysis.document_type.replace(" ", "_").replace("/", "_").replace("\\", "_") if document_analysis.document_type else "document"
+        # Extract file extension
+        ext = "." + old_filename.split(".")[-1] if "." in old_filename and len(old_filename.split(".")) > 1 else ""
+
+        new_filename = f"{patient_name_safe}_{dob_safe}_{claim_safe}_{document_type}{ext}"
+        logger.info(f"🔄 Preparing to rename file to: {new_filename} (old: {old_filename})")
+
+        # Perform rename if blob_path exists
+        renamed = False
+        if old_blob_path:
+            new_blob_path, new_gcs_url = await self.rename_gcs_file(old_blob_path, new_filename, old_gcs_url)
+            if new_blob_path != old_blob_path:
+                processed_data["blob_path"] = new_blob_path
+                processed_data["gcs_url"] = new_gcs_url
+                processed_data["filename"] = new_filename
+                renamed = True
+                logger.info(f"✅ GCS file renamed successfully to {new_filename} (new path: {new_blob_path}, new URL: {new_gcs_url})")
+            else:
+                logger.warning(f"⚠️ GCS rename attempted but no change detected (using original: {old_filename})")
+        else:
+            # If no blob_path, just update local filename (though unlikely for GCS upload)
+            processed_data["filename"] = new_filename
+            renamed = True
+            logger.info(f"ℹ️ No blob_path provided; updated local filename only to {new_filename}")
+
+        logger.info(f"📁 Final filename for DB: {processed_data['filename']}, GCS URL: {processed_data['gcs_url']}")
+
+        # Mock ExtractionResult
+        extraction_result = ExtractionResult(
+            text=processed_data["result_data"].get("text", ""),
+            pages=processed_data["result_data"].get("pages", 0),
+            entities=processed_data["result_data"].get("entities", []),
+            tables=processed_data["result_data"].get("tables", []),
+            formFields=processed_data["result_data"].get("formFields", []),
+            confidence=processed_data["result_data"].get("confidence", 0.0),
+            success=processed_data["result_data"].get("success", False),
+            gcs_file_link=processed_data["result_data"].get("gcs_file_link", processed_data["gcs_url"]),
+            fileInfo=processed_data["result_data"].get("fileInfo", {}),
+            summary=status_result["document_summary"]["summary"],
+            comprehensive_analysis=processed_data["result_data"].get("comprehensive_analysis"),
+            document_id=processed_data["result_data"].get("document_id", f"webhook_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),
+            date_reasoning=processed_data["date_reasoning_data"]
+        )
+
+        # Save the document to get the document_id
+        # MODIFIED: Pass summary_snapshots (list) instead of summary_snapshot (single)
+        document_id = await db_service.save_document_analysis(
+            extraction_result=extraction_result,
+            file_name=processed_data["filename"],  # Now uses new filename
+            file_size=processed_data["file_size"],
+            mime_type=processed_data["mime_type"],
+            processing_time_ms=processed_data["processing_time_ms"],
+            blob_path=processed_data["blob_path"],  # Updated if renamed
+            file_hash=processed_data["file_hash"],
+            gcs_file_link=processed_data["gcs_url"],  # Updated if renamed
+            patient_name=status_result["patient_name_to_use"],
+            claim_number=status_result["claim_to_save"],
+            dob=processed_data["dob"],
+            doi=processed_data["doi"],
+            status=document_status,
+            brief_summary=processed_data["brief_summary"],
+            summary_snapshots=summary_snapshots,  # Changed to plural
+            whats_new=status_result["whats_new_data"],
+            adl_data=status_result["adl_data"],
+            document_summary=status_result["document_summary"],
+            rd=processed_data["rd_for_db"],
+            physician_id=physician_id,
+            mode=mode,
+            ur_denial_reason=document_analysis.ur_denial_reason,
+            original_name=old_filename  # Pass the original filename
+        )
+
+        # ✅ DECREMENT PARSE COUNT AFTER SUCCESSFUL DOCUMENT SAVE
+        parse_decremented = await db_service.decrement_parse_count(physician_id)
+        if not parse_decremented:
+            logger.warning(f"⚠️ Could not decrement parse count for physician {physician_id}")
+
+        # ✅ ENHANCED TASK CREATION - Check physician role and name matching consulting_doctor
+        created_tasks = 0
+        if document_analysis.is_task_needed:
+            logger.info(f"🔧 Task needed - checking physician authorization for document {processed_data['filename']}")
+            
+            # Step 1: Get all users from DB using physician_id
+            try:
+                prisma = Prisma()
+                await prisma.connect()
+                
+                users = await prisma.user.find_many(where={
+                    "OR": [
+                        {
+                            "physicianId": physician_id,
+                            "role": "Physician"
+                        },
+                        {
+                            "id": physician_id,  # Match by user ID if it's an admin physician
+                            "role": "Physician"
+                        }
+                    ]
+                })
+                
+                await prisma.disconnect()
+
+                if not users:
+                    logger.warning(f"⚠️ No physician users found with physician_id: {physician_id} - skipping task creation")
+                else:
+                    # Step 2: Check if any user's name matches consulting_doctor (ignoring titles)
+                    consulting_doctor = document_analysis.consulting_doctor or ""
+                    matching_user = None
+
+                    # Function to remove titles and normalize names
+                    def normalize_name(name):
+                        if not name:
+                            return ""
+                        # Remove common titles
+                        name = re.sub(r'^(Dr\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?)\s*', '', name, flags=re.IGNORECASE)
+                        # Remove extra spaces and convert to lowercase
+                        return name.strip().lower()
+
+                    normalized_consulting_doctor = normalize_name(consulting_doctor)
+
+                    for user in users:
+                        user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
+                        normalized_user_name = normalize_name(user_full_name)
+                        
+                        logger.info(f"🔍 Checking physician match - User: '{user_full_name}' (normalized: '{normalized_user_name}'), Consulting Doctor: '{consulting_doctor}' (normalized: '{normalized_consulting_doctor}')")
+                        
+                        if normalized_user_name and normalized_consulting_doctor and normalized_user_name == normalized_consulting_doctor:
+                            matching_user = user
+                            logger.info(f"✅ Physician name matches consulting doctor (after normalization) - User ID: {user.id}")
+                            break
+                    
+                    # Step 3: Create tasks only if names match
+                    if matching_user:
+                        logger.info(f"✅ Physician name matches consulting doctor - proceeding with task creation")
+                        
+                        task_creator = TaskCreator()
+                        
+                        try:
+                            # Prepare document data for task generation
+                            document_data = document_analysis.dict()
+                            document_data["filename"] = processed_data["filename"]
+                            document_data["document_id"] = document_id
+                            document_data["physician_id"] = physician_id
+                            
+                            # Generate tasks based on document analysis
+                            tasks = await task_creator.generate_tasks(document_data, processed_data["filename"])
+                            logger.info(f"📋 Generated {len(tasks)} tasks for document {processed_data['filename']}")
+
+                            # Save tasks to DB
+                            prisma = Prisma()
+                            await prisma.connect()
+                            
+                            for task in tasks:
+                                try:
+                                    # Map task fields
+                                    mapped_task = {
+                                        "description": task.get("description"),
+                                        "department": task.get("department"),
+                                        "status": "Open",
+                                        "dueDate": None,
+                                        "patient": task.get("patient", "Unknown"),
+                                        "actions": task.get("actions") if isinstance(task.get("actions"), list) else [],
+                                        "sourceDocument": task.get("source_document") or task.get("sourceDocument") or processed_data.get("filename"),
+                                        "documentId": document_id,
+                                        "physicianId": physician_id,
+                                    }
+
+                                    # Normalize due date
+                                    due_raw = task.get("due_date") or task.get("dueDate")
+                                    if due_raw:
+                                        if isinstance(due_raw, str):
+                                            try:
+                                                mapped_task["dueDate"] = datetime.strptime(due_raw, "%Y-%m-%d")
+                                            except Exception:
+                                                mapped_task["dueDate"] = datetime.now() + timedelta(days=3)
+                                        else:
+                                            mapped_task["dueDate"] = due_raw
+
+                                    await prisma.task.create(data=mapped_task)
+                                    created_tasks += 1
+                                    logger.info(f"✅ Created task: {task.get('description', 'Unknown task')}")
+                                    
+                                except Exception as task_err:
+                                    logger.error(f"❌ Failed to create task for document {processed_data['filename']}: {task_err}", exc_info=True)
+                                    continue
+
+                            await prisma.disconnect()
+                            logger.info(f"✅ {created_tasks} / {len(tasks)} tasks created for document {processed_data['filename']}")
+                            
+                        except Exception as e:
+                            logger.error(f"❌ Task generation failed for document {processed_data['filename']}: {str(e)}", exc_info=True)
+                    else:
+                        logger.warning(f"⚠️ No physician user name matches consulting doctor '{consulting_doctor}' - skipping task creation")
+                        
+            except Exception as user_err:
+                logger.error(f"❌ Error fetching user for physician_id {physician_id}: {user_err}", exc_info=True)
+        else:
+            logger.info(f"ℹ️ No tasks needed for document {processed_data['filename']} - skipping task creation")
+
+        # Update previous documents' fields (skip for first-time claim-only as there are no previous)
+        # UPDATED LOGIC: Match by claim number if present, otherwise match by BOTH name AND dob exactly
+        total_previous_docs = status_result["lookup_data"].get("total_documents", 0) if status_result["lookup_data"] else 0
+        
+        # Check if we have valid claim number to match on
+        has_valid_claim_for_update = (
+            status_result["claim_to_save"] and 
+            str(status_result["claim_to_save"]).lower() not in ["not specified", "unknown", ""]
+        )
+        
+        # Check if we have valid name AND dob to match on
+        has_valid_name_dob_for_update = (
+            status_result["patient_name_to_use"] and 
+            str(status_result["patient_name_to_use"]).lower() not in ["not specified", "unknown", ""] and
+            updated_dob_for_query is not None and
+            dob_str and
+            str(dob_str).lower() not in ["not specified", "unknown", ""]
+        )
+        
+        # Decide if we should update
+        # Rule: Update ONLY if (claim number matches) OR (no claim number BUT name AND dob both match)
+        should_update_previous = (
+            document_status not in ["failed"] and
+            total_previous_docs > 0 and
+            not status_result["has_conflicting_claims"] and
+            not is_first_time_claim_only and
+            (has_valid_claim_for_update or has_valid_name_dob_for_update)  # Either claim OR (name AND dob)
+        )
+
+        if should_update_previous:
+            logger.info("🔄 Updating previous documents with strict matching logic:")
+            
+            if has_valid_claim_for_update:
+                # Priority 1: Match by claim number
+                logger.info(f"   ✅ MATCHING BY CLAIM NUMBER: '{status_result['claim_to_save']}'")
+                updated_count = await db_service.update_previous_fields(
+                    patient_name=status_result["patient_name_to_use"],
+                    dob=dob_str,
+                    physician_id=physician_id,
+                    claim_number=status_result["claim_to_save"],  # Match by claim number
+                    doi=document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else None
+                )
+                logger.info(f"🔄 Updated {updated_count} previous documents matched by claim number '{status_result['claim_to_save']}'")
+            elif has_valid_name_dob_for_update:
+                # Priority 2: Match by BOTH name AND dob (only if no claim number)
+                logger.info(f"   ✅ MATCHING BY NAME + DOB: '{status_result['patient_name_to_use']}' + '{dob_str}'")
+                logger.info(f"   ⚠️ No claim number available - using strict name+dob matching")
+                updated_count = await db_service.update_previous_fields(
+                    patient_name=status_result["patient_name_to_use"],
+                    dob=dob_str,
+                    physician_id=physician_id,
+                    claim_number=None,  # No claim number to match, will match by name+dob in DB service
+                    doi=document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else None
+                )
+                logger.info(f"🔄 Updated {updated_count} previous documents matched by name+dob ('{status_result['patient_name_to_use']}' + '{dob_str}')")
+        else:
+            logger.info(f"ℹ️ Skipping previous update:")
+            logger.info(f"   - status={document_status}")
+            logger.info(f"   - total_previous={total_previous_docs}")
+            logger.info(f"   - has_conflicts={status_result['has_conflicting_claims']}")
+            logger.info(f"   - is_first_time_claim_only={is_first_time_claim_only}")
+            logger.info(f"   - has_valid_claim_for_update={has_valid_claim_for_update} (claim='{status_result.get('claim_to_save')}')")
+            logger.info(f"   - has_valid_name_dob_for_update={has_valid_name_dob_for_update} (name='{status_result.get('patient_name_to_use')}', dob='{dob_str}')")
+
+        logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}, filename: {processed_data['filename']}")
+
+        logger.info(f"📡 Success event processed for document: {document_id}")
+
+        return {
+            "status": document_status,
+            "document_id": document_id,
+            "missing_fields": status_result['updated_missing_fields'] if status_result['has_missing_required_fields'] else None,
+            "pending_reason": pending_reason,
+            "is_first_time_claim_only": is_first_time_claim_only,
+            "parse_count_decremented": parse_decremented,  # Add this field
+            "filename": processed_data["filename"],  # Include the (possibly new) filename
+            "gcs_url": processed_data["gcs_url"],  # Updated if renamed
+            "blob_path": processed_data["blob_path"],  # Updated if renamed
+            "file_renamed": renamed,
+            "date_reasoning_summary": {
+                "used_reasoning": has_date_reasoning,
+                "confidence_scores": processed_data["date_reasoning_data"]["confidence_scores"],
+                "dates_extracted": len(processed_data["date_reasoning_data"]["extracted_dates"])
+            },
+            "lookup_summary": {
+                "documents_found": status_result["lookup_data"].get("total_documents", 0),
+                "has_conflicting_claims": status_result["has_conflicting_claims"],
+                "unique_valid_claims": status_result["lookup_data"].get("unique_valid_claims", []) if status_result["lookup_data"] else [],
+                "fields_fetched": {
+                    "patient_name": bool(status_result["lookup_data"].get("patient_name")),
+                    "dob": bool(status_result["lookup_data"].get("dob")),
+                    "doi": bool(status_result["lookup_data"].get("doi")),
+                    "claim_number": bool(status_result["lookup_data"].get("claim_number"))
+                }
+            },
+            "mode": mode,
+            "ur_denial_reason": document_analysis.ur_denial_reason or None,
+            "body_parts_analysis": {
+                "total_body_parts": len(summary_snapshots),
+                "has_multiple_body_parts": has_multiple_body_parts,
+                "body_parts": [snapshot["body_part"] for snapshot in summary_snapshots]
+            },
+            "task_analysis": {  # Changed from rfa_task_analysis to task_analysis
+                "is_task_needed": document_analysis.is_task_needed,  # Changed from is_rfa_task_needed
+                "tasks_created": created_tasks
+            }
+        }
     
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
-        Orchestrates the full webhook processing pipeline.
+        Orchestrates the full webhook processing pipeline with mode-aware processing.
         """
-        # Step 1: Process document data
+        # Step 1: Process document data with mode-awareness
         processed_data = await self.process_document_data(data)
         
         # Extract physician_id
@@ -1027,14 +1106,13 @@ class WebhookService:
         # Step 2: Perform patient lookup (NO CACHING - always fresh data)
         lookup_result = await self.perform_patient_lookup(db_service, processed_data, physician_id)
         
-        # Step 3: Compare and determine status
+        # Step 3: Compare and determine status with mode-aware snapshot creation
         status_result = await self.compare_and_determine_status(processed_data, lookup_result, db_service, physician_id)
         
-        # Step 4: Save and process
+        # Step 4: Save and process with mode-aware data storage
         result = await self.save_and_process_document(processed_data, status_result, data, db_service)
         
         return result
-    
     
     async def update_fail_document(self, fail_doc: Any, updated_fields: dict, user_id: str = None, db_service: Any = None) -> dict:
         """

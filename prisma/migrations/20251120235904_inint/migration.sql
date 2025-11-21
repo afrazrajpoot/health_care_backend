@@ -68,6 +68,7 @@ CREATE TABLE "Document" (
     "fileHash" VARCHAR(64),
     "mode" TEXT DEFAULT 'wc',
     "reportDate" TIMESTAMP(3),
+    "originalName" TEXT,
     "physicianId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
@@ -81,7 +82,20 @@ CREATE TABLE "Document" (
 CREATE TABLE "body_part_snapshots" (
     "id" TEXT NOT NULL,
     "documentId" TEXT NOT NULL,
-    "bodyPart" TEXT NOT NULL,
+    "mode" TEXT NOT NULL DEFAULT 'wc',
+    "bodyPart" TEXT,
+    "condition" TEXT,
+    "conditionSeverity" TEXT,
+    "symptoms" TEXT,
+    "medications" TEXT,
+    "chronicCondition" BOOLEAN NOT NULL DEFAULT false,
+    "comorbidities" TEXT,
+    "lifestyleRecommendations" TEXT,
+    "injuryType" TEXT,
+    "workRelatedness" TEXT,
+    "permanentImpairment" TEXT,
+    "mmiStatus" TEXT,
+    "returnToWorkPlan" TEXT,
     "dx" TEXT NOT NULL,
     "keyConcern" TEXT NOT NULL,
     "nextStep" TEXT,
@@ -93,6 +107,9 @@ CREATE TABLE "body_part_snapshots" (
     "treatmentApproach" TEXT,
     "clinicalSummary" TEXT,
     "referralDoctor" TEXT,
+    "adlsAffected" TEXT,
+    "painLevel" TEXT,
+    "functionalLimitations" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -115,18 +132,10 @@ CREATE TABLE "SummarySnapshot" (
     "clinicalSummary" TEXT,
     "referralDoctor" TEXT,
     "documentId" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "SummarySnapshot_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "ADL" (
-    "id" TEXT NOT NULL,
-    "adlsAffected" TEXT NOT NULL,
-    "workRestrictions" TEXT NOT NULL,
-    "documentId" TEXT NOT NULL,
-
-    CONSTRAINT "ADL_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -136,8 +145,30 @@ CREATE TABLE "DocumentSummary" (
     "date" TIMESTAMP(3) NOT NULL,
     "summary" TEXT NOT NULL,
     "documentId" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "DocumentSummary_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "adls" (
+    "id" TEXT NOT NULL,
+    "documentId" TEXT NOT NULL,
+    "mode" TEXT NOT NULL DEFAULT 'wc',
+    "adlsAffected" TEXT NOT NULL,
+    "workRestrictions" TEXT NOT NULL,
+    "dailyLivingImpact" TEXT,
+    "functionalLimitations" TEXT,
+    "symptomImpact" TEXT,
+    "qualityOfLife" TEXT,
+    "workImpact" TEXT,
+    "physicalDemands" TEXT,
+    "workCapacity" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "adls_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -160,7 +191,6 @@ CREATE TABLE "patient_quizzes" (
     "id" TEXT NOT NULL,
     "patientName" TEXT NOT NULL,
     "dob" TEXT,
-    "claimNumber" TEXT,
     "doi" TEXT,
     "lang" TEXT NOT NULL,
     "bodyAreas" TEXT,
@@ -170,6 +200,7 @@ CREATE TABLE "patient_quizzes" (
     "therapies" JSONB,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "claimNumber" TEXT,
 
     CONSTRAINT "patient_quizzes_pkey" PRIMARY KEY ("id")
 );
@@ -178,16 +209,18 @@ CREATE TABLE "patient_quizzes" (
 CREATE TABLE "FailDocs" (
     "id" TEXT NOT NULL,
     "reason" TEXT NOT NULL,
-    "dob" TEXT,
-    "doi" TEXT,
-    "claimNumber" TEXT,
-    "patientName" TEXT,
-    "documentText" TEXT,
     "physicianId" TEXT,
-    "gcsFileLink" TEXT,
-    "fileName" TEXT,
-    "fileHash" TEXT,
+    "claimNumber" TEXT,
+    "documentText" TEXT,
+    "doi" TEXT,
+    "patientName" TEXT,
     "blobPath" TEXT,
+    "fileHash" TEXT,
+    "fileName" TEXT,
+    "gcsFileLink" TEXT,
+    "dob" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "FailDocs_pkey" PRIMARY KEY ("id")
 );
@@ -198,7 +231,6 @@ CREATE TABLE "intake_links" (
     "token" TEXT NOT NULL,
     "patientName" TEXT NOT NULL,
     "dateOfBirth" TIMESTAMP(3) NOT NULL,
-    "claimNumber" TEXT,
     "visitType" TEXT NOT NULL DEFAULT 'Follow-up',
     "language" TEXT NOT NULL DEFAULT 'en',
     "mode" TEXT NOT NULL DEFAULT 'tele',
@@ -208,6 +240,7 @@ CREATE TABLE "intake_links" (
     "expiresAt" TIMESTAMP(3) NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "claimNumber" TEXT,
 
     CONSTRAINT "intake_links_pkey" PRIMARY KEY ("id")
 );
@@ -225,6 +258,7 @@ CREATE TABLE "Task" (
     "sourceDocument" TEXT,
     "claimNumber" TEXT,
     "quickNotes" JSONB DEFAULT '{"status_update": "", "details": "", "one_line_note": ""}',
+    "followUpTaskId" TEXT,
     "documentId" TEXT,
     "physicianId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -299,13 +333,25 @@ CREATE UNIQUE INDEX "VerificationToken_identifier_token_key" ON "VerificationTok
 CREATE UNIQUE INDEX "Document_fileHash_userId_key" ON "Document"("fileHash", "userId");
 
 -- CreateIndex
+CREATE INDEX "body_part_snapshots_mode_idx" ON "body_part_snapshots"("mode");
+
+-- CreateIndex
+CREATE INDEX "body_part_snapshots_documentId_idx" ON "body_part_snapshots"("documentId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "SummarySnapshot_documentId_key" ON "SummarySnapshot"("documentId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "ADL_documentId_key" ON "ADL"("documentId");
+CREATE UNIQUE INDEX "DocumentSummary_documentId_key" ON "DocumentSummary"("documentId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "DocumentSummary_documentId_key" ON "DocumentSummary"("documentId");
+CREATE UNIQUE INDEX "adls_documentId_key" ON "adls"("documentId");
+
+-- CreateIndex
+CREATE INDEX "adls_mode_idx" ON "adls"("mode");
+
+-- CreateIndex
+CREATE INDEX "adls_documentId_idx" ON "adls"("documentId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "intake_links_token_key" ON "intake_links"("token");
@@ -335,10 +381,10 @@ ALTER TABLE "body_part_snapshots" ADD CONSTRAINT "body_part_snapshots_documentId
 ALTER TABLE "SummarySnapshot" ADD CONSTRAINT "SummarySnapshot_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "Document"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ADL" ADD CONSTRAINT "ADL_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "Document"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "DocumentSummary" ADD CONSTRAINT "DocumentSummary_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "Document"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "DocumentSummary" ADD CONSTRAINT "DocumentSummary_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "Document"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "adls" ADD CONSTRAINT "adls_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "Document"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "Task" ADD CONSTRAINT "Task_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "Document"("id") ON DELETE SET NULL ON UPDATE CASCADE;

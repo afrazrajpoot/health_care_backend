@@ -32,7 +32,7 @@ class ReportAnalyzer:
     Maintains backward compatibility while adding robustness.
     """
     
-    def __init__(self):
+    def __init__(self,mode):
         """Initialize LLM and all extraction components"""
         self.llm = AzureChatOpenAI(
             azure_endpoint=CONFIG.get("azure_openai_endpoint"),
@@ -40,9 +40,10 @@ class ReportAnalyzer:
             deployment_name=CONFIG.get("azure_openai_deployment"),
             api_version=CONFIG.get("azure_openai_api_version"),
             temperature=0.0,
-            timeout=120
+            timeout=120,
+
         )
-        
+        self.mode=mode
         # Create a second LLM instance for analysis (can use same or different deployment)
         self.analysis_llm = AzureChatOpenAI(
             azure_endpoint=CONFIG.get("azure_openai_endpoint"),
@@ -58,7 +59,7 @@ class ReportAnalyzer:
         self.document_analyzer = DocumentContextAnalyzer(self.analysis_llm)
         
         # Initialize specialized extractors with dual LLMs
-        self.qme_extractor = QMEExtractorChained(self.llm)
+        self.qme_extractor = QMEExtractorChained(self.llm, mode=mode)
         self.imaging_extractor = ImagingExtractorChained(self.llm)
         self.pr2_extractor = PR2ExtractorChained(self.llm)
         self.consult_extractor = ConsultExtractorChained(self.llm)
@@ -631,194 +632,3 @@ class ReportAnalyzer:
                 "document_type": "Unknown",
                 "error": str(e)
             }
-
-
-
-
-
-
-# """
-# Simplified Report Analyzer with ONLY SimpleExtractor
-# Version: 1.0 - Minimalist Approach
-# """
-# import logging
-# from typing import List, Dict, Any, Optional
-# from datetime import datetime
-# from langchain_openai import AzureChatOpenAI
-
-# from config.settings import CONFIG
-# from models.data_models import DocumentType
-# from utils.document_detector import detect_document_type
-# from extractors.simple_extractor import SimpleExtractor
-
-# logger = logging.getLogger("document_ai")
-
-
-# class ReportAnalyzer:
-#     """
-#     Minimalist orchestrator using ONLY SimpleExtractor.
-#     """
-    
-#     def __init__(self):
-#         """Initialize LLM and SimpleExtractor only"""
-#         self.llm = AzureChatOpenAI(
-#             azure_endpoint=CONFIG.get("azure_openai_endpoint"),
-#             api_key=CONFIG.get("azure_openai_api_key"),
-#             deployment_name=CONFIG.get("azure_openai_deployment"),
-#             api_version=CONFIG.get("azure_openai_api_version"),
-#             temperature=0.0,
-#             timeout=120
-#         )
-        
-#         # Initialize ONLY SimpleExtractor
-#         self.simple_extractor = SimpleExtractor(self.llm)
-        
-#         logger.info("✅ ReportAnalyzer initialized with ONLY SimpleExtractor")
-    
-#     def compare_with_previous_documents(
-#         self, 
-#         current_raw_text: str,
-#         page_zones: Optional[Dict[str, Dict[str, str]]] = None
-#     ) -> Dict[str, str]:
-#         """
-#         Main extraction pipeline - returns dictionary with both summaries.
-#         """
-#         try:
-#             # extract_document returns dict with both summaries
-#             result_dict = self.extract_document(current_raw_text, page_zones)
-            
-#             # Return the dictionary directly
-#             return result_dict
-            
-#         except Exception as e:
-#             logger.error(f"❌ Extraction pipeline failed: {e}")
-#             fallback_date = datetime.now().strftime("%m/%d/%y")
-#             error_msg = f"{fallback_date}: Extraction failed - manual review required"
-#             return {
-#                 "long_summary": error_msg,
-#                 "short_summary": error_msg
-#             }
-    
-#     def extract_document(self, text: str, page_zones: Optional[Dict] = None) -> Dict[str, str]:
-#         """
-#         Simplified pipeline using ONLY SimpleExtractor.
-#         """
-#         fallback_date = datetime.now().strftime("%m/%d/%y")
-        
-#         try:
-#             # Stage 1: Detect document type
-#             detection_result = detect_document_type(text)
-#             doc_type_str = detection_result.get("doc_type", "Unknown")
-            
-#             logger.info(f"📄 Document type: {doc_type_str}")
-            
-#             # Convert to DocumentType enum
-#             doc_type = self._parse_document_type(doc_type_str)
-            
-#             # Stage 2: Use SimpleExtractor for ALL document types
-#             result_dict = self.simple_extractor.extract(
-#                 text=text,
-#                 doc_type=doc_type.value,
-#                 fallback_date=fallback_date
-#             )
-            
-#             logger.info(f"✅ Extraction complete")
-#             logger.info(f"   Long summary: {len(result_dict.get('long_summary', ''))} chars")
-#             logger.info(f"   Short summary: {result_dict.get('short_summary', '')}")
-            
-#             return result_dict
-            
-#         except Exception as e:
-#             logger.error(f"❌ Extraction failed: {e}", exc_info=True)
-#             error_msg = f"{fallback_date}: Extraction failed - manual review required"
-#             return {
-#                 "long_summary": error_msg,
-#                 "short_summary": error_msg
-#             }
-
-#     def _parse_document_type(self, doc_type_str: str) -> DocumentType:
-#         """
-#         Parse document type string to DocumentType enum.
-#         """
-#         try:
-#             # Normalize the string to match enum
-#             normalized = doc_type_str.upper().replace("-", "").replace(" ", "_")
-            
-#             # Try direct match first
-#             if normalized in DocumentType.__members__:
-#                 return DocumentType[normalized]
-            
-#             # Handle common special cases
-#             if doc_type_str == "X-ray":
-#                 return DocumentType.XRAY
-#             elif doc_type_str in ["PR-2", "PR2"]:
-#                 return DocumentType.PR2
-#             elif doc_type_str in ["PR-4", "PR4"]:
-#                 return DocumentType.PR4
-#             elif doc_type_str in ["UR", "Utilization Review"]:
-#                 return DocumentType.UR
-#             elif doc_type_str in ["IMR", "Independent Medical Review"]:
-#                 return DocumentType.IMR
-#             elif doc_type_str == "Appeal":
-#                 return DocumentType.APPEAL
-#             elif doc_type_str in ["Authorization", "Treatment Authorization"]:
-#                 return DocumentType.AUTHORIZATION
-#             elif doc_type_str in ["RFA", "Request for Authorization"]:
-#                 return DocumentType.RFA
-#             elif doc_type_str in ["DFR", "Doctor First Report"]:
-#                 return DocumentType.DFR
-#             else:
-#                 logger.warning(f"⚠️ Unknown document type '{doc_type_str}', using UNKNOWN")
-#                 return DocumentType.UNKNOWN
-#         except Exception as e:
-#             logger.warning(f"⚠️ Error parsing document type '{doc_type_str}': {e}")
-#             return DocumentType.UNKNOWN
-
-#     def get_structured_extraction(self, text: str) -> Dict[str, Any]:
-#         """
-#         Get full structured extraction as dictionary.
-#         """
-#         try:
-#             # Get both summaries
-#             summaries_dict = self.extract_document(text)
-            
-#             # Get additional metadata
-#             detection_result = detect_document_type(text)
-#             doc_type_str = detection_result.get("doc_type", "Unknown")
-            
-#             return {
-#                 "document_type": doc_type_str,
-#                 "long_summary": summaries_dict.get("long_summary", ""),
-#                 "short_summary": summaries_dict.get("short_summary", ""),
-#                 "extracted_at": datetime.now().isoformat(),
-#                 "text_length": len(text)
-#             }
-#         except Exception as e:
-#             logger.error(f"❌ Structured extraction failed: {e}")
-#             fallback_date = datetime.now().strftime("%m/%d/%y")
-#             return {
-#                 "document_type": "Unknown",
-#                 "long_summary": f"{fallback_date}: Extraction failed",
-#                 "short_summary": f"{fallback_date}: Extraction failed",
-#                 "error": str(e)
-#             }
-    
-#     def get_extraction_metadata(self, text: str) -> Dict[str, Any]:
-#         """
-#         Get extraction metadata without full processing.
-#         """
-#         try:
-#             detection_result = detect_document_type(text)
-#             doc_type_str = detection_result.get("doc_type", "Unknown")
-#             return {
-#                 "document_type": doc_type_str,
-#                 "detected_at": datetime.now().isoformat(),
-#                 "text_length": len(text),
-#                 "preview": text[:200] + "..." if len(text) > 200 else text
-#             }
-#         except Exception as e:
-#             logger.error(f"❌ Metadata extraction failed: {e}")
-#             return {
-#                 "document_type": "Unknown",
-#                 "error": str(e)
-#             }

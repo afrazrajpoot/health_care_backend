@@ -174,7 +174,7 @@ class ExtractionResult:
 
 
 # ============================================================================
-# PYDANTIC MODELS (Enhanced with verification fields)
+# PYDANTIC MODELS (Enhanced with verification fields and WC/GM mode support)
 # ============================================================================
 
 class DateReasoning(BaseModel):
@@ -186,7 +186,7 @@ class DateReasoning(BaseModel):
     predicted_assignments: Dict[str, str] = Field(..., description="Predicted date assignments")
 
 class BodyPartAnalysis(BaseModel):
-    """Analysis for a specific body part"""
+    """Analysis for a specific body part with WC/GM mode support"""
     body_part: str = Field(..., description="Specific body part involved if it's a workers comp report else disease/condition")
     diagnosis: str = Field(..., description="Diagnosis for this body part")
     key_concern: str = Field(..., description="Key concern for this body part")
@@ -195,9 +195,28 @@ class BodyPartAnalysis(BaseModel):
     extracted_recommendation: str = Field(..., description="Recommendations for this body part")
     adls_affected: str = Field(..., description="ADLs affected for this body part")
     work_restrictions: str = Field(..., description="Work restrictions for this body part")
+    
+    # 🆕 WC-SPECIFIC FIELDS
+    injury_type: Optional[str] = Field(None, description="sprain/strain/fracture etc. (WC mode)")
+    work_relatedness: Optional[str] = Field(None, description="Confirmed/probable/possible (WC mode)")
+    permanent_impairment: Optional[str] = Field(None, description="Permanent disability rating (WC mode)")
+    mmi_status: Optional[str] = Field(None, description="Maximum Medical Improvement status (WC mode)")
+    return_to_work_plan: Optional[str] = Field(None, description="RTW plan/timing (WC mode)")
+    
+    # 🆕 GM-SPECIFIC FIELDS
+    condition_severity: Optional[str] = Field(None, description="mild/moderate/severe, acute/chronic (GM mode)")
+    symptoms: Optional[str] = Field(None, description="Key symptoms reported (GM mode)")
+    medications: Optional[str] = Field(None, description="Current/prescribed medications (GM focus)")
+    chronic_condition: Optional[bool] = Field(None, description="Is this a chronic condition? (GM mode)")
+    comorbidities: Optional[str] = Field(None, description="Other existing conditions (GM mode)")
+    lifestyle_recommendations: Optional[str] = Field(None, description="Diet/exercise/smoking cessation etc. (GM mode)")
+    
+    # 🆕 QUALITY OF LIFE IMPACT (both modes, different emphasis)
+    pain_level: Optional[str] = Field(None, description="Pain scale 0-10 or description")
+    functional_limitations: Optional[str] = Field(None, description="General functional limitations")
 
 class DocumentAnalysis(BaseModel):
-    """Structured analysis of medical document matching database schema (enhanced with verification)"""
+    """Structured analysis of medical document matching database schema with WC/GM mode support"""
     patient_name: str = Field(..., description="Full name of the patient")
     claim_number: str = Field(..., description="Claim number. Use 'Not specified' if not found")
     dob: str = Field(..., description="Date of birth in YYYY-MM-DD format")
@@ -225,10 +244,28 @@ class DocumentAnalysis(BaseModel):
     date_reasoning: Optional[DateReasoning] = Field(None, description="Reasoning behind date assignments")
     is_task_needed: bool = Field(default=False, description="If analysis determines any tasks are needed based on pending actions")
     
+    # 🆕 WC-SPECIFIC FIELDS
+    work_impact: Optional[str] = Field(None, description="Specific work impact details (WC focus)")
+    physical_demands: Optional[str] = Field(None, description="Physical demands affected (WC focus)")
+    work_capacity: Optional[str] = Field(None, description="Work capacity assessment (WC focus)")
+    
+    # 🆕 GM-SPECIFIC FIELDS
+    daily_living_impact: Optional[str] = Field(None, description="Impact on daily living activities (GM focus)")
+    functional_limitations: Optional[str] = Field(None, description="General functional limitations (GM focus)")
+    symptom_impact: Optional[str] = Field(None, description="Impact of symptoms on function (GM focus)")
+    quality_of_life: Optional[str] = Field(None, description="Overall quality of life impact (GM focus)")
+    
+    # 🆕 MODE-AWARE FIELDS
+    patient_id: Optional[str] = Field(None, description="Medical record number or patient identifier (GM mode)")
+    onset_date: Optional[str] = Field(None, description="Symptom onset or condition start date (GM mode)")
+    
     # NEW: Verification metadata
     extraction_confidence: float = Field(default=0.0, description="Overall confidence score (0.0-1.0)")
     verified: bool = Field(default=False, description="Whether extraction has been verified")
     verification_notes: List[str] = Field(default=[], description="Any issues found during verification")
+    
+    # 🆕 FORMATTED SUMMARY FOR BOTH MODES
+    formatted_summary: Optional[str] = Field(None, description="Formatted one-line summary appropriate for the mode")
 
 class BriefSummary(BaseModel):
     """Structured brief summary of the report"""
@@ -263,4 +300,3 @@ class ReasoningState(TypedDict, total=False):
     final_date_assignments: dict
     date_reasoning_complete: bool
     validated_date_assignments: dict
-

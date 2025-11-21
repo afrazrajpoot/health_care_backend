@@ -21,8 +21,8 @@ model User {
   image         String?
   physicianId   String?
   accounts      Account[]
-  sessions      Session[]
   Document      Document[]
+  sessions      Session[]
 }
 
 model Account {
@@ -72,93 +72,150 @@ model Document {
   whatsNew     Json?
   blobPath     String?
   fileName     String?
-  fileHash     String? @db.VarChar(64) // ✅ new column for content hash
+  fileHash     String? @db.VarChar(64)
   mode         String? @default("wc")
-  reportDate  DateTime?
+  reportDate   DateTime?
   originalName String?
-  physicianId String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  physicianId  String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  ur_denial_reason String?
 
-
-ur_denial_reason String?
   // Relations
   summarySnapshot SummarySnapshot?
   adl             ADL?
   documentSummary DocumentSummary?
   tasks           Task[]
   bodyPartSnapshots BodyPartSnapshot[]
-  // Optional: If you have users table
-  userId String? // link to the uploader / owner
+  
+  userId String?
   user   User?   @relation(fields: [userId], references: [id])
 
-  @@unique([fileHash, userId]) // ✅ prevent duplicate uploads per user
+  @@unique([fileHash, userId])
 }
+
 model BodyPartSnapshot {
   id              String   @id @default(cuid())
   document        Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
   documentId      String
   
-  bodyPart        String
-  dx              String
-  keyConcern      String
-  nextStep        String?
-  urDecision      String?
-  recommended     String?
-  aiOutcome       String?
-  consultingDoctor String?
+  // 🆕 MODE FIELD - Essential for distinguishing between WC and GM
+  mode            String   @default("wc")  // "wc" or "gm"
   
-  // New fields from BodyPartSnapshot model
-  keyFindings     String?  // Important clinical findings for this body part
-  treatmentApproach String? // Treatment approach mentioned for this body part
-  clinicalSummary String?  // One-line summary of key content about this body part
-  referralDoctor  String?  // Referral doctor for this body part if mentioned
+  // 🆕 FLEXIBLE FIELDS - Adapts based on mode
+  bodyPart        String?  // Used for WC mode (body parts)
+  condition       String?  // Used for GM mode (conditions/diseases)
+  
+  // 🆕 GM-SPECIFIC FIELDS
+  conditionSeverity String? // mild/moderate/severe, acute/chronic (GM mode)
+  symptoms        String?  // Key symptoms reported (GM mode)
+  medications     String?  // Current/prescribed medications (GM focus)
+  chronicCondition Boolean @default(false) // Is this a chronic condition? (GM mode)
+  comorbidities   String?  // Other existing conditions (GM mode)
+  lifestyleRecommendations String? // Diet/exercise/smoking cessation etc. (GM mode)
+  
+  // 🆕 WC-SPECIFIC FIELDS  
+  injuryType      String?  // sprain/strain/fracture etc. (WC mode)
+  workRelatedness String?  // Confirmed/probable/possible (WC mode)
+  permanentImpairment String? // Permanent disability rating (WC mode)
+  mmiStatus       String?  // Maximum Medical Improvement status (WC mode)
+  returnToWorkPlan String? // RTW plan/timing (WC mode)
+  
+  // 🎯 SHARED CLINICAL FIELDS (used in both modes)
+  dx              String   // Diagnosis
+  keyConcern      String   // Primary concern
+  nextStep        String?  // Next steps/recommendations
+  urDecision      String?  // Utilization review decision
+  recommended     String?  // Treatment recommendations
+  aiOutcome       String?  // AI-predicted outcome
+  consultingDoctor String? // Treating/consulting physician
+  
+  // 🎯 SHARED DETAIL FIELDS
+  keyFindings     String?  // Important clinical findings
+  treatmentApproach String? // Treatment approach/plan
+  clinicalSummary String?  // One-line clinical summary
+  referralDoctor  String?  // Referral physician if mentioned
+  
+  // 🆕 QUALITY OF LIFE IMPACT (both modes, different emphasis)
+  adlsAffected    String?  // Activities of daily living affected
+  painLevel       String?  // Pain scale 0-10 or description
+  functionalLimitations String? // General functional limitations
   
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@map("body_part_snapshots")
+  @@index([mode])
+  @@index([documentId])
 }
 
 model SummarySnapshot {
   id                String   @id @default(cuid())
-  dx                String
-  keyConcern        String
-  nextStep          String
-  bodyPart          String
-  urDecision        String?   // corresponds to 'ur-decision'
-  recommended       String?   // recommended treatment plan
-  aiOutcome         String?   // AI-generated follow-up or summary
-  consultingDoctor String?  // list of consulting doctor' names
-  keyFindings     String?  // Important clinical findings for this body part
-  treatmentApproach String? // Treatment approach mentioned for this body part
-  clinicalSummary String?  // One-line summary of key content about this body part
-  referralDoctor  String?  // Referral doctor for this body part if mentioned
+  
+  // 🆕 UPDATED: Make all fields optional to match function requirements
+  dx                String?  // Changed from required to optional
+  keyConcern        String?  // Changed from required to optional
+  nextStep          String?  // Changed from required to optional
+  bodyPart          String?  // Changed from required to optional
+  
+  urDecision        String?
+  recommended       String?
+  aiOutcome         String?
+  consultingDoctor  String?
+  keyFindings       String?
+  treatmentApproach String?
+  clinicalSummary   String?
+  referralDoctor    String?
+  
   // Relation back to Document
   document   Document @relation(fields: [documentId], references: [id])
   documentId String   @unique
-}
-
-
-model ADL {
-  id               String @id @default(cuid())
-  adlsAffected     String
-  workRestrictions String
-
-  // Relation back to Document
-  document   Document @relation(fields: [documentId], references: [id])
-  documentId String   @unique
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model DocumentSummary {
-  id      String   @id @default(cuid())
-  type    String
-  date    DateTime
-  summary String
-
-  // Relation back to Document
-  document   Document @relation(fields: [documentId], references: [id])
+  id         String   @id @default(cuid())
+  type       String
+  date       DateTime
+  summary    String
   documentId String   @unique
+  document   Document @relation(fields: [documentId], references: [id])
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ADL {
+  id              String   @id @default(cuid())
+  document        Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentId      String   @unique
+  
+  // 🆕 MODE FIELD
+  mode            String   @default("wc")  // "wc" or "gm"
+  
+  // 🎯 SHARED FIELDS
+  adlsAffected    String
+  workRestrictions String
+  
+  // 🆕 GM-SPECIFIC FIELDS
+  dailyLivingImpact String? // Impact on daily living activities (GM focus)
+  functionalLimitations String? // General functional limitations (GM focus)
+  symptomImpact   String?  // Impact of symptoms on function (GM focus)
+  qualityOfLife   String?  // Overall quality of life impact (GM focus)
+  
+  // 🆕 WC-SPECIFIC FIELDS
+  workImpact      String?  // Specific work impact details (WC focus)
+  physicalDemands String?  // Physical demands affected (WC focus)
+  workCapacity    String?  // Work capacity assessment (WC focus)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("adls")
+  @@index([mode])
+  @@index([documentId])
 }
 
 model AuditLog {
@@ -174,39 +231,39 @@ model AuditLog {
 }
 
 model PatientQuiz {
-  id             String   @id @default(cuid())
-  patientName    String
-  dob            String?
-  claimNumber    String?
-  doi            String?
-  lang           String
-  bodyAreas      String?
-  newAppointments Json?   // Stores [{type: string, date: string}] or null
-  refill         Json?    // Stores {needed: boolean, before: string, after: string} or null
-  adl            Json     // Stores {state: string, list: string[]}
-  therapies      Json?    // Stores [{therapy: string, effect: string}] or null
-
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id              String   @id @default(cuid())
+  patientName     String
+  dob             String?
+  doi             String?
+  lang            String
+  bodyAreas       String?
+  newAppointments Json?
+  refill          Json?
+  adl             Json
+  therapies       Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  claimNumber     String?
 
   @@map("patient_quizzes")
 }
 
-
 model FailDocs {
-  id          String  @id @default(cuid())
-  reason     String
-
-  dob          String?
-  doi         String?
-  claimNumber String?
-  patientName String?
+  id           String  @id @default(cuid())
+  reason       String
+  physicianId  String?
+  claimNumber  String?
   documentText String?
-  physicianId String?
-  gcsFileLink String?
-  fileName    String?
-  fileHash    String?
-  blobPath    String?
+  doi          String?
+  patientName  String?
+  blobPath     String?
+  fileHash     String?
+  fileName     String?
+  gcsFileLink  String?
+  dob          String?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model IntakeLink {
@@ -214,7 +271,6 @@ model IntakeLink {
   token         String   @unique
   patientName   String
   dateOfBirth   DateTime
-  claimNumber   String?  
   visitType     String   @default("Follow-up")
   language      String   @default("en")
   mode          String   @default("tele")
@@ -224,6 +280,7 @@ model IntakeLink {
   expiresAt     DateTime
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+  claimNumber   String?
 
   @@map("intake_links")
 }
@@ -239,18 +296,16 @@ model Task {
   actions        String[]  @default(["Claim", "Complete"])
   sourceDocument String?
   claimNumber    String?
-  // Quick notes as a nested JSON field
+  
   quickNotes Json? @default("{\"status_update\": \"\", \"details\": \"\", \"one_line_note\": \"\"}")
   followUpTaskId  String?
-  // Relation (optional) — link back to Document if available
+  
   documentId  String?
   document    Document? @relation(fields: [documentId], references: [id])
   physicianId String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 }
-
-
 
 model WorkflowStats {
   id                 String   @id @default(cuid())
@@ -264,7 +319,6 @@ model WorkflowStats {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 }
-
 
 model Subscription {
   id           String   @id @default(cuid())

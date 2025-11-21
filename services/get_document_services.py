@@ -119,6 +119,7 @@ class DocumentAggregationService:
         brief_summary_by_document = {}
         document_summary_by_document = {}
         adl_by_document = {}
+        summary_snapshot_by_document = {}
 
         for doc in sorted_documents:
             doc_id = doc["id"]
@@ -156,14 +157,43 @@ class DocumentAggregationService:
                 }
                 document_summary_by_document[doc_id] = summary_entry
 
-            # Group ADL by document
+            # Group ADL by document - INCLUDING ALL FIELDS
             adl_data = doc.get("adl")
             if adl_data:
+                # Create complete ADL entry with all fields
+                complete_adl_entry = {
+                    # Shared fields
+                    "adls_affected": adl_data.get("adlsAffected"),
+                    "work_restrictions": adl_data.get("workRestrictions"),
+                    "mode": adl_data.get("mode", "wc"),
+                    
+                    # GM-specific fields
+                    "daily_living_impact": adl_data.get("dailyLivingImpact"),
+                    "functional_limitations": adl_data.get("functionalLimitations"),
+                    "symptom_impact": adl_data.get("symptomImpact"),
+                    "quality_of_life": adl_data.get("qualityOfLife"),
+                    
+                    # WC-specific fields
+                    "work_impact": adl_data.get("workImpact"),
+                    "physical_demands": adl_data.get("physicalDemands"),
+                    "work_capacity": adl_data.get("workCapacity"),
+                    
+                    # Metadata
+                    "created_at": self._format_date_field(adl_data.get("createdAt")),
+                    "updated_at": self._format_date_field(adl_data.get("updatedAt"))
+                }
+                
                 if doc_id not in adl_by_document:
                     adl_by_document[doc_id] = {
                         "adls_affected": [],
-                        "work_restrictions": []
+                        "work_restrictions": [],
+                        "complete_adl_data": []  # New field for complete ADL data
                     }
+                
+                # Add to complete ADL data
+                adl_by_document[doc_id]["complete_adl_data"].append(complete_adl_entry)
+                
+                # Also maintain the legacy structure for backward compatibility
                 if "adls_affected" not in adl_by_document[doc_id]:
                     adl_by_document[doc_id]["adls_affected"] = []
                 if adls_affected := adl_data.get("adlsAffected"):
@@ -180,6 +210,11 @@ class DocumentAggregationService:
                     else:
                         adl_by_document[doc_id]["work_restrictions"] = [adl_by_document[doc_id]["work_restrictions"], work_restrictions]
 
+            # Group summary_snapshot by document
+            summary_snapshot = doc.get("summarySnapshot")
+            if summary_snapshot:
+                summary_snapshot_by_document[doc_id] = summary_snapshot
+
         # Get unique document IDs, sorted by latest report date
         unique_doc_ids = list(dict.fromkeys([doc["id"] for doc in sorted_documents]))
         id_to_latest_doc = {doc["id"]: doc for doc in sorted_documents}
@@ -190,12 +225,21 @@ class DocumentAggregationService:
         for latest_doc in latest_docs:
             doc_id = latest_doc["id"]
             base_doc = await self._format_single_document_base(latest_doc)
+            
+            # Get ADL data for this document
+            document_adl_data = adl_by_document.get(doc_id, {
+                "adls_affected": [], 
+                "work_restrictions": [],
+                "complete_adl_data": []
+            })
+            
             base_doc.update({
                 "body_part_snapshots": body_part_by_document.get(doc_id, []),
                 "whats_new": whats_new_by_document.get(doc_id, []),  # Original structure as is
                 "brief_summary": brief_summary_by_document.get(doc_id),
                 "document_summary": document_summary_by_document.get(doc_id),
-                "adl": adl_by_document.get(doc_id, {"adls_affected": [], "work_restrictions": []}),
+                "adl": document_adl_data,  # Now includes complete_adl_data with all fields
+                "summary_snapshot": summary_snapshot_by_document.get(doc_id),
                 "document_index": latest_docs.index(latest_doc) + 1,
                 "is_latest": doc_id == latest_docs[0]["id"]
             })
@@ -243,7 +287,7 @@ class DocumentAggregationService:
         return datetime.min
 
     async def _format_single_document_base(self, document: Dict[str, Any]) -> Dict[str, Any]:
-        """Format base info for a single document."""
+        """Format base info for a single document with all fields from the model."""
         return {
             "document_id": document.get("id"),
             "patient_name": document.get("patientName"),
@@ -252,22 +296,45 @@ class DocumentAggregationService:
             "claim_number": document.get("claimNumber"),
             "status": document.get("status"),
             "gcs_file_link": document.get("gcsFileLink"),
-            "blob_path": document.get("blobPath"),  # Adjust key if needed
-            "file_name": document.get("fileName"),  # ✅ Added fileName field
+            "blob_path": document.get("blobPath"),
+            "file_name": document.get("fileName"),
+            "file_hash": document.get("fileHash"),  # ✅ Added fileHash field
+            "mode": document.get("mode"),  # ✅ Added mode field (default: "wc")
+            "original_name": document.get("originalName"),  # ✅ Added originalName field
+            "physician_id": document.get("physicianId"),  # ✅ Added physicianId field
+            "ur_denial_reason": document.get("ur_denial_reason"),  # ✅ Added ur_denial_reason field
+            "user_id": document.get("userId"),  # ✅ Added userId field
             "created_at": self._format_date_field(document.get("createdAt")),
             "updated_at": self._format_date_field(document.get("updatedAt")),
-            "report_date": self._format_date_field(document.get("reportDate")),  # ✅ Added reportDate field
+            "report_date": self._format_date_field(document.get("reportDate")),
         }
 
-    async def _format_adl(self, document: Dict[str, Any]) -> Dict[str, Any]:
-        """Format ADL data."""
-        adl_data = document.get("adl")
-        if adl_data:
-            return {
-                "adls_affected": adl_data.get("adlsAffected"),
-                "work_restrictions": adl_data.get("workRestrictions")
-            }
-        return None
+    async def _format_adl_complete(self, adl_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Format complete ADL data with all fields."""
+        if not adl_data:
+            return None
+            
+        return {
+            # Shared fields
+            "adls_affected": adl_data.get("adlsAffected"),
+            "work_restrictions": adl_data.get("workRestrictions"),
+            "mode": adl_data.get("mode", "wc"),
+            
+            # GM-specific fields
+            "daily_living_impact": adl_data.get("dailyLivingImpact"),
+            "functional_limitations": adl_data.get("functionalLimitations"),
+            "symptom_impact": adl_data.get("symptomImpact"),
+            "quality_of_life": adl_data.get("qualityOfLife"),
+            
+            # WC-specific fields
+            "work_impact": adl_data.get("workImpact"),
+            "physical_demands": adl_data.get("physicalDemands"),
+            "work_capacity": adl_data.get("workCapacity"),
+            
+            # Metadata
+            "created_at": self._format_date_field(adl_data.get("createdAt")),
+            "updated_at": self._format_date_field(adl_data.get("updatedAt"))
+        }
 
     def _format_date_field(self, field_value: Any) -> Optional[str]:
         """Safely format datetime field to ISO string."""
@@ -277,4 +344,4 @@ class DocumentAggregationService:
             return field_value.isoformat()
         if isinstance(field_value, str):
             return field_value
-        return None   
+        return None
