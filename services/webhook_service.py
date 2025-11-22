@@ -121,21 +121,35 @@ class WebhookService:
             "dates": []
         }
         
-        # OPTIMIZATION: Run analysis and summary generation in parallel
+        # OPTIMIZATION: Run ReportAnalyzer first to get long summary
+        logger.info(f"🚀 Running ReportAnalyzer to generate long summary for {mode.upper()} mode...")
+        report_analyzer = ReportAnalyzer(mode)
+        
+        # Run ReportAnalyzer in thread
+        report_result = await asyncio.to_thread(
+            report_analyzer.extract_document,
+            text_for_llm
+        )
+        
+        long_summary = report_result.get("long_summary", "")
+        logger.info(f"✅ Generated long summary: {len(long_summary)} chars")
+        
+        # OPTIMIZATION: Run analysis and summary generation in parallel using LONG SUMMARY
         analyzer = EnhancedReportAnalyzer()
         
-        # Pass raw text and mode to extraction for mode-aware processing
+        # Pass long_summary instead of raw text for mode-aware processing
         analysis_task = asyncio.create_task(
             asyncio.to_thread(
                 analyzer.extract_document_data_with_reasoning, 
-                text_for_llm,
-                None,  # raw_text parameter
-                mode     # NEW: Pass mode for mode-aware extraction
+                long_summary,    # document_text (now using summary)
+                None,            # page_zones
+                None,            # raw_text
+                mode             # mode
             )
         )
         summary_task = asyncio.create_task(
-            asyncio.to_thread(analyzer.generate_brief_summary, text_for_llm, mode)  # Pass mode to summary
-        )
+            asyncio.to_thread(analyzer.generate_brief_summary, long_summary, mode)  # Pass summary to brief summary gen
+    )
         
         # Wait for both to complete
         document_analysis, brief_summary = await asyncio.gather(analysis_task, summary_task)
