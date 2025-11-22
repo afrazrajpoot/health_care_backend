@@ -71,20 +71,22 @@ class ReportAnalyzer:
     
     def compare_with_previous_documents(
         self, 
-        current_raw_text: str
+        current_raw_text: str,
+        doc_type: Optional[str] = None
     ) -> Dict[str, str]:
         """
         Main extraction pipeline - returns dictionary with both summaries.
         
         Args:
             current_raw_text: Raw document text to extract
+            doc_type: Optional document type if already detected
             
         Returns:
             Dict with 'long_summary' and 'short_summary'
         """
         try:
             # extract_document returns dict with both summaries
-            result_dict = self.extract_document(current_raw_text)
+            result_dict = self.extract_document(current_raw_text, doc_type)
             
             # Return the dictionary directly (no bullet points)
             return result_dict
@@ -98,12 +100,13 @@ class ReportAnalyzer:
                 "short_summary": error_msg
             }
     
-    def extract_document(self, text: str) -> Dict[str, str]:
+    def extract_document(self, text: str, doc_type: Optional[str] = None) -> Dict[str, str]:
         """
         Optimized pipeline - returns dictionary with both summaries.
         
         Args:
             text: Raw document text to extract
+            doc_type: Optional document type if already detected
             
         Returns:
             Dict with 'long_summary' and 'short_summary'
@@ -112,8 +115,12 @@ class ReportAnalyzer:
         
         try:
             # Stage 1: Detect document type (simplified)
-            detection_result = detect_document_type(text)
-            doc_type_str = detection_result.get("doc_type", "Unknown")
+            if doc_type:
+                doc_type_str = doc_type
+                logger.info(f"📄 Document type provided: {doc_type_str}")
+            else:
+                detection_result = detect_document_type(text)
+                doc_type_str = detection_result.get("doc_type", "Unknown")
             
             logger.info(f"📄 Document type: {doc_type_str}")
             

@@ -248,7 +248,9 @@ class EnhancedReportAnalyzer:
             logger.info(f"🚀 Starting MODE-AWARE extraction (Mode: {mode})...")
             
             current_date = datetime.now().strftime("%Y-%m-%d")
-            detected_doc_type = self.detect_document_type(document_text)
+            # OPTIMIZATION: Removed redundant separate detection call
+            # detected_doc_type = self.detect_document_type(document_text)
+            detected_doc_type = "Unknown - Please Identify from text"
 
             # Extract signature context
             signature_context = ""

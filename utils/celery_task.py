@@ -229,17 +229,16 @@ async def _async_update_file_progress(
     else:
         current_file = f"{filename} - Processing..."
     
-    # ✅ FIX: Use the original update_progress but with completed=False
+    # ✅ FIX: Use the new update_file_progress_only method
     await loop.run_in_executor(
         None,
-        lambda: progress_service.update_progress(
+        lambda: progress_service.update_file_progress_only(
             task_id=batch_task_id,
-            current_step=file_index + 1,
-            current_file=current_file,
+            file_index=file_index,
+            filename=filename,
             status=status,
             file_progress=file_progress,
-            completed=False,  # NEVER mark as completed here
-            failed_file=None
+            message=message
         )
     )
 
@@ -283,13 +282,11 @@ def process_batch_documents(self, payloads: list[dict]):
         )
         
         # ✅ FIX: Initial progress at 0% - use original method with completed=False
-        progress_service.update_progress(
+        # ✅ FIX: Initial progress at 0%
+        progress_service.update_status(
             task_id=batch_task_id,
-            current_step=0,
-            current_file="Initializing batch processing...",
             status='processing',
-            file_progress=0,  # Start at 0%
-            completed=False  # Important: not completed
+            message="Initializing batch processing..."
         )
         
         # ===== PARALLEL PROCESSING =====
@@ -322,12 +319,11 @@ def process_batch_documents(self, payloads: list[dict]):
         
         # Update progress to failed
         if 'batch_task_id' in locals():
-            progress_service.update_progress(
+            progress_service.update_status(
                 task_id=batch_task_id,
                 status='failed',
-                current_file=f"Batch failed: {str(e)}",
-                file_progress=0,
-                completed=False
+                message=f"Batch failed: {str(e)}",
+                completed=True
             )
         
         raise
@@ -357,15 +353,13 @@ def _batch_complete_callback(results: List[Dict], batch_task_id: str, filenames:
             else:
                 logger.error(f"❌ Batch file {i+1} failed: {filename}")
         
-        # ✅ FIX: ONLY HERE we mark as 100% complete AND completed=True
+        # ✅ FIX: ONLY HERE we mark as 100% complete using update_batch_progress
         final_status = 'completed' if failed_count == 0 else 'completed_with_errors'
-        progress_service.update_progress(
+        progress_service.update_batch_progress(
             task_id=batch_task_id,
-            current_step=len(results),
-            current_file="All files processed - Batch complete",
+            results=results,
             status=final_status,
-            file_progress=100,  # ONLY HERE we set 100%
-            completed=True  # ONLY HERE we mark as completed
+            completed=True
         )
         
         logger.info(f"🏁 Batch complete: {success_count}/{len(results)} successful, {failed_count} failed, {skipped_count} skipped")
@@ -387,11 +381,11 @@ def _batch_complete_callback(results: List[Dict], batch_task_id: str, filenames:
         logger.error(f"❌ Batch callback failed: {str(e)}")
         
         # Even on callback failure, mark as failed with 100%
-        progress_service.update_progress(
+        # Even on callback failure, mark as failed with 100%
+        progress_service.update_status(
             task_id=batch_task_id,
             status='failed',
-            current_file=f"Batch callback failed: {str(e)}",
-            file_progress=100,
+            message=f"Batch callback failed: {str(e)}",
             completed=True
         )
         
@@ -402,43 +396,7 @@ def _batch_complete_callback(results: List[Dict], batch_task_id: str, filenames:
         }
 
 
-# ============================================================================
-# SIMPLE FIX FOR PROGRESS SERVICE
-# ============================================================================
 
-"""
-If you want to keep it simple, just modify your existing progress_service.py
-to NOT calculate progress based on current_step/total_steps.
-
-Instead, add this logic to your update_progress method:
-
-In services/progress_service.py, modify the update_progress method:
-
-def update_progress(self, task_id: str, current_step: int, current_file: str, 
-                   status: str, file_progress: int, completed: bool = False, 
-                   failed_file: str = None):
-    
-    progress_data = self.get_progress(task_id)
-    if not progress_data:
-        return
-    
-    progress_data['current_step'] = current_step
-    progress_data['current_file'] = current_file
-    progress_data['status'] = status
-    
-    # ✅ FIX: Only use file_progress for overall progress, not step-based calculation
-    if completed:
-        # Only set 100% when explicitly marked as completed
-        progress_data['file_progress_percent'] = 100
-    else:
-        # Use the provided file_progress, don't calculate from steps
-        progress_data['file_progress_percent'] = min(file_progress, 99)  # Cap at 99%
-    
-    if failed_file:
-        progress_data['failed_files'] = progress_data.get('failed_files', []) + [failed_file]
-    
-    self._save_progress(task_id, progress_data, completed=completed)
-"""
 
 
 # ============================================================================

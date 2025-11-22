@@ -470,7 +470,8 @@ class WebhookService:
         comparison_task = asyncio.create_task(
             asyncio.to_thread(
                 analyzer.compare_with_previous_documents,
-                processed_data["text_for_analysis"]
+                processed_data["text_for_analysis"],
+                document_analysis.document_type
             )
         )
         

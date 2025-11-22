@@ -411,113 +411,26 @@ class ProgressService:
         except Exception as e:
             logger.error(f"❌ Failed to emit batch_started for task {task_id}: {str(e)}")
 
-    def update_progress(
-        self, 
-        task_id: str, 
-        current_step: int = None,
-        current_file: str = None,
-        status: str = None,
-        completed: bool = False,
-        failed_file: Optional[str] = None,
-        file_progress: Optional[int] = None
-    ):
-        """Simplified progress calculation - each file contributes equally (BACKWARD COMPAT, DEPRECATED - USE update_file_progress_only)"""
+    def update_status(self, task_id: str, status: str, message: str = None, completed: bool = False):
+        """Update task status and message (non-file specific)"""
         try:
-            progress_key = f"progress:{task_id}"
-            progress_data = self.redis_client.get(progress_key)
-            
+            progress_data = self._get_progress_sync(task_id)
             if not progress_data:
-                error_msg = f"❌ Progress data not found for task {task_id}"
-                logger.warning(error_msg)
-                return None
+                return
+
+            progress_data['status'] = status
+            if message:
+                progress_data['current_file'] = message
             
-            progress = json.loads(progress_data)
-            
-            # Update basic fields
-            if current_step is not None:
-                progress['current_step'] = current_step
-            if current_file is not None:
-                progress['current_file'] = current_file
-            if status is not None:
-                progress['status'] = status
-            
-            # Handle file-level progress
-            if file_progress is not None:
-                progress['current_file_progress'] = min(100, max(0, file_progress))
-            
-            # Handle failed file
-            if failed_file:
-                if failed_file not in progress['failed_files']:
-                    progress['failed_files'].append(failed_file)
-                progress['current_file_progress'] = 100
-            
-            # Handle completion of current file
             if completed:
-                if not failed_file and current_file and current_file not in progress['processed_files']:
-                    progress['processed_files'].append(current_file)
-                
-                old_completed = progress['completed_steps']
-                progress['completed_steps'] += 1
-                progress['current_file_progress'] = 0
-                
-                logger.info(f"✅ File processed: {current_file or 'unknown'} | Completed: {old_completed} -> {progress['completed_steps']}")
+                progress_data['progress_percentage'] = 100
+                progress_data['end_time'] = datetime.now().isoformat()
+
+            self._save_progress(task_id, progress_data, completed=completed)
+            self._emit_progress_update_background(task_id, progress_data)
             
-            # SIMPLIFIED PROGRESS CALCULATION:
-            # Each file contributes equally to overall progress
-            total_steps = progress['total_steps']
-            completed_steps = progress['completed_steps']
-            
-            # Base progress from completed files
-            base_progress = (completed_steps / total_steps) * 100 if total_steps > 0 else 0
-            
-            # Add current file progress as fraction
-            current_file_contribution = (progress.get('current_file_progress', 0) / 100) * (1 / total_steps) * 100
-            
-            # Total progress
-            new_percentage = min(100, base_progress + current_file_contribution)
-            old_percentage = progress.get('progress_percentage', 0)
-            progress['progress_percentage'] = new_percentage
-            
-            calc_msg = f"📊 Progress: {completed_steps}/{total_steps} files + {progress.get('current_file_progress', 0)}% current = {new_percentage:.1f}% overall"
-            logger.info(calc_msg)
-            
-            # Update queue progress if this task is part of one
-            queue_id = progress.get('queue_id')
-            if queue_id:
-                self.update_task_progress_in_queue(queue_id, task_id, new_percentage, progress['status'])
-            
-            # Check if all files are completed
-            if progress['completed_steps'] >= total_steps and progress['status'] != 'completed':
-                progress['status'] = 'completed'
-                progress['end_time'] = datetime.now().isoformat()
-                progress['progress_percentage'] = 100  # Force 100% when all files done
-                complete_msg = f"🏁 Task {task_id} completed: {progress['completed_steps']}/{total_steps} files"
-                logger.info(complete_msg)
-                
-                # Mark as completed in queue
-                if queue_id:
-                    success = len(progress['failed_files']) == 0
-                    self.complete_task_in_queue(queue_id, task_id, success)
-                
-                # Schedule reset after completion
-                self._schedule_reset_task(task_id, progress)
-                
-                self._emit_task_complete_background(task_id, progress)
-            
-            # Save updated progress
-            self.redis_client.setex(progress_key, 3600, json.dumps(progress))
-            
-            update_msg = f"📊 Saved: {progress['progress_percentage']:.1f}% | Step: {progress['current_step']} | Status: {progress['status']} | File: '{progress['current_file']}'"
-            logger.info(update_msg)
-            
-            # Emit progress update
-            self._emit_progress_update_background(task_id, progress)
-            
-            return progress
         except Exception as e:
-            error_msg = f"❌ Failed to update progress for task {task_id}: {str(e)}"
-            logger.error(error_msg)
-            return None
+            logger.error(f"❌ Failed to update status for task {task_id}: {str(e)}")
 
     def update_file_progress_only(self, task_id: str, file_index: int, filename: str, status: str, file_progress: int, message: str = None):
         """
@@ -568,6 +481,9 @@ class ProgressService:
         
         self._save_progress(task_id, progress_data, completed=False)
         logger.info(f"📊 File {file_index} ({filename}): {file_progress}% | Overall: {progress_data['progress_percentage']:.1f}% | {completed_files}/{total_files} files")
+        
+        # Emit progress update
+        self._emit_progress_update_background(task_id, progress_data)
 
     def update_batch_progress(self, task_id: str, results: List[Dict], status: str = 'completed', completed: bool = True):
         """
@@ -605,6 +521,10 @@ class ProgressService:
         
         self._save_progress(task_id, progress_data, completed=completed)
         logger.info(f"🏁 Batch {task_id} complete: {success_count}/{len(results)} | Queue updated")
+        
+        # Emit completion and schedule reset
+        self._emit_task_complete_background(task_id, progress_data)
+        self._schedule_reset_task(task_id, progress_data)
 
     def _get_progress_sync(self, task_id: str) -> Optional[Dict]:
         """SYNC helper for Celery/internal use"""
