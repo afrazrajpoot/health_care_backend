@@ -680,7 +680,7 @@ class DatabaseService:
 
 
   
-    async def update_previous_fields(
+    async def update_document_fields(
         self,
         patient_name: str,
         dob: str,

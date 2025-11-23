@@ -497,7 +497,7 @@ Extract into COMPREHENSIVE structured JSON with all critical details:
             mode_focus = """
 MODE: GENERAL MEDICINE (GM)
 - Emphasize clinical details: detailed physical exam findings, treatment history, current therapies, diagnostic recommendations
-- Structure: Patient Info → Diagnosis → Physical Exam (detailed) → Clinical Status → Medications/Treatments → Recommendations (clinical focus)
+- Structure: Patient Info (MUST INCLUDE CLAIM NUMBER) → Diagnosis → Physical Exam (detailed) → Clinical Status → Medications/Treatments → Recommendations (clinical focus)
 - Tone: Clinical, comprehensive for ongoing care planning
 - Length: 400-600 words, detailed but readable for physicians
 """
@@ -505,12 +505,12 @@ MODE: GENERAL MEDICINE (GM)
             mode_focus = """
 MODE: WORKERS COMPENSATION (WC)
 - Emphasize medical-legal aspects: MMI/WPI status, work restrictions, impairment ratings, return-to-work prognosis
-- Structure: Report Overview → Patient/Claim Info → Diagnosis → Medical-Legal Conclusions (priority) → Work Status → Recommendations (actionable for claims)
+- Structure: Report Overview → Patient/Claim Info (MUST INCLUDE CLAIM NUMBER) → Diagnosis → Medical-Legal Conclusions (priority) → Work Status → Recommendations (actionable for claims)
 - Tone: Objective, legal-focused, highlighting impairment and restrictions
 - Length: 300-500 words, concise for adjusters/attorneys
 """
         else:
-            mode_focus = "MODE: DEFAULT - Balanced clinical and legal focus"
+            mode_focus = "MODE: DEFAULT - Balanced clinical and legal focus. Patient Info MUST INCLUDE CLAIM NUMBER."
 
         system_prompt = SystemMessagePromptTemplate.from_template(f"""
 You are a medical documentation expert generating a structured long summary from extracted QME data.
@@ -524,6 +524,7 @@ STRICT RULES:
 - If data is empty/missing, note "Not specified" briefly and move on
 - Ensure factual, professional tone
 - Output as markdown-formatted text for readability
+- **MANDATORY: You MUST include the "Claim Number" in the Patient Information section. If it is missing in the data, explicitly state "Claim Number: Not specified".**
 
 Structure the summary logically based on mode.
         """)

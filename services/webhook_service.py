@@ -252,212 +252,7 @@ class WebhookService:
             "mode": mode
         }
     
-    async def perform_patient_lookup(self, db_service, processed_data: dict, physician_id: str) -> dict:
-        """
-        OPTIMIZED: Step 2 with FRESH DB queries (no caching).
-        Always gets latest patient data from database.
-        """
-        logger.info(f"🔍 Performing FRESH patient lookup for physician_id: {physician_id}")
-        
-        patient_name = processed_data["patient_name_for_query"]
-        claim_number = processed_data["claim_number_for_query"]
-        
-        # 🚫 NO CACHING - Always query DB directly for fresh data
-        logger.info(f"🔍 Querying DB directly for {patient_name} (caching disabled)")
-        lookup_data = await db_service.get_patient_claim_numbers(
-            patient_name=patient_name,
-            physicianId=physician_id,
-            dob=processed_data["dob_for_query"],
-            claim_number=claim_number
-        )
-        
-        # 🎯 DEBUG: Comprehensive logging of lookup data
-        logger.info(f"🎯 DEBUG - LOOKUP DATA RECEIVED:")
-        logger.info(f"  - total_documents: {lookup_data.get('total_documents', 0)}")
-        logger.info(f"  - patient_name: '{lookup_data.get('patient_name')}'")
-        logger.info(f"  - dob: '{lookup_data.get('dob')}'")
-        logger.info(f"  - doi: '{lookup_data.get('doi')}'")
-        logger.info(f"  - claim_number: '{lookup_data.get('claim_number')}'")
-        logger.info(f"  - has_conflicting_claims: {lookup_data.get('has_conflicting_claims', False)}")
-        logger.info(f"  - unique_valid_claims: {lookup_data.get('unique_valid_claims', [])}")
-        if lookup_data.get('documents'):
-            logger.info(f"  - individual documents:")
-            for i, doc in enumerate(lookup_data['documents']):
-                logger.info(f"    Doc {i+1}: patient='{doc.get('patientName')}', dob='{doc.get('dob')}', doi='{doc.get('doi')}', claim='{doc.get('claimNumber')}'")
-        
-        is_first_time_claim_only = (
-            processed_data["has_claim_number"]
-            and not processed_data["has_patient_name"]
-            and lookup_data
-            and lookup_data.get("total_documents", 0) == 0
-        )
-        
-        if is_first_time_claim_only:
-            logger.info("✅ First time document with only claim number")
-        
-        has_conflicting_claims = lookup_data.get("has_conflicting_claims", False) if lookup_data else False
-        conflicting_claims_reason = None
-        
-        if has_conflicting_claims and is_first_time_claim_only:
-            has_conflicting_claims = False
-            logger.info("🔄 Ignoring conflicts for first-time claim-only document")
-        
-        if has_conflicting_claims and not is_first_time_claim_only:
-            conflicting_claims_reason = f"Multiple conflicting claim numbers found: {lookup_data.get('unique_valid_claims', [])}"
-            logger.warning(f"⚠️ {conflicting_claims_reason}")
-        
-        document_analysis = processed_data["document_analysis"]
-        
-        # 🎯 DEBUG: Document analysis before override
-        logger.info(f"🎯 DEBUG - DOCUMENT ANALYSIS BEFORE OVERRIDE:")
-        logger.info(f"  - patient_name: '{document_analysis.patient_name}'")
-        logger.info(f"  - dob: '{document_analysis.dob}'")
-        logger.info(f"  - doi: '{document_analysis.doi}'")
-        logger.info(f"  - claim_number: '{document_analysis.claim_number}'")
-        
-        # FIXED: SIMPLIFIED override logic - override if we have ANY lookup data
-        override_attempted = False
-        if lookup_data and lookup_data.get("total_documents", 0) > 0 and (not has_conflicting_claims or is_first_time_claim_only):
-            fetched_patient_name = lookup_data.get("patient_name")
-            fetched_dob = lookup_data.get("dob")
-            fetched_doi = lookup_data.get("doi")
-            fetched_claim_number = lookup_data.get("claim_number")
-            
-            logger.info(f"🔄 ATTEMPTING FIELD OVERRIDE:")
-            logger.info(f"  - Document current - Patient: '{document_analysis.patient_name}', DOB: '{document_analysis.dob}', DOI: '{document_analysis.doi}', Claim: '{document_analysis.claim_number}'")
-            logger.info(f"  - Fetched from DB  - Patient: '{fetched_patient_name}', DOB: '{fetched_dob}', DOI: '{fetched_doi}', Claim: '{fetched_claim_number}'")
-            
-            # SIMPLIFIED: Override ANY "not specified" or missing field with fetched data
-            def should_override(doc_value, fetched_value):
-                if not fetched_value:
-                    logger.debug(f"    ❌ No fetched value to override with")
-                    return False
-                if not doc_value or str(doc_value).lower() in ["not specified", "unknown", ""]:
-                    logger.debug(f"    ✅ Should override: doc_value='{doc_value}', fetched_value='{fetched_value}'")
-                    return True
-                logger.debug(f"    ❌ No override needed: doc_value='{doc_value}' is already valid")
-                return False
-            
-            override_attempted = True
-            
-            # Patient name override
-            if should_override(document_analysis.patient_name, fetched_patient_name):
-                old_value = document_analysis.patient_name
-                document_analysis.patient_name = fetched_patient_name
-                logger.info(f"🔄 OVERRODE patient_name: '{old_value}' → '{fetched_patient_name}'")
-            else:
-                logger.info(f"ℹ️ No patient_name override needed")
-            
-            # DOB override  
-            if should_override(document_analysis.dob, fetched_dob):
-                old_value = document_analysis.dob
-                document_analysis.dob = fetched_dob
-                logger.info(f"🔄 OVERRODE dob: '{old_value}' → '{fetched_dob}'")
-            else:
-                logger.info(f"ℹ️ No dob override needed")
-            
-            # DOI override
-            if should_override(document_analysis.doi, fetched_doi):
-                old_value = document_analysis.doi
-                document_analysis.doi = fetched_doi
-                logger.info(f"🔄 OVERRODE doi: '{old_value}' → '{fetched_doi}'")
-            else:
-                logger.info(f"ℹ️ No doi override needed")
-            
-            # Claim number override
-            if should_override(document_analysis.claim_number, fetched_claim_number):
-                old_value = document_analysis.claim_number
-                document_analysis.claim_number = fetched_claim_number
-                logger.info(f"🔄 OVERRODE claim_number: '{old_value}' → '{fetched_claim_number}'")
-            else:
-                logger.info(f"ℹ️ No claim_number override needed")
-            
-            # FIXED: Also check for mismatches (warn but don't override)
-            if (document_analysis.patient_name and fetched_patient_name and 
-                str(document_analysis.patient_name).strip().lower() != str(fetched_patient_name).strip().lower()):
-                logger.warning(f"⚠️ Patient name mismatch - document: '{document_analysis.patient_name}', previous: '{fetched_patient_name}'")
-            
-            if (document_analysis.dob and fetched_dob and 
-                str(document_analysis.dob).strip().lower() != str(fetched_dob).strip().lower()):
-                logger.warning(f"⚠️ DOB mismatch - document: '{document_analysis.dob}', previous: '{fetched_dob}'")
-            
-            if (document_analysis.doi and fetched_doi and 
-                str(document_analysis.doi).strip() != str(fetched_doi).strip()):
-                logger.warning(f"⚠️ DOI mismatch - document: '{document_analysis.doi}', previous: '{fetched_doi}'")
-            
-            if (document_analysis.claim_number and fetched_claim_number and 
-                str(document_analysis.claim_number).strip().lower() != str(fetched_claim_number).strip().lower()):
-                logger.warning(f"⚠️ Claim mismatch - document: '{document_analysis.claim_number}', previous: '{fetched_claim_number}'")
-        else:
-            logger.info(f"🎯 DEBUG - OVERRIDE SKIPPED:")
-            logger.info(f"  - lookup_data exists: {bool(lookup_data)}")
-            logger.info(f"  - total_documents > 0: {lookup_data.get('total_documents', 0) > 0 if lookup_data else False}")
-            logger.info(f"  - has_conflicting_claims: {has_conflicting_claims}")
-            logger.info(f"  - is_first_time_claim_only: {is_first_time_claim_only}")
-        
-        # FIXED: Better field validation after override
-        def is_valid_field(value):
-            is_valid = value and str(value).lower() not in ["not specified", "unknown", ""]
-            logger.debug(f"    Field validation: '{value}' → {is_valid}")
-            return is_valid
-        
-        updated_claim_number_for_query = (
-            document_analysis.claim_number
-            if is_valid_field(document_analysis.claim_number)
-            else None
-        )
-        
-        updated_patient_name_for_query = (
-            document_analysis.patient_name
-            if is_valid_field(document_analysis.patient_name)
-            else "Unknown Patient"
-        )
-        
-        # FIXED: Check actual values after override
-        updated_required_fields = {
-            "patient_name": document_analysis.patient_name,
-            "dob": document_analysis.dob,
-        }
-        
-        updated_missing_fields = []
-        for field_name, field_value in updated_required_fields.items():
-            if not is_valid_field(field_value):
-                updated_missing_fields.append(field_name)
-        
-        has_missing_required_fields = len(updated_missing_fields) > 0
-        
-        # Skip failure conditions if document has claim number
-        if processed_data.get("has_claim_number"):
-            logger.info("✅ Document has claim number — skipping failure conditions")
-            has_conflicting_claims = False
-            has_missing_required_fields = False
-            conflicting_claims_reason = None
-            updated_missing_fields = []
-        
-        # 🎯 DEBUG: Final state after all processing
-        logger.info(f"🎯 DEBUG - FINAL STATE:")
-        logger.info(f"  - Patient: '{document_analysis.patient_name}'")
-        logger.info(f"  - DOB: '{document_analysis.dob}'")
-        logger.info(f"  - DOI: '{document_analysis.doi}'")
-        logger.info(f"  - Claim: '{document_analysis.claim_number}'")
-        logger.info(f"  - Missing fields: {updated_missing_fields}")
-        logger.info(f"  - Has conflicts: {has_conflicting_claims}")
-        logger.info(f"  - Total documents found: {lookup_data.get('total_documents', 0) if lookup_data else 0}")
-        logger.info(f"  - Override attempted: {override_attempted}")
-        
-        return {
-            "lookup_data": lookup_data,
-            "has_conflicting_claims": has_conflicting_claims,
-            "conflicting_claims_reason": conflicting_claims_reason,
-            "updated_missing_fields": updated_missing_fields,
-            "has_missing_required_fields": has_missing_required_fields,
-            "updated_claim_number_for_query": updated_claim_number_for_query,
-            "updated_patient_name_for_query": updated_patient_name_for_query,
-            "document_analysis": document_analysis,
-            "is_first_time_claim_only": is_first_time_claim_only,
-            "mode": processed_data.get("mode")
-        }
-
+   
     async def compare_and_determine_status(self, processed_data: dict, lookup_result: dict, db_service, physician_id: str) -> dict:
         """
         OPTIMIZED: Step 3 with parallel DB fetch + comparison.
@@ -683,54 +478,317 @@ class WebhookService:
             "has_multiple_body_parts": len(summary_snapshots) > 1
         }
 
+    async def perform_patient_lookup(self, db_service, processed_data: dict, physician_id: str) -> dict:
+        """
+        OPTIMIZED: Step 2 with FRESH DB queries (no caching).
+        Always gets latest patient data from database.
+        FIXED: PROPER BIDIRECTIONAL OVERRIDE - update any field that's "not specified"
+        NOW INCLUDES: Database updates for previous documents
+        """
+        logger.info(f"🔍 Performing FRESH patient lookup for physician_id: {physician_id}")
+        
+        patient_name = processed_data["patient_name_for_query"]
+        claim_number = processed_data["claim_number_for_query"]
+        
+        # 🚫 NO CACHING - Always query DB directly for fresh data
+        logger.info(f"🔍 Querying DB directly for {patient_name} (caching disabled)")
+        lookup_data = await db_service.get_patient_claim_numbers(
+            patient_name=patient_name,
+            physicianId=physician_id,
+            dob=processed_data["dob_for_query"],
+            claim_number=claim_number
+        )
+        
+        # 🎯 DEBUG: Comprehensive logging of lookup data
+        logger.info(f"🎯 DEBUG - LOOKUP DATA RECEIVED:")
+        logger.info(f"  - total_documents: {lookup_data.get('total_documents', 0)}")
+        logger.info(f"  - patient_name: '{lookup_data.get('patient_name')}'")
+        logger.info(f"  - dob: '{lookup_data.get('dob')}'")
+        logger.info(f"  - doi: '{lookup_data.get('doi')}'")
+        logger.info(f"  - claim_number: '{lookup_data.get('claim_number')}'")
+        logger.info(f"  - has_conflicting_claims: {lookup_data.get('has_conflicting_claims', False)}")
+        logger.info(f"  - unique_valid_claims: {lookup_data.get('unique_valid_claims', [])}")
+        if lookup_data.get('documents'):
+            logger.info(f"  - individual documents:")
+            for i, doc in enumerate(lookup_data['documents']):
+                logger.info(f"    Doc {i+1}: patient='{doc.get('patientName')}', dob='{doc.get('dob')}', doi='{doc.get('doi')}', claim='{doc.get('claimNumber')}'")
+        
+        is_first_time_claim_only = (
+            processed_data["has_claim_number"]
+            and not processed_data["has_patient_name"]
+            and lookup_data
+            and lookup_data.get("total_documents", 0) == 0
+        )
+        
+        if is_first_time_claim_only:
+            logger.info("✅ First time document with only claim number")
+        
+        has_conflicting_claims = lookup_data.get("has_conflicting_claims", False) if lookup_data else False
+        conflicting_claims_reason = None
+        
+        if has_conflicting_claims and is_first_time_claim_only:
+            has_conflicting_claims = False
+            logger.info("🔄 Ignoring conflicts for first-time claim-only document")
+        
+        if has_conflicting_claims and not is_first_time_claim_only:
+            conflicting_claims_reason = f"Multiple conflicting claim numbers found: {lookup_data.get('unique_valid_claims', [])}"
+            logger.warning(f"⚠️ {conflicting_claims_reason}")
+        
+        document_analysis = processed_data["document_analysis"]
+        
+        # 🎯 DEBUG: Document analysis before override
+        logger.info(f"🎯 DEBUG - DOCUMENT ANALYSIS BEFORE OVERRIDE:")
+        logger.info(f"  - patient_name: '{document_analysis.patient_name}'")
+        logger.info(f"  - dob: '{document_analysis.dob}'")
+        logger.info(f"  - doi: '{document_analysis.doi}'")
+        logger.info(f"  - claim_number: '{document_analysis.claim_number}'")
+        logger.info(f"  - has_patient_name: {processed_data['has_patient_name']}")
+        logger.info(f"  - has_claim_number: {processed_data['has_claim_number']}")
+        
+        # ✅ FIXED: PROPER BIDIRECTIONAL OVERRIDE - UPDATE ANY "NOT SPECIFIED" FIELD
+        override_attempted = False
+        field_updates = []
+        
+        # 🆕 NEW: Track if we need to update previous documents in DB
+        previous_documents_to_update = []
+        
+        if lookup_data and lookup_data.get("total_documents", 0) > 0 and (not has_conflicting_claims or is_first_time_claim_only):
+            fetched_patient_name = lookup_data.get("patient_name")
+            fetched_dob = lookup_data.get("dob")
+            fetched_doi = lookup_data.get("doi")
+            fetched_claim_number = lookup_data.get("claim_number")
+            
+            logger.info(f"🔄 ATTEMPTING BIDIRECTIONAL FIELD OVERRIDE:")
+            logger.info(f"  - Document current - Patient: '{document_analysis.patient_name}', DOB: '{document_analysis.dob}', DOI: '{document_analysis.doi}', Claim: '{document_analysis.claim_number}'")
+            logger.info(f"  - Fetched from DB  - Patient: '{fetched_patient_name}', DOB: '{fetched_dob}', DOI: '{fetched_doi}', Claim: '{fetched_claim_number}'")
+            
+            # ✅ SIMPLE RULE: If either value is good, use the good one. If both good, prefer document value.
+            def override_if_better(current_value, previous_value, field_name):
+                current_is_bad = not current_value or str(current_value).lower() in ["not specified", "unknown", "", "none"]
+                previous_is_bad = not previous_value or str(previous_value).lower() in ["not specified", "unknown", "", "none"]
+                
+                logger.info(f"🔍 OVERRIDE CHECK {field_name}:")
+                logger.info(f"   - Current: '{current_value}' (bad: {current_is_bad})")
+                logger.info(f"   - Previous: '{previous_value}' (bad: {previous_is_bad})")
+                
+                # Case 1: Current is bad, previous is good → USE PREVIOUS
+                if current_is_bad and not previous_is_bad:
+                    logger.info(f"🔄 PREVIOUS IMPROVES {field_name}: '{current_value}' → '{previous_value}'")
+                    field_updates.append(f"previous_improved_{field_name}")
+                    return previous_value
+                
+                # Case 2: Previous is bad, current is good → USE CURRENT (WILL UPDATE PREVIOUS DOCS LATER)
+                elif not current_is_bad and previous_is_bad:
+                    logger.info(f"🔄 DOCUMENT IMPROVES {field_name}: '{previous_value}' → '{current_value}'")
+                    field_updates.append(f"document_improved_{field_name}")
+                    return current_value
+                
+                # Case 3: Both good but different → USE CURRENT (but warn)
+                elif not current_is_bad and not previous_is_bad and str(current_value).strip().lower() != str(previous_value).strip().lower():
+                    logger.warning(f"⚠️ {field_name} mismatch - document: '{current_value}', previous: '{previous_value}'")
+                    return current_value
+                
+                # Case 4: Both good and same, or both bad → KEEP CURRENT
+                else:
+                    logger.info(f"ℹ️ No {field_name} override needed")
+                    return current_value
+            
+            override_attempted = True
+            
+            # Apply bidirectional override to each field (EXCEPT DOI - you said to remove DOI)
+            old_patient_name = document_analysis.patient_name
+            document_analysis.patient_name = override_if_better(
+                document_analysis.patient_name, fetched_patient_name, "patient_name"
+            )
+            if old_patient_name != document_analysis.patient_name:
+                logger.info(f"✅ PATIENT NAME UPDATED: '{old_patient_name}' → '{document_analysis.patient_name}'")
+            
+            old_dob = document_analysis.dob
+            document_analysis.dob = override_if_better(
+                document_analysis.dob, fetched_dob, "dob"
+            )
+            if old_dob != document_analysis.dob:
+                logger.info(f"✅ DOB UPDATED: '{old_dob}' → '{document_analysis.dob}'")
+            
+            old_claim = document_analysis.claim_number
+            document_analysis.claim_number = override_if_better(
+                document_analysis.claim_number, fetched_claim_number, "claim_number"
+            )
+            if old_claim != document_analysis.claim_number:
+                logger.info(f"✅ CLAIM NUMBER UPDATED: '{old_claim}' → '{document_analysis.claim_number}'")
+            
+            # ⚠️ REMOVE DOI OVERRIDE - you said to remove DOI
+            logger.info(f"ℹ️ Skipping DOI override as requested")
+            
+            # 🆕 NEW: Identify which previous documents need updates
+            if lookup_data.get('documents'):
+                for doc in lookup_data['documents']:
+                    update_needed = False
+                    update_fields = {}
+                    
+                    # Check if this document has bad fields that our current document can improve
+                    current_doc_patient = doc.get('patientName', '')
+                    current_doc_dob = doc.get('dob', '')
+                    current_doc_claim = doc.get('claimNumber', '')
+                    
+                    def is_bad_field(value):
+                        return not value or str(value).lower() in ["not specified", "unknown", "", "none"]
+                    
+                    # If previous document has bad patient name but current has good one
+                    if (is_bad_field(current_doc_patient) and 
+                        not is_bad_field(document_analysis.patient_name)):
+                        update_fields['patientName'] = document_analysis.patient_name
+                        update_needed = True
+                        logger.info(f"📝 Will update previous doc patient: '{current_doc_patient}' → '{document_analysis.patient_name}'")
+                    
+                    # If previous document has bad DOB but current has good one
+                    if (is_bad_field(current_doc_dob) and 
+                        not is_bad_field(document_analysis.dob)):
+                        update_fields['dob'] = document_analysis.dob
+                        update_needed = True
+                        logger.info(f"📝 Will update previous doc DOB: '{current_doc_dob}' → '{document_analysis.dob}'")
+                    
+                    # If previous document has bad claim but current has good one
+                    if (is_bad_field(current_doc_claim) and 
+                        not is_bad_field(document_analysis.claim_number)):
+                        update_fields['claimNumber'] = document_analysis.claim_number
+                        update_needed = True
+                        logger.info(f"📝 Will update previous doc claim: '{current_doc_claim}' → '{document_analysis.claim_number}'")
+                    
+                    if update_needed:
+                        previous_documents_to_update.append({
+                            'document_id': doc.get('id'),
+                            'update_fields': update_fields,
+                            'original_doc': doc
+                        })
+            
+            logger.info(f"🎯 BIDIRECTIONAL OVERRIDE SUMMARY: {field_updates}")
+            
+        else:
+            logger.info(f"🎯 DEBUG - OVERRIDE SKIPPED:")
+            logger.info(f"  - lookup_data exists: {bool(lookup_data)}")
+            logger.info(f"  - total_documents > 0: {lookup_data.get('total_documents', 0) > 0 if lookup_data else False}")
+            logger.info(f"  - has_conflicting_claims: {has_conflicting_claims}")
+            logger.info(f"  - is_first_time_claim_only: {is_first_time_claim_only}")
+        
+        # 🆕 NEW: ACTUALLY UPDATE THE DATABASE RECORDS - MOVED HERE FROM save_and_process_document
+        if previous_documents_to_update:
+            logger.info(f"💾 UPDATING {len(previous_documents_to_update)} PREVIOUS DOCUMENTS IN DATABASE")
+            for doc_update in previous_documents_to_update:
+                try:
+                    document_id = doc_update['document_id']
+                    update_fields = doc_update['update_fields']
+                    
+                    logger.info(f"💾 Updating document {document_id} with fields: {update_fields}")
+                    
+                    # Use the bulk update method with the specific criteria
+                    updated_count = await db_service.update_document_fields(
+                        patient_name=document_analysis.patient_name,
+                        dob=document_analysis.dob,
+                        physician_id=physician_id,
+                        claim_number=document_analysis.claim_number,
+                        doi=document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() not in ["not specified", "unknown", ""] else None
+                    )
+                    
+                    logger.info(f"✅ Database update completed for document {document_id}")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Error updating document {doc_update['document_id']}: {str(e)}")
+        else:
+            logger.info("💾 No previous documents need database updates")
+        
+        # Field validation after override
+        def is_valid_field(value):
+            is_valid = value and str(value).lower() not in ["not specified", "unknown", "", "none"]
+            return is_valid
+        
+        updated_claim_number_for_query = (
+            document_analysis.claim_number
+            if is_valid_field(document_analysis.claim_number)
+            else None
+        )
+        
+        updated_patient_name_for_query = (
+            document_analysis.patient_name
+            if is_valid_field(document_analysis.patient_name)
+            else "Unknown Patient"
+        )
+        
+        # Check required fields after override
+        updated_required_fields = {
+            "patient_name": document_analysis.patient_name,
+            "dob": document_analysis.dob,
+        }
+        
+        updated_missing_fields = []
+        for field_name, field_value in updated_required_fields.items():
+            if not is_valid_field(field_value):
+                updated_missing_fields.append(field_name)
+        
+        has_missing_required_fields = len(updated_missing_fields) > 0
+        
+        # Skip failure conditions if document has claim number
+        if processed_data.get("has_claim_number"):
+            logger.info("✅ Document has claim number — skipping failure conditions")
+            has_conflicting_claims = False
+            has_missing_required_fields = False
+            conflicting_claims_reason = None
+            updated_missing_fields = []
+        
+        # 🎯 DEBUG: Final state after all processing
+        logger.info(f"🎯 DEBUG - FINAL STATE:")
+        logger.info(f"  - Patient: '{document_analysis.patient_name}'")
+        logger.info(f"  - DOB: '{document_analysis.dob}'")
+        logger.info(f"  - DOI: '{document_analysis.doi}'")
+        logger.info(f"  - Claim: '{document_analysis.claim_number}'")
+        logger.info(f"  - Missing fields: {updated_missing_fields}")
+        logger.info(f"  - Has conflicts: {has_conflicting_claims}")
+        logger.info(f"  - Total documents found: {lookup_data.get('total_documents', 0) if lookup_data else 0}")
+        logger.info(f"  - Override attempted: {override_attempted}")
+        logger.info(f"  - Field updates: {field_updates}")
+        logger.info(f"  - Previous documents updated: {len(previous_documents_to_update)}")
+        
+        # 🎯 CRITICAL: Check if we should update previous documents
+        has_valid_claim_for_previous_update = is_valid_field(document_analysis.claim_number)
+        has_valid_patient_for_previous_update = is_valid_field(document_analysis.patient_name)
+        
+        logger.info(f"🎯 PREVIOUS UPDATE ANALYSIS:")
+        logger.info(f"  - Has valid claim for previous update: {has_valid_claim_for_previous_update} ('{document_analysis.claim_number}')")
+        logger.info(f"  - Has valid patient for previous update: {has_valid_patient_for_previous_update} ('{document_analysis.patient_name}')")
+        logger.info(f"  - Total previous documents: {lookup_data.get('total_documents', 0) if lookup_data else 0}")
+        logger.info(f"  - Document improvements for previous: {[f for f in field_updates if 'document_improved' in f]}")
+        
+        return {
+            "lookup_data": lookup_data,
+            "has_conflicting_claims": has_conflicting_claims,
+            "conflicting_claims_reason": conflicting_claims_reason,
+            "updated_missing_fields": updated_missing_fields,
+            "has_missing_required_fields": has_missing_required_fields,
+            "updated_claim_number_for_query": updated_claim_number_for_query,
+            "updated_patient_name_for_query": updated_patient_name_for_query,
+            "document_analysis": document_analysis,
+            "is_first_time_claim_only": is_first_time_claim_only,
+            "mode": processed_data.get("mode"),
+            "field_updates": field_updates,  # Track what was updated
+            "override_attempted": override_attempted,
+            "has_valid_claim_for_previous_update": has_valid_claim_for_previous_update,
+            "has_valid_patient_for_previous_update": has_valid_patient_for_previous_update,
+            "previous_documents_updated": len(previous_documents_to_update)  # Track DB updates
+        }
     async def save_and_process_document(self, processed_data: dict, status_result: dict, data: dict, db_service) -> dict:
         """
         Step 4: Save and process document with mode-aware data storage.
-        Handles both WC and GM mode data with appropriate field mapping.
+        SIMPLIFIED: Removed previous document update logic since it's now handled in perform_patient_lookup
         """
         document_analysis = status_result["document_analysis"]
-        has_date_reasoning = processed_data["has_date_reasoning"]
         physician_id = processed_data["physician_id"]
         user_id = processed_data["user_id"]
         document_status = status_result["document_status"]
-        pending_reason = status_result["pending_reason"]
-        is_first_time_claim_only = status_result.get("is_first_time_claim_only", False)
         mode = status_result.get("mode", "wc")
         has_multiple_body_parts = status_result.get("has_multiple_body_parts", False)
         
-        # Get summary snapshots (now a list)
+        # Get summary snapshots
         summary_snapshots = status_result["summary_snapshots"]
-
-        # UPDATED FAILURE LOGIC: Allow first-time claim-only documents to pass
-        if document_status == "failed" and not is_first_time_claim_only:
-            # Fail: save to FailDocs, no further processing
-            fail_reason = pending_reason if pending_reason else f"Missing required fields: {', '.join(status_result['updated_missing_fields'])}"
-            logger.warning(f"⚠️ Failing document {processed_data['filename']}: {fail_reason}")
-
-            await db_service.save_fail_doc(
-                reason=fail_reason,
-                db=processed_data["dob"],
-                doi=processed_data["doi"],
-                claim_number=status_result["claim_to_save"],
-                patient_name=status_result["patient_name_to_use"],
-                document_text=processed_data["result_data"].get("text", ""),
-                physician_id=physician_id,
-                gcs_file_link=processed_data["gcs_url"],
-                file_name=processed_data["filename"],
-                file_hash=processed_data["file_hash"],
-                blob_path=processed_data["blob_path"],
-                mode=mode
-            )
-
-            logger.info(f"📡 Failed event processed for document: {processed_data['document_id']}")
-
-            return {
-                "status": "failed",
-                "document_id": processed_data.get('document_id'),
-                "reason": fail_reason,
-                "missing_fields": status_result['updated_missing_fields'] if status_result['has_missing_required_fields'] else None,
-                "pending_reason": pending_reason
-            }
 
         # ✅ DUPLICATE VALIDATION - Check before saving
         logger.info(f"🔍 Checking for duplicate documents before saving: {processed_data['filename']}")
@@ -752,9 +810,8 @@ class WebhookService:
 
         if is_duplicate:
             logger.warning(f"🚫 DUPLICATE DOCUMENT DETECTED - Skipping save for: {processed_data['filename']}")
-            logger.info(f"   📋 Duplicate criteria - Patient: {patient_name}, DOI: {doi}, Report Date: {report_date}, Document Type: {document_type}")
             
-            # Still decrement parse count since processing happened
+            # Decrement parse count since processing happened
             parse_decremented = await db_service.decrement_parse_count(physician_id)
             if not parse_decremented:
                 logger.warning(f"⚠️ Could not decrement parse count for physician {physician_id}")
@@ -763,30 +820,21 @@ class WebhookService:
                 "status": "skipped",
                 "document_id": processed_data.get('document_id'),
                 "reason": "Duplicate document detected",
-                "missing_fields": None,
-                "pending_reason": "Duplicate document - skipping save",
                 "is_duplicate": True,
                 "parse_count_decremented": parse_decremented
             }
 
         logger.info(f"✅ No duplicate found - proceeding with document save: {processed_data['filename']}")
 
-        # Success: Proceed with saving (including first-time claim-only documents)
-        logger.info(f"💾 Proceeding to save document {processed_data['filename']} - status: {document_status}, mode: {mode}")
-        if has_multiple_body_parts:
-            logger.info(f"📊 Saving {len(summary_snapshots)} body part snapshots")
-
         # Prepare dob_str for update
         dob_str = None
-        updated_dob_for_query = None
         if document_analysis.dob and str(document_analysis.dob).lower() != "not specified":
             try:
                 updated_dob_for_query = datetime.strptime(document_analysis.dob, "%Y-%m-%d")
                 dob_str = updated_dob_for_query.strftime("%Y-%m-%d")
             except ValueError:
-                updated_dob_for_query = processed_data["dob_for_query"]
-                if updated_dob_for_query:
-                    dob_str = updated_dob_for_query.strftime("%Y-%m-%d")
+                if processed_data["dob_for_query"]:
+                    dob_str = processed_data["dob_for_query"].strftime("%Y-%m-%d")
 
         # RENAME GCS FILE BEFORE SAVING
         old_filename = processed_data["filename"]
@@ -798,11 +846,10 @@ class WebhookService:
         dob_safe = dob_str if dob_str else ""
         claim_safe = "" if status_result["claim_to_save"] == "Not specified" else status_result["claim_to_save"].replace(" ", "_").replace("/", "_").replace("\\", "_")
         document_type = document_analysis.document_type.replace(" ", "_").replace("/", "_").replace("\\", "_") if document_analysis.document_type else "document"
-        # Extract file extension
         ext = "." + old_filename.split(".")[-1] if "." in old_filename and len(old_filename.split(".")) > 1 else ""
 
         new_filename = f"{patient_name_safe}_{dob_safe}_{claim_safe}_{document_type}{ext}"
-        logger.info(f"🔄 Preparing to rename file to: {new_filename} (old: {old_filename})")
+        logger.info(f"🔄 Preparing to rename file to: {new_filename}")
 
         # Perform rename if blob_path exists
         renamed = False
@@ -813,16 +860,13 @@ class WebhookService:
                 processed_data["gcs_url"] = new_gcs_url
                 processed_data["filename"] = new_filename
                 renamed = True
-                logger.info(f"✅ GCS file renamed successfully to {new_filename} (new path: {new_blob_path}, new URL: {new_gcs_url})")
+                logger.info(f"✅ GCS file renamed successfully to {new_filename}")
             else:
-                logger.warning(f"⚠️ GCS rename attempted but no change detected (using original: {old_filename})")
+                logger.warning(f"⚠️ GCS rename attempted but no change detected")
         else:
-            # If no blob_path, just update local filename (though unlikely for GCS upload)
             processed_data["filename"] = new_filename
             renamed = True
             logger.info(f"ℹ️ No blob_path provided; updated local filename only to {new_filename}")
-
-        logger.info(f"📁 Final filename for DB: {processed_data['filename']}, GCS URL: {processed_data['gcs_url']}")
 
         # Mock ExtractionResult
         extraction_result = ExtractionResult(
@@ -842,23 +886,22 @@ class WebhookService:
         )
 
         # Save the document to get the document_id
-        # MODIFIED: Pass summary_snapshots (list) instead of summary_snapshot (single)
         document_id = await db_service.save_document_analysis(
             extraction_result=extraction_result,
-            file_name=processed_data["filename"],  # Now uses new filename
+            file_name=processed_data["filename"],
             file_size=processed_data["file_size"],
             mime_type=processed_data["mime_type"],
             processing_time_ms=processed_data["processing_time_ms"],
-            blob_path=processed_data["blob_path"],  # Updated if renamed
+            blob_path=processed_data["blob_path"],
             file_hash=processed_data["file_hash"],
-            gcs_file_link=processed_data["gcs_url"],  # Updated if renamed
+            gcs_file_link=processed_data["gcs_url"],
             patient_name=status_result["patient_name_to_use"],
             claim_number=status_result["claim_to_save"],
             dob=processed_data["dob"],
             doi=processed_data["doi"],
             status=document_status,
             brief_summary=processed_data["brief_summary"],
-            summary_snapshots=summary_snapshots,  # Changed to plural
+            summary_snapshots=summary_snapshots,
             whats_new=status_result["whats_new_data"],
             adl_data=status_result["adl_data"],
             document_summary=status_result["document_summary"],
@@ -866,7 +909,7 @@ class WebhookService:
             physician_id=physician_id,
             mode=mode,
             ur_denial_reason=document_analysis.ur_denial_reason,
-            original_name=old_filename  # Pass the original filename
+            original_name=old_filename
         )
 
         # ✅ DECREMENT PARSE COUNT AFTER SUCCESSFUL DOCUMENT SAVE
@@ -874,84 +917,62 @@ class WebhookService:
         if not parse_decremented:
             logger.warning(f"⚠️ Could not decrement parse count for physician {physician_id}")
 
-        # ✅ ENHANCED TASK CREATION - Check physician role and name matching consulting_doctor
+        # ✅ TASK CREATION - Simplified logic
         created_tasks = 0
         if document_analysis.is_task_needed:
-            logger.info(f"🔧 Task needed - checking physician authorization for document {processed_data['filename']}")
+            logger.info(f"🔧 Task needed for document {processed_data['filename']}")
             
-            # Step 1: Get all users from DB using physician_id
             try:
                 prisma = Prisma()
                 await prisma.connect()
                 
                 users = await prisma.user.find_many(where={
                     "OR": [
-                        {
-                            "physicianId": physician_id,
-                            "role": "Physician"
-                        },
-                        {
-                            "id": physician_id,  # Match by user ID if it's an admin physician
-                            "role": "Physician"
-                        }
+                        {"physicianId": physician_id, "role": "Physician"},
+                        {"id": physician_id, "role": "Physician"}
                     ]
                 })
                 
                 await prisma.disconnect()
 
-                if not users:
-                    logger.warning(f"⚠️ No physician users found with physician_id: {physician_id} - skipping task creation")
-                else:
-                    # Step 2: Check if any user's name matches consulting_doctor (ignoring titles)
+                if users:
                     consulting_doctor = document_analysis.consulting_doctor or ""
-                    matching_user = None
-
-                    # Function to remove titles and normalize names
+                    
                     def normalize_name(name):
                         if not name:
                             return ""
-                        # Remove common titles
                         name = re.sub(r'^(Dr\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?)\s*', '', name, flags=re.IGNORECASE)
-                        # Remove extra spaces and convert to lowercase
                         return name.strip().lower()
 
                     normalized_consulting_doctor = normalize_name(consulting_doctor)
+                    matching_user = None
 
                     for user in users:
                         user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
                         normalized_user_name = normalize_name(user_full_name)
                         
-                        logger.info(f"🔍 Checking physician match - User: '{user_full_name}' (normalized: '{normalized_user_name}'), Consulting Doctor: '{consulting_doctor}' (normalized: '{normalized_consulting_doctor}')")
-                        
                         if normalized_user_name and normalized_consulting_doctor and normalized_user_name == normalized_consulting_doctor:
                             matching_user = user
-                            logger.info(f"✅ Physician name matches consulting doctor (after normalization) - User ID: {user.id}")
+                            logger.info(f"✅ Physician name matches consulting doctor - User ID: {user.id}")
                             break
                     
-                    # Step 3: Create tasks only if names match
                     if matching_user:
-                        logger.info(f"✅ Physician name matches consulting doctor - proceeding with task creation")
-                        
                         task_creator = TaskCreator()
                         
                         try:
-                            # Prepare document data for task generation
                             document_data = document_analysis.dict()
                             document_data["filename"] = processed_data["filename"]
                             document_data["document_id"] = document_id
                             document_data["physician_id"] = physician_id
                             
-                            # Generate tasks based on document analysis
                             tasks = await task_creator.generate_tasks(document_data, processed_data["filename"])
-                            logger.info(f"📋 Generated {len(tasks)} tasks for document {processed_data['filename']}")
+                            logger.info(f"📋 Generated {len(tasks)} tasks")
 
-                            # Save tasks to DB
                             prisma = Prisma()
                             await prisma.connect()
                             
                             for task in tasks:
                                 try:
-                                    # Map task fields
                                     mapped_task = {
                                         "description": task.get("description"),
                                         "department": task.get("department"),
@@ -964,133 +985,45 @@ class WebhookService:
                                         "physicianId": physician_id,
                                     }
 
-                                    # Normalize due date
                                     due_raw = task.get("due_date") or task.get("dueDate")
-                                    if due_raw:
-                                        if isinstance(due_raw, str):
-                                            try:
-                                                mapped_task["dueDate"] = datetime.strptime(due_raw, "%Y-%m-%d")
-                                            except Exception:
-                                                mapped_task["dueDate"] = datetime.now() + timedelta(days=3)
-                                        else:
-                                            mapped_task["dueDate"] = due_raw
+                                    if due_raw and isinstance(due_raw, str):
+                                        try:
+                                            mapped_task["dueDate"] = datetime.strptime(due_raw, "%Y-%m-%d")
+                                        except Exception:
+                                            mapped_task["dueDate"] = datetime.now() + timedelta(days=3)
 
                                     await prisma.task.create(data=mapped_task)
                                     created_tasks += 1
                                     logger.info(f"✅ Created task: {task.get('description', 'Unknown task')}")
                                     
                                 except Exception as task_err:
-                                    logger.error(f"❌ Failed to create task for document {processed_data['filename']}: {task_err}", exc_info=True)
+                                    logger.error(f"❌ Failed to create task: {task_err}")
                                     continue
 
                             await prisma.disconnect()
-                            logger.info(f"✅ {created_tasks} / {len(tasks)} tasks created for document {processed_data['filename']}")
+                            logger.info(f"✅ {created_tasks} tasks created")
                             
                         except Exception as e:
-                            logger.error(f"❌ Task generation failed for document {processed_data['filename']}: {str(e)}", exc_info=True)
+                            logger.error(f"❌ Task generation failed: {str(e)}")
                     else:
-                        logger.warning(f"⚠️ No physician user name matches consulting doctor '{consulting_doctor}' - skipping task creation")
-                        
+                        logger.warning(f"⚠️ No physician user name matches consulting doctor - skipping task creation")
+                            
             except Exception as user_err:
-                logger.error(f"❌ Error fetching user for physician_id {physician_id}: {user_err}", exc_info=True)
+                logger.error(f"❌ Error fetching user: {user_err}")
         else:
-            logger.info(f"ℹ️ No tasks needed for document {processed_data['filename']} - skipping task creation")
+            logger.info(f"ℹ️ No tasks needed for document {processed_data['filename']}")
 
-        # Update previous documents' fields (skip for first-time claim-only as there are no previous)
-        # UPDATED LOGIC: Match by claim number if present, otherwise match by BOTH name AND dob exactly
-        total_previous_docs = status_result["lookup_data"].get("total_documents", 0) if status_result["lookup_data"] else 0
-        
-        # Check if we have valid claim number to match on
-        has_valid_claim_for_update = (
-            status_result["claim_to_save"] and 
-            str(status_result["claim_to_save"]).lower() not in ["not specified", "unknown", ""]
-        )
-        
-        # Check if we have valid name AND dob to match on
-        has_valid_name_dob_for_update = (
-            status_result["patient_name_to_use"] and 
-            str(status_result["patient_name_to_use"]).lower() not in ["not specified", "unknown", ""] and
-            updated_dob_for_query is not None and
-            dob_str and
-            str(dob_str).lower() not in ["not specified", "unknown", ""]
-        )
-        
-        # Decide if we should update
-        # Rule: Update ONLY if (claim number matches) OR (no claim number BUT name AND dob both match)
-        should_update_previous = (
-            document_status not in ["failed"] and
-            total_previous_docs > 0 and
-            not status_result["has_conflicting_claims"] and
-            not is_first_time_claim_only and
-            (has_valid_claim_for_update or has_valid_name_dob_for_update)  # Either claim OR (name AND dob)
-        )
-
-        if should_update_previous:
-            logger.info("🔄 Updating previous documents with strict matching logic:")
-            
-            if has_valid_claim_for_update:
-                # Priority 1: Match by claim number
-                logger.info(f"   ✅ MATCHING BY CLAIM NUMBER: '{status_result['claim_to_save']}'")
-                updated_count = await db_service.update_previous_fields(
-                    patient_name=status_result["patient_name_to_use"],
-                    dob=dob_str,
-                    physician_id=physician_id,
-                    claim_number=status_result["claim_to_save"],  # Match by claim number
-                    doi=document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else None
-                )
-                logger.info(f"🔄 Updated {updated_count} previous documents matched by claim number '{status_result['claim_to_save']}'")
-            elif has_valid_name_dob_for_update:
-                # Priority 2: Match by BOTH name AND dob (only if no claim number)
-                logger.info(f"   ✅ MATCHING BY NAME + DOB: '{status_result['patient_name_to_use']}' + '{dob_str}'")
-                logger.info(f"   ⚠️ No claim number available - using strict name+dob matching")
-                updated_count = await db_service.update_previous_fields(
-                    patient_name=status_result["patient_name_to_use"],
-                    dob=dob_str,
-                    physician_id=physician_id,
-                    claim_number=None,  # No claim number to match, will match by name+dob in DB service
-                    doi=document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else None
-                )
-                logger.info(f"🔄 Updated {updated_count} previous documents matched by name+dob ('{status_result['patient_name_to_use']}' + '{dob_str}')")
-        else:
-            logger.info(f"ℹ️ Skipping previous update:")
-            logger.info(f"   - status={document_status}")
-            logger.info(f"   - total_previous={total_previous_docs}")
-            logger.info(f"   - has_conflicts={status_result['has_conflicting_claims']}")
-            logger.info(f"   - is_first_time_claim_only={is_first_time_claim_only}")
-            logger.info(f"   - has_valid_claim_for_update={has_valid_claim_for_update} (claim='{status_result.get('claim_to_save')}')")
-            logger.info(f"   - has_valid_name_dob_for_update={has_valid_name_dob_for_update} (name='{status_result.get('patient_name_to_use')}', dob='{dob_str}')")
-
-        logger.info(f"💾 Document saved via webhook with ID: {document_id}, status: {document_status}, filename: {processed_data['filename']}")
-
-        logger.info(f"📡 Success event processed for document: {document_id}")
+        # ✅ REMOVED: Previous document update logic - now handled in perform_patient_lookup
+        logger.info(f"ℹ️ Previous document updates already handled in patient lookup phase")
 
         return {
             "status": document_status,
             "document_id": document_id,
-            "missing_fields": status_result['updated_missing_fields'] if status_result['has_missing_required_fields'] else None,
-            "pending_reason": pending_reason,
-            "is_first_time_claim_only": is_first_time_claim_only,
-            "parse_count_decremented": parse_decremented,  # Add this field
-            "filename": processed_data["filename"],  # Include the (possibly new) filename
-            "gcs_url": processed_data["gcs_url"],  # Updated if renamed
-            "blob_path": processed_data["blob_path"],  # Updated if renamed
+            "parse_count_decremented": parse_decremented,
+            "filename": processed_data["filename"],
+            "gcs_url": processed_data["gcs_url"],
+            "blob_path": processed_data["blob_path"],
             "file_renamed": renamed,
-            "date_reasoning_summary": {
-                "used_reasoning": has_date_reasoning,
-                "confidence_scores": processed_data["date_reasoning_data"]["confidence_scores"],
-                "dates_extracted": len(processed_data["date_reasoning_data"]["extracted_dates"])
-            },
-            "lookup_summary": {
-                "documents_found": status_result["lookup_data"].get("total_documents", 0),
-                "has_conflicting_claims": status_result["has_conflicting_claims"],
-                "unique_valid_claims": status_result["lookup_data"].get("unique_valid_claims", []) if status_result["lookup_data"] else [],
-                "fields_fetched": {
-                    "patient_name": bool(status_result["lookup_data"].get("patient_name")),
-                    "dob": bool(status_result["lookup_data"].get("dob")),
-                    "doi": bool(status_result["lookup_data"].get("doi")),
-                    "claim_number": bool(status_result["lookup_data"].get("claim_number"))
-                }
-            },
             "mode": mode,
             "ur_denial_reason": document_analysis.ur_denial_reason or None,
             "body_parts_analysis": {
@@ -1098,11 +1031,11 @@ class WebhookService:
                 "has_multiple_body_parts": has_multiple_body_parts,
                 "body_parts": [snapshot["body_part"] for snapshot in summary_snapshots]
             },
-            "task_analysis": {  # Changed from rfa_task_analysis to task_analysis
-                "is_task_needed": document_analysis.is_task_needed,  # Changed from is_rfa_task_needed
+            "task_analysis": {
+                "is_task_needed": document_analysis.is_task_needed,
                 "tasks_created": created_tasks
             }
-        }
+    }
     
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
