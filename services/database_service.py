@@ -633,32 +633,52 @@ class DatabaseService:
     ) -> int:
         print(patient_name, physician_id, claim_number, dob, 'patient data for update')
         
-        # 🆕 IMPROVED: Fetch based on looser criteria to catch docs with incorrect/missing fields
-        # Primary: physician_id + (patient_name OR claim_number match/missing)
+        # 🚨 CRITICAL FIX: Use STRICT patient matching criteria
+        # Only update documents that definitely belong to the SAME patient
+        
         or_conditions = []
         
-        # Condition 1: Matches patient_name (if provided)
-        if patient_name and patient_name.lower() != "not specified":
-            or_conditions.append({"patientName": patient_name})
-        
-        # Condition 2: Matches claim_number or missing
+        # Condition 1: Exact claim number match (strongest identifier)
         if claim_number and claim_number.lower() != "not specified":
-            or_conditions.append({"claimNumber": {"in": [claim_number, "Not specified"]}})
+            or_conditions.append({"claimNumber": claim_number})
         
-        # If no OR conditions, fallback to just physician_id
+        # Condition 2: Patient name + DOB match (strong identifier)
+        if (patient_name and patient_name.lower() != "not specified" and 
+            dob and dob.lower() != "not specified"):
+            or_conditions.append({
+                "AND": [
+                    {"patientName": patient_name},
+                    {"dob": dob}
+                ]
+            })
+        
+        # Condition 3: If we have DOI + patient name match
+        if (doi and doi.lower() != "not specified" and 
+            patient_name and patient_name.lower() != "not specified"):
+            or_conditions.append({
+                "AND": [
+                    {"patientName": patient_name},
+                    {"doi": doi}
+                ]
+            })
+        
+        # 🚨 If no strong matching criteria, DON'T update any documents
+        if not or_conditions:
+            logger.warning(f"🚨 Cannot update documents - insufficient patient identification criteria")
+            return 0
+        
         fetch_where = {
             "physicianId": physician_id,
+            "OR": or_conditions
         }
-        
-        if or_conditions:
-            fetch_where["OR"] = or_conditions
         
         # 🆕 FIXED: No 'select' parameter
         documents_to_update = await self.prisma.document.find_many(
             where=fetch_where,
         )
         
-        logger.info(f"🔍 Found {len(documents_to_update)} documents to potentially update for physician '{physician_id}'")
+        logger.info(f"🔍 Found {len(documents_to_update)} documents for SAME PATIENT (physician '{physician_id}')")
+        logger.info(f"   Matching criteria: {or_conditions}")
         
         updated_count = 0
         for doc in documents_to_update:
@@ -700,9 +720,10 @@ class DatabaseService:
             else:
                 logger.debug(f"  ℹ️ No updates needed for doc {doc.id}")
         
-        logger.info(f"🔄 Updated {updated_count} previous documents for patient '{patient_name}' (DOB: {dob}, Physician: {physician_id}) with fields: patientName={patient_name}, dob={dob}, claimNumber={claim_number}, doi={doi}")
+        logger.info(f"🔄 Updated {updated_count} documents for SAME PATIENT: '{patient_name}' (DOB: {dob}, Claim: {claim_number})")
         
         return updated_count
+    
     async def get_patient_claim_numbers(
         self,
         patient_name: Optional[str] = None,

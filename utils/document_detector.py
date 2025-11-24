@@ -1,8 +1,78 @@
+# models/data_models.py
+from pydantic import BaseModel, Field
+from typing import Literal
+
+# Convert enum to BaseModel with Literal types
+class DocumentType(BaseModel):
+    """All supported document types - 70+ document types"""
+    
+    # Using Literal for type safety while maintaining flexibility
+    doc_type: Literal[
+        # Imaging Reports
+        "MRI", "CT", "X-ray", "Ultrasound", "EMG", "Mammogram", "PET Scan", "Bone Scan",
+        "DEXA Scan", "Fluoroscopy", "Angiogram",
+        
+        # Laboratory & Diagnostics
+        "Labs", "Pathology", "Biopsy", "Genetic Testing", "Toxicology", "Allergy Testing",
+        
+        # Progress Reports & Evaluations
+        "PR-2", "PR-4", "DFR", "Consult", "Progress Note", "Office Visit", "Clinic Note", "Telemedicine",
+        
+        # Medical Evaluations
+        "QME", "AME", "IME", "IMR", "FCE", "Peer Review", "Independent Review",
+        
+        # Authorization & Utilization
+        "RFA", "UR", "Authorization", "Peer-to-Peer", "Treatment Authorization", "Procedure Authorization",
+        
+        # Therapy & Treatment Notes
+        "Physical Therapy", "Occupational Therapy", "Chiropractic", "Acupuncture", "Massage Therapy", "Pain Management",
+        
+        # Clinical Notes - Nursing and additional types
+        "Nursing", "Nursing Note", "Vital Signs", "Medication Administration",
+        
+        # Surgical Documents
+        "Surgery Report", "Operative Note", "Anesthesia Report", "Pre-Op", "Post-Op", "Discharge",
+        
+        # Hospital Documents
+        "Admission Note", "Hospital Course", "ER Report", "Emergency Room", "Hospital Progress",
+        
+        # Specialty Reports
+        "Cardiology", "Neurology", "Orthopedics", "Psychiatry", "Psychology", "Psychotherapy", 
+        "Behavioral Health", "Rheumatology", "Endocrinology", "Gastroenterology", "Pulmonology",
+        
+        # Diagnostic Studies
+        "Sleep Study", "EKG", "ECG", "Holter Monitor", "Echocardiogram", "Stress Test", 
+        "Pulmonary Function", "Nerve Conduction",
+        
+        # Medications & Pharmacy
+        "Med Refill", "Prescription", "Pharmacy", "Medication List", "Prior Authorization",
+        
+        # Administrative & Correspondence
+        "Adjuster", "Attorney", "NCM", "Signature Request", "Referral", "Correspondence", 
+        "Appeal", "Denial Letter", "Approval Letter",
+        
+        # Work Status & Disability
+        "Work Status", "Work Restrictions", "Return to Work", "Disability", "Claim Form",
+        
+        # Legal Documents
+        "Deposition", "Interrogatory", "Subpoena", "Affidavit",
+        
+        # Employer & Vocational
+        "Employer Report", "Vocational Rehab", "Job Analysis", "Work Capacity",
+        
+        # Generic Fallbacks
+        "Clinical Note", "Medical Report", "Administrative", "Unknown",
+        
+        # Allow any string for custom types
+        str
+    ] = Field(description="Document type - can be predefined or custom")
+
 # document_detector_simple.py
 """
 Minimal context-aware document type detector.
 Uses GPT-4o + LangChain OutputParser (Pydantic).
 No regex, no embeddings, no rule bias.
+Simplified: Single LLM call to classify or extract title as doc_type.
 """
 
 import logging
@@ -11,7 +81,6 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import AzureChatOpenAI
 from config.settings import CONFIG
-from utils.document_context_analyzer import DocumentContextAnalyzer
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -26,102 +95,104 @@ logging.basicConfig(
 
 class DocumentTypeOut(BaseModel):
     doc_type: str = Field(
-        description="The main document type inferred from the text. "
-                    "Must be one of the predefined types (RFA, PR2, DFR, QME, IMAGING, CONSULT, UR, etc.), "
-                    "OR if none match, use the actual title/heading from the document."
+        description="The main document type. "
+                    "If matches a standard type, use that exact name. "
+                    "Otherwise, use the extracted main title/heading from the document."
     )
     confidence: float = Field(
         description="Confidence level from 0.0 to 1.0",
         ge=0.0, le=1.0
     )
     reasoning: str = Field(
-        description="Short reason why this document type was chosen."
+        description="Short reason why this document type was chosen, including if it's a standard type or extracted title."
+    )
+    is_standard_type: bool = Field(
+        description="True if this is a known standard document type, False if it's an extracted title."
     )
 
 parser = PydanticOutputParser(pydantic_object=DocumentTypeOut)
 
+# Standard document types for reference (passed to prompt)
+standard_types = [
+    # Imaging Reports
+    "MRI", "CT", "X-ray", "Ultrasound", "EMG", "Mammogram", "PET Scan", "Bone Scan",
+    "DEXA Scan", "Fluoroscopy", "Angiogram",
+    
+    # Laboratory & Diagnostics
+    "Labs", "Pathology", "Biopsy", "Genetic Testing", "Toxicology", "Allergy Testing",
+    
+    # Progress Reports & Evaluations
+    "PR-2", "PR-4", "DFR", "Consult", "Progress Note", "Office Visit", "Clinic Note", "Telemedicine",
+    
+    # Medical Evaluations
+    "QME", "AME", "IME", "IMR", "FCE", "Peer Review", "Independent Review",
+    
+    # Authorization & Utilization
+    "RFA", "UR", "Authorization", "Peer-to-Peer", "Treatment Authorization", "Procedure Authorization",
+    
+    # Therapy & Treatment Notes
+    "Physical Therapy", "Occupational Therapy", "Chiropractic", "Acupuncture", "Massage Therapy", "Pain Management",
+    
+    # Clinical Notes - Nursing and additional types
+    "Nursing", "Nursing Note", "Vital Signs", "Medication Administration",
+    
+    # Surgical Documents
+    "Surgery Report", "Operative Note", "Anesthesia Report", "Pre-Op", "Post-Op", "Discharge",
+    
+    # Hospital Documents
+    "Admission Note", "Hospital Course", "ER Report", "Emergency Room", "Hospital Progress",
+    
+    # Specialty Reports
+    "Cardiology", "Neurology", "Orthopedics", "Psychiatry", "Psychology", "Psychotherapy", 
+    "Behavioral Health", "Rheumatology", "Endocrinology", "Gastroenterology", "Pulmonology",
+    
+    # Diagnostic Studies
+    "Sleep Study", "EKG", "ECG", "Holter Monitor", "Echocardiogram", "Stress Test", 
+    "Pulmonary Function", "Nerve Conduction",
+    
+    # Medications & Pharmacy
+    "Med Refill", "Prescription", "Pharmacy", "Medication List", "Prior Authorization",
+    
+    # Administrative & Correspondence
+    "Adjuster", "Attorney", "NCM", "Signature Request", "Referral", "Correspondence", 
+    "Appeal", "Denial Letter", "Approval Letter",
+    
+    # Work Status & Disability
+    "Work Status", "Work Restrictions", "Return to Work", "Disability", "Claim Form",
+    
+    # Legal Documents
+    "Deposition", "Interrogatory", "Subpoena", "Affidavit",
+    
+    # Employer & Vocational
+    "Employer Report", "Vocational Rehab", "Job Analysis", "Work Capacity",
+    
+    # Generic Fallbacks
+    "Clinical Note", "Medical Report", "Administrative", "Unknown"
+]
+
 # --------------------------
-# 2. Build the LLM + prompt
+# 2. Build the LLM + prompt (single call for classification or title extraction)
 # --------------------------
 
 SYSTEM_PROMPT = """
 You are a professional document classification model for medical and workers' compensation reports.
 Your job is to decide the primary type of document from raw extracted text.
 
-You will handle report types such as:
-- RFA (Request for Authorization)
-- PR2 (Progress Report)
-- PR4 (Permanent/Stationary Report)
-- DFR (Doctor's First Report)
-- QME (Qualified Medical Evaluation)
-- AME (Agreed Medical Evaluation)
-- IME (Independent Medical Evaluation)
-- IMR (Independent Medical Review)
-- UR (Utilization Review)
-- CONSULT (Consultation or Office Visit)
-- IMAGING (Generic Imaging Report)
-- MRI (Magnetic Resonance Imaging)
-- CT (Computed Tomography)
-- X-ray (X-ray Imaging)
-- Ultrasound (Ultrasound Imaging)
-- EMG (Electromyography / Nerve Study)
-- Progress Reports (PR2, PR4)
-- Progress Notes
-- Consult Reports
-- Radiology Reports
-- Surgery Reports
-- PT/OT/Chiro/Acupuncture Notes
-- Peer Reviews
-- UR / IMR Decisions
-- Medication / Pharmacy Documents
-- Nurse Case Manager Notes
-- Attorney Letters
-- DFR / PR-2 / PR-4 Forms
-- Treatment Plans
-- Lab Reports
-- Pathology Reports
-- Cardiology Reports
-- EMG/NCS Reports
-- FCE (Functional Capacity Evaluation)
-- Work Status Reports
-- Return-to-Work / Restriction Notes
-- Surgery Pre-Op / Post-Op Notes
-- Anesthesia Reports
-- Pain Management Notes
-- Psychological / Psychiatric Reports
-- Emergency Department Reports
-- Discharge Summaries
-- Admission Summaries
-- Hospital Course Documents
-- Nursing Notes
-- Disability / Claim Forms
-- Pharmacy Logs
-- Legal Correspondence
-- Employer Incident Reports
-- Job Requirements Reports
-- Medication Administration Records
-- Telemedicine Notes
-- Endoscopy / Colonoscopy Reports
-- Biopsy Reports
-- Genetic Testing Reports
-- Sleep Study Reports
-- Appeal / Denial Letters
-- ICD/CPT Billing Summaries
+**CRITICAL INSTRUCTIONS:**
+1. FIRST, check if the document matches ANY standard type from the list below. If it does, set doc_type to that EXACT standard name, is_standard_type=True, and high confidence.
+2. If NO match to ANY standard type, extract the ACTUAL main title/heading from the document (look at the first prominent heading or line) and set doc_type to that title, is_standard_type=False, and moderate confidence.
+3. NEVER use "OTHER", "UNKNOWN", or generic terms if a title can be extracted.
+4. Be specific and context-aware. Reasoning should explain the choice briefly.
 
-**IMPORTANT**: 
-- If the document type matches one of the predefined categories above, use that category name.
-- If the document does NOT match any predefined category, extract and use the ACTUAL TITLE or HEADING from the document as the doc_type.
-- Do NOT use "OTHER" - always provide either a predefined type or the document's actual title.
+Standard types (exact matches only):
+{standard_list}
 
-Guidelines:
-- Consider the **context**, not just keywords.
-- If a form is only *mentioned* (e.g., "Attach the Doctor's First Report"), do NOT classify as that type.
-- The **title or heading appearing first** is usually the main document, but use full context to confirm.
-- Be concise and objective. Never invent facts.
+If unsure, prioritize extracting a clear title over guessing a standard type.
 """
 
 HUMAN_PROMPT = """
 Determine the most appropriate document type based on the provided text.
+If standard match: use it. Else: extract and use the main title as doc_type.
 
 Return strict JSON using this schema:
 {format_instructions}
@@ -131,67 +202,53 @@ TEXT:
 """
 
 # --------------------------
-# 3. Detector function with title override
+# 3. Simplified detector function
 # --------------------------
 
-def detect_document_type(text: str) -> dict:
+def detect_document_type(text: str) -> DocumentTypeOut:
     """
-    Detects the most suitable document type using GPT-4o with context reasoning.
-    Returns dict: {"doc_type": "...", "confidence": ..., "reasoning": "..."}
-    
-    If document doesn't match predefined types, returns the actual document title.
+    Detects document type: Returns standard type if matched, else extracted title as doc_type.
+    Single LLM call for simplicity.
     """
-    logger.info("=" * 80)
     logger.info("Starting document type detection")
-    logger.info(f"Input text length: {len(text)} characters")
-    logger.info(f"Text preview (first 200 chars): {text[:200]}...")
     
     try:
         model = AzureChatOpenAI(
-                azure_endpoint=CONFIG.get("azure_openai_endpoint"),
-                api_key=CONFIG.get("azure_openai_api_key"),
-                deployment_name=CONFIG.get("azure_openai_deployment"),
-                api_version=CONFIG.get("azure_openai_api_version"),
-                temperature=0.0,
-                timeout=120
-            )
-        logger.info("Azure OpenAI model initialized successfully")
+            azure_endpoint=CONFIG.get("azure_openai_endpoint"),
+            api_key=CONFIG.get("azure_openai_api_key"),
+            deployment_name=CONFIG.get("azure_openai_deployment"),
+            api_version=CONFIG.get("azure_openai_api_version"),
+            temperature=0.0,
+            timeout=120
+        )
 
+        # Use first 1000 characters for detection (adjust if needed)
+        detection_text = text[:3000]
+        
+        # Build prompt with standard types list
+        standard_list_str = ", ".join(standard_types)
         prompt = ChatPromptTemplate.from_messages([
-            ("system", SYSTEM_PROMPT.strip()),
+            ("system", SYSTEM_PROMPT.strip().format(standard_list=standard_list_str)),
             ("human", HUMAN_PROMPT.strip())
         ]).partial(format_instructions=parser.get_format_instructions())
 
-        chain_input = {"text": text[:8000]}  # cap text length for efficiency
-        logger.info(f"Capped text length for LLM: {len(chain_input['text'])} characters")
-
-        logger.info("Formatting prompt and invoking model...")
-        messages = prompt.format_prompt(**chain_input).to_messages()
-        response = model.invoke(messages)  # Use .invoke() instead of calling directly
-        
-        logger.info(f"Raw LLM response: {response.content}")
-        
+        messages = prompt.format_prompt(text=detection_text).to_messages()
+        response = model.invoke(messages)
         result = parser.parse(response.content)
-        result = result.model_dump()
 
-        logger.info("=" * 80)
-        logger.info("DOCUMENT TYPE DETECTION RESULT")
-        logger.info("=" * 80)
-        logger.info(f'📝 Document type: {result["doc_type"]}')
-        logger.info(f'📊 Confidence: {result["confidence"]}')
-        logger.info(f'💡 Reasoning: {result["reasoning"]}')
-        logger.info("=" * 80)
-
-        print(f'📝 Document type: {result["doc_type"]}')
-        print(f'📝 Confidence: {result["confidence"]}')
-        print(f'📝 Reasoning: {result["reasoning"]}')
+        logger.info(f'📝 Document type: {result.doc_type}')
+        logger.info(f'📊 Confidence: {result.confidence}')
+        logger.info(f'💡 Reasoning: {result.reasoning}')
+        logger.info(f'🏷️ Standard type: {result.is_standard_type}')
 
         return result
         
     except Exception as e:
-        logger.error("=" * 80)
-        logger.error("ERROR during document type detection")
-        logger.error(f"Error type: {type(e).__name__}")
-        logger.error(f"Error message: {str(e)}")
-        logger.error("=" * 80)
-        raise
+        logger.error(f"ERROR during document type detection: {e}")
+        # Simple fallback: "Unknown"
+        return DocumentTypeOut(
+            doc_type="Unknown",
+            confidence=0.0,
+            reasoning=f"Detection failed: {str(e)}",
+            is_standard_type=False
+        )

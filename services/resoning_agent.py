@@ -12,8 +12,7 @@ from datetime import datetime, timedelta
 import re, json
 import logging
 
-# Import our modular document detector (kept for hybrid approach)
-from utils.document_detector import detect_document_type
+# Removed import: from utils.document_detector import detect_document_type
 from config.settings import CONFIG
 
 logger = logging.getLogger("document_ai")
@@ -47,21 +46,6 @@ class EnhancedReportAnalyzer:
         self.brief_summary_parser = JsonOutputParser(pydantic_object=BriefSummary)
         
         logger.info("✅ MODE-AWARE EnhancedReportAnalyzer initialized (WC/GM support)")
-
-    def detect_document_type(self, document_text: str) -> str:
-        """
-        Updated: Uses detect_document_type function from utils.document_detector.
-        Returns the final_doc_type string from the detection result.
-        """
-        try:
-            logger.info("🔍 Fast document type detection...")
-            detection_result = detect_document_type(document_text)
-            doc_type = detection_result.get("doc_type", "medical_document")
-            logger.info(f"✅ Document type detected: {doc_type}")
-            return doc_type
-        except Exception as e:
-            logger.error(f"❌ Document type detection failed: {str(e)}")
-            return "medical_document"
 
     def extract_signature_context(self, page_zones: Optional[Dict[int, Dict[str, str]]]) -> str:
         """

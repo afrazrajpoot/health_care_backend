@@ -116,8 +116,6 @@ class WebhookService:
             text
         )
         
-        # ✅ STORE THE ACTUAL REPORT ANALYZER RESULT
-        # print(report_analyzer,'report analyer')
         long_summary = report_result.get("long_summary", "")
         short_summary = report_result.get("short_summary", "")
         
@@ -156,7 +154,6 @@ class WebhookService:
             "document_analysis": document_analysis,
             "brief_summary": brief_summary,
             "text_for_analysis": text,
-            # ✅ ADD THE ACTUAL REPORT ANALYZER RESULT
             "report_analyzer_result": report_result,
             "patient_name": patient_name,
             "claim_number": claim_number,
@@ -176,6 +173,7 @@ class WebhookService:
             "document_id": data.get("document_id", "unknown"),
             "mode": mode
         }
+
     async def save_to_redis_cache(self, document_id: str, document_data: dict):
         """Save document data to Redis cache"""
         if not self.redis_client:
@@ -215,8 +213,238 @@ class WebhookService:
         except Exception as e:
             logger.error(f"❌ Failed to save document {document_id} to Redis: {str(e)}")
             return False
+
+    async def _get_cached_patient_lookup(self, physician_id: str, patient_name: str, claim_number: str, dob: str, db_service) -> dict:
+        """Get patient lookup data from cache or database with minimum 2-field matching"""
+        
+        # Create cache key matching your log format
+        cache_key_parts = [f"patient_lookup:{physician_id}"]
+        
+        if patient_name and str(patient_name).lower() not in ["not specified", "unknown", "", "none"]:
+            cache_key_parts.append(f"patient:{patient_name}")
+        
+        if dob and str(dob).lower() not in ["not specified", "unknown", "", "none"]:
+            cache_key_parts.append(f"dob:{dob}")
+        
+        if claim_number and str(claim_number).lower() not in ["not specified", "unknown", "", "none"]:
+            cache_key_parts.append(f"claim:{claim_number}")
+        
+        cache_key = ":".join(cache_key_parts)
+        logger.info(f"🔑 Final cache key: {cache_key}")
+        
+        # Helper function to check if field is "bad"
+        def is_bad_field(value):
+            return not value or str(value).lower() in ["not specified", "unknown", "", "none", "null"]
+        
+        # Helper function to normalize field values
+        def normalize_field(value):
+            if not value:
+                return ""
+            return str(value).strip().lower()
+        
+        # Check if Redis client is available
+        if not self.redis_client:
+            logger.warning("❌ Redis client not available, skipping cache")
+            lookup_data = await db_service.get_patient_claim_numbers(
+                patient_name=patient_name,
+                physicianId=physician_id,
+                dob=dob,
+                claim_number=claim_number
+            )
+            # Add original search criteria to lookup data for matching validation
+            if lookup_data:
+                lookup_data["_search_criteria"] = {
+                    "patient_name": patient_name,
+                    "dob": dob,
+                    "claim_number": claim_number
+                }
+            return lookup_data
+        
+        # Try cache first
+        try:
+            logger.info(f"🔍 Checking Redis cache FIRST for key: {cache_key}")
+            cached_data = await self.redis_client.get(cache_key)
+            if cached_data:
+                logger.info(f"💾 CACHE HIT: Found patient lookup data in cache for key: {cache_key}")
+                lookup_data = json.loads(cached_data)
+                
+                # 🚨 CRITICAL: Validate that cached data meets minimum 2-field matching
+                if lookup_data and lookup_data.get("total_documents", 0) > 0:
+                    # Get the original search criteria from cache key or reconstruct
+                    original_patient_name = patient_name
+                    original_dob = dob
+                    original_claim_number = claim_number
+                    
+                    # Count matching fields between original search and cached results
+                    matching_fields = 0
+                    
+                    # Get the first document from cached results for field comparison
+                    first_doc = lookup_data.get("documents", [{}])[0] if lookup_data.get("documents") else {}
+                    cached_patient_name = first_doc.get("patientName") or lookup_data.get("patient_name")
+                    cached_dob = first_doc.get("dob") or lookup_data.get("dob")
+                    cached_claim_number = first_doc.get("claimNumber") or lookup_data.get("claim_number")
+                    
+                    # Check patient name match
+                    original_patient_normalized = normalize_field(original_patient_name)
+                    cached_patient_normalized = normalize_field(cached_patient_name)
+                    patient_matches = (
+                        not is_bad_field(original_patient_name) and 
+                        not is_bad_field(cached_patient_name) and
+                        original_patient_normalized == cached_patient_normalized
+                    )
+                    if patient_matches:
+                        matching_fields += 1
+                        logger.info(f"✅ Cached patient name matches: '{original_patient_name}' == '{cached_patient_name}'")
+                    
+                    # Check DOB match
+                    original_dob_normalized = normalize_field(original_dob)
+                    cached_dob_normalized = normalize_field(cached_dob)
+                    dob_matches = (
+                        not is_bad_field(original_dob) and 
+                        not is_bad_field(cached_dob) and
+                        original_dob_normalized == cached_dob_normalized
+                    )
+                    if dob_matches:
+                        matching_fields += 1
+                        logger.info(f"✅ Cached DOB matches: '{original_dob}' == '{cached_dob}'")
+                    
+                    # Check claim number match
+                    original_claim_normalized = normalize_field(original_claim_number)
+                    cached_claim_normalized = normalize_field(cached_claim_number)
+                    claim_matches = (
+                        not is_bad_field(original_claim_number) and 
+                        not is_bad_field(cached_claim_number) and
+                        original_claim_normalized == cached_claim_normalized
+                    )
+                    if claim_matches:
+                        matching_fields += 1
+                        logger.info(f"✅ Cached claim number matches: '{original_claim_number}' == '{cached_claim_number}'")
+                    
+                    logger.info(f"🔢 Cached data field matching: {matching_fields} fields match")
+                    
+                    # 🚨 Only return cached data if we have minimum 2-field match
+                    if matching_fields >= 2:
+                        logger.info("✅ Cached data meets minimum 2-field requirement - using cached results")
+                        # Add search criteria to lookup data for later validation
+                        lookup_data["_search_criteria"] = {
+                            "patient_name": original_patient_name,
+                            "dob": original_dob,
+                            "claim_number": original_claim_number
+                        }
+                        return lookup_data
+                    else:
+                        logger.warning(f"🚨 Cached data FAILED 2-field requirement (only {matching_fields} matches) - fetching fresh from DB")
+                        # Intentionally fall through to database fetch
+                else:
+                    logger.info("💾 Cached data has no documents - returning as-is")
+                    return lookup_data
+            else:
+                logger.info(f"💾 CACHE MISS: No data found in cache for key: {cache_key}")
+        except Exception as e:
+            logger.error(f"⚠️ Cache read error for key {cache_key}: {e}")
+        
+        # Get from database (either cache miss or cache validation failed)
+        logger.info("🗄️ Fetching patient lookup data from database...")
+        lookup_data = await db_service.get_patient_claim_numbers(
+            patient_name=patient_name,
+            physicianId=physician_id,
+            dob=dob,
+            claim_number=claim_number
+        )
+        
+        # 🚨 CRITICAL: Validate database results meet minimum 2-field matching BEFORE caching
+        valid_for_cache = False
+        if lookup_data and lookup_data.get("total_documents", 0) > 0:
+            # Count matching fields between search criteria and database results
+            matching_fields = 0
+            
+            # Get the first document from database results for field comparison
+            first_doc = lookup_data.get("documents", [{}])[0] if lookup_data.get("documents") else {}
+            db_patient_name = first_doc.get("patientName") or lookup_data.get("patient_name")
+            db_dob = first_doc.get("dob") or lookup_data.get("dob")
+            db_claim_number = first_doc.get("claimNumber") or lookup_data.get("claim_number")
+            
+            # Check patient name match
+            original_patient_normalized = normalize_field(patient_name)
+            db_patient_normalized = normalize_field(db_patient_name)
+            patient_matches = (
+                not is_bad_field(patient_name) and 
+                not is_bad_field(db_patient_name) and
+                original_patient_normalized == db_patient_normalized
+            )
+            if patient_matches:
+                matching_fields += 1
+            
+            # Check DOB match
+            original_dob_normalized = normalize_field(dob)
+            db_dob_normalized = normalize_field(db_dob)
+            dob_matches = (
+                not is_bad_field(dob) and 
+                not is_bad_field(db_dob) and
+                original_dob_normalized == db_dob_normalized
+            )
+            if dob_matches:
+                matching_fields += 1
+            
+            # Check claim number match
+            original_claim_normalized = normalize_field(claim_number)
+            db_claim_normalized = normalize_field(db_claim_number)
+            claim_matches = (
+                not is_bad_field(claim_number) and 
+                not is_bad_field(db_claim_number) and
+                original_claim_normalized == db_claim_normalized
+            )
+            if claim_matches:
+                matching_fields += 1
+            
+            logger.info(f"🔢 Database results field matching: {matching_fields} fields match")
+            
+            # Only cache if we have minimum 2-field match
+            if matching_fields >= 2:
+                valid_for_cache = True
+                logger.info("✅ Database results meet minimum 2-field requirement - will cache")
+            else:
+                logger.warning(f"🚨 Database results FAILED 2-field requirement (only {matching_fields} matches) - NOT caching")
+        
+        # Cache the result only if it meets 2-field requirement
+        if valid_for_cache:
+            try:
+                # Convert any non-serializable objects to strings
+                cacheable_data = {
+                    "total_documents": lookup_data.get("total_documents", 0),
+                    "patient_name": lookup_data.get("patient_name"),
+                    "dob": lookup_data.get("dob"),
+                    "claim_number": lookup_data.get("claim_number"),
+                    "doi": lookup_data.get("doi"),
+                    "has_conflicting_claims": lookup_data.get("has_conflicting_claims", False),
+                    "documents": [
+                        {
+                            "patientName": doc.get("patientName"),
+                            "dob": doc.get("dob"),
+                            "claimNumber": doc.get("claimNumber"),
+                            "physicianId": doc.get("physicianId")
+                        }
+                        for doc in lookup_data.get("documents", [])
+                    ]
+                }
+                
+                await self.redis_client.setex(cache_key, 3600, json.dumps(cacheable_data))
+                logger.info(f"💾 CACHE STORE: Successfully cached patient lookup data for key: {cache_key}")
+            except Exception as e:
+                logger.error(f"⚠️ Cache write error for key {cache_key}: {e}")
+        
+        # Add search criteria to lookup data for later validation in perform_patient_lookup
+        if lookup_data:
+            lookup_data["_search_criteria"] = {
+                "patient_name": patient_name,
+                "dob": dob,
+                "claim_number": claim_number
+            }
+        
+        return lookup_data
+
     async def perform_patient_lookup(self, db_service, processed_data: dict) -> dict:
-        """Step 2: Perform patient lookup and update fields bidirectionally (NO DUPLICATE CHECK)"""
+        """Step 2: Perform patient lookup and update fields bidirectionally with minimum 2-field matching"""
         physician_id = processed_data["physician_id"]
         patient_name = processed_data["patient_name"]
         claim_number = processed_data["claim_number"]
@@ -228,6 +456,12 @@ class WebhookService:
         def is_bad_field(value):
             return not value or str(value).lower() in ["not specified", "unknown", "", "none", "null"]
         
+        # Helper function to normalize field values for comparison
+        def normalize_field(value):
+            if not value:
+                return ""
+            return str(value).strip().lower()
+        
         # 🚨 CRITICAL: Check if both DOB and claim number are not specified
         dob_not_specified = is_bad_field(processed_data["dob"])
         claim_not_specified = is_bad_field(claim_number)
@@ -236,7 +470,6 @@ class WebhookService:
         if dob_not_specified and claim_not_specified:
             logger.warning("🚨 SKIPPING PATIENT LOOKUP: Both DOB and claim number are not specified - no updates will be performed")
             
-            # Determine document status for this case
             document_status = "failed"
             pending_reason = "Missing both DOB and claim number - cannot identify patient"
             
@@ -249,24 +482,23 @@ class WebhookService:
                 "document_analysis": document_analysis,
                 "field_updates": [],
                 "previous_docs_updated": 0,
-                "lookup_skipped": True  # New flag to indicate lookup was skipped
+                "lookup_skipped": True
             }
         
-        # ✅ Continue with normal patient lookup for documents with at least DOB OR claim number
-        # Verify Redis connection first
+        # ✅ Continue with normal patient lookup
         redis_ok = await self.verify_redis_connection()
         if not redis_ok:
             logger.warning("⚠️ Redis not available - proceeding without cache")
         
-        # Get patient lookup data (with Redis caching)
+        # Get patient lookup data (with Redis caching and 2-field validation)
         lookup_data = await self._get_cached_patient_lookup(physician_id, patient_name, claim_number, processed_data["dob"], db_service)
         
-        # Bidirectional field updating logic (only if we have lookup data)
+        # Bidirectional field updating logic
         field_updates = []
         updated_previous_docs = 0
         
         if lookup_data and lookup_data.get("total_documents", 0) > 0:
-            logger.info("🔄 Checking for bidirectional field updates...")
+            logger.info("🔄 Checking for bidirectional field updates with minimum 2-field matching...")
             
             # Get fields from lookup data
             fetched_patient_name = lookup_data.get("patient_name")
@@ -274,77 +506,155 @@ class WebhookService:
             fetched_claim_number = lookup_data.get("claim_number")
             fetched_doi = lookup_data.get("doi")
             
-            # Update document analysis with good values from DB
-            # Only update if current document has bad values AND DB has good values
-            if is_bad_field(document_analysis.patient_name) and not is_bad_field(fetched_patient_name):
-                old_name = document_analysis.patient_name
-                document_analysis.patient_name = fetched_patient_name
-                field_updates.append(f"patient_name: '{old_name}' → '{fetched_patient_name}'")
-                logger.info(f"✅ Updated patient_name from DB: '{old_name}' → '{fetched_patient_name}'")
+            # 🚨 CRITICAL FIX: Compare CURRENT DOCUMENT ANALYSIS with FETCHED DATA
+            # Count matching fields between CURRENT DOCUMENT and fetched data
+            matching_fields = 0
             
-            if hasattr(document_analysis, 'dob') and is_bad_field(document_analysis.dob) and not is_bad_field(fetched_dob):
-                old_dob = document_analysis.dob
-                document_analysis.dob = fetched_dob
-                field_updates.append(f"dob: '{old_dob}' → '{fetched_dob}'")
-                logger.info(f"✅ Updated DOB from DB: '{old_dob}' → '{fetched_dob}'")
+            # Get current document field values
+            current_patient_name = document_analysis.patient_name
+            current_dob = getattr(document_analysis, 'dob', None)
+            current_claim_number = document_analysis.claim_number
+            current_doi = getattr(document_analysis, 'doi', None)
             
-            if is_bad_field(document_analysis.claim_number) and not is_bad_field(fetched_claim_number):
-                old_claim = document_analysis.claim_number
-                document_analysis.claim_number = fetched_claim_number
-                field_updates.append(f"claim_number: '{old_claim}' → '{fetched_claim_number}'")
-                logger.info(f"✅ Updated claim_number from DB: '{old_claim}' → '{fetched_claim_number}'")
+            logger.info(f"🔍 CURRENT DOCUMENT - Patient: '{current_patient_name}', DOB: '{current_dob}', Claim: '{current_claim_number}', DOI: '{current_doi}'")
+            logger.info(f"🔍 FETCHED DATA - Patient: '{fetched_patient_name}', DOB: '{fetched_dob}', Claim: '{fetched_claim_number}', DOI: '{fetched_doi}'")
             
-            if (hasattr(document_analysis, 'doi') and 
-                is_bad_field(document_analysis.doi) and 
-                not is_bad_field(fetched_doi)):
-                old_doi = document_analysis.doi
-                document_analysis.doi = fetched_doi
-                field_updates.append(f"doi: '{old_doi}' → '{fetched_doi}'")
-                logger.info(f"✅ Updated DOI from DB: '{old_doi}' → '{fetched_doi}'")
-            
-            # 🚨 IMPORTANT: Update previous documents ONLY if current document has good identification
-            # Check if current document has at least one good identification field
-            current_has_good_patient = not is_bad_field(document_analysis.patient_name)
-            current_has_good_dob = hasattr(document_analysis, 'dob') and not is_bad_field(document_analysis.dob)
-            current_has_good_claim = not is_bad_field(document_analysis.claim_number)
-            current_has_good_doi = hasattr(document_analysis, 'doi') and not is_bad_field(document_analysis.doi)
-            
-            # Only update previous documents if we have at least DOB OR claim number in current document
-            current_has_identification = current_has_good_dob or current_has_good_claim
-            
-            if current_has_identification and (current_has_good_patient or current_has_good_dob or current_has_good_claim or current_has_good_doi):
-                try:
-                    update_patient = document_analysis.patient_name if current_has_good_patient else None
-                    update_dob = document_analysis.dob if current_has_good_dob else None
-                    update_claim = document_analysis.claim_number if current_has_good_claim else None
-                    update_doi = document_analysis.doi if current_has_good_doi else None
-                    
-                    if update_patient or update_dob or update_claim:
-                        updated_previous_docs = await db_service.update_document_fields(
-                            patient_name=update_patient or "Not specified",
-                            dob=update_dob or "Not specified",
-                            physician_id=physician_id,
-                            claim_number=update_claim or "Not specified",
-                            doi=update_doi
-                        )
-                        logger.info(f"🔄 Updated {updated_previous_docs} previous documents with current good fields")
-                        
-                        # Invalidate cache after updates
-                        if updated_previous_docs > 0 and self.redis_client:
-                            pattern = f"patient_lookup:{physician_id}:*"
-                            keys = await self.redis_client.keys(pattern)
-                            if keys:
-                                await self.redis_client.delete(*keys)
-                                logger.info(f"🗑️ Invalidated {len(keys)} patient lookup cache entries")
-                    
-                except Exception as update_err:
-                    logger.error(f"❌ Error updating previous documents: {update_err}")
+            # Check patient name match - CURRENT DOCUMENT vs FETCHED DATA
+            current_patient_normalized = normalize_field(current_patient_name)
+            fetched_patient_normalized = normalize_field(fetched_patient_name)
+            patient_name_matches = (
+                not is_bad_field(current_patient_name) and 
+                not is_bad_field(fetched_patient_name) and
+                current_patient_normalized == fetched_patient_normalized
+            )
+            if patient_name_matches:
+                matching_fields += 1
+                logger.info(f"✅ Patient name matches: '{current_patient_name}' == '{fetched_patient_name}'")
             else:
-                logger.info("ℹ️ Skipping previous document updates - current document lacks sufficient identification")
+                logger.info(f"❌ Patient name MISMATCH: '{current_patient_name}' != '{fetched_patient_name}'")
             
-            logger.info(f"🎯 Bidirectional updates completed: {field_updates}")
+            # Check DOB match - CURRENT DOCUMENT vs FETCHED DATA
+            current_dob_normalized = normalize_field(current_dob)
+            fetched_dob_normalized = normalize_field(fetched_dob)
+            dob_matches = (
+                not is_bad_field(current_dob) and 
+                not is_bad_field(fetched_dob) and
+                current_dob_normalized == fetched_dob_normalized
+            )
+            if dob_matches:
+                matching_fields += 1
+                logger.info(f"✅ DOB matches: '{current_dob}' == '{fetched_dob}'")
+            else:
+                logger.info(f"❌ DOB MISMATCH: '{current_dob}' != '{fetched_dob}'")
+            
+            # Check claim number match - CURRENT DOCUMENT vs FETCHED DATA
+            current_claim_normalized = normalize_field(current_claim_number)
+            fetched_claim_normalized = normalize_field(fetched_claim_number)
+            claim_matches = (
+                not is_bad_field(current_claim_number) and 
+                not is_bad_field(fetched_claim_number) and
+                current_claim_normalized == fetched_claim_normalized
+            )
+            if claim_matches:
+                matching_fields += 1
+                logger.info(f"✅ Claim number matches: '{current_claim_number}' == '{fetched_claim_number}'")
+            else:
+                logger.info(f"❌ Claim number MISMATCH: '{current_claim_number}' != '{fetched_claim_number}'")
+            
+            # Check DOI match - CURRENT DOCUMENT vs FETCHED DATA
+            current_doi_normalized = normalize_field(current_doi)
+            fetched_doi_normalized = normalize_field(fetched_doi)
+            doi_matches = (
+                not is_bad_field(current_doi) and 
+                not is_bad_field(fetched_doi) and
+                current_doi_normalized == fetched_doi_normalized
+            )
+            if doi_matches:
+                matching_fields += 1
+                logger.info(f"✅ DOI matches: '{current_doi}' == '{fetched_doi}'")
+            else:
+                logger.info(f"❌ DOI MISMATCH: '{current_doi}' != '{fetched_doi}'")
+            
+            logger.info(f"🔢 Field matching summary: {matching_fields} fields match")
+            
+            # 🚨 CRITICAL: Only proceed with updates if we have AT LEAST 2 matching fields
+            if matching_fields >= 2:
+                logger.info("✅ Minimum 2-field match satisfied - proceeding with field updates")
+                
+                # Update document analysis with good values from DB
+                # Only update if current document has bad values AND DB has good values
+                if is_bad_field(document_analysis.patient_name) and not is_bad_field(fetched_patient_name):
+                    old_name = document_analysis.patient_name
+                    document_analysis.patient_name = fetched_patient_name
+                    field_updates.append(f"patient_name: '{old_name}' → '{fetched_patient_name}'")
+                    logger.info(f"✅ Updated patient_name from DB: '{old_name}' → '{fetched_patient_name}'")
+                
+                if hasattr(document_analysis, 'dob') and is_bad_field(document_analysis.dob) and not is_bad_field(fetched_dob):
+                    old_dob = document_analysis.dob
+                    document_analysis.dob = fetched_dob
+                    field_updates.append(f"dob: '{old_dob}' → '{fetched_dob}'")
+                    logger.info(f"✅ Updated DOB from DB: '{old_dob}' → '{fetched_dob}'")
+                
+                if is_bad_field(document_analysis.claim_number) and not is_bad_field(fetched_claim_number):
+                    old_claim = document_analysis.claim_number
+                    document_analysis.claim_number = fetched_claim_number
+                    field_updates.append(f"claim_number: '{old_claim}' → '{fetched_claim_number}'")
+                    logger.info(f"✅ Updated claim_number from DB: '{old_claim}' → '{fetched_claim_number}'")
+                
+                if (hasattr(document_analysis, 'doi') and 
+                    is_bad_field(document_analysis.doi) and 
+                    not is_bad_field(fetched_doi)):
+                    old_doi = document_analysis.doi
+                    document_analysis.doi = fetched_doi
+                    field_updates.append(f"doi: '{old_doi}' → '{fetched_doi}'")
+                    logger.info(f"✅ Updated DOI from DB: '{old_doi}' → '{fetched_doi}'")
+                
+                # 🚨 IMPORTANT: Update previous documents ONLY if current document has good identification
+                # AND we have the minimum 2-field match
+                current_has_good_patient = not is_bad_field(document_analysis.patient_name)
+                current_has_good_dob = hasattr(document_analysis, 'dob') and not is_bad_field(document_analysis.dob)
+                current_has_good_claim = not is_bad_field(document_analysis.claim_number)
+                current_has_good_doi = hasattr(document_analysis, 'doi') and not is_bad_field(document_analysis.doi)
+                
+                # Only update previous documents if we have at least DOB OR claim number in current document
+                current_has_identification = current_has_good_dob or current_has_good_claim
+                
+                if current_has_identification and (current_has_good_patient or current_has_good_dob or current_has_good_claim or current_has_good_doi):
+                    try:
+                        update_patient = document_analysis.patient_name if current_has_good_patient else None
+                        update_dob = document_analysis.dob if current_has_good_dob else None
+                        update_claim = document_analysis.claim_number if current_has_good_claim else None
+                        update_doi = document_analysis.doi if current_has_good_doi else None
+                        
+                        if update_patient or update_dob or update_claim:
+                            updated_previous_docs = await db_service.update_document_fields(
+                                patient_name=update_patient or "Not specified",
+                                dob=update_dob or "Not specified",
+                                physician_id=physician_id,
+                                claim_number=update_claim or "Not specified",
+                                doi=update_doi
+                            )
+                            logger.info(f"🔄 Updated {updated_previous_docs} previous documents with current good fields")
+                            
+                            # Invalidate cache after updates
+                            if updated_previous_docs > 0 and self.redis_client:
+                                pattern = f"patient_lookup:{physician_id}:*"
+                                keys = await self.redis_client.keys(pattern)
+                                if keys:
+                                    await self.redis_client.delete(*keys)
+                                    logger.info(f"🗑️ Invalidated {len(keys)} patient lookup cache entries")
+                        
+                    except Exception as update_err:
+                        logger.error(f"❌ Error updating previous documents: {update_err}")
+                else:
+                    logger.info("ℹ️ Skipping previous document updates - current document lacks sufficient identification")
+                
+                logger.info(f"🎯 Bidirectional updates completed: {field_updates}")
+            else:
+                logger.warning(f"🚨 SKIPPING FIELD UPDATES: Only {matching_fields} field(s) match - minimum 2 fields required")
+                logger.info(f"   Required at least 2 matching fields from: patient_name, dob, claim_number, doi")
         
-        # Update processed_data with overridden values
+        # Update processed_data with overridden values (only if updates were applied)
         processed_data["patient_name"] = document_analysis.patient_name
         processed_data["claim_number"] = document_analysis.claim_number
         processed_data["has_patient_name"] = not is_bad_field(document_analysis.patient_name)
@@ -372,87 +682,8 @@ class WebhookService:
             "document_analysis": document_analysis,
             "field_updates": field_updates,
             "previous_docs_updated": updated_previous_docs,
-            "lookup_skipped": False  # Lookup was performed
+            "lookup_skipped": False
         }
-    async def _get_cached_patient_lookup(self, physician_id: str, patient_name: str, claim_number: str, dob: str, db_service) -> dict:
-        """Get patient lookup data from cache or database"""
-        
-        # Create cache key matching your log format
-        cache_key_parts = [f"patient_lookup:{physician_id}"]
-        
-        if patient_name and str(patient_name).lower() not in ["not specified", "unknown", "", "none"]:
-            cache_key_parts.append(f"patient:{patient_name}")
-        
-        if dob and str(dob).lower() not in ["not specified", "unknown", "", "none"]:
-            cache_key_parts.append(f"dob:{dob}")
-        
-        if claim_number and str(claim_number).lower() not in ["not specified", "unknown", "", "none"]:
-            cache_key_parts.append(f"claim:{claim_number}")
-        
-        cache_key = ":".join(cache_key_parts)
-        logger.info(f"🔑 Final cache key: {cache_key}")
-        
-        # Check if Redis client is available
-        if not self.redis_client:
-            logger.warning("❌ Redis client not available, skipping cache")
-            return await db_service.get_patient_claim_numbers(
-                patient_name=patient_name,
-                physicianId=physician_id,
-                dob=dob,
-                claim_number=claim_number
-            )
-        
-        # Try cache first
-        try:
-            logger.info(f"🔍 Checking Redis cache FIRST for key: {cache_key}")
-            cached_data = await self.redis_client.get(cache_key)
-            if cached_data:
-                logger.info(f"💾 CACHE HIT: Found patient lookup data in cache for key: {cache_key}")
-                return json.loads(cached_data)
-            else:
-                logger.info(f"💾 CACHE MISS: No data found in cache for key: {cache_key}")
-        except Exception as e:
-            logger.error(f"⚠️ Cache read error for key {cache_key}: {e}")
-        
-        # Get from database
-        logger.info("🗄️ Fetching patient lookup data from database...")
-        lookup_data = await db_service.get_patient_claim_numbers(
-            patient_name=patient_name,
-            physicianId=physician_id,
-            dob=dob,
-            claim_number=claim_number
-        )
-        
-        # Cache the result
-        if lookup_data and lookup_data.get("total_documents", 0) > 0:
-            try:
-                # Convert any non-serializable objects to strings
-                cacheable_data = {
-                    "total_documents": lookup_data.get("total_documents", 0),
-                    "patient_name": lookup_data.get("patient_name"),
-                    "dob": lookup_data.get("dob"),
-                    "claim_number": lookup_data.get("claim_number"),
-                    "doi": lookup_data.get("doi"),
-                    "has_conflicting_claims": lookup_data.get("has_conflicting_claims", False),
-                    "documents": [
-                        {
-                            "patientName": doc.get("patientName"),
-                            "dob": doc.get("dob"),
-                            "claimNumber": doc.get("claimNumber"),
-                            "physicianId": doc.get("physicianId")
-                        }
-                        for doc in lookup_data.get("documents", [])
-                    ]
-                }
-                
-                await self.redis_client.setex(cache_key, 3600, json.dumps(cacheable_data))
-                logger.info(f"💾 CACHE STORE: Successfully cached patient lookup data for key: {cache_key}")
-            except Exception as e:
-                logger.error(f"⚠️ Cache write error for key {cache_key}: {e}")
-                logger.error(f"⚠️ Data that failed to cache: {lookup_data}")
-        
-        return lookup_data
-
     async def create_tasks_if_needed(self, document_analysis, document_id: str, physician_id: str, filename: str) -> int:
         """Step 3: Create tasks if conditions are met"""
         if not document_analysis.is_task_needed:
@@ -548,6 +779,7 @@ class WebhookService:
             logger.error(f"❌ Error in task creation: {str(e)}")
         
         return created_tasks
+
     async def save_document(self, db_service, processed_data: dict, lookup_result: dict) -> dict:
         """Step 4: Save document to database and Redis cache"""
         
@@ -680,7 +912,6 @@ class WebhookService:
             summary_snapshots.append(snapshot)
         
         # ✅ FIXED: Get the ACTUAL long and short summaries from ReportAnalyzer
-        # The ReportAnalyzer returns a dict with both summaries in process_document_data
         report_analyzer_result = processed_data.get("report_analyzer_result", {})
         
         # Use the actual summaries from ReportAnalyzer if available
@@ -768,6 +999,7 @@ class WebhookService:
             "filename": processed_data["filename"],
             "cache_success": cache_success
         }
+
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
         Clean webhook processing pipeline WITHOUT duplicate prevention
@@ -826,7 +1058,6 @@ class WebhookService:
         except Exception as e:
             logger.error(f"❌ Webhook processing failed: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
-   
     async def update_fail_document(self, fail_doc: Any, updated_fields: dict, user_id: str = None, db_service: Any = None) -> dict:
         """
         Updates and processes a failed document using the complete webhook-like logic.

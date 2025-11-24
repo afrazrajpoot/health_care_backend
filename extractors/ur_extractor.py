@@ -77,9 +77,7 @@ class DecisionDocumentExtractor:
         logger.info("⚖️ STARTING DECISION DOCUMENT EXTRACTION (FULL CONTEXT)")
         logger.info("=" * 80)
         
-        # Auto-detect document type if not specified
-        detected_type = self._detect_document_type(text, doc_type)
-        logger.info(f"📋 Document Type: {detected_type} (original: {doc_type})")
+        logger.info(f"📋 Document Type: {doc_type}")
         
         # Check document size
         text_length = len(text)
@@ -93,12 +91,12 @@ class DecisionDocumentExtractor:
         # Stage 1: Directly generate long summary with FULL CONTEXT (no intermediate extraction)
         long_summary = self._generate_long_summary_direct(
             text=text,
-            doc_type=detected_type,
+            doc_type=doc_type,
             fallback_date=fallback_date
         )
 
         # Stage 2: Generate short summary from long summary
-        short_summary = self._generate_short_summary_from_long_summary(long_summary, detected_type)
+        short_summary = self._generate_short_summary_from_long_summary(long_summary, doc_type)
 
         logger.info("=" * 80)
         logger.info("✅ DECISION DOCUMENT EXTRACTION COMPLETE (FULL CONTEXT)")
@@ -109,40 +107,6 @@ class DecisionDocumentExtractor:
             "long_summary": long_summary,
             "short_summary": short_summary
         }
-
-    def _detect_document_type(self, text: str, original_type: str) -> str:
-        """
-        Auto-detect document type based on content patterns.
-        Falls back to original type if detection is uncertain.
-        """
-        if original_type and original_type.lower() not in ['unknown', 'auto', '']:
-            return original_type
-        
-        type_scores = {}
-        
-        for doc_type, pattern in self.doc_type_patterns.items():
-            matches = pattern.findall(text)
-            type_scores[doc_type] = len(matches)
-        
-        # Also check for decision patterns
-        for decision_type, pattern in self.decision_patterns.items():
-            matches = pattern.findall(text)
-            if matches:
-                # Boost scores for documents with clear decision language
-                if decision_type in ['approved', 'denied']:
-                    for doc_type in ['ur_imr', 'authorization', 'appeal']:
-                        type_scores[doc_type] = type_scores.get(doc_type, 0) + len(matches)
-        
-        # Get highest scoring type
-        if type_scores:
-            best_type = max(type_scores.items(), key=lambda x: x[1])
-            if best_type[1] > 0:  # Only return if we found matches
-                detected_type = best_type[0].upper().replace('_', ' ')
-                logger.info(f"🔍 Auto-detected document type: {detected_type} (score: {best_type[1]})")
-                return detected_type
-        
-        logger.info(f"🔍 Could not auto-detect document type, using: {original_type}")
-        return original_type or "UNKNOWN"
 
     def _generate_long_summary_direct(
         self,
