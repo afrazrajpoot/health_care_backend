@@ -26,6 +26,7 @@ class AdministrativeExtractor:
     - Chain-of-thought reasoning = Explains decisions
     - Optimized for accuracy matching Gemini's approach
     - Supports Attorney Letters, NCM Notes, Employer Reports, Disability Forms, Legal Correspondence
+    - Direct LLM generation for long summary (removes intermediate extraction)
     """
 
     def __init__(self, llm: AzureChatOpenAI):
@@ -92,17 +93,14 @@ class AdministrativeExtractor:
             logger.warning(f"⚠️ Document very large ({token_estimate:,} tokens)")
             logger.warning("⚠️ May exceed GPT-4o context window (128K tokens)")
         
-        # Stage 1: Extract with FULL CONTEXT
-        raw_result = self._extract_full_context(
+        # Stage 1: Directly generate long summary with FULL CONTEXT (no intermediate extraction)
+        long_summary = self._generate_long_summary_direct(
             text=text,
             doc_type=detected_type,
             fallback_date=fallback_date
         )
 
-        # Stage 2: Build long summary from ALL raw data
-        long_summary = self._build_comprehensive_long_summary(raw_result, detected_type, fallback_date)
-
-        # Stage 3: Generate short summary from long summary
+        # Stage 2: Generate short summary from long summary
         short_summary = self._generate_short_summary_from_long_summary(long_summary, detected_type)
 
         logger.info("=" * 80)
@@ -149,18 +147,20 @@ class AdministrativeExtractor:
         logger.info(f"🔍 Could not auto-detect administrative type, using: {original_type}")
         return original_type or "Administrative Document"
 
-    def _extract_full_context(
+    def _generate_long_summary_direct(
         self,
         text: str,
         doc_type: str,
         fallback_date: str
-    ) -> Dict:
+    ) -> str:
         """
-        Extract with FULL document context using only the text.
+        Directly generate comprehensive long summary with FULL document context using LLM.
+        Adapted from original extraction prompt to output structured summary directly.
         """
-        logger.info("🔍 Processing ENTIRE administrative document in single context window...")
+        logger.info("🔍 Processing ENTIRE administrative document in single context window for direct long summary...")
         
-        # Build system prompt without contextual guidance
+        # Adapted System Prompt for Direct Long Summary Generation
+        # Reuses core anti-hallucination rules and administrative focus from original extraction prompt
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are an expert administrative and legal documentation specialist analyzing a COMPLETE {doc_type}.
 
@@ -255,101 +255,87 @@ VIII. CONTACT & FOLLOW-UP PROCEDURES
 - CONTACT INFO: Extract verbatim without formatting
 - It is BETTER to have empty fields than incorrect administrative information
 
-Now analyze this COMPLETE {doc_type} and extract ALL relevant administrative information:
+Now analyze this COMPLETE {doc_type} and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
 """)
 
+        # Adapted User Prompt for Direct Long Summary - Outputs the structured summary directly
         user_prompt = HumanMessagePromptTemplate.from_template("""
 COMPLETE {doc_type} TEXT:
 
 {full_document_text}
 
-Extract into COMPREHENSIVE structured JSON with all critical administrative details:
+Generate the long summary in this EXACT STRUCTURED FORMAT (use the fallback date {fallback_date} if no document date found):
 
-{{
-  "document_identity": {{
-    "document_type": "{doc_type}",
-    "document_date": "",
-    "effective_date": "",
-    "document_id": "",
-    "subject": "",
-    "purpose": "",
-    "reference_numbers": []
-  }},
-  
-  "parties_involved": {{
-    "sender": {{
-      "name": "",
-      "title": "",
-      "organization": "",
-      "contact_info": ""
-    }},
-    "recipient": {{
-      "name": "",
-      "title": "",
-      "organization": "",
-      "contact_info": ""
-    }},
-    "cc_parties": [],
-    "legal_representation": {{
-      "attorney_name": "",
-      "firm": "",
-      "contact_info": ""
-    }}
-  }},
-  
-  "key_dates_deadlines": {{
-    "response_deadline": "",
-    "hearing_date": "",
-    "appointment_date": "",
-    "follow_up_date": "",
-    "effective_period": "",
-    "time_sensitive_requirements": []
-  }},
-  
-  "administrative_content": {{
-    "primary_subject": "",
-    "key_points_summary": "",
-    "background_context": "",
-    "incident_details": "",
-    "current_status": ""
-  }},
-  
-  "action_items_requirements": {{
-    "required_responses": [],
-    "documentation_required": [],
-    "specific_actions": [],
-    "compliance_requirements": [],
-    "submission_methods": ""
-  }},
-  
-  "legal_procedural_elements": {{
-    "legal_demands": [],
-    "procedural_requirements": [],
-    "next_steps": [],
-    "rights_obligations": [],
-    "consequences_non_compliance": ""
-  }},
-  
-  "medical_claim_information": {{
-    "claim_number": "",
-    "case_number": "",
-    "treatment_authorizations": [],
-    "work_status": "",
-    "disability_information": "",
-    "medication_details": []
-  }},
-  
-  "contact_follow_up": {{
-    "submission_address": "",
-    "contact_person": "",
-    "phone_number": "",
-    "email_address": "",
-    "response_format": "",
-    "follow_up_procedures": ""
-  }},
-  
-  "critical_administrative_findings": []
-}}
+📋 ADMINISTRATIVE DOCUMENT OVERVIEW
+--------------------------------------------------
+Document Type: {doc_type}
+Document Date: [extracted or {fallback_date}]
+Subject: [extracted]
+Purpose: [extracted]
+Document ID: [extracted]
+
+👥 PARTIES INVOLVED
+--------------------------------------------------
+From: [sender name]
+  Organization: [extracted]
+  Title: [extracted]
+To: [recipient name]
+  Organization: [extracted]
+Legal Representation: [attorney name]
+  Firm: [extracted]
+
+📅 KEY DATES & DEADLINES
+--------------------------------------------------
+Response Deadline: [extracted]
+Hearing Date: [extracted]
+Appointment Date: [extracted]
+Time-Sensitive Requirements:
+• [list up to 3, exact wording]
+
+📄 ADMINISTRATIVE CONTENT
+--------------------------------------------------
+Primary Subject: [extracted]
+Key Points: [extracted]
+Current Status: [extracted]
+Incident Details: [extracted, truncate if >200 chars]
+
+✅ ACTION ITEMS & REQUIREMENTS
+--------------------------------------------------
+Required Responses:
+• [list up to 5]
+Documentation Required:
+• [list up to 5]
+Specific Actions:
+• [list up to 5]
+
+⚖️ LEGAL & PROCEDURAL ELEMENTS
+--------------------------------------------------
+Legal Demands:
+• [list up to 3]
+Next Steps:
+• [list up to 3]
+Consequences of Non-Compliance: [extracted]
+
+🏥 MEDICAL & CLAIM INFORMATION
+--------------------------------------------------
+Claim Number: [extracted]
+Case Number: [extracted]
+Work Status: [extracted]
+Disability Information: [extracted]
+Treatment Authorizations:
+• [list up to 3]
+
+📞 CONTACT & FOLLOW-UP
+--------------------------------------------------
+Contact Person: [extracted]
+Phone: [extracted]
+Email: [extracted]
+Submission Address: [extracted]
+Response Format: [extracted]
+
+🚨 CRITICAL ADMINISTRATIVE FINDINGS
+--------------------------------------------------
+• [list up to 8 most actionable/time-sensitive items]
 
 ⚠️ CRITICAL ADMINISTRATIVE REMINDERS:
 1. For "key_dates_deadlines": Extract EXACT date wording from document
@@ -373,6 +359,7 @@ Extract into COMPREHENSIVE structured JSON with all critical administrative deta
    - Legal deadlines
    - Critical compliance requirements
    - Urgent action items
+   - If none explicit, derive from deadlines/actions (but prioritize explicit)
 """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
@@ -380,323 +367,36 @@ Extract into COMPREHENSIVE structured JSON with all critical administrative deta
         try:
             start_time = time.time()
             
-            logger.info("🤖 Invoking LLM for full-context administrative document extraction...")
+            logger.info("🤖 Invoking LLM for direct full-context administrative document long summary generation...")
             
-            # Single LLM call with FULL document context
-            chain = chat_prompt | self.llm | self.parser
+            # Single LLM call with FULL document context to generate long summary directly
+            chain = chat_prompt | self.llm
             result = chain.invoke({
                 "doc_type": doc_type,
-                "full_document_text": text
+                "full_document_text": text,
+                "fallback_date": fallback_date
             })
+            
+            long_summary = result.content.strip()
             
             end_time = time.time()
             processing_time = end_time - start_time
             
-            logger.info(f"⚡ Full-context administrative document extraction completed in {processing_time:.2f}s")
-            logger.info(f"✅ Extracted data from complete {len(text):,} char administrative document")
+            logger.info(f"⚡ Direct administrative document long summary generation completed in {processing_time:.2f}s")
+            logger.info(f"✅ Generated long summary from complete {len(text):,} char administrative document")
             
-            return result
+            return long_summary
             
         except Exception as e:
-            logger.error(f"❌ Full-context administrative document extraction failed: {e}", exc_info=True)
+            logger.error(f"❌ Direct administrative document long summary generation failed: {e}", exc_info=True)
             
             # Check if context length exceeded
             if "context_length_exceeded" in str(e).lower() or "maximum context" in str(e).lower():
                 logger.error("❌ Administrative document exceeds GPT-4o 128K context window")
                 logger.error("❌ Consider implementing chunked fallback for very large documents")
             
-            return self._get_fallback_result(doc_type, fallback_date)
-
-    def _build_comprehensive_long_summary(self, raw_data: Dict, doc_type: str, fallback_date: str) -> str:
-        """
-        Build comprehensive long summary from ALL extracted administrative data.
-        """
-        logger.info("📝 Building comprehensive long summary from ALL extracted administrative data...")
-        
-        sections = []
-        
-        # Section 1: DOCUMENT OVERVIEW
-        sections.append("📋 ADMINISTRATIVE DOCUMENT OVERVIEW")
-        sections.append("-" * 50)
-        
-        document_identity = raw_data.get("document_identity", {})
-        overview_lines = [
-            f"Document Type: {document_identity.get('document_type', doc_type)}",
-            f"Document Date: {document_identity.get('document_date', fallback_date)}",
-            f"Subject: {document_identity.get('subject', 'Not specified')}",
-            f"Purpose: {document_identity.get('purpose', 'Not specified')}",
-            f"Document ID: {document_identity.get('document_id', 'Not specified')}"
-        ]
-        sections.append("\n".join(overview_lines))
-        
-        # Section 2: PARTIES INVOLVED
-        sections.append("\n👥 PARTIES INVOLVED")
-        sections.append("-" * 50)
-        
-        parties = raw_data.get("parties_involved", {})
-        party_lines = []
-        
-        # Sender
-        sender = parties.get("sender", {})
-        if sender.get("name"):
-            party_lines.append(f"From: {sender['name']}")
-            if sender.get("organization"):
-                party_lines.append(f"  Organization: {sender['organization']}")
-            if sender.get("title"):
-                party_lines.append(f"  Title: {sender['title']}")
-        
-        # Recipient
-        recipient = parties.get("recipient", {})
-        if recipient.get("name"):
-            party_lines.append(f"To: {recipient['name']}")
-            if recipient.get("organization"):
-                party_lines.append(f"  Organization: {recipient['organization']}")
-        
-        # Legal representation
-        legal_rep = parties.get("legal_representation", {})
-        if legal_rep.get("attorney_name"):
-            party_lines.append(f"Legal Representation: {legal_rep['attorney_name']}")
-            if legal_rep.get("firm"):
-                party_lines.append(f"  Firm: {legal_rep['firm']}")
-        
-        sections.append("\n".join(party_lines) if party_lines else "No party information extracted")
-        
-        # Section 3: KEY DATES & DEADLINES
-        sections.append("\n📅 KEY DATES & DEADLINES")
-        sections.append("-" * 50)
-        
-        dates_deadlines = raw_data.get("key_dates_deadlines", {})
-        date_lines = []
-        
-        if dates_deadlines.get("response_deadline"):
-            date_lines.append(f"Response Deadline: {dates_deadlines['response_deadline']}")
-        
-        if dates_deadlines.get("hearing_date"):
-            date_lines.append(f"Hearing Date: {dates_deadlines['hearing_date']}")
-        
-        if dates_deadlines.get("appointment_date"):
-            date_lines.append(f"Appointment Date: {dates_deadlines['appointment_date']}")
-        
-        time_sensitive = dates_deadlines.get("time_sensitive_requirements", [])
-        if time_sensitive:
-            date_lines.append("\nTime-Sensitive Requirements:")
-            for requirement in time_sensitive[:3]:
-                if isinstance(requirement, dict):
-                    req_desc = requirement.get("requirement", "")
-                    if req_desc:
-                        date_lines.append(f"  • {req_desc}")
-                elif requirement:
-                    date_lines.append(f"  • {requirement}")
-        
-        sections.append("\n".join(date_lines) if date_lines else "No dates/deadlines extracted")
-        
-        # Section 4: ADMINISTRATIVE CONTENT
-        sections.append("\n📄 ADMINISTRATIVE CONTENT")
-        sections.append("-" * 50)
-        
-        admin_content = raw_data.get("administrative_content", {})
-        content_lines = []
-        
-        if admin_content.get("primary_subject"):
-            content_lines.append(f"Primary Subject: {admin_content['primary_subject']}")
-        
-        if admin_content.get("key_points_summary"):
-            content_lines.append(f"Key Points: {admin_content['key_points_summary']}")
-        
-        if admin_content.get("current_status"):
-            content_lines.append(f"Current Status: {admin_content['current_status']}")
-        
-        if admin_content.get("incident_details"):
-            # Truncate long incident details
-            incident = admin_content['incident_details']
-            if len(incident) > 200:
-                incident = incident[:197] + "..."
-            content_lines.append(f"Incident Details: {incident}")
-        
-        sections.append("\n".join(content_lines) if content_lines else "No administrative content extracted")
-        
-        # Section 5: ACTION ITEMS & REQUIREMENTS
-        sections.append("\n✅ ACTION ITEMS & REQUIREMENTS")
-        sections.append("-" * 50)
-        
-        action_items = raw_data.get("action_items_requirements", {})
-        action_lines = []
-        
-        # Required responses
-        required_responses = action_items.get("required_responses", [])
-        if required_responses:
-            action_lines.append("Required Responses:")
-            for response in required_responses[:5]:
-                if isinstance(response, dict):
-                    resp_desc = response.get("response", "")
-                    if resp_desc:
-                        action_lines.append(f"  • {resp_desc}")
-                elif response:
-                    action_lines.append(f"  • {response}")
-        
-        # Documentation required
-        documentation = action_items.get("documentation_required", [])
-        if documentation:
-            action_lines.append("\nDocumentation Required:")
-            for doc in documentation[:5]:
-                if isinstance(doc, dict):
-                    doc_desc = doc.get("document", "")
-                    if doc_desc:
-                        action_lines.append(f"  • {doc_desc}")
-                elif doc:
-                    action_lines.append(f"  • {doc}")
-        
-        # Specific actions
-        specific_actions = action_items.get("specific_actions", [])
-        if specific_actions:
-            action_lines.append("\nSpecific Actions:")
-            for action in specific_actions[:5]:
-                if isinstance(action, dict):
-                    action_desc = action.get("action", "")
-                    if action_desc:
-                        action_lines.append(f"  • {action_desc}")
-                elif action:
-                    action_lines.append(f"  • {action}")
-        
-        sections.append("\n".join(action_lines) if action_lines else "No action items extracted")
-        
-        # Section 6: LEGAL & PROCEDURAL ELEMENTS
-        sections.append("\n⚖️ LEGAL & PROCEDURAL ELEMENTS")
-        sections.append("-" * 50)
-        
-        legal_elements = raw_data.get("legal_procedural_elements", {})
-        legal_lines = []
-        
-        # Legal demands
-        legal_demands = legal_elements.get("legal_demands", [])
-        if legal_demands:
-            legal_lines.append("Legal Demands:")
-            for demand in legal_demands[:3]:
-                if isinstance(demand, dict):
-                    demand_desc = demand.get("demand", "")
-                    if demand_desc:
-                        legal_lines.append(f"  • {demand_desc}")
-                elif demand:
-                    legal_lines.append(f"  • {demand}")
-        
-        # Next steps
-        next_steps = legal_elements.get("next_steps", [])
-        if next_steps:
-            legal_lines.append("\nNext Steps:")
-            for step in next_steps[:3]:
-                if isinstance(step, dict):
-                    step_desc = step.get("step", "")
-                    if step_desc:
-                        legal_lines.append(f"  • {step_desc}")
-                elif step:
-                    legal_lines.append(f"  • {step}")
-        
-        if legal_elements.get("consequences_non_compliance"):
-            legal_lines.append(f"\nConsequences of Non-Compliance: {legal_elements['consequences_non_compliance']}")
-        
-        sections.append("\n".join(legal_lines) if legal_lines else "No legal/procedural elements extracted")
-        
-        # Section 7: MEDICAL & CLAIM INFORMATION
-        sections.append("\n🏥 MEDICAL & CLAIM INFORMATION")
-        sections.append("-" * 50)
-        
-        medical_claim = raw_data.get("medical_claim_information", {})
-        medical_lines = []
-        
-        if medical_claim.get("claim_number"):
-            medical_lines.append(f"Claim Number: {medical_claim['claim_number']}")
-        
-        if medical_claim.get("case_number"):
-            medical_lines.append(f"Case Number: {medical_claim['case_number']}")
-        
-        if medical_claim.get("work_status"):
-            medical_lines.append(f"Work Status: {medical_claim['work_status']}")
-        
-        if medical_claim.get("disability_information"):
-            medical_lines.append(f"Disability Information: {medical_claim['disability_information']}")
-        
-        # Treatment authorizations
-        treatment_auths = medical_claim.get("treatment_authorizations", [])
-        if treatment_auths:
-            medical_lines.append("\nTreatment Authorizations:")
-            for auth in treatment_auths[:3]:
-                if isinstance(auth, dict):
-                    auth_desc = auth.get("authorization", "")
-                    if auth_desc:
-                        medical_lines.append(f"  • {auth_desc}")
-                elif auth:
-                    medical_lines.append(f"  • {auth}")
-        
-        sections.append("\n".join(medical_lines) if medical_lines else "No medical/claim information extracted")
-        
-        # Section 8: CONTACT & FOLLOW-UP
-        sections.append("\n📞 CONTACT & FOLLOW-UP")
-        sections.append("-" * 50)
-        
-        contact_followup = raw_data.get("contact_follow_up", {})
-        contact_lines = []
-        
-        if contact_followup.get("contact_person"):
-            contact_lines.append(f"Contact Person: {contact_followup['contact_person']}")
-        
-        if contact_followup.get("phone_number"):
-            contact_lines.append(f"Phone: {contact_followup['phone_number']}")
-        
-        if contact_followup.get("email_address"):
-            contact_lines.append(f"Email: {contact_followup['email_address']}")
-        
-        if contact_followup.get("submission_address"):
-            contact_lines.append(f"Submission Address: {contact_followup['submission_address']}")
-        
-        if contact_followup.get("response_format"):
-            contact_lines.append(f"Response Format: {contact_followup['response_format']}")
-        
-        sections.append("\n".join(contact_lines) if contact_lines else "No contact information extracted")
-        
-        # Section 9: CRITICAL ADMINISTRATIVE FINDINGS
-        sections.append("\n🚨 CRITICAL ADMINISTRATIVE FINDINGS")
-        sections.append("-" * 50)
-        
-        critical_findings = raw_data.get("critical_administrative_findings", [])
-        if critical_findings:
-            for finding in critical_findings[:8]:
-                if isinstance(finding, dict):
-                    finding_desc = finding.get("finding", "")
-                    finding_priority = finding.get("priority", "")
-                    if finding_desc:
-                        if finding_priority:
-                            sections.append(f"• [{finding_priority}] {finding_desc}")
-                        else:
-                            sections.append(f"• {finding_desc}")
-                elif finding:
-                    sections.append(f"• {finding}")
-        else:
-            # Check for critical findings in other sections
-            critical_items = []
-            
-            # Check for urgent deadlines
-            if dates_deadlines.get("response_deadline"):
-                critical_items.append(f"Response Deadline: {dates_deadlines['response_deadline']}")
-            
-            # Check for legal consequences
-            if legal_elements.get("consequences_non_compliance"):
-                critical_items.append("Legal consequences specified for non-compliance")
-            
-            # Check for urgent actions
-            if action_items.get("required_responses"):
-                critical_items.append(f"{len(action_items['required_responses'])} required responses")
-            
-            if critical_items:
-                for item in critical_items:
-                    sections.append(f"• {item}")
-            else:
-                sections.append("No critical administrative findings identified")
-        
-        # Join all sections
-        long_summary = "\n\n".join(sections)
-        logger.info(f"✅ Administrative document long summary built: {len(long_summary)} characters")
-        
-        return long_summary
+            # Fallback: Generate a minimal summary
+            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
 
     def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
         """
@@ -707,55 +407,55 @@ Extract into COMPREHENSIVE structured JSON with all critical administrative deta
         logger.info("🎯 Generating 30–60 word administrative structured summary (key-value format)...")
 
         system_prompt = SystemMessagePromptTemplate.from_template("""
-    You are an administrative and legal-document extraction specialist.
+You are an administrative and legal-document extraction specialist.
 
-    TASK:
-    Create a concise, accurate administrative summary using ONLY information explicitly present in the long summary.
+TASK:
+Create a concise, accurate administrative summary using ONLY information explicitly present in the long summary.
 
-    STRICT REQUIREMENTS:
-    1. Word count MUST be **between 30 and 60 words**.
-    2. Output format MUST be EXACTLY:
+STRICT REQUIREMENTS:
+1. Word count MUST be **between 30 and 60 words**.
+2. Output format MUST be EXACTLY:
 
-    [Document Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Medication:[value] | MMI Status:[value] | Work Status:[value] | Restrictions:[value] | Action Items:[value] | Critical Finding:[value] | Follow-up:[value]
+[Document Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Medication:[value] | MMI Status:[value] | Work Status:[value] | Restrictions:[value] | Action Items:[value] | Critical Finding:[value] | Follow-up:[value]
 
-    FORMAT & RULES:
-    - MUST be **30–60 words**.
-    - MUST be **ONE LINE**, pipe-delimited, no line breaks.
-    - NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
-    - NEVER fabricate: no invented dates, meds, restrictions, or findings.
-    - NO narrative sentences. Use short factual fragments ONLY.
-    - First three fields (Document Title, Author, Date) appear without keys
-    - All other fields use key-value format: Key:[value]
+FORMAT & RULES:
+- MUST be **30–60 words**.
+- MUST be **ONE LINE**, pipe-delimited, no line breaks.
+- NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
+- NEVER fabricate: no invented dates, meds, restrictions, or findings.
+- NO narrative sentences. Use short factual fragments ONLY.
+- First three fields (Document Title, Author, Date) appear without keys
+- All other fields use key-value format: Key:[value]
 
-    CONTENT PRIORITY (only if provided in the long summary):
-    1. Document Title  
-    2. Author  
-    3. Document Date  
-    4. Body parts  
-    5. Diagnosis  
-    6. Medications  
-    7. MMI status  
-    8. Work status & restrictions  
-    9. Key action items  
-    10. Critical finding  
-    11. Follow-up requirements
+CONTENT PRIORITY (only if provided in the long summary):
+1. Document Title  
+2. Author  
+3. Document Date  
+4. Body parts  
+5. Diagnosis  
+6. Medications  
+7. MMI status  
+8. Work status & restrictions  
+9. Key action items  
+10. Critical finding  
+11. Follow-up requirements
 
-    ABSOLUTELY FORBIDDEN:
-    - assumptions, interpretations, invented medications, or inferred diagnoses
-    - narrative writing
-    - placeholder text or "Not provided"
-    - duplicate pipes or empty pipe fields (e.g., "||")
+ABSOLUTELY FORBIDDEN:
+- assumptions, interpretations, invented medications, or inferred diagnoses
+- narrative writing
+- placeholder text or "Not provided"
+- duplicate pipes or empty pipe fields (e.g., "||")
 
-    Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
-    """)
+Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
+""")
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
-    LONG ADMINISTRATIVE SUMMARY:
+LONG ADMINISTRATIVE SUMMARY:
 
-    {long_summary}
+{long_summary}
 
-    Now produce a 30–60 word administrative structured summary following ALL rules.
-    """)
+Now produce a 30–60 word administrative structured summary following ALL rules.
+""")
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
 
@@ -848,83 +548,3 @@ Extract into COMPREHENSIVE structured JSON with all critical administrative deta
         
         logger.info(f"🔄 Used administrative fallback summary: {len(summary.split())} words")
         return summary
-
-    def _get_fallback_result(self, doc_type: str, fallback_date: str) -> Dict:
-        """Return minimal fallback result structure for administrative documents"""
-        return {
-            "document_identity": {
-                "document_type": doc_type,
-                "document_date": fallback_date,
-                "effective_date": "",
-                "document_id": "",
-                "subject": "",
-                "purpose": "",
-                "reference_numbers": []
-            },
-            "parties_involved": {
-                "sender": {
-                    "name": "",
-                    "title": "",
-                    "organization": "",
-                    "contact_info": ""
-                },
-                "recipient": {
-                    "name": "",
-                    "title": "",
-                    "organization": "",
-                    "contact_info": ""
-                },
-                "cc_parties": [],
-                "legal_representation": {
-                    "attorney_name": "",
-                    "firm": "",
-                    "contact_info": ""
-                }
-            },
-            "key_dates_deadlines": {
-                "response_deadline": "",
-                "hearing_date": "",
-                "appointment_date": "",
-                "follow_up_date": "",
-                "effective_period": "",
-                "time_sensitive_requirements": []
-            },
-            "administrative_content": {
-                "primary_subject": "",
-                "key_points_summary": "",
-                "background_context": "",
-                "incident_details": "",
-                "current_status": ""
-            },
-            "action_items_requirements": {
-                "required_responses": [],
-                "documentation_required": [],
-                "specific_actions": [],
-                "compliance_requirements": [],
-                "submission_methods": ""
-            },
-            "legal_procedural_elements": {
-                "legal_demands": [],
-                "procedural_requirements": [],
-                "next_steps": [],
-                "rights_obligations": [],
-                "consequences_non_compliance": ""
-            },
-            "medical_claim_information": {
-                "claim_number": "",
-                "case_number": "",
-                "treatment_authorizations": [],
-                "work_status": "",
-                "disability_information": "",
-                "medication_details": []
-            },
-            "contact_follow_up": {
-                "submission_address": "",
-                "contact_person": "",
-                "phone_number": "",
-                "email_address": "",
-                "response_format": "",
-                "follow_up_procedures": ""
-            },
-            "critical_administrative_findings": []
-        }

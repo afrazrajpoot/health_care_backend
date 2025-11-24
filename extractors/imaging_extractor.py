@@ -30,6 +30,7 @@ class ImagingExtractorChained:
     - 6-FIELD IMAGING FOCUS (Header, Clinical Data, Technique, Key Findings, Impression, Recommendations)
     - ZERO tolerance for hallucination, assumptions, or self-additions
     - Only extracts EXPLICITLY STATED information from imaging reports
+    - Direct LLM generation for long summary (removes intermediate extraction)
     """
 
     def __init__(self, llm: AzureChatOpenAI):
@@ -74,13 +75,10 @@ class ImagingExtractorChained:
         start_time = time.time()
         
         try:
-            # Step 1: Extract raw data with full context and zone-aware radiologist detection
-            raw_data = self._extract_raw_data(text, doc_type, fallback_date, page_zones)
+            # Step 1: Directly generate long summary with full context (no intermediate extraction)
+            long_summary = self._generate_long_summary_direct(text, doc_type, fallback_date, page_zones)
             
-            # Step 2: Build comprehensive long summary from ALL raw data
-            long_summary = self._build_comprehensive_long_summary(raw_data, doc_type, fallback_date)
-            
-            # Step 3: Generate short summary from long summary (like QME extractor)
+            # Step 2: Generate short summary from long summary (like QME extractor)
             short_summary = self._generate_short_summary_from_long_summary(long_summary)
             
             elapsed_time = time.time() - start_time
@@ -105,13 +103,13 @@ class ImagingExtractorChained:
                 "short_summary": "Imaging summary not available"
             }
 
-    def _extract_raw_data(self, text: str, doc_type: str, fallback_date: str, page_zones: Optional[Dict] = None) -> Dict:
-        """Extract raw imaging data using LLM with full context and integrated author detection"""
+    def _generate_long_summary_direct(self, text: str, doc_type: str, fallback_date: str, page_zones: Optional[Dict] = None) -> str:
+        """Directly generate raw imaging data using LLM with full context and integrated author detection"""
         # Build system prompt with 6-field imaging focus, including instructions for detecting the signing author
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are an expert radiological report specialist analyzing a COMPLETE imaging report.
 
-PRIMARY PURPOSE: Extract the 6 critical imaging fields for accurate medical documentation.
+PRIMARY PURPOSE: Generate a comprehensive, structured long summary of the 6 critical imaging fields for accurate medical documentation.
 
 CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY):
 
@@ -166,7 +164,7 @@ FIELD 4: KEY FINDINGS - POSITIVE/NEGATIVE (Evidence of Pathology)
 FIELD 5: IMPRESSION/CONCLUSION (Radiologist's Final Diagnosis)
 FIELD 6: RECOMMENDATIONS/FOLLOW-UP (Actionable Next Steps)
 
-Now analyze this COMPLETE imaging report and extract 6 critical fields:
+Now analyze this COMPLETE imaging report and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
 """)
         
         # Build user prompt
@@ -175,79 +173,69 @@ COMPLETE IMAGING REPORT TEXT:
 
 {full_document_text}
 
-Extract into STRUCTURED JSON focusing on 6 CRITICAL IMAGING FIELDS:
+Generate the long summary in this EXACT STRUCTURED FORMAT (use the fallback date {fallback_date} if no exam date found):
 
-{{
-  "field_1_header_context": {{
-    "imaging_center": "",
-    "exam_date": "",
-    "exam_type": "",
-    "patient_name": "",
-    "patient_dob": "",
-    "referring_physician": "",
-    "radiologist": {{
-      "name": "",
-      "credentials": "",
-      "specialty": "Radiology"
-    }}
-  }},
-  
-  "field_2_clinical_data": {{
-    "clinical_indication": "",
-    "clinical_history": "",
-    "specific_clinical_questions": "",
-    "chief_complaint": ""
-  }},
-  
-  "field_3_technique_prior": {{
-    "study_type": "{doc_type}",
-    "body_part_imaged": "",
-    "laterality": "",
-    "contrast_used": "",
-    "contrast_type": "",
-    "prior_studies_available": "",
-    "prior_study_dates": [],
-    "technical_quality": "",
-    "limitations": ""
-  }},
-  
-  "field_4_key_findings": {{
-    "primary_finding": {{
-      "description": "",
-      "location": "",
-      "size": "",
-      "characteristics": "",
-      "acuity": "acute|chronic|chronic_on_acute",
-      "significance": ""
-    }},
-    "secondary_findings": [
-      {{
-        "description": "",
-        "location": "",
-        "significance": ""
-      }}
-    ],
-    "normal_findings": [
-      ""
-    ]
-  }},
-  
-  "field_5_impression_conclusion": {{
-    "overall_impression": "",
-    "primary_diagnosis": "",
-    "differential_diagnoses": [],
-    "clinical_correlation_statement": "",
-    "final_diagnostic_statement": ""
-  }},
-  
-  "field_6_recommendations_followup": {{
-    "follow_up_recommended": "",
-    "follow_up_modality": "",
-    "follow_up_timing": "",
-    "clinical_correlation_needed": "",
-    "specialist_consultation": ""
-  }}
-}}
+📋 IMAGING OVERVIEW
+--------------------------------------------------
+Document Type: {doc_type}
+Exam Date: [extracted or {fallback_date}]
+Exam Type: [extracted]
+Radiologist: [name]
+Imaging Center: [extracted]
+Referring Physician: [extracted]
+
+👤 PATIENT INFORMATION
+--------------------------------------------------
+Name: [extracted]
+Date of Birth: [extracted]
+
+🎯 CLINICAL INDICATION
+--------------------------------------------------
+Clinical Indication: [extracted]
+Clinical History: [extracted]
+Chief Complaint: [extracted]
+Specific Questions: [extracted]
+
+🔧 TECHNICAL DETAILS
+--------------------------------------------------
+Study Type: {doc_type}
+Body Part Imaged: [extracted]
+Laterality: [extracted]
+Contrast Used: [extracted]
+Contrast Type: [extracted]
+Prior Studies Available: [extracted]
+Technical Quality: [extracted]
+Limitations: [extracted]
+
+📊 KEY FINDINGS
+--------------------------------------------------
+Primary Finding:
+  • Description: [extracted]
+  • Location: [extracted]
+  • Size: [extracted]
+  • Characteristics: [extracted]
+  • Acuity: [extracted]
+Secondary Findings:
+• [list up to 5 with locations and significance]
+Normal Findings:
+• [list up to 5]
+
+💡 IMPRESSION & CONCLUSION
+--------------------------------------------------
+Overall Impression: [extracted]
+Primary Diagnosis: [extracted]
+Final Diagnostic Statement: [extracted]
+Differential Diagnoses:
+• [list up to 3]
+Clinical Correlation: [extracted]
+
+📋 RECOMMENDATIONS & FOLLOW-UP
+--------------------------------------------------
+Follow-up Recommended: [extracted]
+Follow-up Modality: [extracted]
+Follow-up Timing: [extracted]
+Clinical Correlation Needed: [extracted]
+Specialist Consultation: [extracted]
 
 ⚠️ MANDATORY EXTRACTION RULES:
 1. Field 1: Extract EXACT dates and names from report
@@ -266,254 +254,57 @@ Extract into STRUCTURED JSON focusing on 6 CRITICAL IMAGING FIELDS:
             user_prompt
         ])
         
-        # Create chain
-        chain = prompt | self.llm | self.parser
-        
         logger.info(f"📄 Document size: {len(text):,} chars (~{len(text) // 4:,} tokens)")
         logger.info("🔍 Processing ENTIRE imaging report in single context window with 6-field focus...")
-        logger.info("🤖 Invoking LLM for full-context imaging extraction (with integrated author detection)...")
+        logger.info("🤖 Invoking LLM for direct full-context imaging long summary generation...")
         
         # Invoke LLM
         try:
-            raw_data = chain.invoke({
+            chain = prompt | self.llm
+            result = chain.invoke({
                 "full_document_text": text,
-                "doc_type": doc_type
+                "doc_type": doc_type,
+                "fallback_date": fallback_date
             })
             
-            logger.info("✅ Extracted imaging data from complete document")
-            return raw_data
+            long_summary = result.content.strip()
+            
+            logger.info("✅ Generated imaging long summary from complete document")
+            return long_summary
         
         except Exception as e:
-            logger.error(f"❌ LLM extraction failed: {str(e)}")
-            return self._get_fallback_result(fallback_date, doc_type)
+            logger.error(f"❌ Direct LLM generation failed: {str(e)}")
+            return self._get_fallback_long_summary(fallback_date, doc_type)
 
-    def _build_comprehensive_long_summary(self, raw_data: Dict, doc_type: str, fallback_date: str) -> str:
-        """
-        Build comprehensive long summary from ALL extracted raw data with detailed headings.
-        Similar to QME extractor structure.
-        """
-        logger.info("📝 Building comprehensive long summary from ALL extracted imaging data...")
-        
-        sections = []
-        
-        # Section 1: IMAGING OVERVIEW
-        sections.append("📋 IMAGING OVERVIEW")
-        sections.append("-" * 50)
-        
-        header_context = raw_data.get("field_1_header_context", {})
-        radiologist = header_context.get("radiologist", {})
-        
-        radiologist_name = radiologist.get("name", "")
-        exam_date = header_context.get("exam_date", fallback_date)
-        exam_type = header_context.get("exam_type", doc_type)
-        imaging_center = header_context.get("imaging_center", "")
-        referring_physician = header_context.get("referring_physician", "")
-        
-        overview_lines = [
-            f"Document Type: {doc_type}",
-            f"Exam Date: {exam_date}",
-            f"Exam Type: {exam_type}",
-            f"Radiologist: {radiologist_name}",
-            f"Imaging Center: {imaging_center}" if imaging_center else "Imaging Center: Not specified",
-            f"Referring Physician: {referring_physician}" if referring_physician else "Referring Physician: Not specified"
-        ]
-        sections.append("\n".join(overview_lines))
-        
-        # Section 2: PATIENT INFORMATION
-        sections.append("\n👤 PATIENT INFORMATION")
-        sections.append("-" * 50)
-        
-        patient_lines = [
-            f"Name: {header_context.get('patient_name', 'Not specified')}",
-            f"Date of Birth: {header_context.get('patient_dob', 'Not specified')}"
-        ]
-        sections.append("\n".join(patient_lines))
-        
-        # Section 3: CLINICAL INDICATION
-        sections.append("\n🎯 CLINICAL INDICATION")
-        sections.append("-" * 50)
-        
-        clinical_data = raw_data.get("field_2_clinical_data", {})
-        clinical_lines = [
-            f"Clinical Indication: {clinical_data.get('clinical_indication', 'Not specified')}",
-            f"Clinical History: {clinical_data.get('clinical_history', 'Not specified')}",
-            f"Chief Complaint: {clinical_data.get('chief_complaint', 'Not specified')}",
-            f"Specific Questions: {clinical_data.get('specific_clinical_questions', 'Not specified')}"
-        ]
-        sections.append("\n".join(clinical_lines))
-        
-        # Section 4: TECHNICAL DETAILS
-        sections.append("\n🔧 TECHNICAL DETAILS")
-        sections.append("-" * 50)
-        
-        technique = raw_data.get("field_3_technique_prior", {})
-        technique_lines = [
-            f"Study Type: {technique.get('study_type', doc_type)}",
-            f"Body Part Imaged: {technique.get('body_part_imaged', 'Not specified')}",
-            f"Laterality: {technique.get('laterality', 'Not specified')}",
-            f"Contrast Used: {technique.get('contrast_used', 'Not specified')}",
-            f"Contrast Type: {technique.get('contrast_type', 'Not specified')}",
-            f"Prior Studies Available: {technique.get('prior_studies_available', 'Not specified')}",
-            f"Technical Quality: {technique.get('technical_quality', 'Not specified')}",
-            f"Limitations: {technique.get('limitations', 'None specified')}"
-        ]
-        sections.append("\n".join(technique_lines))
-        
-        # Section 5: KEY FINDINGS (MOST IMPORTANT)
-        sections.append("\n📊 KEY FINDINGS")
-        sections.append("-" * 50)
-        
-        key_findings = raw_data.get("field_4_key_findings", {})
-        findings_lines = []
-        
-        # Primary finding
-        primary_finding = key_findings.get("primary_finding", {})
-        if isinstance(primary_finding, dict):
-            primary_desc = primary_finding.get("description", "")
-            if primary_desc:
-                findings_lines.append("Primary Finding:")
-                findings_lines.append(f"  • Description: {primary_desc}")
-                
-                location = primary_finding.get("location", "")
-                if location:
-                    findings_lines.append(f"  • Location: {location}")
-                
-                size = primary_finding.get("size", "")
-                if size:
-                    findings_lines.append(f"  • Size: {size}")
-                
-                characteristics = primary_finding.get("characteristics", "")
-                if characteristics:
-                    findings_lines.append(f"  • Characteristics: {characteristics}")
-                
-                acuity = primary_finding.get("acuity", "")
-                if acuity:
-                    findings_lines.append(f"  • Acuity: {acuity}")
-        
-        # Secondary findings
-        secondary_findings = key_findings.get("secondary_findings", [])
-        if secondary_findings:
-            findings_lines.append("\nSecondary Findings:")
-            for finding in secondary_findings[:5]:  # Limit to 5 secondary findings
-                if isinstance(finding, dict):
-                    finding_desc = finding.get("description", "")
-                    finding_location = finding.get("location", "")
-                    if finding_desc:
-                        if finding_location:
-                            findings_lines.append(f"  • {finding_location}: {finding_desc}")
-                        else:
-                            findings_lines.append(f"  • {finding_desc}")
-        
-        # Normal findings
-        normal_findings = key_findings.get("normal_findings", [])
-        if normal_findings:
-            findings_lines.append("\nNormal Findings:")
-            for normal in normal_findings[:5]:  # Limit to 5 normal findings
-                if normal and str(normal).strip():
-                    findings_lines.append(f"  • {normal}")
-        
-        sections.append("\n".join(findings_lines) if findings_lines else "No significant findings extracted")
-        
-        # Section 6: IMPRESSION & CONCLUSION
-        sections.append("\n💡 IMPRESSION & CONCLUSION")
-        sections.append("-" * 50)
-        
-        impression = raw_data.get("field_5_impression_conclusion", {})
-        impression_lines = []
-        
-        overall_impression = impression.get("overall_impression", "")
-        if overall_impression:
-            impression_lines.append(f"Overall Impression: {overall_impression}")
-        
-        primary_diagnosis = impression.get("primary_diagnosis", "")
-        if primary_diagnosis:
-            impression_lines.append(f"Primary Diagnosis: {primary_diagnosis}")
-        
-        final_diagnostic = impression.get("final_diagnostic_statement", "")
-        if final_diagnostic:
-            impression_lines.append(f"Final Diagnostic Statement: {final_diagnostic}")
-        
-        # Differential diagnoses
-        differentials = impression.get("differential_diagnoses", [])
-        if differentials:
-            impression_lines.append("\nDifferential Diagnoses:")
-            for dx in differentials[:3]:  # Limit to 3 differentials
-                if isinstance(dx, dict):
-                    dx_name = dx.get("diagnosis", "")
-                    if dx_name:
-                        impression_lines.append(f"  • {dx_name}")
-                elif dx and str(dx).strip():
-                    impression_lines.append(f"  • {dx}")
-        
-        clinical_correlation = impression.get("clinical_correlation_statement", "")
-        if clinical_correlation:
-            impression_lines.append(f"\nClinical Correlation: {clinical_correlation}")
-        
-        sections.append("\n".join(impression_lines) if impression_lines else "No impression/conclusion extracted")
-        
-        # Section 7: RECOMMENDATIONS & FOLLOW-UP
-        sections.append("\n📋 RECOMMENDATIONS & FOLLOW-UP")
-        sections.append("-" * 50)
-        
-        recommendations = raw_data.get("field_6_recommendations_followup", {})
-        rec_lines = []
-        
-        follow_up = recommendations.get("follow_up_recommended", "")
-        if follow_up:
-            rec_lines.append(f"Follow-up Recommended: {follow_up}")
-        
-        follow_up_modality = recommendations.get("follow_up_modality", "")
-        if follow_up_modality:
-            rec_lines.append(f"Follow-up Modality: {follow_up_modality}")
-        
-        follow_up_timing = recommendations.get("follow_up_timing", "")
-        if follow_up_timing:
-            rec_lines.append(f"Follow-up Timing: {follow_up_timing}")
-        
-        clinical_correlation_needed = recommendations.get("clinical_correlation_needed", "")
-        if clinical_correlation_needed:
-            rec_lines.append(f"Clinical Correlation Needed: {clinical_correlation_needed}")
-        
-        specialist_consultation = recommendations.get("specialist_consultation", "")
-        if specialist_consultation:
-            rec_lines.append(f"Specialist Consultation: {specialist_consultation}")
-        
-        sections.append("\n".join(rec_lines) if rec_lines else "No specific recommendations provided")
-        
-        # Join all sections
-        long_summary = "\n\n".join(sections)
-        logger.info(f"✅ Long summary built: {len(long_summary)} characters")
-        
-        return long_summary
     def _clean_pipes_from_summary(self, short_summary: str) -> str:
-            """
-            Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.
+        """
+        Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.
+        
+        Args:
+            short_summary: The pipe-delimited short summary string
             
-            Args:
-                short_summary: The pipe-delimited short summary string
-                
-            Returns:
-                Cleaned summary with proper pipe formatting
-            """
-            if not short_summary or '|' not in short_summary:
-                return short_summary
-            
-            # Split by pipe and clean each part
-            parts = short_summary.split('|')
-            cleaned_parts = []
-            
-            for part in parts:
-                # Remove whitespace and check if part has meaningful content
-                stripped_part = part.strip()
-                # Keep part if it has actual content (not just empty or whitespace)
-                if stripped_part:
-                    cleaned_parts.append(stripped_part)
-            
-            # Join back with pipes - only include parts with actual content
-            cleaned_summary = ' . '.join(cleaned_parts)
-            
-            logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
-            return cleaned_summary
+        Returns:
+            Cleaned summary with proper pipe formatting
+        """
+        if not short_summary or '|' not in short_summary:
+            return short_summary
+        
+        # Split by pipe and clean each part
+        parts = short_summary.split('|')
+        cleaned_parts = []
+        
+        for part in parts:
+            # Remove whitespace and check if part has meaningful content
+            stripped_part = part.strip()
+            # Keep part if it has actual content (not just empty or whitespace)
+            if stripped_part:
+                cleaned_parts.append(stripped_part)
+        
+        # Join back with pipes - only include parts with actual content
+        cleaned_summary = ' . '.join(cleaned_parts)
+        
+        logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
+        return cleaned_summary
     
     def _generate_short_summary_from_long_summary(self, long_summary: str) -> str:
         """
@@ -756,3 +547,70 @@ Extract into STRUCTURED JSON focusing on 6 CRITICAL IMAGING FIELDS:
                 "specialist_consultation": ""
             }
         }
+
+    def _get_fallback_long_summary(self, fallback_date: str, doc_type: str) -> str:
+        """Return fallback long summary structure"""
+        fallback_text = f"""
+📋 IMAGING OVERVIEW
+--------------------------------------------------
+Document Type: {doc_type}
+Exam Date: {fallback_date}
+Exam Type: {doc_type}
+Radiologist: Not specified
+Imaging Center: Not specified
+Referring Physician: Not specified
+
+👤 PATIENT INFORMATION
+--------------------------------------------------
+Name: Not specified
+Date of Birth: Not specified
+
+🎯 CLINICAL INDICATION
+--------------------------------------------------
+Clinical Indication: Not specified
+Clinical History: Not specified
+Chief Complaint: Not specified
+Specific Questions: Not specified
+
+🔧 TECHNICAL DETAILS
+--------------------------------------------------
+Study Type: {doc_type}
+Body Part Imaged: Not specified
+Laterality: Not specified
+Contrast Used: Not specified
+Contrast Type: Not specified
+Prior Studies Available: Not specified
+Technical Quality: Not specified
+Limitations: Not specified
+
+📊 KEY FINDINGS
+--------------------------------------------------
+Primary Finding:
+  • Description: Not specified
+  • Location: Not specified
+  • Size: Not specified
+  • Characteristics: Not specified
+  • Acuity: Not specified
+Secondary Findings:
+• None specified
+Normal Findings:
+• None specified
+
+💡 IMPRESSION & CONCLUSION
+--------------------------------------------------
+Overall Impression: Not specified
+Primary Diagnosis: Not specified
+Final Diagnostic Statement: Not specified
+Differential Diagnoses:
+• None specified
+Clinical Correlation: Not specified
+
+📋 RECOMMENDATIONS & FOLLOW-UP
+--------------------------------------------------
+Follow-up Recommended: Not specified
+Follow-up Modality: Not specified
+Follow-up Timing: Not specified
+Clinical Correlation Needed: Not specified
+Specialist Consultation: Not specified
+        """
+        return fallback_text.strip()

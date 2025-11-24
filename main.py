@@ -22,6 +22,7 @@ from services.webhook_service import WebhookService
 from services.database_service import get_database_service
 from services.progress_service import ProgressService
 import logging
+import redis.asyncio as redis  # 🆕 Add Redis
 
 logger = logging.getLogger("document_ai")
 
@@ -37,6 +38,9 @@ app = FastAPI(
 
 # 🧩 Prisma ORM instance
 db = Prisma()
+
+# 🆕 Redis Client
+redis_client = None
 
 # 🌐 CORS setup
 NEXTAUTH_URL = os.getenv("NEXTAUTH_URL", "http://localhost:3000")
@@ -140,6 +144,38 @@ llm = AzureChatOpenAI(
 # Initialize services
 progress_service = ProgressService()
 
+# 🆕 Initialize Redis Client
+async def init_redis():
+    """Initialize Redis connection"""
+    global redis_client
+    try:
+        redis_client = redis.Redis(
+            host=os.getenv("REDIS_HOST", "localhost"),
+            port=int(os.getenv("REDIS_PORT", 6379)),
+            password=os.getenv("REDIS_PASSWORD", None),
+            db=int(os.getenv("REDIS_DB", 0)),
+            decode_responses=True,  # Automatically decode responses to strings
+            socket_connect_timeout=5,
+            socket_timeout=5,
+            retry_on_timeout=True
+        )
+        
+        # Test connection
+        await redis_client.ping()
+        logger.info("✅ Redis connected successfully")
+        return redis_client
+    except Exception as e:
+        logger.error(f"❌ Redis connection failed: {str(e)}")
+        redis_client = None
+        return None
+
+# 🆕 Get Redis client dependency
+async def get_redis_client():
+    """Dependency to get Redis client"""
+    if redis_client is None:
+        await init_redis()
+    return redis_client
+
 # 🆕 PUBLIC Progress Route (No Authentication)
 @app.get("/api/agent/progress/{task_id}")
 async def get_progress(task_id: str):
@@ -167,7 +203,8 @@ async def save_document_webhook(request: Request):
         logger.info(f"📥 Webhook received for document save: {data.get('document_id', 'unknown')}")
 
         db_service = await get_database_service()
-        service = WebhookService()
+        redis_client = await get_redis_client()  # 🆕 Get Redis client
+        service = WebhookService(redis_client=redis_client)  # 🆕 Pass Redis to service
         result = await service.handle_webhook(data, db_service)
 
         return result
@@ -202,7 +239,12 @@ async def save_document_webhook(request: Request):
 # 🩺 Health check (public)
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "processor": CONFIG["processor_id"]}
+    redis_status = "connected" if redis_client and await redis_client.ping() else "disconnected"
+    return {
+        "status": "healthy", 
+        "processor": CONFIG["processor_id"],
+        "redis": redis_status
+    }
 
 
 # 🔐 SECURED Protected API routes
@@ -300,6 +342,9 @@ async def startup():
     await db.connect()
     print("✅ Connected to PostgreSQL")
     
+    # 🆕 Initialize Redis
+    await init_redis()
+    
     # 🕓 Start enhanced cron scheduler - runs every 1 minute FOR TESTING
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_all_overdue_tasks, "interval", minutes=1)
@@ -307,11 +352,15 @@ async def startup():
     print("🕒 Enhanced scheduler started — runs every 1 minute (FOR TESTING)")
     print("🔒 All API routes are secured with JWT authentication")
     print("🌐 Public route available: /api/agent/progress/{task_id}")
+    print("💾 Redis caching: Enabled")
 
 
 @app.on_event("shutdown")
 async def shutdown():
     await db.disconnect()
+    if redis_client:
+        await redis_client.close()
+        print("🔌 Disconnected from Redis")
     print("🔌 Disconnected from DB")
 
 

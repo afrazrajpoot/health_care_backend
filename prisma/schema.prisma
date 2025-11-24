@@ -23,6 +23,8 @@ model User {
   accounts      Account[]
   Document      Document[]
   sessions      Session[]
+
+  @@map("users")
 }
 
 model Account {
@@ -39,9 +41,10 @@ model Account {
   scope              String?
   id_token           String?
   session_state      String?
-  user               User    @relation(fields: [userId], references: [id])
+  user               User    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerAccountId])
+  @@map("accounts")
 }
 
 model Session {
@@ -50,6 +53,8 @@ model Session {
   userId       String
   expires      DateTime
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
 }
 
 model VerificationToken {
@@ -58,6 +63,7 @@ model VerificationToken {
   expires    DateTime
 
   @@unique([identifier, token])
+  @@map("verification_tokens")
 }
 
 model Document {
@@ -92,6 +98,7 @@ model Document {
   user   User?   @relation(fields: [userId], references: [id])
 
   @@unique([fileHash, userId])
+  @@map("documents")
 }
 
 model BodyPartSnapshot {
@@ -167,12 +174,14 @@ model SummarySnapshot {
   clinicalSummary   String?
   referralDoctor    String?
   
-  // Relation back to Document
-  document   Document @relation(fields: [documentId], references: [id])
+  // Relation back to Document - FIXED: Added onDelete: Cascade
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
   documentId String   @unique
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@map("summary_snapshots")
 }
 
 model DocumentSummary {
@@ -180,11 +189,14 @@ model DocumentSummary {
   type       String
   date       DateTime
   summary    String
+  // FIXED: Added onDelete: Cascade
   documentId String   @unique
-  document   Document @relation(fields: [documentId], references: [id])
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@map("document_summaries")
 }
 
 model ADL {
@@ -228,6 +240,8 @@ model AuditLog {
   path      String?
   method    String?
   timestamp DateTime @default(now())
+
+  @@map("audit_logs")
 }
 
 model PatientQuiz {
@@ -264,6 +278,8 @@ model FailDocs {
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@map("fail_docs")
 }
 
 model IntakeLink {
@@ -300,11 +316,14 @@ model Task {
   quickNotes Json? @default("{\"status_update\": \"\", \"details\": \"\", \"one_line_note\": \"\"}")
   followUpTaskId  String?
   
+  // FIXED: Added onDelete: Cascade
   documentId  String?
-  document    Document? @relation(fields: [documentId], references: [id])
+  document    Document? @relation(fields: [documentId], references: [id], onDelete: Cascade)
   physicianId String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+
+  @@map("tasks")
 }
 
 model WorkflowStats {
@@ -318,6 +337,8 @@ model WorkflowStats {
   intakes_created    Int      @default(0)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+
+  @@map("workflow_stats")
 }
 
 model Subscription {
@@ -348,4 +369,5 @@ model CheckoutSession {
 
   @@index([stripeSessionId])
   @@index([physicianId])
+  @@map("checkout_sessions")
 }

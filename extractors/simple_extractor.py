@@ -2,7 +2,6 @@
 Simplified Four-LLM Chain Extractor with Conditional Routing
 Version: 4.1 - Enhanced Universal Document Handling
 """
-
 import logging
 from typing import Dict, Optional
 from langchain_core.output_parsers import JsonOutputParser
@@ -43,422 +42,191 @@ class SimpleExtractor:
         logger.info(f"🚀 Four-LLM Conditional Extraction: {doc_type}")
         
         try:
-            # STEP 1: First LLM - Extract key data
-            extracted_data = self._extract_key_data(text, doc_type, fallback_date)
+            # STEP 1: Directly generate long summary with full context (no intermediate extraction)
+            long_summary = self._generate_long_summary_direct(text, doc_type, fallback_date)
             
-            # STEP 2: Conditional routing - Check if document has medical content
-            has_medical_content = self._check_medical_content(extracted_data, text)
-            
-            # STEP 3: Generate appropriate long summary based on content type
-            if has_medical_content:
-                logger.info("🩺 Document contains medical content - generating medical summary")
-                long_summary = self._generate_medical_long_summary(extracted_data, doc_type, text)
-            else:
-                logger.info("📄 Document is administrative - generating administrative summary")
-                long_summary = self._generate_administrative_summary(text, doc_type, extracted_data)
-            
-            # STEP 4: Generate short summary
-            short_summary = self._generate_short_summary(long_summary, doc_type)
+            # STEP 2: Generate short summary from long summary (like QME extractor)
+            short_summary = self._generate_short_summary_from_long_summary(long_summary, doc_type)
             
             logger.info(f"✅ Conditional chain extraction completed")
             
             return {
                 "long_summary": long_summary,
                 "short_summary": short_summary,
-                "extracted_data": extracted_data,
-                "content_type": "medical" if has_medical_content else "administrative"
+                "content_type": "universal"
             }
             
         except Exception as e:
             logger.error(f"❌ Extraction failed: {str(e)}")
             return self._create_error_response(doc_type, str(e), fallback_date)
     
-    def _check_medical_content(self, extracted_data: Dict, text: str) -> bool:
+    def _generate_long_summary_direct(self, text: str, doc_type: str, fallback_date: str) -> str:
         """
-        Fourth LLM: Determine if document contains medical content.
+        Directly generate comprehensive long summary with FULL document context using LLM.
+        Adapted to handle both medical and administrative content universally.
         """
-        logger.info("🔍 Fourth LLM - Checking medical content...")
+        logger.info("🔍 Processing ENTIRE document in single context window for direct long summary...")
         
+        # Adapted System Prompt for Direct Long Summary Generation
+        # Universal prompt that handles medical or administrative based on content
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a document classification expert. Determine if the document contains meaningful medical/clinical content.
+You are a universal medical and administrative document summarization expert analyzing a COMPLETE document.
 
-MEDICAL CONTENT INDICATORS:
-- Diagnoses, symptoms, or medical conditions
-- Medications, treatments, or procedures
-- Physical exam findings or test results
-- Laboratory results, imaging findings
-- Patient clinical status or progress
-- Medical recommendations or plans
-- Vital signs, biometric data
-- Clinical observations or assessments
+PRIMARY PURPOSE: Generate a comprehensive, structured long summary that adapts to the document type (medical or administrative).
 
-ADMINISTRATIVE CONTENT INDICATORS:
-- Forms, cover letters, or cover sheets
-- Appointment scheduling or billing
-- Document processing notifications
-- Request for information or records
-- Minimal clinical data (just names/dates)
+DETERMINE DOCUMENT TYPE AUTOMATICALLY:
+- MEDICAL: If contains diagnoses, treatments, labs, imaging, clinical observations
+- ADMINISTRATIVE: If primarily forms, letters, notifications, billing, scheduling
 
-Return ONLY "true" if medical content exists, "false" if only administrative content.
+CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
+You are seeing the ENTIRE document at once, allowing comprehensive extraction without loss.
+
+⚠️ CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY):
+1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION** - Empty if not mentioned
+2. **NO ASSUMPTIONS** - Do not infer or add typical values
+3. **ADAPT STRUCTURE** - Use medical sections for clinical content, administrative for non-clinical
+4. **EMPTY FIELDS BETTER THAN GUESSES** - Omit sections if no data
+
+UNIVERSAL EXTRACTION FOCUS:
+
+For MEDICAL DOCUMENTS:
+I. PATIENT & CLINICAL CONTEXT
+II. CRITICAL FINDINGS & DIAGNOSES
+III. LAB/IMAGING RESULTS
+IV. TREATMENT & OBSERVATIONS
+V. STATUS & RECOMMENDATIONS
+
+For ADMINISTRATIVE DOCUMENTS:
+I. DOCUMENT OVERVIEW
+II. KEY PARTIES & INFORMATION
+III. ACTION ITEMS & DEADLINES
+IV. CONTACT & FOLLOW-UP
+
+Now analyze this COMPLETE document and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points; adapt sections based on content type):
 """)
-        
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-EXTRACTED DATA:
-{extracted_data}
 
-DOCUMENT TEXT PREVIEW (first 500 chars):
-{text_preview}
-
-Does this document contain meaningful medical/clinical content?
-Answer with ONLY "true" or "false":
-""")
-        
-        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-        
-        try:
-            chain = chat_prompt | self.llm
-            response = chain.invoke({
-                "extracted_data": str(extracted_data),
-                "text_preview": text[:500]
-            })
-            
-            result = response.content.strip().lower()
-            has_medical = result == "true"
-            
-            logger.info(f"✅ Medical content check: {has_medical}")
-            return has_medical
-            
-        except Exception as e:
-            logger.error(f"❌ Medical content check failed: {e}")
-            # Fallback: Check if we have any medical data in extraction
-            return self._fallback_medical_check(extracted_data)
-    
-    def _fallback_medical_check(self, extracted_data: Dict) -> bool:
-        """Fallback method to check for medical content."""
-        # Check if we have any medical data
-        medical_indicators = [
-            extracted_data.get("diagnoses"),
-            extracted_data.get("critical_findings"),
-            extracted_data.get("current_treatment", {}).get("medications"),
-            extracted_data.get("current_treatment", {}).get("procedures"),
-            extracted_data.get("lab_results"),
-            extracted_data.get("imaging_findings"),
-            extracted_data.get("clinical_observations")
-        ]
-        
-        has_medical = any(indicator for indicator in medical_indicators if indicator)
-        logger.info(f"📄 Fallback medical check: {has_medical}")
-        return has_medical
-    
-    def _extract_key_data(self, text: str, doc_type: str, fallback_date: str) -> Dict:
-        """
-        First LLM: Extract key findings, critical data, and patient details.
-        Enhanced to handle ANY document type including lab reports, imaging, etc.
-        """
-        logger.info("🔍 First LLM - Extracting key data...")
-        
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a medical document analysis expert. Extract ALL available information from ANY type of medical document.
-
-EXTRACT THESE KEY CATEGORIES (include ALL that are present):
-
-1. PATIENT DETAILS:
-   - Name, DOB, Age, Gender
-   - MRN, Account Number
-   - Chief complaint
-   - Injury date and mechanism
-
-2. CRITICAL FINDINGS (URGENT):
-   - Life-threatening conditions
-   - Critical lab values (HIGH/LOW alerts)
-   - Abnormal imaging findings
-   - Surgical emergencies  
-   - Medication alerts
-   - Abnormal vital signs
-   - Neurological deficits
-
-3. KEY DIAGNOSES:
-   - Primary diagnosis with ICD-10 if available
-   - Secondary diagnoses
-   - Affected body parts
-   - Clinical impressions
-
-4. LAB RESULTS (if lab report):
-   - Test names with results and reference ranges
-   - Abnormal values (HIGH/LOW flags)
-   - Critical values
-   - Collection date/time
-   - Ordering physician
-
-5. IMAGING FINDINGS (if imaging report):
-   - Study type (X-ray, MRI, CT, Ultrasound, etc.)
-   - Body part examined
-   - Key findings
-   - Impressions/conclusions
-   - Comparison to prior studies
-
-6. CLINICAL OBSERVATIONS:
-   - Physical exam findings
-   - Vital signs
-   - Symptoms reported
-   - Functional status
-   - Clinical assessments
-
-7. CURRENT TREATMENT:
-   - Current medications (name, dose, frequency)
-   - Recent procedures
-   - Ongoing therapies
-   - Treatment plans
-
-8. WORK STATUS:
-   - Current work capacity
-   - Restrictions and limitations
-   - MMI status if mentioned
-
-9. IMPORTANT DATES:
-   - Report date
-   - Service date / Collection date
-   - Examination date
-   - Follow-up dates
-
-10. DOCUMENT CONTEXT:
-    - Document type/purpose
-    - Ordering/referring physician
-    - Facility/department
-    - Report status (preliminary/final)
-    - Any administrative information
-    - Next steps or recommendations
-
-CRITICAL RULES:
-- Extract ANY and ALL information available, even if minimal
-- For lab reports: focus on test results, abnormal values, critical findings
-- For imaging: focus on findings, impressions, recommendations
-- If no data found for a field, DO NOT include it in output
-- Empty arrays for no items, omit empty objects
-- Include administrative details if medical data is sparse
-- Look for ANY clinical data: tests, results, observations, assessments
-
-Return JSON format - ONLY include fields with actual data:
-{{{{
-  "patient_details": {{}},
-  "critical_findings": [],
-  "diagnoses": [],
-  "lab_results": [],
-  "imaging_findings": [],
-  "clinical_observations": [],
-  "current_treatment": {{}},
-  "work_status": {{}},
-  "important_dates": {{}},
-  "document_context": {{}}
-}}}}
-""")
-        
+        # Adapted User Prompt for Direct Long Summary - Outputs the structured summary directly
         user_prompt = HumanMessagePromptTemplate.from_template("""
 DOCUMENT TYPE: {doc_type}
 
-DOCUMENT TEXT:
-{text}
+COMPLETE DOCUMENT TEXT:
 
-Extract ALL available information from this document. Look for any clinical data, test results, findings, or observations:
+{full_document_text}
+
+Generate the long summary in this EXACT STRUCTURED FORMAT (use the fallback date {fallback_date} if no date found; adapt to medical or administrative content):
+
+For MEDICAL CONTENT:
+📋 MEDICAL DOCUMENT OVERVIEW
+--------------------------------------------------
+Document Type: {doc_type}
+Report Date: [extracted or {fallback_date}]
+Patient Name: [extracted]
+Provider: [extracted]
+
+👤 PATIENT & CLINICAL INFORMATION
+--------------------------------------------------
+Name: [extracted]
+DOB: [extracted]
+Chief Complaint: [extracted]
+Clinical History: [extracted]
+
+🚨 CRITICAL FINDINGS
+--------------------------------------------------
+• [list up to 5 critical items, e.g., abnormal labs, urgent diagnoses]
+
+🏥 DIAGNOSES & ASSESSMENTS
+--------------------------------------------------
+Primary Diagnosis: [extracted]
+Secondary Diagnoses:
+• [list up to 3]
+Lab Results:
+• [list key results with values/ranges]
+Imaging Findings:
+• [list key observations]
+
+💊 TREATMENT & OBSERVATIONS
+--------------------------------------------------
+Current Medications:
+• [list with doses if stated]
+Clinical Observations:
+• [list vital signs, exam findings]
+Procedures/Treatments:
+• [list recent or ongoing]
+
+💼 STATUS & RECOMMENDATIONS
+--------------------------------------------------
+Work Status: [extracted]
+MMI: [extracted]
+Recommendations:
+• [list up to 5 next steps]
+
+For ADMINISTRATIVE CONTENT:
+📋 ADMINISTRATIVE DOCUMENT OVERVIEW
+--------------------------------------------------
+Document Type: {doc_type}
+Document Date: [extracted or {fallback_date}]
+Purpose: [extracted]
+
+👥 KEY PARTIES
+--------------------------------------------------
+Patient: [extracted]
+Provider: [extracted]
+Referring Party: [extracted]
+
+📄 KEY INFORMATION
+--------------------------------------------------
+Important Dates: [extracted]
+Reference Numbers: [extracted]
+Administrative Details: [extracted]
+
+✅ ACTION ITEMS
+--------------------------------------------------
+Required Actions:
+• [list up to 5]
+Deadlines: [extracted]
+
+📞 CONTACT & FOLLOW-UP
+--------------------------------------------------
+Contact Information: [extracted]
+Next Steps: [extracted]
+
+⚠️ MANDATORY EXTRACTION RULES:
+1. Adapt structure to content: Medical if clinical data present, Administrative if not
+2. Extract ONLY explicit information - omit sections with no data
+3. Use exact wording for medical terms, dates, names
+4. Bullet points for lists, clear headings
+5. No assumptions or additions
 """)
-        
+
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
         
         try:
-            chain = chat_prompt | self.llm | self.parser
-            extracted = chain.invoke({
-                "text": text[:20000],
-                "doc_type": doc_type
-            })
+            logger.info("🤖 Invoking LLM for direct full-context universal long summary generation...")
             
-            # Clean empty fields
-            extracted = self._clean_empty_fields(extracted, fallback_date)
-            
-            logger.info("✅ Key data extraction complete")
-            return extracted
-            
-        except Exception as e:
-            logger.error(f"❌ Key data extraction failed: {e}")
-            return self._create_fallback_extraction(fallback_date, doc_type)
-    
-    def _generate_medical_long_summary(self, extracted_data: Dict, doc_type: str, original_text: str = "") -> str:
-        """
-        Second LLM: Generate comprehensive medical long summary from extracted data.
-        Enhanced to handle lab reports, imaging, and other document types.
-        """
-        logger.info("🔍 Second LLM - Generating medical long summary...")
-        
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a medical summarization expert. Create a professionally formatted medical summary for ANY type of medical document.
-
-CRITICAL RULES:
-- Use proper medical formatting with clear sections and bullet points
-- ONLY include information that is explicitly available
-- OMIT entire sections if no data exists
-- NEVER mention missing information
-- Use professional medical terminology
-- Structure the summary for quick physician review
-- Adapt sections based on document type (lab report, imaging, clinical note, etc.)
-
-PROFESSIONAL FORMATTING GUIDE:
-
-Start with a clear header:
-MEDICAL SUMMARY - [Document Type]
-[Report Date]
-
-Then include ONLY these sections if data exists:
-
-1. PATIENT INFORMATION
-   • Name: [Name]
-   • DOB: [Date of Birth]
-   • MRN: [Medical Record Number]
-
-2. CRITICAL FINDINGS (if any urgent findings)
-   • [List any critical or urgent findings]
-   • [Abnormal lab values with HIGH/LOW flags]
-   • [Critical imaging findings]
-
-3. LABORATORY RESULTS (for lab reports)
-   • Test Name: [Result] ([Reference Range]) [FLAG if abnormal]
-   • [List all test results with values]
-   • Notable Abnormalities: [Highlight critical values]
-
-4. IMAGING FINDINGS (for imaging reports)
-   • Study Type: [MRI/CT/X-ray/Ultrasound]
-   • Body Part: [Anatomical region]
-   • Key Findings: [Major observations]
-   • Impression: [Radiologist's conclusion]
-   • Recommendations: [Follow-up imaging or studies]
-
-5. DIAGNOSES (if available)
-   • Primary: [Diagnosis] ([ICD-10 if available])
-   • Secondary: [Diagnosis]
-
-6. CLINICAL OBSERVATIONS (if available)
-   • Physical Exam: [Findings]
-   • Vital Signs: [Values]
-   • Symptoms: [Patient reported symptoms]
-
-7. PROCEDURES & TREATMENT (if available)
-   • Procedure: [Procedure Name] ([Date])
-   • Surgeon/Provider: [Name]
-   • Findings: [Key findings]
-   • Medications: [List with doses]
-
-8. CURRENT STATUS (if available)
-   • Work Status: [Status]
-   • Restrictions: [Specific restrictions]
-   • MMI Status: [If applicable]
-
-9. RECOMMENDATIONS & FOLLOW-UP
-   • Next Steps: [Recommended actions]
-   • Follow-up: [Appointments or tests needed]
-   • Referrals: [Specialist consultations]
-   • Deadlines: [Important dates]
-
-Use bullet points (•) for lists and clear section headers. Maintain professional medical tone.
-Adapt the structure based on what information is available in the extracted data.
-""")
-        
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-DOCUMENT TYPE: {doc_type}
-
-EXTRACTED MEDICAL INFORMATION:
-{extracted_data}
-
-Create a professionally formatted medical summary that includes ALL available information:
-""")
-        
-        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-        
-        try:
+            # Single LLM call with FULL document context to generate long summary directly
             chain = chat_prompt | self.llm
-            response = chain.invoke({
-                "extracted_data": str(extracted_data),
-                "doc_type": doc_type
+            result = chain.invoke({
+                "full_document_text": text,
+                "doc_type": doc_type,
+                "fallback_date": fallback_date
             })
             
-            long_summary = response.content.strip()
-            long_summary = self._clean_summary_text(long_summary)
+            long_summary = result.content.strip()
             
-            logger.info(f"✅ Medical long summary generated ({len(long_summary)} chars)")
+            logger.info(f"⚡ Direct universal long summary generation completed")
+            logger.info(f"✅ Generated long summary from complete {len(text):,} char document")
+            
             return long_summary
             
         except Exception as e:
-            logger.error(f"❌ Medical long summary generation failed: {e}")
-            return self._create_basic_medical_summary(extracted_data, doc_type)
-    
-    def _generate_administrative_summary(self, text: str, doc_type: str, extracted_data: Dict) -> str:
-        """
-        Fourth LLM: Generate administrative summary for non-medical documents.
-        """
-        logger.info("📋 Fourth LLM - Generating administrative summary...")
-        
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are an administrative document summarization expert. Create a clear, concise summary of administrative documents.
-
-DOCUMENT TYPES:
-- Cover letters, forms, or cover sheets
-- Appointment notifications
-- Billing or insurance documents
-- Record requests
-- Processing notifications
-
-SUMMARY STRUCTURE:
-
-ADMINISTRATIVE SUMMARY - [Document Type]
-[Document Date]
-
-KEY INFORMATION:
-• Document Purpose: [Why this document was created]
-• Key Parties: [Names mentioned - patients, providers, organizations]
-• Important Dates: [Deadlines, appointment dates, due dates]
-• Action Required: [What needs to be done next]
-• Contact Information: [Who to contact if mentioned]
-
-RULES:
-- Focus on practical, actionable information
-- Extract names, dates, and deadlines
-- Highlight next steps or required actions
-- Keep it concise and professional
-- Omit sections if no information available
-""")
-        
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-DOCUMENT TYPE: {doc_type}
-
-DOCUMENT TEXT (first 2000 characters):
-{text}
-
-EXTRACTED DATA CONTEXT:
-{extracted_data}
-
-Create a clear administrative summary:
-""")
-        
-        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-        
-        try:
-            chain = chat_prompt | self.llm
-            response = chain.invoke({
-                "text": text[:2000],
-                "doc_type": doc_type,
-                "extracted_data": str(extracted_data)
-            })
+            logger.error(f"❌ Direct universal long summary generation failed: {e}", exc_info=True)
             
-            admin_summary = response.content.strip()
-            admin_summary = self._clean_summary_text(admin_summary)
-            
-            logger.info(f"✅ Administrative summary generated ({len(admin_summary)} chars)")
-            return admin_summary
-            
-        except Exception as e:
-            logger.error(f"❌ Administrative summary generation failed: {e}")
-            return self._create_basic_administrative_summary(extracted_data, doc_type)
-    
-    def _generate_short_summary(self, long_summary: str, doc_type: str) -> str:
+            # Fallback: Generate a minimal summary
+            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
+
+    def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
         """
-        Third LLM: Generate concise short summary from long summary.
+        Generate concise short summary from long summary.
         Enhanced to handle any document type with available information.
         """
         logger.info("🎯 Third LLM - Generating short summary...")
@@ -774,6 +542,5 @@ Create a clean pipe-delimited short summary with ONLY available information:
         return {
             "long_summary": f"DOCUMENT SUMMARY - {doc_type.upper()}\n\nDocument processed. Basic information extracted.",
             "short_summary": f"Report Title: {doc_type} | Date: {fallback_date}",
-            "extracted_data": self._create_fallback_extraction(fallback_date, doc_type),
             "content_type": "unknown"
         }

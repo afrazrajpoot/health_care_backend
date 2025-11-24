@@ -26,6 +26,7 @@ class ClinicalNoteExtractor:
     - Chain-of-thought reasoning = Explains decisions
     - Optimized for accuracy matching Gemini's approach
     - Supports Progress Notes, PT/OT/Chiro/Acupuncture, Pain Management, Psychiatry, Nursing Notes
+    - Direct LLM generation for long summary (removes intermediate extraction)
     """
 
     def __init__(self, llm: AzureChatOpenAI):
@@ -92,17 +93,14 @@ class ClinicalNoteExtractor:
             logger.warning(f"⚠️ Document very large ({token_estimate:,} tokens)")
             logger.warning("⚠️ May exceed GPT-4o context window (128K tokens)")
         
-        # Stage 1: Extract with FULL CONTEXT
-        raw_result = self._extract_full_context(
+        # Stage 1: Directly generate long summary with FULL CONTEXT (no intermediate extraction)
+        long_summary = self._generate_long_summary_direct(
             text=text,
             doc_type=detected_type,
             fallback_date=fallback_date
         )
 
-        # Stage 2: Build long summary from ALL raw data
-        long_summary = self._build_comprehensive_long_summary(raw_result, detected_type, fallback_date)
-
-        # Stage 3: Generate short summary from long summary
+        # Stage 2: Generate short summary from long summary
         short_summary = self._generate_short_summary_from_long_summary(long_summary, detected_type)
 
         logger.info("=" * 80)
@@ -149,18 +147,20 @@ class ClinicalNoteExtractor:
         logger.info(f"🔍 Could not auto-detect note type, using: {original_type}")
         return original_type or "Clinical Note"
 
-    def _extract_full_context(
+    def _generate_long_summary_direct(
         self,
         text: str,
         doc_type: str,
         fallback_date: str
-    ) -> Dict:
+    ) -> str:
         """
-        Extract with FULL document context using only the text.
+        Directly generate comprehensive long summary with FULL document context using LLM.
+        Adapted from original extraction prompt to output structured summary directly.
         """
-        logger.info("🔍 Processing ENTIRE clinical note in single context window...")
+        logger.info("🔍 Processing ENTIRE clinical note in single context window for direct long summary...")
         
-        # Build system prompt without contextual guidance
+        # Adapted System Prompt for Direct Long Summary Generation
+        # Reuses core anti-hallucination rules and clinical focus from original extraction prompt
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are an expert clinical documentation specialist analyzing a COMPLETE {doc_type}.
 
@@ -267,134 +267,88 @@ VIII. OUTCOME MEASURES & PROGRESS TRACKING
 - ROM MEASUREMENTS: Extract exact degrees, not ranges
 - It is BETTER to have empty fields than incorrect clinical information
 
-Now analyze this COMPLETE {doc_type} and extract ALL relevant clinical information:
+Now analyze this COMPLETE {doc_type} and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
 """)
 
+        # Adapted User Prompt for Direct Long Summary - Outputs the structured summary directly
         user_prompt = HumanMessagePromptTemplate.from_template("""
 COMPLETE {doc_type} TEXT:
 
 {full_document_text}
 
-Extract into COMPREHENSIVE structured JSON with all critical clinical details:
+Generate the long summary in this EXACT STRUCTURED FORMAT (use the fallback date {fallback_date} if no visit date found):
 
-{{
-  "note_identity": {{
-    "note_type": "{doc_type}",
-    "visit_date": "",
-    "encounter_date": "",
-    "visit_type": "",
-    "encounter_duration": "",
-    "clinic_facility": "",
-    "provider_credentials": ""
-  }},
-  
-  "patient_information": {{
-    "patient_name": "",
-    "patient_dob": "",
-    "patient_age": "",
-    "time_since_injury": "",
-    "visit_number": "",
-    "treatment_frequency": ""
-  }},
-  
-  "providers": {{
-    "treating_provider": {{
-      "name": "",
-      "credentials": "",
-      "specialty": "",
-      "role": "Treating Provider"
-    }},
-    "assistant_provider": {{
-      "name": "",
-      "credentials": "",
-      "role": ""
-    }},
-    "supervising_physician": {{
-      "name": "",
-      "credentials": ""
-    }}
-  }},
-  
-  "subjective_findings": {{
-    "chief_complaint": "",
-    "history_present_illness": "",
-    "pain_characteristics": {{
-      "location": "",
-      "intensity": "",
-      "quality": "",
-      "radiation": "",
-      "aggravating_factors": "",
-      "relieving_factors": ""
-    }},
-    "functional_limitations": [],
-    "patient_goals": "",
-    "compliance_with_treatment": ""
-  }},
-  
-  "objective_findings": {{
-    "vital_signs": {{
-      "blood_pressure": "",
-      "heart_rate": "",
-      "respiratory_rate": "",
-      "temperature": ""
-    }},
-    "range_of_motion": [],
-    "manual_muscle_testing": [],
-    "palpation_findings": [],
-    "special_tests": [],
-    "functional_assessments": [],
-    "neurological_findings": [],
-    "observation_findings": ""
-  }},
-  
-  "treatment_provided": {{
-    "treatment_techniques": [],
-    "therapeutic_exercises": [],
-    "modalities_used": [],
-    "manual_therapy": [],
-    "treatment_parameters": {{
-      "duration": "",
-      "intensity": "",
-      "patient_response": ""
-    }},
-    "adverse_reactions": ""
-  }},
-  
-  "clinical_assessment": {{
-    "assessment": "",
-    "progress_since_last_visit": "",
-    "changes_in_status": "",
-    "clinical_impression": "",
-    "prognosis": "",
-    "barriers_to_recovery": []
-  }},
-  
-  "treatment_plan": {{
-    "short_term_goals": [],
-    "long_term_goals": [],
-    "plan_of_care": "",
-    "home_exercise_program": [],
-    "frequency_duration": "",
-    "next_appointment": "",
-    "referrals_needed": []
-  }},
-  
-  "work_status": {{
-    "current_work_status": "",
-    "work_restrictions": [],
-    "functional_capacity": "",
-    "return_to_work_plan": ""
-  }},
-  
-  "outcome_measures": {{
-    "pain_scale": "",
-    "functional_scores": [],
-    "progress_metrics": [],
-    "patient_satisfaction": ""
-  }},
-  
-  "critical_clinical_findings": []
-}}
+📋 CLINICAL ENCOUNTER OVERVIEW
+--------------------------------------------------
+Note Type: {doc_type}
+Visit Date: [extracted or {fallback_date}]
+Visit Type: [extracted]
+Duration: [extracted]
+Facility: [extracted]
+
+👨‍⚕️ PROVIDER INFORMATION
+--------------------------------------------------
+Treating Provider: [name]
+  Credentials: [extracted]
+  Specialty: [extracted]
+
+🗣️ SUBJECTIVE FINDINGS
+--------------------------------------------------
+Chief Complaint: [extracted]
+Pain: [location, intensity, quality]
+Functional Limitations:
+• [list up to 5, exact wording]
+
+🔍 OBJECTIVE EXAMINATION
+--------------------------------------------------
+Range of Motion:
+• [list up to 5, with body part, motion, degrees]
+Manual Muscle Testing:
+• [list up to 3, with muscle and grade/5]
+Special Tests:
+• [list up to 3, with results]
+
+💆 TREATMENT PROVIDED
+--------------------------------------------------
+Treatment Techniques:
+• [list up to 5]
+Therapeutic Exercises:
+• [list up to 5]
+Modalities Used:
+• [list up to 3]
+
+🏥 CLINICAL ASSESSMENT
+--------------------------------------------------
+Assessment: [extracted]
+Progress: [extracted]
+Clinical Impression: [extracted]
+Prognosis: [extracted]
+
+🎯 TREATMENT PLAN
+--------------------------------------------------
+Short-term Goals:
+• [list up to 3]
+Home Exercise Program:
+• [list up to 3]
+Frequency/Duration: [extracted]
+Next Appointment: [extracted]
+
+💼 WORK STATUS
+--------------------------------------------------
+Current Status: [extracted]
+Work Restrictions:
+• [list up to 5, exact wording]
+Functional Capacity: [extracted]
+
+📊 OUTCOME MEASURES
+--------------------------------------------------
+Pain Scale: [extracted, e.g., 6/10]
+Functional Scores:
+• [list up to 3, with measure and value]
+
+🚨 CRITICAL CLINICAL FINDINGS
+--------------------------------------------------
+• [list up to 8 most significant items]
 
 ⚠️ CRITICAL CLINICAL REMINDERS:
 1. For "range_of_motion": Extract EXACT measurements with degrees
@@ -425,359 +379,36 @@ Extract into COMPREHENSIVE structured JSON with all critical clinical details:
         try:
             start_time = time.time()
             
-            logger.info("🤖 Invoking LLM for full-context clinical note extraction...")
+            logger.info("🤖 Invoking LLM for direct full-context clinical note long summary generation...")
             
-            # Single LLM call with FULL document context
-            chain = chat_prompt | self.llm | self.parser
+            # Single LLM call with FULL document context to generate long summary directly
+            chain = chat_prompt | self.llm
             result = chain.invoke({
                 "doc_type": doc_type,
-                "full_document_text": text
+                "full_document_text": text,
+                "fallback_date": fallback_date
             })
+            
+            long_summary = result.content.strip()
             
             end_time = time.time()
             processing_time = end_time - start_time
             
-            logger.info(f"⚡ Full-context clinical note extraction completed in {processing_time:.2f}s")
-            logger.info(f"✅ Extracted data from complete {len(text):,} char clinical note")
+            logger.info(f"⚡ Direct clinical note long summary generation completed in {processing_time:.2f}s")
+            logger.info(f"✅ Generated long summary from complete {len(text):,} char clinical note")
             
-            return result
+            return long_summary
             
         except Exception as e:
-            logger.error(f"❌ Full-context clinical note extraction failed: {e}", exc_info=True)
+            logger.error(f"❌ Direct clinical note long summary generation failed: {e}", exc_info=True)
             
             # Check if context length exceeded
             if "context_length_exceeded" in str(e).lower() or "maximum context" in str(e).lower():
                 logger.error("❌ Clinical note exceeds GPT-4o 128K context window")
                 logger.error("❌ Consider implementing chunked fallback for very large notes")
             
-            return self._get_fallback_result(doc_type, fallback_date)
-
-    def _build_comprehensive_long_summary(self, raw_data: Dict, doc_type: str, fallback_date: str) -> str:
-        """
-        Build comprehensive long summary from ALL extracted clinical note data.
-        """
-        logger.info("📝 Building comprehensive long summary from ALL extracted clinical data...")
-        
-        sections = []
-        
-        # Section 1: CLINICAL ENCOUNTER OVERVIEW
-        sections.append("📋 CLINICAL ENCOUNTER OVERVIEW")
-        sections.append("-" * 50)
-        
-        note_identity = raw_data.get("note_identity", {})
-        overview_lines = [
-            f"Note Type: {note_identity.get('note_type', doc_type)}",
-            f"Visit Date: {note_identity.get('visit_date', fallback_date)}",
-            f"Visit Type: {note_identity.get('visit_type', 'Not specified')}",
-            f"Duration: {note_identity.get('encounter_duration', 'Not specified')}",
-            f"Facility: {note_identity.get('clinic_facility', 'Not specified')}"
-        ]
-        sections.append("\n".join(overview_lines))
-        
-        # Section 2: PROVIDER INFORMATION
-        sections.append("\n👨‍⚕️ PROVIDER INFORMATION")
-        sections.append("-" * 50)
-        
-        providers = raw_data.get("providers", {})
-        provider_lines = []
-        
-        treating_provider = providers.get("treating_provider", {})
-        if treating_provider.get("name"):
-            provider_lines.append(f"Treating Provider: {treating_provider['name']}")
-            if treating_provider.get("credentials"):
-                provider_lines.append(f"  Credentials: {treating_provider['credentials']}")
-            if treating_provider.get("specialty"):
-                provider_lines.append(f"  Specialty: {treating_provider['specialty']}")
-        
-        sections.append("\n".join(provider_lines) if provider_lines else "No provider information extracted")
-        
-        # Section 3: SUBJECTIVE FINDINGS
-        sections.append("\n🗣️ SUBJECTIVE FINDINGS")
-        sections.append("-" * 50)
-        
-        subjective = raw_data.get("subjective_findings", {})
-        subjective_lines = []
-        
-        if subjective.get("chief_complaint"):
-            subjective_lines.append(f"Chief Complaint: {subjective['chief_complaint']}")
-        
-        # Pain characteristics
-        pain_chars = subjective.get("pain_characteristics", {})
-        pain_info = []
-        if pain_chars.get("location"):
-            pain_info.append(f"Location: {pain_chars['location']}")
-        if pain_chars.get("intensity"):
-            pain_info.append(f"Intensity: {pain_chars['intensity']}")
-        if pain_chars.get("quality"):
-            pain_info.append(f"Quality: {pain_chars['quality']}")
-        
-        if pain_info:
-            subjective_lines.append(f"Pain: {', '.join(pain_info)}")
-        
-        # Functional limitations
-        functional_limitations = subjective.get("functional_limitations", [])
-        if functional_limitations:
-            subjective_lines.append("\nFunctional Limitations:")
-            for limitation in functional_limitations[:5]:
-                if isinstance(limitation, dict):
-                    desc = limitation.get("limitation", "")
-                    if desc:
-                        subjective_lines.append(f"  • {desc}")
-                elif limitation:
-                    subjective_lines.append(f"  • {limitation}")
-        
-        sections.append("\n".join(subjective_lines) if subjective_lines else "No subjective findings extracted")
-        
-        # Section 4: OBJECTIVE EXAMINATION
-        sections.append("\n🔍 OBJECTIVE EXAMINATION")
-        sections.append("-" * 50)
-        
-        objective = raw_data.get("objective_findings", {})
-        objective_lines = []
-        
-        # Range of motion
-        rom_measurements = objective.get("range_of_motion", [])
-        if rom_measurements:
-            objective_lines.append("Range of Motion:")
-            for rom in rom_measurements[:5]:
-                if isinstance(rom, dict):
-                    body_part = rom.get("body_part", "")
-                    motion = rom.get("motion", "")
-                    measurement = rom.get("measurement", "")
-                    if body_part and motion and measurement:
-                        objective_lines.append(f"  • {body_part} {motion}: {measurement}")
-                elif rom:
-                    objective_lines.append(f"  • {rom}")
-        
-        # Manual muscle testing
-        mmt = objective.get("manual_muscle_testing", [])
-        if mmt:
-            objective_lines.append("\nManual Muscle Testing:")
-            for muscle in mmt[:3]:
-                if isinstance(muscle, dict):
-                    muscle_name = muscle.get("muscle", "")
-                    grade = muscle.get("grade", "")
-                    if muscle_name and grade:
-                        objective_lines.append(f"  • {muscle_name}: {grade}/5")
-                elif muscle:
-                    objective_lines.append(f"  • {muscle}")
-        
-        # Special tests
-        special_tests = objective.get("special_tests", [])
-        if special_tests:
-            objective_lines.append("\nSpecial Tests:")
-            for test in special_tests[:3]:
-                if isinstance(test, dict):
-                    test_name = test.get("test", "")
-                    result = test.get("result", "")
-                    if test_name:
-                        if result:
-                            objective_lines.append(f"  • {test_name}: {result}")
-                        else:
-                            objective_lines.append(f"  • {test_name}")
-                elif test:
-                    objective_lines.append(f"  • {test}")
-        
-        sections.append("\n".join(objective_lines) if objective_lines else "No objective findings extracted")
-        
-        # Section 5: TREATMENT PROVIDED
-        sections.append("\n💆 TREATMENT PROVIDED")
-        sections.append("-" * 50)
-        
-        treatment = raw_data.get("treatment_provided", {})
-        treatment_lines = []
-        
-        # Treatment techniques
-        techniques = treatment.get("treatment_techniques", [])
-        if techniques:
-            treatment_lines.append("Treatment Techniques:")
-            for technique in techniques[:5]:
-                if isinstance(technique, dict):
-                    tech_name = technique.get("technique", "")
-                    if tech_name:
-                        treatment_lines.append(f"  • {tech_name}")
-                elif technique:
-                    treatment_lines.append(f"  • {technique}")
-        
-        # Therapeutic exercises
-        exercises = treatment.get("therapeutic_exercises", [])
-        if exercises:
-            treatment_lines.append("\nTherapeutic Exercises:")
-            for exercise in exercises[:5]:
-                if isinstance(exercise, dict):
-                    ex_name = exercise.get("exercise", "")
-                    if ex_name:
-                        treatment_lines.append(f"  • {ex_name}")
-                elif exercise:
-                    treatment_lines.append(f"  • {exercise}")
-        
-        # Modalities
-        modalities = treatment.get("modalities_used", [])
-        if modalities:
-            treatment_lines.append("\nModalities Used:")
-            for modality in modalities[:3]:
-                if isinstance(modality, dict):
-                    mod_name = modality.get("modality", "")
-                    if mod_name:
-                        treatment_lines.append(f"  • {mod_name}")
-                elif modality:
-                    treatment_lines.append(f"  • {modality}")
-        
-        sections.append("\n".join(treatment_lines) if treatment_lines else "No treatment details extracted")
-        
-        # Section 6: CLINICAL ASSESSMENT
-        sections.append("\n🏥 CLINICAL ASSESSMENT")
-        sections.append("-" * 50)
-        
-        assessment = raw_data.get("clinical_assessment", {})
-        assessment_lines = []
-        
-        if assessment.get("assessment"):
-            assessment_lines.append(f"Assessment: {assessment['assessment']}")
-        
-        if assessment.get("progress_since_last_visit"):
-            assessment_lines.append(f"Progress: {assessment['progress_since_last_visit']}")
-        
-        if assessment.get("clinical_impression"):
-            assessment_lines.append(f"Clinical Impression: {assessment['clinical_impression']}")
-        
-        if assessment.get("prognosis"):
-            assessment_lines.append(f"Prognosis: {assessment['prognosis']}")
-        
-        sections.append("\n".join(assessment_lines) if assessment_lines else "No clinical assessment extracted")
-        
-        # Section 7: TREATMENT PLAN
-        sections.append("\n🎯 TREATMENT PLAN")
-        sections.append("-" * 50)
-        
-        treatment_plan = raw_data.get("treatment_plan", {})
-        plan_lines = []
-        
-        # Short-term goals
-        short_term_goals = treatment_plan.get("short_term_goals", [])
-        if short_term_goals:
-            plan_lines.append("Short-term Goals:")
-            for goal in short_term_goals[:3]:
-                if isinstance(goal, dict):
-                    goal_desc = goal.get("goal", "")
-                    if goal_desc:
-                        plan_lines.append(f"  • {goal_desc}")
-                elif goal:
-                    plan_lines.append(f"  • {goal}")
-        
-        # Home exercise program
-        hep = treatment_plan.get("home_exercise_program", [])
-        if hep:
-            plan_lines.append("\nHome Exercise Program:")
-            for exercise in hep[:3]:
-                if isinstance(exercise, dict):
-                    ex_desc = exercise.get("exercise", "")
-                    if ex_desc:
-                        plan_lines.append(f"  • {ex_desc}")
-                elif exercise:
-                    plan_lines.append(f"  • {exercise}")
-        
-        if treatment_plan.get("frequency_duration"):
-            plan_lines.append(f"\nFrequency/Duration: {treatment_plan['frequency_duration']}")
-        
-        if treatment_plan.get("next_appointment"):
-            plan_lines.append(f"Next Appointment: {treatment_plan['next_appointment']}")
-        
-        sections.append("\n".join(plan_lines) if plan_lines else "No treatment plan extracted")
-        
-        # Section 8: WORK STATUS
-        sections.append("\n💼 WORK STATUS")
-        sections.append("-" * 50)
-        
-        work_status = raw_data.get("work_status", {})
-        work_lines = []
-        
-        if work_status.get("current_work_status"):
-            work_lines.append(f"Current Status: {work_status['current_work_status']}")
-        
-        work_restrictions = work_status.get("work_restrictions", [])
-        if work_restrictions:
-            work_lines.append("\nWork Restrictions:")
-            for restriction in work_restrictions[:5]:
-                if isinstance(restriction, dict):
-                    desc = restriction.get("restriction", "")
-                    if desc:
-                        work_lines.append(f"  • {desc}")
-                elif restriction:
-                    work_lines.append(f"  • {restriction}")
-        
-        if work_status.get("functional_capacity"):
-            work_lines.append(f"\nFunctional Capacity: {work_status['functional_capacity']}")
-        
-        sections.append("\n".join(work_lines) if work_lines else "No work status information extracted")
-        
-        # Section 9: OUTCOME MEASURES
-        sections.append("\n📊 OUTCOME MEASURES")
-        sections.append("-" * 50)
-        
-        outcomes = raw_data.get("outcome_measures", {})
-        outcome_lines = []
-        
-        if outcomes.get("pain_scale"):
-            outcome_lines.append(f"Pain Scale: {outcomes['pain_scale']}")
-        
-        functional_scores = outcomes.get("functional_scores", [])
-        if functional_scores:
-            outcome_lines.append("\nFunctional Scores:")
-            for score in functional_scores[:3]:
-                if isinstance(score, dict):
-                    score_name = score.get("measure", "")
-                    score_value = score.get("score", "")
-                    if score_name and score_value:
-                        outcome_lines.append(f"  • {score_name}: {score_value}")
-                elif score:
-                    outcome_lines.append(f"  • {score}")
-        
-        sections.append("\n".join(outcome_lines) if outcome_lines else "No outcome measures extracted")
-        
-        # Section 10: CRITICAL CLINICAL FINDINGS
-        sections.append("\n🚨 CRITICAL CLINICAL FINDINGS")
-        sections.append("-" * 50)
-        
-        critical_findings = raw_data.get("critical_clinical_findings", [])
-        if critical_findings:
-            for finding in critical_findings[:8]:
-                if isinstance(finding, dict):
-                    finding_desc = finding.get("finding", "")
-                    finding_priority = finding.get("priority", "")
-                    if finding_desc:
-                        if finding_priority:
-                            sections.append(f"• [{finding_priority}] {finding_desc}")
-                        else:
-                            sections.append(f"• {finding_desc}")
-                elif finding:
-                    sections.append(f"• {finding}")
-        else:
-            # Check for critical findings in other sections
-            critical_items = []
-            
-            # Check for worsening pain
-            if outcomes.get("pain_scale"):
-                pain_match = re.search(r'(\d+)/10', outcomes['pain_scale'])
-                if pain_match and int(pain_match.group(1)) >= 7:
-                    critical_items.append(f"High pain level: {outcomes['pain_scale']}")
-            
-            # Check for significant functional decline
-            if assessment.get("progress_since_last_visit"):
-                if any(term in assessment['progress_since_last_visit'].lower() for term in ['worse', 'declined', 'deteriorated', 'regressed']):
-                    critical_items.append("Functional decline noted")
-            
-            if critical_items:
-                for item in critical_items:
-                    sections.append(f"• {item}")
-            else:
-                sections.append("No critical clinical findings identified")
-        
-        # Join all sections
-        long_summary = "\n\n".join(sections)
-        logger.info(f"✅ Clinical note long summary built: {len(long_summary)} characters")
-        
-        return long_summary
+            # Fallback: Generate a minimal summary
+            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
     def _clean_pipes_from_summary(self, short_summary: str) -> str:
         """
         Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.
@@ -977,114 +608,3 @@ Extract into COMPREHENSIVE structured JSON with all critical clinical details:
         
         logger.info(f"🔄 Used clinical fallback summary: {len(summary.split())} words")
         return summary
-
-    def _get_fallback_result(self, doc_type: str, fallback_date: str) -> Dict:
-        """Return minimal fallback result structure for clinical notes"""
-        return {
-            "note_identity": {
-                "note_type": doc_type,
-                "visit_date": fallback_date,
-                "encounter_date": "",
-                "visit_type": "",
-                "encounter_duration": "",
-                "clinic_facility": "",
-                "provider_credentials": ""
-            },
-            "patient_information": {
-                "patient_name": "",
-                "patient_dob": "",
-                "patient_age": "",
-                "time_since_injury": "",
-                "visit_number": "",
-                "treatment_frequency": ""
-            },
-            "providers": {
-                "treating_provider": {
-                    "name": "",
-                    "credentials": "",
-                    "specialty": "",
-                    "role": "Treating Provider"
-                },
-                "assistant_provider": {
-                    "name": "",
-                    "credentials": "",
-                    "role": ""
-                },
-                "supervising_physician": {
-                    "name": "",
-                    "credentials": ""
-                }
-            },
-            "subjective_findings": {
-                "chief_complaint": "",
-                "history_present_illness": "",
-                "pain_characteristics": {
-                    "location": "",
-                    "intensity": "",
-                    "quality": "",
-                    "radiation": "",
-                    "aggravating_factors": "",
-                    "relieving_factors": ""
-                },
-                "functional_limitations": [],
-                "patient_goals": "",
-                "compliance_with_treatment": ""
-            },
-            "objective_findings": {
-                "vital_signs": {
-                    "blood_pressure": "",
-                    "heart_rate": "",
-                    "respiratory_rate": "",
-                    "temperature": ""
-                },
-                "range_of_motion": [],
-                "manual_muscle_testing": [],
-                "palpation_findings": [],
-                "special_tests": [],
-                "functional_assessments": [],
-                "neurological_findings": [],
-                "observation_findings": ""
-            },
-            "treatment_provided": {
-                "treatment_techniques": [],
-                "therapeutic_exercises": [],
-                "modalities_used": [],
-                "manual_therapy": [],
-                "treatment_parameters": {
-                    "duration": "",
-                    "intensity": "",
-                    "patient_response": ""
-                },
-                "adverse_reactions": ""
-            },
-            "clinical_assessment": {
-                "assessment": "",
-                "progress_since_last_visit": "",
-                "changes_in_status": "",
-                "clinical_impression": "",
-                "prognosis": "",
-                "barriers_to_recovery": []
-            },
-            "treatment_plan": {
-                "short_term_goals": [],
-                "long_term_goals": [],
-                "plan_of_care": "",
-                "home_exercise_program": [],
-                "frequency_duration": "",
-                "next_appointment": "",
-                "referrals_needed": []
-            },
-            "work_status": {
-                "current_work_status": "",
-                "work_restrictions": [],
-                "functional_capacity": "",
-                "return_to_work_plan": ""
-            },
-            "outcome_measures": {
-                "pain_scale": "",
-                "functional_scores": [],
-                "progress_metrics": [],
-                "patient_satisfaction": ""
-            },
-            "critical_clinical_findings": []
-        }

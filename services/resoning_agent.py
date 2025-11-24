@@ -246,7 +246,7 @@ class EnhancedReportAnalyzer:
         """
         try:
             logger.info(f"🚀 Starting MODE-AWARE extraction (Mode: {mode})...")
-            
+            print(document_text,'document text')
             current_date = datetime.now().strftime("%Y-%m-%d")
             # OPTIMIZATION: Removed redundant separate detection call
             # detected_doc_type = self.detect_document_type(document_text)

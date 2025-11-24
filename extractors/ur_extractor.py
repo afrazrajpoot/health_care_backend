@@ -26,6 +26,7 @@ class DecisionDocumentExtractor:
     - Chain-of-thought reasoning = Explains decisions
     - Optimized for accuracy matching Gemini's approach
     - Supports UR/IMR, Appeals, Authorizations, RFA, DFR
+    - Direct LLM generation for long summary (removes intermediate extraction)
     """
 
     def __init__(self, llm: AzureChatOpenAI):
@@ -89,17 +90,14 @@ class DecisionDocumentExtractor:
             logger.warning(f"⚠️ Document very large ({token_estimate:,} tokens)")
             logger.warning("⚠️ May exceed GPT-4o context window (128K tokens)")
         
-        # Stage 1: Extract with FULL CONTEXT
-        raw_result = self._extract_full_context(
+        # Stage 1: Directly generate long summary with FULL CONTEXT (no intermediate extraction)
+        long_summary = self._generate_long_summary_direct(
             text=text,
             doc_type=detected_type,
             fallback_date=fallback_date
         )
 
-        # Stage 2: Build long summary from ALL raw data
-        long_summary = self._build_comprehensive_long_summary(raw_result, detected_type, fallback_date)
-
-        # Stage 3: Generate short summary from long summary
+        # Stage 2: Generate short summary from long summary
         short_summary = self._generate_short_summary_from_long_summary(long_summary, detected_type)
 
         logger.info("=" * 80)
@@ -146,18 +144,20 @@ class DecisionDocumentExtractor:
         logger.info(f"🔍 Could not auto-detect document type, using: {original_type}")
         return original_type or "UNKNOWN"
 
-    def _extract_full_context(
+    def _generate_long_summary_direct(
         self,
         text: str,
         doc_type: str,
         fallback_date: str
-    ) -> Dict:
+    ) -> str:
         """
-        Extract with FULL document context.
+        Directly generate comprehensive long summary with FULL document context using LLM.
+        Adapted from original extraction prompt to output structured summary directly.
         """
-        logger.info("🔍 Processing ENTIRE decision document in single context window...")
+        logger.info("🔍 Processing ENTIRE decision document in single context window for direct long summary...")
         
-        # Build system prompt
+        # Adapted System Prompt for Direct Long Summary Generation
+        # Reuses core anti-hallucination rules and decision focus from original extraction prompt
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are an expert medical-legal documentation specialist analyzing a COMPLETE {doc_type} decision document.
 
@@ -246,119 +246,82 @@ VII. REGULATORY COMPLIANCE
 - DECISION STATUS: Use exact wording from document
 - It is BETTER to have empty fields than incorrect information
 
-Now analyze this COMPLETE {doc_type} decision document and extract ALL relevant information:
+Now analyze this COMPLETE {doc_type} decision document and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
 """)
 
+        # Adapted User Prompt for Direct Long Summary - Outputs the structured summary directly
         user_prompt = HumanMessagePromptTemplate.from_template("""
 COMPLETE {doc_type} DECISION DOCUMENT TEXT:
 
 {full_document_text}
 
-Extract into COMPREHENSIVE structured JSON with all critical details:
+Generate the long summary in this EXACT STRUCTURED FORMAT (use the fallback date {fallback_date} if no dates found):
 
-{{
-  "document_identity": {{
-    "document_type": "{doc_type}",
-    "document_date": "",
-    "decision_date": "",
-    "effective_date": "",
-    "document_id": "",
-    "claim_number": "",
-    "case_number": "",
-    "jurisdiction": ""
-  }},
-  
-  "parties_involved": {{
-    "patient": {{
-      "name": "",
-      "date_of_birth": "",
-      "member_id": ""
-    }},
-    "requesting_provider": {{
-      "name": "",
-      "specialty": "",
-      "npi": "",
-      "contact_info": ""
-    }},
-    "reviewing_entity": {{
-      "name": "",
-      "reviewer_name": "",
-      "reviewer_credentials": "",
-      "contact_info": ""
-    }},
-    "claims_administrator": {{
-      "name": "",
-      "contact_info": ""
-    }}
-  }},
-  
-  "request_details": {{
-    "date_of_service_requested": "",
-    "request_received_date": "",
-    "requested_services": [
-      {{
-        "service_type": "",
-        "procedure_name": "",
-        "cpt_code": "",
-        "body_part": "",
-        "frequency": "",
-        "duration": "",
-        "quantity": ""
-      }}
-    ],
-    "clinical_reason": "",
-    "supporting_documentation": []
-  }},
-  
-  "decision_outcome": {{
-    "overall_decision": "",
-    "decision_date": "",
-    "decision_details": "",
-    "partial_decision_breakdown": [
-      {{
-        "service": "",
-        "decision": "",
-        "approved_quantity": "",
-        "denied_quantity": ""
-      }}
-    ],
-    "decision_effective_dates": {{
-      "start_date": "",
-      "end_date": ""
-    }}
-  }},
-  
-  "medical_necessity_determination": {{
-    "medical_necessity": "",
-    "criteria_applied": "",
-    "clinical_rationale": "",
-    "supporting_evidence": [],
-    "guidelines_referenced": []
-  }},
-  
-  "reviewer_analysis": {{
-    "clinical_summary_reviewed": "",
-    "key_findings": [],
-    "consultant_opinions": [],
-    "documentation_gaps": []
-  }},
-  
-  "appeal_information": {{
-    "appeal_deadline": "",
-    "appeal_procedures": "",
-    "required_documentation": [],
-    "contact_information": "",
-    "timeframe_for_response": ""
-  }},
-  
-  "regulatory_compliance": {{
-    "regulatory_references": [],
-    "timeliness_compliance": "",
-    "reviewer_qualifications": ""
-  }},
-  
-  "critical_actions_required": []
-}}
+📋 DECISION DOCUMENT OVERVIEW
+--------------------------------------------------
+Document Type: {doc_type}
+Document Date: [extracted or {fallback_date}]
+Decision Date: [extracted]
+Document ID: [extracted]
+Claim/Case Number: [extracted]
+Jurisdiction: [extracted]
+
+👥 PARTIES INVOLVED
+--------------------------------------------------
+Patient: [name]
+  DOB: [extracted]
+  Member ID: [extracted]
+Requesting Provider: [name]
+  Specialty: [extracted]
+  NPI: [extracted]
+Reviewing Entity: [name]
+  Reviewer: [extracted]
+  Credentials: [extracted]
+Claims Administrator: [name]
+
+📋 REQUEST DETAILS
+--------------------------------------------------
+Date of Service Requested: [extracted]
+Request Received: [extracted]
+Requested Services:
+• [list up to 10 with procedure names, CPT, body parts, frequency/duration]
+Clinical Reason: [extracted]
+
+⚖️ DECISION OUTCOME
+--------------------------------------------------
+Overall Decision: [extracted, exact wording]
+Decision Details: [extracted]
+Partial Decision Breakdown:
+• [list up to 5 with service: decision/quantity approved/denied]
+Effective Dates: [start/end]
+
+🏥 MEDICAL NECESSITY DETERMINATION
+--------------------------------------------------
+Medical Necessity: [extracted]
+Criteria Applied: [extracted]
+Clinical Rationale: [extracted]
+Guidelines Referenced:
+• [list up to 5]
+
+🔍 REVIEWER ANALYSIS
+--------------------------------------------------
+Clinical Summary Reviewed: [extracted]
+Key Findings:
+• [list up to 5]
+Documentation Gaps:
+• [list up to 3]
+
+🔄 APPEAL INFORMATION
+--------------------------------------------------
+Appeal Deadline: [extracted]
+Appeal Procedures: [extracted]
+Required Documentation:
+• [list up to 5]
+Timeframe for Response: [extracted]
+
+🚨 CRITICAL ACTIONS REQUIRED
+--------------------------------------------------
+• [list up to 8 time-sensitive items]
 
 ⚠️ CRITICAL REMINDERS:
 1. For "overall_decision": Extract EXACT wording from document
@@ -384,317 +347,36 @@ Extract into COMPREHENSIVE structured JSON with all critical details:
         try:
             start_time = time.time()
             
-            logger.info("🤖 Invoking LLM for full-context decision extraction...")
+            logger.info("🤖 Invoking LLM for direct full-context decision long summary generation...")
             
-            # Single LLM call with FULL document context
-            chain = chat_prompt | self.llm | self.parser
+            # Single LLM call with FULL document context to generate long summary directly
+            chain = chat_prompt | self.llm
             result = chain.invoke({
                 "doc_type": doc_type,
-                "full_document_text": text
+                "full_document_text": text,
+                "fallback_date": fallback_date
             })
+            
+            long_summary = result.content.strip()
             
             end_time = time.time()
             processing_time = end_time - start_time
             
-            logger.info(f"⚡ Full-context decision extraction completed in {processing_time:.2f}s")
-            logger.info(f"✅ Extracted data from complete {len(text):,} char document")
+            logger.info(f"⚡ Direct decision long summary generation completed in {processing_time:.2f}s")
+            logger.info(f"✅ Generated long summary from complete {len(text):,} char document")
             
-            return result
+            return long_summary
             
         except Exception as e:
-            logger.error(f"❌ Full-context decision extraction failed: {e}", exc_info=True)
+            logger.error(f"❌ Direct decision long summary generation failed: {e}", exc_info=True)
             
             # Check if context length exceeded
             if "context_length_exceeded" in str(e).lower() or "maximum context" in str(e).lower():
                 logger.error("❌ Document exceeds GPT-4o 128K context window")
                 logger.error("❌ Consider implementing chunked fallback for very large documents")
             
-            return self._get_fallback_result(doc_type, fallback_date)
-
-    def _build_comprehensive_long_summary(self, raw_data: Dict, doc_type: str, fallback_date: str) -> str:
-        """
-        Build comprehensive long summary from ALL extracted raw data with detailed headings.
-        """
-        logger.info("📝 Building comprehensive long summary from ALL extracted decision data...")
-        
-        sections = []
-        
-        # Section 1: DOCUMENT OVERVIEW
-        sections.append("📋 DECISION DOCUMENT OVERVIEW")
-        sections.append("-" * 50)
-        
-        document_identity = raw_data.get("document_identity", {})
-        overview_lines = [
-            f"Document Type: {document_identity.get('document_type', doc_type)}",
-            f"Document Date: {document_identity.get('document_date', fallback_date)}",
-            f"Decision Date: {document_identity.get('decision_date', 'Not specified')}",
-            f"Document ID: {document_identity.get('document_id', 'Not specified')}",
-            f"Claim/Case Number: {document_identity.get('claim_number', document_identity.get('case_number', 'Not specified'))}",
-            f"Jurisdiction: {document_identity.get('jurisdiction', 'Not specified')}"
-        ]
-        sections.append("\n".join(overview_lines))
-        
-        # Section 2: PARTIES INVOLVED
-        sections.append("\n👥 PARTIES INVOLVED")
-        sections.append("-" * 50)
-        
-        parties = raw_data.get("parties_involved", {})
-        party_lines = []
-        
-        # Patient information
-        patient = parties.get("patient", {})
-        if patient.get("name"):
-            party_lines.append(f"Patient: {patient.get('name')}")
-            if patient.get("date_of_birth"):
-                party_lines.append(f"  DOB: {patient.get('date_of_birth')}")
-            if patient.get("member_id"):
-                party_lines.append(f"  Member ID: {patient.get('member_id')}")
-        
-        # Requesting provider
-        provider = parties.get("requesting_provider", {})
-        if provider.get("name"):
-            party_lines.append(f"\nRequesting Provider: {provider.get('name')}")
-            if provider.get("specialty"):
-                party_lines.append(f"  Specialty: {provider.get('specialty')}")
-            if provider.get("npi"):
-                party_lines.append(f"  NPI: {provider.get('npi')}")
-        
-        # Reviewing entity
-        reviewer = parties.get("reviewing_entity", {})
-        if reviewer.get("name"):
-            party_lines.append(f"\nReviewing Entity: {reviewer.get('name')}")
-            if reviewer.get("reviewer_name"):
-                party_lines.append(f"  Reviewer: {reviewer.get('reviewer_name')}")
-            if reviewer.get("reviewer_credentials"):
-                party_lines.append(f"  Credentials: {reviewer.get('reviewer_credentials')}")
-        
-        sections.append("\n".join(party_lines) if party_lines else "No party information extracted")
-        
-        # Section 3: REQUEST DETAILS
-        sections.append("\n📋 REQUEST DETAILS")
-        sections.append("-" * 50)
-        
-        request_details = raw_data.get("request_details", {})
-        request_lines = []
-        
-        # Dates
-        if request_details.get("date_of_service_requested"):
-            request_lines.append(f"Date of Service Requested: {request_details['date_of_service_requested']}")
-        if request_details.get("request_received_date"):
-            request_lines.append(f"Request Received: {request_details['request_received_date']}")
-        
-        # Requested services
-        requested_services = request_details.get("requested_services", [])
-        if requested_services:
-            request_lines.append("\nRequested Services:")
-            for service in requested_services[:10]:  # Limit to 10 services
-                if isinstance(service, dict):
-                    service_desc = []
-                    if service.get("procedure_name"):
-                        service_desc.append(service["procedure_name"])
-                    if service.get("service_type"):
-                        service_desc.append(f"({service['service_type']})")
-                    if service.get("body_part"):
-                        service_desc.append(f"- {service['body_part']}")
-                    if service.get("frequency"):
-                        service_desc.append(f"Frequency: {service['frequency']}")
-                    if service.get("duration"):
-                        service_desc.append(f"Duration: {service['duration']}")
-                    
-                    if service_desc:
-                        request_lines.append(f"  • {' '.join(service_desc)}")
-                elif service:
-                    request_lines.append(f"  • {service}")
-        else:
-            request_lines.append("No specific services listed in request")
-        
-        # Clinical reason
-        if request_details.get("clinical_reason"):
-            request_lines.append(f"\nClinical Reason: {request_details['clinical_reason']}")
-        
-        sections.append("\n".join(request_lines))
-        
-        # Section 4: DECISION OUTCOME (MOST CRITICAL)
-        sections.append("\n⚖️ DECISION OUTCOME")
-        sections.append("-" * 50)
-        
-        decision_outcome = raw_data.get("decision_outcome", {})
-        decision_lines = []
-        
-        # Overall decision
-        overall_decision = decision_outcome.get("overall_decision", "")
-        if overall_decision:
-            decision_lines.append(f"Overall Decision: {overall_decision}")
-        
-        # Decision details
-        decision_details = decision_outcome.get("decision_details", "")
-        if decision_details:
-            decision_lines.append(f"Decision Details: {decision_details}")
-        
-        # Partial decision breakdown
-        partial_breakdown = decision_outcome.get("partial_decision_breakdown", [])
-        if partial_breakdown:
-            decision_lines.append("\nPartial Decision Breakdown:")
-            for item in partial_breakdown[:5]:
-                if isinstance(item, dict):
-                    service = item.get("service", "")
-                    decision = item.get("decision", "")
-                    if service and decision:
-                        decision_lines.append(f"  • {service}: {decision}")
-                elif item:
-                    decision_lines.append(f"  • {item}")
-        
-        # Effective dates
-        effective_dates = decision_outcome.get("decision_effective_dates", {})
-        if effective_dates.get("start_date") or effective_dates.get("end_date"):
-            date_info = []
-            if effective_dates.get("start_date"):
-                date_info.append(f"Start: {effective_dates['start_date']}")
-            if effective_dates.get("end_date"):
-                date_info.append(f"End: {effective_dates['end_date']}")
-            decision_lines.append(f"\nEffective Dates: {', '.join(date_info)}")
-        
-        sections.append("\n".join(decision_lines) if decision_lines else "No decision outcome extracted")
-        
-        # Section 5: MEDICAL NECESSITY DETERMINATION
-        sections.append("\n🏥 MEDICAL NECESSITY DETERMINATION")
-        sections.append("-" * 50)
-        
-        medical_necessity = raw_data.get("medical_necessity_determination", {})
-        necessity_lines = []
-        
-        # Medical necessity
-        med_necessity = medical_necessity.get("medical_necessity", "")
-        if med_necessity:
-            necessity_lines.append(f"Medical Necessity: {med_necessity}")
-        
-        # Criteria applied
-        criteria = medical_necessity.get("criteria_applied", "")
-        if criteria:
-            necessity_lines.append(f"Criteria Applied: {criteria}")
-        
-        # Clinical rationale
-        rationale = medical_necessity.get("clinical_rationale", "")
-        if rationale:
-            necessity_lines.append(f"Clinical Rationale: {rationale}")
-        
-        # Guidelines referenced
-        guidelines = medical_necessity.get("guidelines_referenced", [])
-        if guidelines:
-            necessity_lines.append("\nGuidelines Referenced:")
-            for guideline in guidelines[:5]:
-                if isinstance(guideline, dict):
-                    guideline_name = guideline.get("guideline", "")
-                    if guideline_name:
-                        necessity_lines.append(f"  • {guideline_name}")
-                elif guideline:
-                    necessity_lines.append(f"  • {guideline}")
-        
-        sections.append("\n".join(necessity_lines) if necessity_lines else "No medical necessity determination extracted")
-        
-        # Section 6: REVIEWER ANALYSIS
-        sections.append("\n🔍 REVIEWER ANALYSIS")
-        sections.append("-" * 50)
-        
-        reviewer_analysis = raw_data.get("reviewer_analysis", {})
-        analysis_lines = []
-        
-        # Clinical summary
-        clinical_summary = reviewer_analysis.get("clinical_summary_reviewed", "")
-        if clinical_summary:
-            analysis_lines.append(f"Clinical Summary Reviewed: {clinical_summary}")
-        
-        # Key findings
-        key_findings = reviewer_analysis.get("key_findings", [])
-        if key_findings:
-            analysis_lines.append("\nKey Findings:")
-            for finding in key_findings[:5]:
-                if isinstance(finding, dict):
-                    finding_desc = finding.get("finding", "")
-                    if finding_desc:
-                        analysis_lines.append(f"  • {finding_desc}")
-                elif finding:
-                    analysis_lines.append(f"  • {finding}")
-        
-        # Documentation gaps
-        doc_gaps = reviewer_analysis.get("documentation_gaps", [])
-        if doc_gaps:
-            analysis_lines.append("\nDocumentation Gaps:")
-            for gap in doc_gaps[:3]:
-                if isinstance(gap, dict):
-                    gap_desc = gap.get("gap", "")
-                    if gap_desc:
-                        analysis_lines.append(f"  • {gap_desc}")
-                elif gap:
-                    analysis_lines.append(f"  • {gap}")
-        
-        sections.append("\n".join(analysis_lines) if analysis_lines else "No reviewer analysis extracted")
-        
-        # Section 7: APPEAL INFORMATION
-        sections.append("\n🔄 APPEAL INFORMATION")
-        sections.append("-" * 50)
-        
-        appeal_info = raw_data.get("appeal_information", {})
-        appeal_lines = []
-        
-        # Appeal deadline
-        appeal_deadline = appeal_info.get("appeal_deadline", "")
-        if appeal_deadline:
-            appeal_lines.append(f"Appeal Deadline: {appeal_deadline}")
-        
-        # Appeal procedures
-        appeal_procedures = appeal_info.get("appeal_procedures", "")
-        if appeal_procedures:
-            appeal_lines.append(f"Appeal Procedures: {appeal_procedures}")
-        
-        # Required documentation
-        required_docs = appeal_info.get("required_documentation", [])
-        if required_docs:
-            appeal_lines.append("\nRequired Documentation:")
-            for doc in required_docs[:5]:
-                if isinstance(doc, dict):
-                    doc_desc = doc.get("document", "")
-                    if doc_desc:
-                        appeal_lines.append(f"  • {doc_desc}")
-                elif doc:
-                    appeal_lines.append(f"  • {doc}")
-        
-        # Timeframe for response
-        response_timeframe = appeal_info.get("timeframe_for_response", "")
-        if response_timeframe:
-            appeal_lines.append(f"Timeframe for Response: {response_timeframe}")
-        
-        sections.append("\n".join(appeal_lines) if appeal_lines else "No appeal information extracted")
-        
-        # Section 8: CRITICAL ACTIONS REQUIRED
-        sections.append("\n🚨 CRITICAL ACTIONS REQUIRED")
-        sections.append("-" * 50)
-        
-        critical_actions = raw_data.get("critical_actions_required", [])
-        if critical_actions:
-            for action in critical_actions[:8]:
-                if isinstance(action, dict):
-                    action_desc = action.get("action", "")
-                    action_deadline = action.get("deadline", "")
-                    if action_desc:
-                        if action_deadline:
-                            sections.append(f"• {action_desc} (Deadline: {action_deadline})")
-                        else:
-                            sections.append(f"• {action_desc}")
-                elif action:
-                    sections.append(f"• {action}")
-        else:
-            # Extract critical actions from appeal information if no specific critical actions
-            if appeal_info.get("appeal_deadline"):
-                sections.append(f"• Appeal Deadline: {appeal_info['appeal_deadline']}")
-            if not sections[-1].startswith("•"):
-                sections.append("No time-critical actions identified")
-        
-        # Join all sections
-        long_summary = "\n\n".join(sections)
-        logger.info(f"✅ Decision long summary built: {len(long_summary)} characters")
-        
-        return long_summary
+            # Fallback: Generate a minimal summary
+            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
 
     def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
         """
@@ -974,84 +656,3 @@ REQUIREMENTS:
         
         logger.info(f"🔄 Used decision fallback summary: {len(summary.split())} words")
         return summary
-
-    def _get_fallback_result(self, doc_type: str, fallback_date: str) -> Dict:
-        """Return minimal fallback result structure for decision documents"""
-        return {
-            "document_identity": {
-                "document_type": doc_type,
-                "document_date": fallback_date,
-                "decision_date": "",
-                "effective_date": "",
-                "document_id": "",
-                "claim_number": "",
-                "case_number": "",
-                "jurisdiction": ""
-            },
-            "parties_involved": {
-                "patient": {
-                    "name": "",
-                    "date_of_birth": "",
-                    "member_id": ""
-                },
-                "requesting_provider": {
-                    "name": "",
-                    "specialty": "",
-                    "npi": "",
-                    "contact_info": ""
-                },
-                "reviewing_entity": {
-                    "name": "",
-                    "reviewer_name": "",
-                    "reviewer_credentials": "",
-                    "contact_info": ""
-                },
-                "claims_administrator": {
-                    "name": "",
-                    "contact_info": ""
-                }
-            },
-            "request_details": {
-                "date_of_service_requested": "",
-                "request_received_date": "",
-                "requested_services": [],
-                "clinical_reason": "",
-                "supporting_documentation": []
-            },
-            "decision_outcome": {
-                "overall_decision": "",
-                "decision_date": "",
-                "decision_details": "",
-                "partial_decision_breakdown": [],
-                "decision_effective_dates": {
-                    "start_date": "",
-                    "end_date": ""
-                }
-            },
-            "medical_necessity_determination": {
-                "medical_necessity": "",
-                "criteria_applied": "",
-                "clinical_rationale": "",
-                "supporting_evidence": [],
-                "guidelines_referenced": []
-            },
-            "reviewer_analysis": {
-                "clinical_summary_reviewed": "",
-                "key_findings": [],
-                "consultant_opinions": [],
-                "documentation_gaps": []
-            },
-            "appeal_information": {
-                "appeal_deadline": "",
-                "appeal_procedures": "",
-                "required_documentation": [],
-                "contact_information": "",
-                "timeframe_for_response": ""
-            },
-            "regulatory_compliance": {
-                "regulatory_references": [],
-                "timeliness_compliance": "",
-                "reviewer_qualifications": ""
-            },
-            "critical_actions_required": []
-        }

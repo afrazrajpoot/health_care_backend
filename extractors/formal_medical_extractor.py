@@ -25,6 +25,7 @@ class FormalMedicalReportExtractor:
     - Chain-of-thought reasoning = Explains decisions
     - Optimized for accuracy matching Gemini's approach
     - Supports Surgery, Anesthesia, EMG/NCS, Pathology, Cardiology, Sleep Studies, Endoscopy, Genetics, Discharge Summaries
+    - Direct LLM generation for long summary (removes intermediate extraction)
     """
 
     def __init__(self, llm: AzureChatOpenAI):
@@ -96,17 +97,14 @@ class FormalMedicalReportExtractor:
             logger.warning(f"⚠️ Document very large ({token_estimate:,} tokens)")
             logger.warning("⚠️ May exceed GPT-4o context window (128K tokens)")
         
-        # Stage 1: Extract with FULL CONTEXT
-        raw_result = self._extract_full_context(
+        # Stage 1: Directly generate long summary with FULL CONTEXT (no intermediate extraction)
+        long_summary = self._generate_long_summary_direct(
             text=text_to_use,
             doc_type=detected_type,
             fallback_date=fallback_date
         )
 
-        # Stage 2: Build long summary from ALL raw data
-        long_summary = self._build_comprehensive_long_summary(raw_result, detected_type, fallback_date)
-
-        # Stage 3: Generate short summary from long summary
+        # Stage 2: Generate short summary from long summary
         short_summary = self._generate_short_summary_from_long_summary(long_summary, detected_type)
 
         logger.info("=" * 80)
@@ -153,18 +151,20 @@ class FormalMedicalReportExtractor:
         logger.info(f"🔍 Could not auto-detect report type, using: {original_type}")
         return original_type or "MEDICAL_REPORT"
 
-    def _extract_full_context(
+    def _generate_long_summary_direct(
         self,
         text: str,
         doc_type: str,
         fallback_date: str
-    ) -> Dict:
+    ) -> str:
         """
-        Extract with FULL document context.
+        Directly generate comprehensive long summary with FULL document context using LLM.
+        Adapted from original extraction prompt to output structured summary directly.
         """
-        logger.info("🔍 Processing ENTIRE medical report in single context window...")
+        logger.info("🔍 Processing ENTIRE medical report in single context window for direct long summary...")
         
-        # Build system prompt
+        # Adapted System Prompt for Direct Long Summary Generation
+        # Reuses core anti-hallucination rules and medical report focus from original extraction prompt
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are an expert medical documentation specialist analyzing a COMPLETE {doc_type} report.
 
@@ -260,129 +260,86 @@ VIII. FOLLOW-UP & RECOMMENDATIONS
 - PROCEDURE DETAILS: Use exact wording from report
 - It is BETTER to have empty fields than incorrect medical information
 
-Now analyze this COMPLETE {doc_type} medical report and extract ALL relevant information:
+Now analyze this COMPLETE {doc_type} medical report and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
 """)
 
+        # Adapted User Prompt for Direct Long Summary - Outputs the structured summary directly
         user_prompt = HumanMessagePromptTemplate.from_template("""
 COMPLETE {doc_type} MEDICAL REPORT TEXT:
 
 {full_document_text}
 
-Extract into COMPREHENSIVE structured JSON with all critical medical details:
+Generate the long summary in this EXACT STRUCTURED FORMAT (use the fallback date {fallback_date} if no report date found):
 
-{{
-  "report_identity": {{
-    "report_type": "{doc_type}",
-    "report_date": "",
-    "procedure_date": "",
-    "accession_number": "",
-    "medical_record_number": "",
-    "facility_name": "",
-    "department": ""
-  }},
-  
-  "patient_information": {{
-    "patient_name": "",
-    "patient_dob": "",
-    "patient_age": "",
-    "patient_gender": "",
-    "medical_record_number": "",
-    "allergies": "",
-    "clinical_history": ""
-  }},
-  
-  "providers": {{
-    "ordering_physician": {{
-      "name": "",
-      "specialty": "",
-      "npi": ""
-    }},
-    "performing_physician": {{
-      "name": "",
-      "specialty": "",
-      "credentials": "",
-      "role": "Performing/Attending Physician"
-    }},
-    "assistant_physicians": [],
-    "anesthesiologist": {{
-      "name": "",
-      "credentials": ""
-    }},
-    "referring_physician": {{
-      "name": "",
-      "specialty": ""
-    }}
-  }},
-  
-  "clinical_context": {{
-    "indications": "",
-    "preoperative_diagnosis": "",
-    "postoperative_diagnosis": "",
-    "clinical_history_summary": "",
-    "relevant_medical_history": []
-  }},
-  
-  "procedure_details": {{
-    "procedure_name": "",
-    "procedure_type": "",
-    "cpt_codes": [],
-    "icd_codes": [],
-    "anatomical_sites": [],
-    "laterality": "",
-    "technique_used": "",
-    "procedure_duration": "",
-    "anesthesia_type": "",
-    "specimens_collected": []
-  }},
-  
-  "intraoperative_findings": {{
-    "description": "",
-    "key_observations": [],
-    "complications": [],
-    "blood_loss": "",
-    "fluids_administered": "",
-    "vital_signs_stability": ""
-  }},
-  
-  "pathology_findings": {{
-    "gross_description": "",
-    "microscopic_description": "",
-    "special_stains": [],
-    "pathological_diagnosis": "",
-    "tumor_characteristics": {{
-      "size": "",
-      "margins": "",
-      "grade": "",
-      "stage": ""
-    }}
-  }},
-  
-  "test_results": {{
-    "results_summary": "",
-    "key_measurements": [],
-    "normal_ranges": "",
-    "abnormal_findings": [],
-    "interpretation": ""
-  }},
-  
-  "medications_anesthesia": {{
-    "preoperative_medications": [],
-    "anesthetic_agents": [],
-    "intraoperative_medications": [],
-    "postoperative_medications": [],
-    "medication_allergies": ""
-  }},
-  
-  "conclusions_recommendations": {{
-    "final_diagnosis": "",
-    "clinical_impressions": "",
-    "recommendations": [],
-    "follow_up_plan": "",
-    "prescriptions": []
-  }},
-  
-  "critical_findings": []
-}}
+📋 MEDICAL REPORT OVERVIEW
+--------------------------------------------------
+Report Type: {doc_type}
+Report Date: [extracted or {fallback_date}]
+Procedure Date: [extracted]
+Accession Number: [extracted]
+Facility: [extracted]
+Department: [extracted]
+
+👤 PATIENT INFORMATION
+--------------------------------------------------
+Name: [extracted]
+DOB: [extracted]
+Age: [extracted]
+Gender: [extracted]
+Allergies: [extracted]
+MRN: [extracted]
+
+👨‍⚕️ HEALTHCARE PROVIDERS
+--------------------------------------------------
+Performing Physician: [name]
+  Specialty: [extracted]
+Ordering Physician: [name]
+  Specialty: [extracted]
+Anesthesiologist: [name]
+
+🏥 CLINICAL CONTEXT
+--------------------------------------------------
+Indications: [extracted]
+Preoperative Diagnosis: [extracted]
+Postoperative Diagnosis: [extracted]
+Clinical History: [extracted]
+
+🔧 PROCEDURE DETAILS
+--------------------------------------------------
+Procedure: [extracted]
+Type: [extracted]
+Anatomical Sites: [list up to 3]
+Laterality: [extracted]
+Anesthesia: [extracted]
+Duration: [extracted]
+CPT Codes: [list up to 3]
+
+🔍 FINDINGS & RESULTS
+--------------------------------------------------
+Intraoperative Findings: [extracted]
+Pathological Diagnosis: [extracted]
+Microscopic: [extracted, truncate if >200 chars]
+Results Summary: [extracted]
+Interpretation: [extracted]
+
+💊 MEDICATIONS & ANESTHESIA
+--------------------------------------------------
+Anesthetic Agents:
+• [list up to 5 with doses if stated]
+Intraoperative Medications:
+• [list up to 5 with doses if stated]
+
+🎯 CONCLUSIONS & RECOMMENDATIONS
+--------------------------------------------------
+Final Diagnosis: [extracted]
+Clinical Impressions: [extracted]
+Recommendations:
+• [list up to 5]
+Follow-up Plan: [extracted]
+
+🚨 CRITICAL FINDINGS
+--------------------------------------------------
+• [list up to 8 most significant items]
 
 ⚠️ CRITICAL MEDICAL REMINDERS:
 1. For "procedure_details": Extract EXACT procedure names from report
@@ -413,299 +370,36 @@ Extract into COMPREHENSIVE structured JSON with all critical medical details:
         try:
             start_time = time.time()
             
-            logger.info("🤖 Invoking LLM for full-context medical report extraction...")
+            logger.info("🤖 Invoking LLM for direct full-context medical report long summary generation...")
             
-            # Single LLM call with FULL document context
-            chain = chat_prompt | self.llm | self.parser
+            # Single LLM call with FULL document context to generate long summary directly
+            chain = chat_prompt | self.llm
             result = chain.invoke({
                 "doc_type": doc_type,
-                "full_document_text": text
+                "full_document_text": text,
+                "fallback_date": fallback_date
             })
+            
+            long_summary = result.content.strip()
             
             end_time = time.time()
             processing_time = end_time - start_time
             
-            logger.info(f"⚡ Full-context medical report extraction completed in {processing_time:.2f}s")
-            logger.info(f"✅ Extracted data from complete {len(text):,} char medical report")
+            logger.info(f"⚡ Direct medical report long summary generation completed in {processing_time:.2f}s")
+            logger.info(f"✅ Generated long summary from complete {len(text):,} char medical report")
             
-            return result
+            return long_summary
             
         except Exception as e:
-            logger.error(f"❌ Full-context medical report extraction failed: {e}", exc_info=True)
+            logger.error(f"❌ Direct medical report long summary generation failed: {e}", exc_info=True)
             
             # Check if context length exceeded
             if "context_length_exceeded" in str(e).lower() or "maximum context" in str(e).lower():
                 logger.error("❌ Medical report exceeds GPT-4o 128K context window")
                 logger.error("❌ Consider implementing chunked fallback for very large reports")
             
-            return self._get_fallback_result(doc_type, fallback_date)
-
-    def _build_comprehensive_long_summary(self, raw_data: Dict, doc_type: str, fallback_date: str) -> str:
-        """
-        Build comprehensive long summary from ALL extracted medical report data.
-        """
-        logger.info("📝 Building comprehensive long summary from ALL extracted medical data...")
-        
-        sections = []
-        
-        # Section 1: REPORT OVERVIEW
-        sections.append("📋 MEDICAL REPORT OVERVIEW")
-        sections.append("-" * 50)
-        
-        report_identity = raw_data.get("report_identity", {})
-        overview_lines = [
-            f"Report Type: {report_identity.get('report_type', doc_type)}",
-            f"Report Date: {report_identity.get('report_date', fallback_date)}",
-            f"Procedure Date: {report_identity.get('procedure_date', 'Not specified')}",
-            f"Accession Number: {report_identity.get('accession_number', 'Not specified')}",
-            f"Facility: {report_identity.get('facility_name', 'Not specified')}",
-            f"Department: {report_identity.get('department', 'Not specified')}"
-        ]
-        sections.append("\n".join(overview_lines))
-        
-        # Section 2: PATIENT INFORMATION
-        sections.append("\n👤 PATIENT INFORMATION")
-        sections.append("-" * 50)
-        
-        patient_info = raw_data.get("patient_information", {})
-        patient_lines = [
-            f"Name: {patient_info.get('patient_name', 'Not specified')}",
-            f"DOB: {patient_info.get('patient_dob', 'Not specified')}",
-            f"Age: {patient_info.get('patient_age', 'Not specified')}",
-            f"Gender: {patient_info.get('patient_gender', 'Not specified')}",
-            f"Allergies: {patient_info.get('allergies', 'Not specified')}",
-            f"MRN: {patient_info.get('medical_record_number', 'Not specified')}"
-        ]
-        sections.append("\n".join(patient_lines))
-        
-        # Section 3: PROVIDERS
-        sections.append("\n👨‍⚕️ HEALTHCARE PROVIDERS")
-        sections.append("-" * 50)
-        
-        providers = raw_data.get("providers", {})
-        provider_lines = []
-        
-        # Performing physician
-        performing_md = providers.get("performing_physician", {})
-        if performing_md.get("name"):
-            provider_lines.append(f"Performing Physician: {performing_md['name']}")
-            if performing_md.get("specialty"):
-                provider_lines.append(f"  Specialty: {performing_md['specialty']}")
-        
-        # Ordering physician
-        ordering_md = providers.get("ordering_physician", {})
-        if ordering_md.get("name"):
-            provider_lines.append(f"Ordering Physician: {ordering_md['name']}")
-            if ordering_md.get("specialty"):
-                provider_lines.append(f"  Specialty: {ordering_md['specialty']}")
-        
-        # Anesthesiologist
-        anesthesiologist = providers.get("anesthesiologist", {})
-        if anesthesiologist.get("name"):
-            provider_lines.append(f"Anesthesiologist: {anesthesiologist['name']}")
-        
-        sections.append("\n".join(provider_lines) if provider_lines else "No provider information extracted")
-        
-        # Section 4: CLINICAL CONTEXT
-        sections.append("\n🏥 CLINICAL CONTEXT")
-        sections.append("-" * 50)
-        
-        clinical_context = raw_data.get("clinical_context", {})
-        context_lines = []
-        
-        if clinical_context.get("indications"):
-            context_lines.append(f"Indications: {clinical_context['indications']}")
-        
-        if clinical_context.get("preoperative_diagnosis"):
-            context_lines.append(f"Preoperative Diagnosis: {clinical_context['preoperative_diagnosis']}")
-        
-        if clinical_context.get("postoperative_diagnosis"):
-            context_lines.append(f"Postoperative Diagnosis: {clinical_context['postoperative_diagnosis']}")
-        
-        if clinical_context.get("clinical_history_summary"):
-            context_lines.append(f"Clinical History: {clinical_context['clinical_history_summary']}")
-        
-        sections.append("\n".join(context_lines) if context_lines else "No clinical context extracted")
-        
-        # Section 5: PROCEDURE DETAILS
-        sections.append("\n🔧 PROCEDURE DETAILS")
-        sections.append("-" * 50)
-        
-        procedure_details = raw_data.get("procedure_details", {})
-        procedure_lines = []
-        
-        if procedure_details.get("procedure_name"):
-            procedure_lines.append(f"Procedure: {procedure_details['procedure_name']}")
-        
-        if procedure_details.get("procedure_type"):
-            procedure_lines.append(f"Type: {procedure_details['procedure_type']}")
-        
-        anatomical_sites = procedure_details.get("anatomical_sites", [])
-        if anatomical_sites:
-            procedure_lines.append(f"Anatomical Sites: {', '.join(anatomical_sites[:3])}")
-        
-        if procedure_details.get("laterality"):
-            procedure_lines.append(f"Laterality: {procedure_details['laterality']}")
-        
-        if procedure_details.get("anesthesia_type"):
-            procedure_lines.append(f"Anesthesia: {procedure_details['anesthesia_type']}")
-        
-        if procedure_details.get("procedure_duration"):
-            procedure_lines.append(f"Duration: {procedure_details['procedure_duration']}")
-        
-        # CPT Codes
-        cpt_codes = procedure_details.get("cpt_codes", [])
-        if cpt_codes:
-            procedure_lines.append(f"CPT Codes: {', '.join(cpt_codes[:3])}")
-        
-        sections.append("\n".join(procedure_lines) if procedure_lines else "No procedure details extracted")
-        
-        # Section 6: FINDINGS & RESULTS
-        sections.append("\n🔍 FINDINGS & RESULTS")
-        sections.append("-" * 50)
-        
-        findings_lines = []
-        
-        # Intraoperative findings
-        intraop_findings = raw_data.get("intraoperative_findings", {})
-        if intraop_findings.get("description"):
-            findings_lines.append(f"Intraoperative Findings: {intraop_findings['description']}")
-        
-        # Pathology findings
-        pathology_findings = raw_data.get("pathology_findings", {})
-        if pathology_findings.get("pathological_diagnosis"):
-            findings_lines.append(f"Pathological Diagnosis: {pathology_findings['pathological_diagnosis']}")
-        
-        if pathology_findings.get("microscopic_description"):
-            # Truncate long microscopic descriptions
-            micro_desc = pathology_findings['microscopic_description']
-            if len(micro_desc) > 200:
-                micro_desc = micro_desc[:197] + "..."
-            findings_lines.append(f"Microscopic: {micro_desc}")
-        
-        # Test results
-        test_results = raw_data.get("test_results", {})
-        if test_results.get("results_summary"):
-            findings_lines.append(f"Results Summary: {test_results['results_summary']}")
-        
-        if test_results.get("interpretation"):
-            findings_lines.append(f"Interpretation: {test_results['interpretation']}")
-        
-        sections.append("\n".join(findings_lines) if findings_lines else "No findings/results extracted")
-        
-        # Section 7: MEDICATIONS & ANESTHESIA
-        sections.append("\n💊 MEDICATIONS & ANESTHESIA")
-        sections.append("-" * 50)
-        
-        meds_anesthesia = raw_data.get("medications_anesthesia", {})
-        med_lines = []
-        
-        # Anesthetic agents
-        anesthetic_agents = meds_anesthesia.get("anesthetic_agents", [])
-        if anesthetic_agents:
-            med_lines.append("Anesthetic Agents:")
-            for agent in anesthetic_agents[:5]:
-                if isinstance(agent, dict):
-                    agent_name = agent.get("name", "")
-                    agent_dose = agent.get("dose", "")
-                    if agent_name:
-                        if agent_dose:
-                            med_lines.append(f"  • {agent_name} - {agent_dose}")
-                        else:
-                            med_lines.append(f"  • {agent_name}")
-                elif agent:
-                    med_lines.append(f"  • {agent}")
-        
-        # Intraoperative medications
-        intraop_meds = meds_anesthesia.get("intraoperative_medications", [])
-        if intraop_meds:
-            med_lines.append("\nIntraoperative Medications:")
-            for med in intraop_meds[:5]:
-                if isinstance(med, dict):
-                    med_name = med.get("name", "")
-                    med_dose = med.get("dose", "")
-                    if med_name:
-                        if med_dose:
-                            med_lines.append(f"  • {med_name} - {med_dose}")
-                        else:
-                            med_lines.append(f"  • {med_name}")
-                elif med:
-                    med_lines.append(f"  • {med}")
-        
-        sections.append("\n".join(med_lines) if med_lines else "No medication/anesthesia details extracted")
-        
-        # Section 8: CONCLUSIONS & RECOMMENDATIONS
-        sections.append("\n🎯 CONCLUSIONS & RECOMMENDATIONS")
-        sections.append("-" * 50)
-        
-        conclusions = raw_data.get("conclusions_recommendations", {})
-        conclusion_lines = []
-        
-        if conclusions.get("final_diagnosis"):
-            conclusion_lines.append(f"Final Diagnosis: {conclusions['final_diagnosis']}")
-        
-        if conclusions.get("clinical_impressions"):
-            conclusion_lines.append(f"Clinical Impressions: {conclusions['clinical_impressions']}")
-        
-        recommendations = conclusions.get("recommendations", [])
-        if recommendations:
-            conclusion_lines.append("\nRecommendations:")
-            for rec in recommendations[:5]:
-                if isinstance(rec, dict):
-                    rec_desc = rec.get("recommendation", "")
-                    if rec_desc:
-                        conclusion_lines.append(f"  • {rec_desc}")
-                elif rec:
-                    conclusion_lines.append(f"  • {rec}")
-        
-        follow_up = conclusions.get("follow_up_plan", "")
-        if follow_up:
-            conclusion_lines.append(f"\nFollow-up Plan: {follow_up}")
-        
-        sections.append("\n".join(conclusion_lines) if conclusion_lines else "No conclusions/recommendations extracted")
-        
-        # Section 9: CRITICAL FINDINGS
-        sections.append("\n🚨 CRITICAL FINDINGS")
-        sections.append("-" * 50)
-        
-        critical_findings = raw_data.get("critical_findings", [])
-        if critical_findings:
-            for finding in critical_findings[:8]:
-                if isinstance(finding, dict):
-                    finding_desc = finding.get("finding", "")
-                    finding_priority = finding.get("priority", "")
-                    if finding_desc:
-                        if finding_priority:
-                            sections.append(f"• [{finding_priority}] {finding_desc}")
-                        else:
-                            sections.append(f"• {finding_desc}")
-                elif finding:
-                    sections.append(f"• {finding}")
-        else:
-            # Check for critical findings in other sections
-            critical_items = []
-            
-            # Check pathology for malignancies
-            path_dx = pathology_findings.get("pathological_diagnosis", "").lower()
-            if any(term in path_dx for term in ['malignant', 'carcinoma', 'cancer', 'neoplasm']):
-                critical_items.append("Malignancy identified in pathology")
-            
-            # Check for significant complications
-            complications = intraop_findings.get("complications", [])
-            if complications:
-                critical_items.append(f"Procedure complications: {len(complications)} noted")
-            
-            if critical_items:
-                for item in critical_items:
-                    sections.append(f"• {item}")
-            else:
-                sections.append("No critical findings explicitly listed")
-        
-        # Join all sections
-        long_summary = "\n\n".join(sections)
-        logger.info(f"✅ Medical report long summary built: {len(long_summary)} characters")
-        
-        return long_summary
+            # Fallback: Generate a minimal summary
+            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
 
     def _clean_pipes_from_summary(self, short_summary: str) -> str:
         """
@@ -892,109 +586,3 @@ Produce a 30–60 word structured medical summary following ALL rules.
         
         logger.info(f"🔄 Used medical fallback summary: {len(summary.split())} words")
         return summary
-
-    def _get_fallback_result(self, doc_type: str, fallback_date: str) -> Dict:
-        """Return minimal fallback result structure for medical reports"""
-        return {
-            "report_identity": {
-                "report_type": doc_type,
-                "report_date": fallback_date,
-                "procedure_date": "",
-                "accession_number": "",
-                "medical_record_number": "",
-                "facility_name": "",
-                "department": ""
-            },
-            "patient_information": {
-                "patient_name": "",
-                "patient_dob": "",
-                "patient_age": "",
-                "patient_gender": "",
-                "medical_record_number": "",
-                "allergies": "",
-                "clinical_history": ""
-            },
-            "providers": {
-                "ordering_physician": {
-                    "name": "",
-                    "specialty": "",
-                    "npi": ""
-                },
-                "performing_physician": {
-                    "name": "",
-                    "specialty": "",
-                    "credentials": "",
-                    "role": "Performing/Attending Physician"
-                },
-                "assistant_physicians": [],
-                "anesthesiologist": {
-                    "name": "",
-                    "credentials": ""
-                },
-                "referring_physician": {
-                    "name": "",
-                    "specialty": ""
-                }
-            },
-            "clinical_context": {
-                "indications": "",
-                "preoperative_diagnosis": "",
-                "postoperative_diagnosis": "",
-                "clinical_history_summary": "",
-                "relevant_medical_history": []
-            },
-            "procedure_details": {
-                "procedure_name": "",
-                "procedure_type": "",
-                "cpt_codes": [],
-                "icd_codes": [],
-                "anatomical_sites": [],
-                "laterality": "",
-                "technique_used": "",
-                "procedure_duration": "",
-                "anesthesia_type": "",
-                "specimens_collected": []
-            },
-            "intraoperative_findings": {
-                "description": "",
-                "key_observations": [],
-                "complications": [],
-                "blood_loss": "",
-                "fluids_administered": "",
-                "vital_signs_stability": ""
-            },
-            "pathology_findings": {
-                "gross_description": "",
-                "microscopic_description": "",
-                "special_stains": [],
-                "pathological_diagnosis": "",
-                "tumor_characteristics": {
-                    "size": "",
-                    "margins": "",
-                    "grade": "",
-                    "stage": ""
-                }
-            },
-            "test_results": {
-                "results_summary": "",
-                "key_measurements": [],
-                "normal_ranges": "",
-                "abnormal_findings": [],
-                "interpretation": ""
-            },
-            "medications_anesthesia": {
-                "preoperative_medications": [],
-                "anesthetic_agents": [],
-                "intraoperative_medications": [],
-                "postoperative_medications": [],
-                "medication_allergies": ""
-            },
-            "conclusions_recommendations": {
-                "final_diagnosis": "",
-                "clinical_impressions": "",
-                "recommendations": [],
-                "follow_up_plan": "",
-                "prescriptions": []
-            },
-            "critical_findings": []
-        }

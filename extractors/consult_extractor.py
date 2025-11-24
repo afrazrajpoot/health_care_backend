@@ -28,6 +28,7 @@ class ConsultExtractorChained:
     - Chain-of-thought reasoning for specialist recommendation evaluation
     - 8-FIELD FOCUSED extraction for zero hallucination
     - Optimized for Workers' Compensation consultation analysis
+    - Direct LLM generation for long summary (removes intermediate extraction)
     """
 
     def __init__(self, llm: AzureChatOpenAI):
@@ -46,13 +47,10 @@ class ConsultExtractorChained:
         start_time = time.time()
         
         try:
-            # Step 2: Extract raw data with full context
-            raw_data = self._extract_raw_data(text, doc_type, fallback_date)
+            # Step 1: Directly generate long summary with full context (no intermediate extraction)
+            long_summary = self._generate_long_summary_direct(text, doc_type, fallback_date)
 
-            # Step 3: Build comprehensive long summary from ALL raw data
-            long_summary = self._build_comprehensive_long_summary(raw_data, doc_type, fallback_date)
-
-            # Step 4: Generate short summary from long summary (like QME extractor)
+            # Step 2: Generate short summary from long summary (like QME extractor)
             short_summary = self._generate_short_summary_from_long_summary(long_summary)
 
             elapsed_time = time.time() - start_time
@@ -76,13 +74,19 @@ class ConsultExtractorChained:
                 "short_summary": "Consultation summary not available"
             }
 
-    def _extract_raw_data(self, text: str, doc_type: str, fallback_date: str) -> Dict:
-        """Extract raw consultation data using LLM with full context and integrated author detection"""
-        # Build system prompt with 8-field focus, including instructions for detecting the signing author
+    def _generate_long_summary_direct(self, text: str, doc_type: str, fallback_date: str) -> str:
+        """
+        Directly generate comprehensive long summary with full document context using LLM.
+        Adapted from original extraction prompt to output structured summary directly.
+        """
+        logger.info("🔍 Processing ENTIRE consultation report in single context window for direct long summary...")
+        
+        # Adapted System Prompt for Direct Long Summary Generation
+        # Reuses core anti-hallucination rules and consultation focus from original extraction prompt
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are an expert Workers' Compensation consultation report specialist analyzing a COMPLETE Specialist Consultation Report.
 
-PRIMARY PURPOSE: Extract the 8 critical fields that define current medical status, diagnostic findings, and treatment plan changes for claims administration.
+PRIMARY PURPOSE: Generate a comprehensive, structured long summary of the 8 critical fields that define current medical status, diagnostic findings, and treatment plan changes for claims administration.
 
 CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
 You are seeing the ENTIRE consultation report at once, allowing you to:
@@ -137,113 +141,112 @@ FIELD 6: OBJECTIVE FINDINGS - Verifiable Evidence (Exam & Imaging)
 FIELD 7: PLAN - RECOMMENDED TREATMENTS (MOST CRITICAL FOR AUTHORIZATION)
 FIELD 8: WORK STATUS & IMPAIRMENT - Legal/Administrative Status
 
-Now analyze this COMPLETE specialist consultation report and extract the 8 critical fields:
+Now analyze this COMPLETE specialist consultation report and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
 """)
         
-        # Build user prompt
+        # Adapted User Prompt for Direct Long Summary - Outputs the structured summary directly
         user_prompt = HumanMessagePromptTemplate.from_template("""
 COMPLETE SPECIALIST CONSULTATION REPORT TEXT:
 
 {full_document_text}
 
-Extract into STRUCTURED JSON focusing on 8 CRITICAL FIELDS:
+Generate the long summary in this EXACT STRUCTURED FORMAT (use the fallback date {fallback_date} if no consultation date found):
 
-{{
-  "field_1_header_context": {{
-    "consulting_physician": {{
-      "name": "",
-      "specialty": "",
-      "credentials": "",
-      "facility": ""
-    }},
-    "consultation_date": "",
-    "referring_physician": "",
-    "patient_name": "",
-    "patient_dob": "",
-    "date_of_injury": "",
-    "claim_number": ""
-  }},
-  
-  "field_2_chief_complaint": {{
-    "primary_complaint": "",
-    "location": "",
-    "duration": "",
-    "radiation_pattern": ""
-  }},
-  
-  "field_3_diagnosis_assessment": {{
-    "primary_diagnosis": "",
-    "icd10_code": "",
-    "secondary_diagnoses": [],
-    "diagnostic_certainty": "",
-    "causation_statement": ""
-  }},
-  
-  "field_4_history_present_illness": {{
-    "pain_quality": "",
-    "pain_location": "",
-    "radiation": "",
-    "aggravating_factors": [],
-    "alleviating_factors": [],
-    "functional_deficits": []
-  }},
-  
-  "field_5_prior_treatment_efficacy": {{
-    "treatments_received": [],
-    "level_of_relief": {{
-      "physical_therapy": "",
-      "medications": "",
-      "injections": "",
-      "chiropractic": ""
-    }},
-    "treatment_failure_statement": ""
-  }},
-  
-  "field_6_objective_findings": {{
-    "physical_exam": {{
-      "rom_measurements": "",
-      "strength_testing": "",
-      "special_tests_positive": [],
-      "palpation_findings": "",
-      "inspection_findings": ""
-    }},
-    "imaging_review": {{
-      "mri_findings": "",
-      "xray_findings": "",
-      "ct_findings": "",
-      "correlation_with_symptoms": ""
-    }}
-  }},
-  
-  "field_7_plan_recommendations": {{
-    "specific_interventions": {{
-      "injections_requested": [],
-      "procedures_requested": [],
-      "surgery_recommended": [],
-      "diagnostics_ordered": []
-    }},
-    "medication_changes": {{
-      "new_medications": [],
-      "dosage_adjustments": [],
-      "discontinued_medications": []
-    }},
-    "therapy_recommendations": {{
-      "therapy_type": "",
-      "frequency": "",
-      "duration": "",
-      "focus_areas": []
-    }}
-  }},
-  
-  "field_8_work_status_impairment": {{
-    "current_work_status": "",
-    "work_restrictions": [],
-    "restriction_duration": "",
-    "return_to_work_plan": ""
-  }},
-  
-  "critical_findings": []
-}}
+📋 CONSULTATION OVERVIEW
+--------------------------------------------------
+Document Type: {doc_type}
+Consultation Date: [extracted or {fallback_date}]
+Consulting Physician: [name]
+Specialty: [extracted]
+Referring Physician: [extracted]
+
+👤 PATIENT INFORMATION
+--------------------------------------------------
+Name: [extracted]
+Date of Birth: [extracted]
+Date of Injury: [extracted]
+Claim Number: [extracted]
+
+🎯 CHIEF COMPLAINT
+--------------------------------------------------
+Primary Complaint: [extracted]
+Location: [extracted]
+Duration: [extracted]
+Radiation Pattern: [extracted]
+
+🏥 DIAGNOSIS & ASSESSMENT
+--------------------------------------------------
+Primary Diagnosis: [extracted with ICD-10 if available] ([certainty])
+Secondary Diagnoses:
+• [list up to 5]
+Causation: [extracted]
+
+🔬 CLINICAL HISTORY & SYMPTOMS
+--------------------------------------------------
+Pain Quality: [extracted]
+Pain Location: [extracted]
+Radiation: [extracted]
+Aggravating Factors:
+• [list up to 5, exact wording]
+Alleviating Factors:
+• [list up to 5, exact wording]
+
+💊 PRIOR TREATMENT & EFFICACY
+--------------------------------------------------
+Prior Treatments Received:
+• [list up to 8 with durations if stated]
+Level of Relief:
+• [physical_therapy: extracted]
+• [medications: extracted]
+• [injections: extracted]
+• [chiropractic: extracted]
+Treatment Failure Statement: [extracted]
+
+📊 OBJECTIVE FINDINGS
+--------------------------------------------------
+Physical Examination:
+• [ROM measurements: extracted]
+• [Strength Testing: extracted]
+• [Special Tests Positive: list up to 5]
+• [Palpation Findings: extracted]
+• [Inspection Findings: extracted]
+Imaging Review:
+• [MRI Findings: extracted]
+• [X-ray Findings: extracted]
+• [CT Findings: extracted]
+• [Correlation with Symptoms: extracted]
+
+🎯 TREATMENT RECOMMENDATIONS
+--------------------------------------------------
+Injections Requested:
+• [list up to 5 with locations]
+Procedures Requested:
+• [list up to 5 with reasons]
+Surgery Recommended:
+• [list up to 3 with urgency]
+Diagnostics Ordered:
+• [list up to 5 with reasons]
+Medication Changes:
+  New Medications:
+    • [list up to 5 with doses]
+  Dosage Adjustments:
+    • [list up to 3]
+Therapy Recommendations:
+• [therapy_type - frequency for duration]
+  Focus Areas:
+    • [list up to 3]
+
+💼 WORK STATUS & IMPAIRMENT
+--------------------------------------------------
+Current Work Status: [extracted]
+Work Restrictions:
+• [list up to 10, exact wording with durations if stated]
+Restriction Duration: [extracted]
+Return to Work Plan: [extracted]
+
+🚨 CRITICAL FINDINGS
+--------------------------------------------------
+• [list up to 8 most actionable items for claims administration]
 
 ⚠️ MANDATORY EXTRACTION RULES:
 1. Field 3 (Diagnosis): Use EXACT diagnostic terminology, include ALL secondary diagnoses
@@ -251,7 +254,7 @@ Extract into STRUCTURED JSON focusing on 8 CRITICAL FIELDS:
 3. Field 6 (Objective): Extract EXACT measurements and imaging findings with anatomical specificity
 4. Field 7 (Plan): Extract ONLY explicitly recommended treatments - THE MOST CRITICAL
 5. Field 8 (Work Restrictions): Use EXACT wording (don't add weight/time limits not stated)
-6. Empty fields are acceptable if not stated in report
+6. Empty fields are acceptable if not stated in report - use "Not specified" only if truly empty
 """)
         
         # Create prompt template
@@ -260,449 +263,58 @@ Extract into STRUCTURED JSON focusing on 8 CRITICAL FIELDS:
             user_prompt
         ])
         
-        # Create chain
-        chain = prompt | self.llm | self.parser
-        
         logger.info(f"📄 Document size: {len(text):,} chars (~{len(text) // 4:,} tokens)")
         logger.info("🔍 Processing ENTIRE consultation report in single context window...")
-        logger.info("🤖 Invoking LLM for full-context consultation extraction (with integrated author detection)...")
+        logger.info("🤖 Invoking LLM for direct full-context consultation long summary generation...")
         
         # Invoke LLM
         try:
-            raw_data = chain.invoke({
-                "full_document_text": text
+            chain = prompt | self.llm
+            result = chain.invoke({
+                "full_document_text": text,
+                "fallback_date": fallback_date,
+                "doc_type": doc_type
             })
             
-            logger.info("✅ Extracted consultation data from complete document")
-            return raw_data
+            long_summary = result.content.strip()
+            
+            logger.info("✅ Generated consultation long summary from complete document")
+            return long_summary
         
         except Exception as e:
-            logger.error(f"❌ LLM extraction failed: {str(e)}")
-            return self._get_fallback_result(fallback_date)
-
-    def _build_comprehensive_long_summary(self, raw_data: Dict, doc_type: str, fallback_date: str) -> str:
-        """
-        Build comprehensive long summary from ALL extracted raw data with detailed headings.
-        Similar to QME extractor structure.
-        """
-        logger.info("📝 Building comprehensive long summary from ALL extracted consultation data...")
-        
-        sections = []
-        
-        # Section 1: CONSULTATION OVERVIEW
-        sections.append("📋 CONSULTATION OVERVIEW")
-        sections.append("-" * 50)
-        
-        header_context = raw_data.get("field_1_header_context", {})
-        consulting_physician = header_context.get("consulting_physician", {})
-        
-        physician_name = consulting_physician.get("name", "")
-        specialty = consulting_physician.get("specialty", "")
-        consultation_date = header_context.get("consultation_date", fallback_date)
-        referring_physician = header_context.get("referring_physician", "")
-        
-        overview_lines = [
-            f"Document Type: {doc_type}",
-            f"Consultation Date: {consultation_date}",
-            f"Consulting Physician: {physician_name}",
-            f"Specialty: {specialty}" if specialty else "Specialty: Not specified",
-            f"Referring Physician: {referring_physician}" if referring_physician else "Referring Physician: Not specified"
-        ]
-        sections.append("\n".join(overview_lines))
-        
-        # Section 2: PATIENT INFORMATION
-        sections.append("\n👤 PATIENT INFORMATION")
-        sections.append("-" * 50)
-        
-        patient_lines = [
-            f"Name: {header_context.get('patient_name', 'Not specified')}",
-            f"Date of Birth: {header_context.get('patient_dob', 'Not specified')}",
-            f"Date of Injury: {header_context.get('date_of_injury', 'Not specified')}",
-            f"Claim Number: {header_context.get('claim_number', 'Not specified')}"
-        ]
-        sections.append("\n".join(patient_lines))
-        
-        # Section 3: CHIEF COMPLAINT
-        sections.append("\n🎯 CHIEF COMPLAINT")
-        sections.append("-" * 50)
-        
-        chief_complaint = raw_data.get("field_2_chief_complaint", {})
-        complaint_lines = [
-            f"Primary Complaint: {chief_complaint.get('primary_complaint', 'Not specified')}",
-            f"Location: {chief_complaint.get('location', 'Not specified')}",
-            f"Duration: {chief_complaint.get('duration', 'Not specified')}",
-            f"Radiation Pattern: {chief_complaint.get('radiation_pattern', 'Not specified')}"
-        ]
-        sections.append("\n".join(complaint_lines))
-        
-        # Section 4: DIAGNOSIS & ASSESSMENT
-        sections.append("\n🏥 DIAGNOSIS & ASSESSMENT")
-        sections.append("-" * 50)
-        
-        diagnosis_assessment = raw_data.get("field_3_diagnosis_assessment", {})
-        diagnosis_lines = []
-        
-        # Primary diagnosis
-        primary_dx = diagnosis_assessment.get("primary_diagnosis", "")
-        icd10_code = diagnosis_assessment.get("icd10_code", "")
-        certainty = diagnosis_assessment.get("diagnostic_certainty", "")
-        
-        if primary_dx:
-            dx_text = primary_dx
-            if icd10_code:
-                dx_text += f" [{icd10_code}]"
-            if certainty:
-                dx_text += f" ({certainty})"
-            diagnosis_lines.append(f"Primary Diagnosis: {dx_text}")
-        
-        # Secondary diagnoses
-        secondary_dx = diagnosis_assessment.get("secondary_diagnoses", [])
-        if secondary_dx:
-            diagnosis_lines.append("\nSecondary Diagnoses:")
-            for dx in secondary_dx[:5]:  # Limit to 5 secondary diagnoses
-                if isinstance(dx, dict):
-                    dx_name = dx.get("diagnosis", dx.get("name", ""))
-                    if dx_name and dx_name.strip():
-                        diagnosis_lines.append(f"  • {dx_name}")
-                elif dx and str(dx).strip():
-                    diagnosis_lines.append(f"  • {dx}")
-        
-        # Causation statement
-        causation = diagnosis_assessment.get("causation_statement", "")
-        if causation:
-            diagnosis_lines.append(f"\nCausation: {causation}")
-        
-        sections.append("\n".join(diagnosis_lines) if diagnosis_lines else "No diagnoses extracted")
-        
-        # Section 5: CLINICAL HISTORY & SYMPTOMS
-        sections.append("\n🔬 CLINICAL HISTORY & SYMPTOMS")
-        sections.append("-" * 50)
-        
-        history = raw_data.get("field_4_history_present_illness", {})
-        history_lines = []
-        
-        if history.get("pain_quality"):
-            history_lines.append(f"Pain Quality: {history['pain_quality']}")
-        if history.get("pain_location"):
-            history_lines.append(f"Pain Location: {history['pain_location']}")
-        if history.get("radiation"):
-            history_lines.append(f"Radiation: {history['radiation']}")
-        
-        # Aggravating factors
-        aggravating = history.get("aggravating_factors", [])
-        if aggravating:
-            history_lines.append("\nAggravating Factors:")
-            for factor in aggravating[:5]:
-                if isinstance(factor, dict):
-                    desc = factor.get("factor", "")
-                    if desc:
-                        history_lines.append(f"  • {desc}")
-                elif factor:
-                    history_lines.append(f"  • {factor}")
-        
-        # Alleviating factors
-        alleviating = history.get("alleviating_factors", [])
-        if alleviating:
-            history_lines.append("\nAlleviating Factors:")
-            for factor in alleviating[:5]:
-                if isinstance(factor, dict):
-                    desc = factor.get("factor", "")
-                    if desc:
-                        history_lines.append(f"  • {desc}")
-                elif factor:
-                    history_lines.append(f"  • {factor}")
-        
-        sections.append("\n".join(history_lines) if history_lines else "No clinical history details extracted")
-        
-        # Section 6: PRIOR TREATMENT & EFFICACY
-        sections.append("\n💊 PRIOR TREATMENT & EFFICACY")
-        sections.append("-" * 50)
-        
-        prior_treatment = raw_data.get("field_5_prior_treatment_efficacy", {})
-        treatment_lines = []
-        
-        # Treatments received
-        treatments = prior_treatment.get("treatments_received", [])
-        if treatments:
-            treatment_lines.append("Prior Treatments Received:")
-            for tx in treatments[:8]:
-                if isinstance(tx, dict):
-                    tx_name = tx.get("treatment", "")
-                    tx_duration = tx.get("duration", "")
-                    if tx_name:
-                        if tx_duration:
-                            treatment_lines.append(f"  • {tx_name} ({tx_duration})")
-                        else:
-                            treatment_lines.append(f"  • {tx_name}")
-                elif tx:
-                    treatment_lines.append(f"  • {tx}")
-        
-        # Level of relief
-        relief = prior_treatment.get("level_of_relief", {})
-        if relief:
-            treatment_lines.append("\nLevel of Relief:")
-            for key, value in relief.items():
-                if value and value not in ["", "Not specified"]:
-                    treatment_lines.append(f"  • {key.replace('_', ' ').title()}: {value}")
-        
-        # Treatment failure
-        failure = prior_treatment.get("treatment_failure_statement", "")
-        if failure:
-            treatment_lines.append(f"\nTreatment Failure Statement: {failure}")
-        
-        sections.append("\n".join(treatment_lines) if treatment_lines else "No prior treatment information extracted")
-        
-        # Section 7: OBJECTIVE FINDINGS
-        sections.append("\n📊 OBJECTIVE FINDINGS")
-        sections.append("-" * 50)
-        
-        objective_findings = raw_data.get("field_6_objective_findings", {})
-        objective_lines = []
-        
-        # Physical exam
-        physical_exam = objective_findings.get("physical_exam", {})
-        if physical_exam:
-            objective_lines.append("Physical Examination:")
-            for key, value in physical_exam.items():
-                if value and value not in ["", "Not specified"]:
-                    objective_lines.append(f"  • {key.replace('_', ' ').title()}: {value}")
-        
-        # Imaging review
-        imaging = objective_findings.get("imaging_review", {})
-        if imaging:
-            objective_lines.append("\nImaging Review:")
-            for key, value in imaging.items():
-                if value and value not in ["", "Not specified"]:
-                    objective_lines.append(f"  • {key.replace('_', ' ').title()}: {value}")
-        
-        sections.append("\n".join(objective_lines) if objective_lines else "No objective findings extracted")
-        
-        # Section 8: TREATMENT RECOMMENDATIONS (MOST CRITICAL)
-        sections.append("\n🎯 TREATMENT RECOMMENDATIONS")
-        sections.append("-" * 50)
-        
-        plan_recommendations = raw_data.get("field_7_plan_recommendations", {})
-        plan_lines = []
-        
-        # Specific interventions
-        interventions = plan_recommendations.get("specific_interventions", {})
-        if interventions:
-            # Injections
-            injections = interventions.get("injections_requested", [])
-            if injections:
-                plan_lines.append("Injections Requested:")
-                for inj in injections[:5]:
-                    if isinstance(inj, dict):
-                        inj_name = inj.get("injection", "")
-                        inj_location = inj.get("location", "")
-                        if inj_name:
-                            if inj_location:
-                                plan_lines.append(f"  • {inj_name} - {inj_location}")
-                            else:
-                                plan_lines.append(f"  • {inj_name}")
-                    elif inj:
-                        plan_lines.append(f"  • {inj}")
-            
-            # Procedures
-            procedures = interventions.get("procedures_requested", [])
-            if procedures:
-                plan_lines.append("\nProcedures Requested:")
-                for proc in procedures[:5]:
-                    if isinstance(proc, dict):
-                        proc_name = proc.get("procedure", "")
-                        proc_reason = proc.get("reason", "")
-                        if proc_name:
-                            if proc_reason:
-                                plan_lines.append(f"  • {proc_name} - {proc_reason}")
-                            else:
-                                plan_lines.append(f"  • {proc_name}")
-                    elif proc:
-                        plan_lines.append(f"  • {proc}")
-            
-            # Surgery
-            surgery = interventions.get("surgery_recommended", [])
-            if surgery:
-                plan_lines.append("\nSurgery Recommended:")
-                for surg in surgery[:3]:
-                    if isinstance(surg, dict):
-                        surg_name = surg.get("procedure", "")
-                        surg_urgency = surg.get("urgency", "")
-                        if surg_name:
-                            if surg_urgency:
-                                plan_lines.append(f"  • {surg_name} ({surg_urgency})")
-                            else:
-                                plan_lines.append(f"  • {surg_name}")
-                    elif surg:
-                        plan_lines.append(f"  • {surg}")
-            
-            # Diagnostics
-            diagnostics = interventions.get("diagnostics_ordered", [])
-            if diagnostics:
-                plan_lines.append("\nDiagnostics Ordered:")
-                for diag in diagnostics[:5]:
-                    if isinstance(diag, dict):
-                        diag_name = diag.get("test", "")
-                        diag_reason = diag.get("reason", "")
-                        if diag_name:
-                            if diag_reason:
-                                plan_lines.append(f"  • {diag_name} - {diag_reason}")
-                            else:
-                                plan_lines.append(f"  • {diag_name}")
-                    elif diag:
-                        plan_lines.append(f"  • {diag}")
-        
-        # Medication changes
-        med_changes = plan_recommendations.get("medication_changes", {})
-        if med_changes:
-            plan_lines.append("\nMedication Changes:")
-            
-            # New medications
-            new_meds = med_changes.get("new_medications", [])
-            if new_meds:
-                plan_lines.append("  New Medications:")
-                for med in new_meds[:5]:
-                    if isinstance(med, dict):
-                        med_name = med.get("medication", "")
-                        med_dose = med.get("dose", "")
-                        if med_name:
-                            if med_dose:
-                                plan_lines.append(f"    • {med_name} - {med_dose}")
-                            else:
-                                plan_lines.append(f"    • {med_name}")
-                    elif med:
-                        plan_lines.append(f"    • {med}")
-            
-            # Dosage adjustments
-            dose_adj = med_changes.get("dosage_adjustments", [])
-            if dose_adj:
-                plan_lines.append("  Dosage Adjustments:")
-                for adj in dose_adj[:3]:
-                    if isinstance(adj, dict):
-                        adj_name = adj.get("medication", "")
-                        adj_details = adj.get("adjustment", "")
-                        if adj_name:
-                            if adj_details:
-                                plan_lines.append(f"    • {adj_name} - {adj_details}")
-                            else:
-                                plan_lines.append(f"    • {adj_name}")
-                    elif adj:
-                        plan_lines.append(f"    • {adj}")
-        
-        # Therapy recommendations
-        therapy = plan_recommendations.get("therapy_recommendations", {})
-        if therapy:
-            plan_lines.append("\nTherapy Recommendations:")
-            therapy_type = therapy.get("therapy_type", "")
-            frequency = therapy.get("frequency", "")
-            duration = therapy.get("duration", "")
-            focus_areas = therapy.get("focus_areas", [])
-            
-            if therapy_type:
-                therapy_info = therapy_type
-                if frequency:
-                    therapy_info += f" - {frequency}"
-                if duration:
-                    therapy_info += f" for {duration}"
-                plan_lines.append(f"  • {therapy_info}")
-            
-            if focus_areas:
-                plan_lines.append("  Focus Areas:")
-                for area in focus_areas[:3]:
-                    if area:
-                        plan_lines.append(f"    • {area}")
-        
-        sections.append("\n".join(plan_lines) if plan_lines else "No treatment recommendations extracted")
-        
-        # Section 9: WORK STATUS & IMPAIRMENT
-        sections.append("\n💼 WORK STATUS & IMPAIRMENT")
-        sections.append("-" * 50)
-        
-        work_status = raw_data.get("field_8_work_status_impairment", {})
-        work_lines = []
-        
-        current_status = work_status.get("current_work_status", "")
-        if current_status:
-            work_lines.append(f"Current Work Status: {current_status}")
-        
-        restrictions = work_status.get("work_restrictions", [])
-        if restrictions:
-            work_lines.append("\nWork Restrictions:")
-            for restriction in restrictions[:10]:
-                if isinstance(restriction, dict):
-                    desc = restriction.get("restriction", "")
-                    duration = restriction.get("duration", "")
-                    if desc:
-                        if duration:
-                            work_lines.append(f"  • {desc} ({duration})")
-                        else:
-                            work_lines.append(f"  • {desc}")
-                elif restriction:
-                    work_lines.append(f"  • {restriction}")
-        
-        restriction_duration = work_status.get("restriction_duration", "")
-        if restriction_duration:
-            work_lines.append(f"\nRestriction Duration: {restriction_duration}")
-        
-        return_plan = work_status.get("return_to_work_plan", "")
-        if return_plan:
-            work_lines.append(f"Return to Work Plan: {return_plan}")
-        
-        sections.append("\n".join(work_lines) if work_lines else "No work status information extracted")
-        
-        # Section 10: CRITICAL FINDINGS
-        sections.append("\n🚨 CRITICAL FINDINGS")
-        sections.append("-" * 50)
-        
-        critical_findings = raw_data.get("critical_findings", [])
-        if critical_findings:
-            for finding in critical_findings[:8]:
-                if isinstance(finding, dict):
-                    finding_desc = finding.get("description", "")
-                    finding_priority = finding.get("priority", "")
-                    if finding_desc:
-                        if finding_priority:
-                            sections.append(f"• [{finding_priority}] {finding_desc}")
-                        else:
-                            sections.append(f"• {finding_desc}")
-                elif finding:
-                    sections.append(f"• {finding}")
-        else:
-            sections.append("No critical findings explicitly listed")
-        
-        # Join all sections
-        long_summary = "\n\n".join(sections)
-        logger.info(f"✅ Long summary built: {len(long_summary)} characters")
-        
-        return long_summary
+            logger.error(f"❌ Direct LLM generation failed: {str(e)}")
+            # Fallback: Generate a minimal summary
+            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
+    
     def _clean_pipes_from_summary(self, short_summary: str) -> str:
-            """
-            Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.
+        """
+        Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.
+        
+        Args:
+            short_summary: The pipe-delimited short summary string
             
-            Args:
-                short_summary: The pipe-delimited short summary string
-                
-            Returns:
-                Cleaned summary with proper pipe formatting
-            """
-            if not short_summary or '|' not in short_summary:
-                return short_summary
-            
-            # Split by pipe and clean each part
-            parts = short_summary.split('|')
-            cleaned_parts = []
-            
-            for part in parts:
-                # Remove whitespace and check if part has meaningful content
-                stripped_part = part.strip()
-                # Keep part if it has actual content (not just empty or whitespace)
-                if stripped_part:
-                    cleaned_parts.append(stripped_part)
-            
-            # Join back with pipes - only include parts with actual content
-            cleaned_summary = ' . '.join(cleaned_parts)
-            
-            logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
-            return cleaned_summary
+        Returns:
+            Cleaned summary with proper pipe formatting
+        """
+        if not short_summary or '|' not in short_summary:
+            return short_summary
+        
+        # Split by pipe and clean each part
+        parts = short_summary.split('|')
+        cleaned_parts = []
+        
+        for part in parts:
+            # Remove whitespace and check if part has meaningful content
+            stripped_part = part.strip()
+            # Keep part if it has actual content (not just empty or whitespace)
+            if stripped_part:
+                cleaned_parts.append(stripped_part)
+        
+        # Join back with pipes - only include parts with actual content
+        cleaned_summary = ' . '.join(cleaned_parts)
+        
+        logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
+        return cleaned_summary
     
     def _generate_short_summary_from_long_summary(self, long_summary: str) -> str:
         """
@@ -887,94 +499,3 @@ Extract into STRUCTURED JSON focusing on 8 CRITICAL FIELDS:
         except Exception as e:
             logger.error(f"Error in _safe_str: {str(e)}")
             return str(default)
-
-    def _get_fallback_result(self, fallback_date: str) -> Dict:
-        """Return fallback result structure matching 8-field structure"""
-        return {
-            "field_1_header_context": {
-                "consulting_physician": {
-                    "name": "",
-                    "specialty": "",
-                    "credentials": "",
-                    "facility": ""
-                },
-                "consultation_date": fallback_date,
-                "referring_physician": "",
-                "patient_name": "",
-                "patient_dob": "",
-                "date_of_injury": "",
-                "claim_number": ""
-            },
-            "field_2_chief_complaint": {
-                "primary_complaint": "",
-                "location": "",
-                "duration": "",
-                "radiation_pattern": ""
-            },
-            "field_3_diagnosis_assessment": {
-                "primary_diagnosis": "",
-                "icd10_code": "",
-                "secondary_diagnoses": [],
-                "diagnostic_certainty": "",
-                "causation_statement": ""
-            },
-            "field_4_history_present_illness": {
-                "pain_quality": "",
-                "pain_location": "",
-                "radiation": "",
-                "aggravating_factors": [],
-                "alleviating_factors": [],
-                "functional_deficits": []
-            },
-            "field_5_prior_treatment_efficacy": {
-                "treatments_received": [],
-                "level_of_relief": {
-                    "physical_therapy": "",
-                    "medications": "",
-                    "injections": "",
-                    "chiropractic": ""
-                },
-                "treatment_failure_statement": ""
-            },
-            "field_6_objective_findings": {
-                "physical_exam": {
-                    "rom_measurements": "",
-                    "strength_testing": "",
-                    "special_tests_positive": [],
-                    "palpation_findings": "",
-                    "inspection_findings": ""
-                },
-                "imaging_review": {
-                    "mri_findings": "",
-                    "xray_findings": "",
-                    "ct_findings": "",
-                    "correlation_with_symptoms": ""
-                }
-            },
-            "field_7_plan_recommendations": {
-                "specific_interventions": {
-                    "injections_requested": [],
-                    "procedures_requested": [],
-                    "surgery_recommended": [],
-                    "diagnostics_ordered": []
-                },
-                "medication_changes": {
-                    "new_medications": [],
-                    "dosage_adjustments": [],
-                    "discontinued_medications": []
-                },
-                "therapy_recommendations": {
-                    "therapy_type": "",
-                    "frequency": "",
-                    "duration": "",
-                    "focus_areas": []
-                }
-            },
-            "field_8_work_status_impairment": {
-                "current_work_status": "",
-                "work_restrictions": [],
-                "restriction_duration": "",
-                "return_to_work_plan": ""
-            },
-            "critical_findings": []
-        }
