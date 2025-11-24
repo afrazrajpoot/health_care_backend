@@ -300,7 +300,7 @@ class ReportAnalyzer:
                 text=text,
                 doc_type=doctype.value,
                 fallback_date=fallback_date,
-                raw_text=text  # Explicitly pass raw text
+                # raw_text=text  # Explicitly pass raw text
             )
             return self._convert_extraction_result_to_dict(consult_result, fallback_date)
         

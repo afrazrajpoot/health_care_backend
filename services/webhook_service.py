@@ -117,6 +117,7 @@ class WebhookService:
         )
         
         # ✅ STORE THE ACTUAL REPORT ANALYZER RESULT
+        # print(report_analyzer,'report analyer')
         long_summary = report_result.get("long_summary", "")
         short_summary = report_result.get("short_summary", "")
         

@@ -233,6 +233,10 @@ class DocumentAggregationService:
                 "complete_adl_data": []
             })
             
+            # Get task quick notes for this document (list of quickNotes JSON from tasks)
+            document_tasks = tasks_dict.get(doc_id, []) if tasks_dict else []
+            task_quick_notes = [task.get("quickNotes", {}) for task in document_tasks]
+            
             base_doc.update({
                 "body_part_snapshots": body_part_by_document.get(doc_id, []),
                 "whats_new": whats_new_by_document.get(doc_id, []),  # Original structure as is
@@ -240,6 +244,7 @@ class DocumentAggregationService:
                 "document_summary": document_summary_by_document.get(doc_id),
                 "adl": document_adl_data,  # Now includes complete_adl_data with all fields
                 "summary_snapshot": summary_snapshot_by_document.get(doc_id),
+                "task_quick_notes": task_quick_notes,  # New field: list of quickNotes per task for this document
                 "document_index": latest_docs.index(latest_doc) + 1,
                 "is_latest": doc_id == latest_docs[0]["id"]
             })
