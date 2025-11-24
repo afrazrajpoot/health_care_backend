@@ -287,6 +287,13 @@ Duration: [extracted]
 Facility: [extracted]
 
 👨‍⚕️ PROVIDER INFORMATION
+                                                               
+ ## PATIENT INFORMATION
+    - **Name:** [extracted name]
+    - **Date of Birth:** [extracted DOB] 
+    - **Claim Number:** [extracted claim number]
+    - **Date of Injury:** [extracted DOI]
+    - **Employer:** [extracted employer]                                                            
 --------------------------------------------------
 Treating Provider: [name]
   Credentials: [extracted]

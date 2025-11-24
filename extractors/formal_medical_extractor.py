@@ -279,14 +279,12 @@ Accession Number: [extracted]
 Facility: [extracted]
 Department: [extracted]
 
-👤 PATIENT INFORMATION
---------------------------------------------------
-Name: [extracted]
-DOB: [extracted]
-Age: [extracted]
-Gender: [extracted]
-Allergies: [extracted]
-MRN: [extracted]
+ ## PATIENT INFORMATION
+    - **Name:** [extracted name]
+    - **Date of Birth:** [extracted DOB] 
+    - **Claim Number:** [extracted claim number]
+    - **Date of Injury:** [extracted DOI]
+    - **Employer:** [extracted employer]   
 
 👨‍⚕️ HEALTHCARE PROVIDERS
 --------------------------------------------------

@@ -182,11 +182,12 @@ Radiologist: [name]
 Imaging Center: [extracted]
 Referring Physician: [extracted]
 
-👤 PATIENT INFORMATION
---------------------------------------------------
-Name: [extracted]
-Date of Birth: [extracted]
-
+ ## PATIENT INFORMATION
+    - **Name:** [extracted name]
+    - **Date of Birth:** [extracted DOB] 
+    - **Claim Number:** [extracted claim number]
+    - **Date of Injury:** [extracted DOI]
+    - **Employer:** [extracted employer]   
 🎯 CLINICAL INDICATION
 --------------------------------------------------
 Clinical Indication: [extracted]

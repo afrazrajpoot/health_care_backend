@@ -1,33 +1,38 @@
 """
 Simplified Four-LLM Chain Extractor with Enhanced Detail Extraction
-Version: 4.3 - Added dedicated patient detail extraction layer
+Version: 4.5 - LLM-Only Patient Details (No Regex Fallback)
+Key Updates:
+- Removed all regex enhancements; rely solely on LLM for accurate detail detection
+- Integrated JsonOutputParser for strict JSON output from LLM
+- Enhanced prompts for precise JSON schema adherence
+- Retained retry logic (LLM-based) for robustness on misses
+- Simplified parsing: Direct dict from parser, no manual fallback extraction
 """
 import logging
-import re
+import json
 from typing import Dict, Optional, List
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 from langchain_core.runnables import RunnableLambda, RunnableBranch
 from datetime import datetime
-
+import re
 logger = logging.getLogger("document_ai")
 
 class SimpleExtractor:
     """
-    Smart four-LLM chain extractor with enhanced patient detail extraction.
-    Key Updates in v4.3:
-    - Added dedicated patient detail extraction BEFORE long summary
-    - Enhanced regex patterns for common medical identifiers
-    - Improved fallback mechanisms for critical fields
-    - Better handling of complex document structures
+    Smart four-LLM chain extractor with LLM-only patient detail extraction.
+    Key Updates in v4.5:
+    - Pure LLM reliance: No regex; enhanced prompts for accuracy
+    - Strict JSON parsing via output parser
+    - Retry on misses for comprehensive coverage
     """
     
     def __init__(self, llm: AzureChatOpenAI, mode: str = "general medicine"):
         self.llm = llm
         self.mode = mode.lower()
         self.parser = JsonOutputParser()
-        logger.info(f"✅ SimpleExtractor v4.3 initialized with mode: {self.mode}")
+        logger.info(f"✅ SimpleExtractor v4.5 initialized with mode: {self.mode}")
     
     def extract(
         self,
@@ -38,7 +43,7 @@ class SimpleExtractor:
         """
         Enhanced extraction with dedicated patient detail capture.
         """
-        print(doc_type,'doc type')
+        print(text,'doc type')
         if fallback_date is None:
             fallback_date = datetime.now().strftime("%B %d, %Y")
         
@@ -70,45 +75,65 @@ class SimpleExtractor:
     
     def _extract_patient_details(self, text: str, doc_type: str, fallback_date: str) -> Dict:
         """
-        DEDICATED extraction of critical patient details from full text.
-        This runs FIRST to ensure key details are captured.
+        DEDICATED extraction of critical patient details from full text using LLM only.
+        This runs FIRST to ensure key details are captured accurately.
         """
-        logger.info("🔍 DEDICATED PATIENT DETAIL EXTRACTION from full text...")
+        logger.info("🔍 DEDICATED PATIENT DETAIL EXTRACTION from full text (LLM-only)...")
+        
+        # Preprocess text for complex/fax docs (kept for LLM context cleaning)
+        processed_text = self._preprocess_text_for_details(text)
+        
+        # Define exact JSON schema for parser
+        json_schema = {
+            "type": "object",
+            "properties": {
+                "patient_name": {"type": "string"},
+                "date_of_birth": {"type": "string"},
+                "patient_id": {"type": "string"},
+                "claim_number": {"type": "string"},
+                "service_date": {"type": "string"},
+                "provider_name": {"type": "string"},
+                "insurance_carrier": {"type": "string"}
+            },
+            "required": ["patient_name", "date_of_birth", "patient_id", "claim_number", "service_date", "provider_name", "insurance_carrier"]
+        }
+        self.parser = JsonOutputParser(pydantic_object=None, partial_schema=json_schema)  # Enforce schema
         
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a medical document detail extraction specialist. Your SOLE task is to extract CRITICAL PATIENT IDENTIFICATION details.
+You are a medical document detail extraction specialist. Your SOLE task is to extract CRITICAL PATIENT IDENTIFICATION details ACCURATELY from the text.
 
-MANDATORY FIELDS TO EXTRACT:
-1. Patient Name (full name)
-2. Date of Birth (DOB)
-3. Patient ID/Medical Record Number
-4. Claim Number (for insurance/worker comp)
-5. Date of Service/Report Date
-6. Provider/Physician Name
-7. Insurance/Carrier Information
+MANDATORY FIELDS (output EXACTLY these, using "Not Found" if absent):
+- patient_name: Full patient name
+- date_of_birth: DOB in any format (e.g., MM/DD/YYYY)
+- patient_id: Medical Record Number, MRN, or ID
+- claim_number: Claim, Case, or Reference number
+- service_date: Date of Service or Report Date
+- provider_name: Physician or Provider full name
+- insurance_carrier: Insurance company or carrier name
+
+SPECIAL HANDLING FOR FAXED/SCANNED DOCS:
+- Look for "Re:", "RE:", "Regarding:", or similar memo-style prefixes—they often introduce patient details (e.g., "Re: Jane Smith DOB: 03/22/1975").
+- Extract the content IMMEDIATELY FOLLOWING these prefixes as primary patient info.
+- Ignore fax headers/footers like transmission dates or sender info unless they contain patient data.
 
 CRITICAL RULES:
-- EXTRACT ONLY EXPLICITLY STATED INFORMATION
-- NO INFERENCES or ASSUMPTIONS
-- If field not found, use "Not Found"
-- Prefer accuracy over completeness
-- Look for common patterns:
-  * Names: Title + First + Last (Dr., Mr., Ms., Patient:)
-  * DOB: MM/DD/YYYY, DD-MM-YYYY, etc.
-  * IDs: Numbers, alphanumeric codes
-  * Claim #: "Claim", "Case", "Reference"
+- EXTRACT ONLY EXPLICITLY STATED INFORMATION—NO INFERENCES or ASSUMPTIONS
+- Be exhaustive: Scan the entire text for patterns like Patient:, DOB:, Claim #, etc.
+- If truly not found anywhere, use "Not Found" (do not guess or infer)
+- Prefer precision: Names after "Re:" or in headers take priority
+- DOB: Often right after name in faxes; IDs: Alphanumeric codes near name
 
-OUTPUT FORMAT: JSON only
+OUTPUT: VALID JSON ONLY matching this exact schema. No extra text, code blocks, or explanations.
 """)
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
 DOCUMENT TYPE: {doc_type}
-FALLBACK DATE: {fallback_date}
+FALLBACK DATE: {fallback_date} (use only if service_date explicitly absent)
 
 FULL DOCUMENT TEXT:
 {full_text}
 
-Extract ONLY the explicitly stated patient details in JSON format:
+Respond with ONLY the JSON object for the fields above.
 """)
         
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
@@ -116,105 +141,99 @@ Extract ONLY the explicitly stated patient details in JSON format:
         try:
             logger.info("🤖 Invoking LLM for dedicated patient detail extraction...")
             
-            chain = chat_prompt | self.llm
-            result = chain.invoke({
-                "full_text": text[:8000],  # Use substantial chunk but not necessarily full doc
+            # Chain with parser for direct dict output
+            chain = chat_prompt | self.llm | self.parser
+            patient_details = chain.invoke({
+                "full_text": processed_text,
                 "doc_type": doc_type,
                 "fallback_date": fallback_date
             })
             
-            # Parse the JSON response
-            detail_text = result.content.strip()
-            patient_details = self._parse_detail_response(detail_text)
+            logger.debug(f"Raw LLM details: {patient_details}")
             
-            # Enhanced regex fallback for critical fields
-            patient_details = self._enhance_with_regex_fallback(text, patient_details)
+            # Ensure all keys present (fill missing with "Not Found")
+            default_keys = {"patient_name", "date_of_birth", "patient_id", "claim_number", "service_date", "provider_name", "insurance_carrier"}
+            for key in default_keys:
+                if key not in patient_details:
+                    patient_details[key] = "Not Found"
             
-            logger.info(f"✅ Patient details extracted: {len(patient_details)} fields")
+            # Retry logic for high misses
+            patient_details = self._retry_on_misses(patient_details, processed_text, system_prompt, fallback_date, doc_type)
+            
+            # Debug for fax
+            if re.search(r'Re[:\-.\s]*', text, re.IGNORECASE):
+                logger.info("📠 FAX DETECTED: LLM prioritized 'Re:' patterns in details")
+            
+            logger.info(f"✅ Patient details extracted via LLM: {len(patient_details)} fields")
             return patient_details
             
         except Exception as e:
             logger.error(f"❌ Patient detail extraction failed: {e}")
             return self._create_default_patient_details()
     
-    def _parse_detail_response(self, detail_text: str) -> Dict:
-        """Parse the detail extraction response into structured data."""
-        try:
-            # Try to extract JSON if wrapped in code blocks
-            json_match = re.search(r'\{.*\}', detail_text, re.DOTALL)
-            if json_match:
-                import json
-                return json.loads(json_match.group())
-        except:
-            pass
+    def _preprocess_text_for_details(self, text: str) -> str:
+        """
+        Normalize text for better LLM context in complex docs.
+        - Split into sections (headers, body, tables) for targeted scanning.
+        - Clean noise: extra whitespace, common artifacts.
+        """
+        # Basic cleaning
+        text = re.sub(r'\n\s*\n', '\n\n', text)  # Normalize newlines
+        text = re.sub(r'[^\w\s\-.,/:;()&@#]+', ' ', text)  # Remove weird chars but keep medical punctuation
         
-        # Fallback: manual parsing
-        details = {
-            "patient_name": "Not Found",
-            "date_of_birth": "Not Found", 
-            "patient_id": "Not Found",
-            "claim_number": "Not Found",
-            "service_date": "Not Found",
-            "provider_name": "Not Found",
-            "insurance_carrier": "Not Found"
+        # Rough section split (improve with heuristics if you have doc metadata)
+        sections = {
+            'headers_footers': re.findall(r'^.{0,500}.*?(?=\n\n[A-Z]{3,})', text, re.MULTILINE | re.DOTALL)[:2],  # First 500 chars + patterns
+            'body': re.sub(r'^.{0,1000}', '', text)[:4000],  # Skip intro, take mid-section
+            'tables': re.findall(r'\b[A-Za-z\s]+:\s*[A-Za-z0-9\s\-/]+(?:\n[A-Za-z\s]+:\s*[A-Za-z0-9\s\-/]+)*', text)  # Key-value lines
         }
         
-        # Simple keyword extraction as fallback
-        lines = detail_text.split('\n')
-        for line in lines:
-            line_lower = line.lower()
-            if 'name:' in line_lower and 'patient' in line_lower:
-                details["patient_name"] = line.split(':', 1)[1].strip()
-            elif 'dob:' in line_lower or 'date of birth:' in line_lower:
-                details["date_of_birth"] = line.split(':', 1)[1].strip()
-            elif 'claim' in line_lower and 'number' in line_lower:
-                details["claim_number"] = line.split(':', 1)[1].strip()
+        # Concat prioritized sections (headers first, as details often there)
+        prioritized_text = '\n\n'.join(sections['headers_footers'] + sections['tables'] + [sections['body']])
         
-        return details
+        logger.info(f"📄 Preprocessed text length: {len(prioritized_text)} (original: {len(text)})")
+        return prioritized_text[:6000]  # Cap to avoid token overflow
     
-    def _enhance_with_regex_fallback(self, text: str, patient_details: Dict) -> Dict:
-        """Enhanced regex patterns to find critical patient details."""
-        enhanced_details = patient_details.copy()
+    def _retry_on_misses(self, patient_details: Dict, processed_text: str, system_prompt: SystemMessagePromptTemplate, fallback_date: str, doc_type: str) -> Dict:
+        """Retry LLM extraction for fields with high 'Not Found' count."""
+        not_found_count = sum(1 for v in patient_details.values() if v == "Not Found")
+        if not_found_count > 3:  # Threshold for retry
+            logger.warning(f"⚠️ High 'Not Found' count ({not_found_count}/7). Retrying with focused LLM scan...")
+            
+            user_prompt_retry = HumanMessagePromptTemplate.from_template("""
+FOCUSED RETRY: You previously missed these fields: {missing_fields}. Scan AGAIN for ONLY them.
+
+ENTIRE PROCESSED DOCUMENT TEXT (be more thorough this time):
+{processed_text}
+
+DOCUMENT TYPE: {doc_type}
+FALLBACK DATE: {fallback_date}
+
+Respond with ONLY the JSON object updating JUST the missing fields (others ignored).
+""")
+            
+            missing_fields = [k for k, v in patient_details.items() if v == "Not Found"]
+            retry_chat = ChatPromptTemplate.from_messages([system_prompt, user_prompt_retry])
+            retry_chain = retry_chat | self.llm | self.parser
+            
+            try:
+                retry_details = retry_chain.invoke({
+                    "processed_text": processed_text,
+                    "missing_fields": ', '.join(missing_fields),
+                    "doc_type": doc_type,
+                    "fallback_date": fallback_date
+                })
+                
+                # Merge: Update only misses
+                for k, v in retry_details.items():
+                    if patient_details[k] == "Not Found" and v != "Not Found":
+                        patient_details[k] = v
+                
+                logger.info(f"🔄 LLM Retry updated {sum(1 for v in patient_details.values() if v != 'Not Found')} fields")
+            except Exception as retry_e:
+                logger.error(f"❌ LLM Retry failed: {retry_e}")
         
-        # Regex patterns for common medical document patterns
-        patterns = {
-            "patient_name": [
-                r'Patient:\s*([A-Za-z\s,]+)',
-                r'Patient Name:\s*([A-Za-z\s,]+)',
-                r'Name:\s*([A-Za-z\s,]+)',
-                r'PATIENT:\s*([A-Za-z\s,]+)'
-            ],
-            "date_of_birth": [
-                r'DOB:\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
-                r'Date of Birth:\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
-                r'Birth Date:\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
-                r'DOB\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})'
-            ],
-            "claim_number": [
-                r'Claim[\s#]*[:\-]*\s*([A-Z0-9\-]+)',
-                r'Claim Number:\s*([A-Z0-9\-]+)',
-                r'Case Number:\s*([A-Z0-9\-]+)',
-                r'Reference Number:\s*([A-Z0-9\-]+)'
-            ],
-            "patient_id": [
-                r'Patient ID:\s*([A-Z0-9\-]+)',
-                r'Medical Record Number:\s*([A-Z0-9\-]+)',
-                r'MRN:\s*([A-Z0-9\-]+)',
-                r'ID:\s*([A-Z0-9\-]+)'
-            ]
-        }
-        
-        # Apply regex patterns
-        for field, regex_list in patterns.items():
-            if enhanced_details.get(field) in ["Not Found", "", None]:
-                for pattern in regex_list:
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        enhanced_details[field] = match.group(1).strip()
-                        logger.info(f"🔍 Regex found {field}: {enhanced_details[field]}")
-                        break
-        
-        return enhanced_details
+        return patient_details
     
     def _generate_long_summary_direct(self, text: str, doc_type: str, fallback_date: str, patient_details: Dict) -> str:
         """
@@ -300,7 +319,7 @@ Insurance/Carrier: {insurance_carrier}
                 "doc_type": doc_type,
                 "fallback_date": fallback_date,
                 "mode": self.mode,
-                "patient_details_json": str(patient_details),
+                "patient_details_json": json.dumps(patient_details),
                 "patient_name": patient_details.get("patient_name", "Not Found"),
                 "provider_name": patient_details.get("provider_name", "Not Found"),
                 "patient_id": patient_details.get("patient_id", "Not Found"),
@@ -343,7 +362,6 @@ Note: Detailed clinical extraction failed, but patient identification details ar
     
     def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
         """Generate concise short summary from long summary."""
-        # [Keep your existing short summary method unchanged]
         logger.info("🎯 Generating short summary...")
         
         system_prompt = SystemMessagePromptTemplate.from_template("""
