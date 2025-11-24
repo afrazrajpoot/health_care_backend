@@ -1,6 +1,6 @@
 """
 Simplified Four-LLM Chain Extractor with Conditional Routing
-Version: 4.1 - Enhanced Universal Document Handling
+Version: 4.2 - Enhanced for General Medicine and Workers' Compensation
 """
 import logging
 from typing import Dict, Optional
@@ -8,38 +8,42 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 from langchain_core.runnables import RunnableLambda, RunnableBranch
-
-
-
-
+from datetime import datetime  # Added for dynamic current date handling
 
 
 logger = logging.getLogger("document_ai")
 
 class SimpleExtractor:
     """
-    Smart four-LLM chain extractor with conditional routing:
-    1. First LLM: Extract key findings and critical data
-    2. Conditional Check: Determine if document has medical content
-    3. Second LLM: Generate medical long summary OR Fourth LLM: Generate administrative summary
-    4. Third LLM: Generate short summary from long summary
+    Smart four-LLM chain extractor with conditional routing, enhanced for General Medicine and Workers' Compensation.
+    Key Updates in v4.2:
+    - Integrated mode-specific prompting for 'general medicine' and 'worker comp'.
+    - Dynamic fallback_date using current date if not provided.
+    - Streamlined code by removing unused fallback extraction methods.
+    - Enhanced prompts with worker comp focus (e.g., causal relationship, impairment, MMI).
+    - Improved short summary fields for work-related details.
     """
     
-    def __init__(self, llm: AzureChatOpenAI):
+    def __init__(self, llm: AzureChatOpenAI, mode: str = "general medicine"):
         self.llm = llm
+        self.mode = mode.lower()  # Normalize mode
         self.parser = JsonOutputParser()
-        logger.info("✅ SimpleExtractor v4.1 initialized with Enhanced Universal Document Handling")
+        logger.info(f"✅ SimpleExtractor v4.2 initialized with mode: {self.mode}")
     
     def extract(
         self,
         text: str,
         doc_type: str,
-        fallback_date: str
+        fallback_date: Optional[str] = None
     ) -> Dict:
         """
         Four-step LLM chain extraction with conditional routing.
+        Updates: Auto-generate fallback_date if None.
         """
-        logger.info(f"🚀 Four-LLM Conditional Extraction: {doc_type}")
+        if fallback_date is None:
+            fallback_date = datetime.now().strftime("%B %d, %Y")  # e.g., "November 24, 2025"
+        
+        logger.info(f"🚀 Four-LLM Conditional Extraction: {doc_type} (Mode: {self.mode})")
         
         try:
             # STEP 1: Directly generate long summary with full context (no intermediate extraction)
@@ -53,7 +57,8 @@ class SimpleExtractor:
             return {
                 "long_summary": long_summary,
                 "short_summary": short_summary,
-                "content_type": "universal"
+                "content_type": "universal",
+                "mode": self.mode
             }
             
         except Exception as e:
@@ -63,19 +68,20 @@ class SimpleExtractor:
     def _generate_long_summary_direct(self, text: str, doc_type: str, fallback_date: str) -> str:
         """
         Directly generate comprehensive long summary with FULL document context using LLM.
-        Adapted to handle both medical and administrative content universally.
+        Adapted to handle both medical and administrative content universally, with mode-specific emphasis.
         """
         logger.info("🔍 Processing ENTIRE document in single context window for direct long summary...")
         
-        # Adapted System Prompt for Direct Long Summary Generation
-        # Universal prompt that handles medical or administrative based on content
+        # Enhanced System Prompt for Direct Long Summary Generation
+        # Universal prompt that handles medical or administrative based on content, tailored by mode
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are a universal medical and administrative document summarization expert analyzing a COMPLETE document.
+Mode: {mode} - Tailor emphasis: For 'worker comp', prioritize work status, causal relationship, impairment %, MMI, and return-to-work recommendations.
 
 PRIMARY PURPOSE: Generate a comprehensive, structured long summary that adapts to the document type (medical or administrative).
 
 DETERMINE DOCUMENT TYPE AUTOMATICALLY:
-- MEDICAL: If contains diagnoses, treatments, labs, imaging, clinical observations
+- MEDICAL: If contains diagnoses, treatments, labs, imaging, clinical observations (common in general medicine or worker comp)
 - ADMINISTRATIVE: If primarily forms, letters, notifications, billing, scheduling
 
 CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
@@ -86,15 +92,16 @@ You are seeing the ENTIRE document at once, allowing comprehensive extraction wi
 2. **NO ASSUMPTIONS** - Do not infer or add typical values
 3. **ADAPT STRUCTURE** - Use medical sections for clinical content, administrative for non-clinical
 4. **EMPTY FIELDS BETTER THAN GUESSES** - Omit sections if no data
+5. **WORKER COMP FOCUS**: If mode is 'worker comp', extract causal link to injury, impairment rating, MMI status, work restrictions.
 
 UNIVERSAL EXTRACTION FOCUS:
 
-For MEDICAL DOCUMENTS:
+For MEDICAL DOCUMENTS (General Medicine or Worker Comp):
 I. PATIENT & CLINICAL CONTEXT
 II. CRITICAL FINDINGS & DIAGNOSES
 III. LAB/IMAGING RESULTS
 IV. TREATMENT & OBSERVATIONS
-V. STATUS & RECOMMENDATIONS
+V. STATUS & RECOMMENDATIONS (emphasize work-related for worker comp)
 
 For ADMINISTRATIVE DOCUMENTS:
 I. DOCUMENT OVERVIEW
@@ -105,9 +112,10 @@ IV. CONTACT & FOLLOW-UP
 Now analyze this COMPLETE document and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points; adapt sections based on content type):
 """)
 
-        # Adapted User Prompt for Direct Long Summary - Outputs the structured summary directly
+        # Enhanced User Prompt for Direct Long Summary - Outputs the structured summary directly
         user_prompt = HumanMessagePromptTemplate.from_template("""
 DOCUMENT TYPE: {doc_type}
+MODE: {mode}
 
 COMPLETE DOCUMENT TEXT:
 
@@ -129,10 +137,11 @@ Name: [extracted]
 DOB: [extracted]
 Chief Complaint: [extracted]
 Clinical History: [extracted]
+Date of Injury/Onset: [extracted, emphasize for worker comp]
 
 🚨 CRITICAL FINDINGS
 --------------------------------------------------
-• [list up to 5 critical items, e.g., abnormal labs, urgent diagnoses]
+• [list up to 5 critical items, e.g., abnormal labs, urgent diagnoses, causal relationship to work injury]
 
 🏥 DIAGNOSES & ASSESSMENTS
 --------------------------------------------------
@@ -155,10 +164,12 @@ Procedures/Treatments:
 
 💼 STATUS & RECOMMENDATIONS
 --------------------------------------------------
-Work Status: [extracted]
-MMI: [extracted]
+Work Status: [extracted, e.g., missed work dates, limitations, return to duty]
+MMI: [extracted, Maximum Medical Improvement status]
+Impairment Rating: [extracted, e.g., 0-100% temporary/permanent]
+Causal Relationship: [extracted, link to work incident]
 Recommendations:
-• [list up to 5 next steps]
+• [list up to 5 next steps, prioritize worker comp follow-ups]
 
 For ADMINISTRATIVE CONTENT:
 📋 ADMINISTRATIVE DOCUMENT OVERVIEW
@@ -172,6 +183,7 @@ Purpose: [extracted]
 Patient: [extracted]
 Provider: [extracted]
 Referring Party: [extracted]
+Employer/Carrier: [extracted, for worker comp]
 
 📄 KEY INFORMATION
 --------------------------------------------------
@@ -196,6 +208,7 @@ Next Steps: [extracted]
 3. Use exact wording for medical terms, dates, names
 4. Bullet points for lists, clear headings
 5. No assumptions or additions
+6. For worker comp mode: Always check for work-related fields even in medical sections
 """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
@@ -208,7 +221,8 @@ Next Steps: [extracted]
             result = chain.invoke({
                 "full_document_text": text,
                 "doc_type": doc_type,
-                "fallback_date": fallback_date
+                "fallback_date": fallback_date,
+                "mode": self.mode
             })
             
             long_summary = result.content.strip()
@@ -222,17 +236,18 @@ Next Steps: [extracted]
             logger.error(f"❌ Direct universal long summary generation failed: {e}", exc_info=True)
             
             # Fallback: Generate a minimal summary
-            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
+            return f"Fallback long summary for {doc_type} on {fallback_date} (Mode: {self.mode}): Document processing failed due to {str(e)}"
 
     def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
         """
         Generate concise short summary from long summary.
-        Enhanced to handle any document type with available information.
+        Enhanced to handle any document type with available information, with worker comp fields.
         """
         logger.info("🎯 Third LLM - Generating short summary...")
         
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You create CONCISE pipe-delimited summaries for ANY type of medical document.
+Mode: {mode} - Include worker comp fields if present (e.g., Impairment Rating, Causal Relationship, MMI).
 
 STRICT REQUIREMENTS:
 1. Word count MUST be **between 30 and 60 words**.
@@ -247,11 +262,14 @@ STRICT REQUIREMENTS:
    - Imaging Findings (key observations)
    - Medication
    - MMI Status
+   - Impairment Rating
+   - Causal Relationship
    - Key Action Items
    - Work Status
    - Recommendation
    - Critical Finding
    - Urgent Next Steps
+   - Employer/Carrier (for worker comp)
 
 ***IMPORTANT FORMAT RULES***
 - Each segment must be **Key: Value**
@@ -263,11 +281,11 @@ STRICT REQUIREMENTS:
 
 EXAMPLES:
 
-Lab Report:
+Lab Report (General Medicine):
 "Report Title: Lab Results | Date: 10/22/2025 | Critical Finding: Elevated WBC 15.2 (H), Glucose 245 mg/dL (H) | Lab Results: Hemoglobin 12.1, Creatinine 1.2 | Recommendation: Repeat CBC in 1 week, endocrinology consult for diabetes management"
 
-Imaging Report:
-"Report Title: MRI Lumbar Spine | Date: 09/15/2025 | Body Parts: L4-L5, L5-S1 | Imaging Findings: Moderate central stenosis L4-L5, broad-based disc herniation L5-S1 with nerve root impingement | Recommendation: Consider epidural steroid injection, neurosurgery consultation if conservative management fails"
+Worker Comp Report:
+"Report Title: Initial Injury Evaluation | Date: 09/15/2025 | Body Parts: Low Back | Diagnosis: Lumbar Strain | Work Status: Off duty since 09/10/2025 | Causal Relationship: Direct result of lifting incident | Impairment Rating: 15% temporary | MMI: Not reached | Recommendation: PT 3x/week, f/u in 4 weeks"
 
 Clinical Note:
 "Report Title: Follow-up Visit | Physician: Dr. Smith | Date: 08/20/2025 | Body Parts: Right knee | Diagnosis: Post-operative status ACL reconstruction | Work Status: Modified duty, no squatting/kneeling | Recommendation: Continue PT 2x/week, f/u 6 weeks"
@@ -282,7 +300,7 @@ Clinical Note:
    - Key test results (labs/imaging)
    - Diagnoses
    - Recommendations or next steps
-   - Work status if mentioned
+   - Work status, impairment, MMI if mentioned (worker comp priority)
    - Medications if mentioned
 
 7. ABSOLUTE NO:
@@ -306,7 +324,10 @@ Create a clean pipe-delimited short summary with ONLY available information:
         
         try:
             chain = chat_prompt | self.llm
-            response = chain.invoke({"long_summary": long_summary[:3000]})
+            response = chain.invoke({
+                "long_summary": long_summary[:3000],
+                "mode": self.mode
+            })
             short_summary = response.content.strip()
             
             short_summary = self._clean_short_summary(short_summary)
@@ -324,90 +345,11 @@ Create a clean pipe-delimited short summary with ONLY available information:
             
         except Exception as e:
             logger.error(f"❌ Short summary generation failed: {e}")
-            return self._clean_pipes_from_summary(f"Report Title: {doc_type} | Date: Unknown")
+            return self._clean_pipes_from_summary(f"Report Title: {doc_type} | Date: Unknown | Mode: {self.mode}")
     
-    def _clean_empty_fields(self, data: Dict, fallback_date: str) -> Dict:
-        """Remove all empty fields and ensure clean structure."""
-        cleaned = {}
-        
-        # Only include patient_details if it has any non-empty values
-        if "patient_details" in data:
-            patient_clean = {}
-            for key, value in data["patient_details"].items():
-                if value and str(value).strip():
-                    patient_clean[key] = value
-            if patient_clean:
-                cleaned["patient_details"] = patient_clean
-        
-        # Only include critical_findings if non-empty
-        critical_findings = data.get("critical_findings", [])
-        if critical_findings and any(finding and str(finding).strip() for finding in critical_findings):
-            cleaned["critical_findings"] = [f for f in critical_findings if f and str(f).strip()]
-        
-        # Only include diagnoses if non-empty
-        diagnoses = data.get("diagnoses", [])
-        if diagnoses and any(dx and str(dx).strip() for dx in diagnoses):
-            cleaned["diagnoses"] = [dx for dx in diagnoses if dx and str(dx).strip()]
-        
-        # Only include lab_results if non-empty
-        lab_results = data.get("lab_results", [])
-        if lab_results and any(lab and str(lab).strip() for lab in lab_results):
-            cleaned["lab_results"] = [lab for lab in lab_results if lab and str(lab).strip()]
-        
-        # Only include imaging_findings if non-empty
-        imaging_findings = data.get("imaging_findings", [])
-        if imaging_findings and any(img and str(img).strip() for img in imaging_findings):
-            cleaned["imaging_findings"] = [img for img in imaging_findings if img and str(img).strip()]
-        
-        # Only include clinical_observations if non-empty
-        clinical_obs = data.get("clinical_observations", [])
-        if clinical_obs and any(obs and str(obs).strip() for obs in clinical_obs):
-            cleaned["clinical_observations"] = [obs for obs in clinical_obs if obs and str(obs).strip()]
-        
-        # Only include current_treatment if it has any non-empty values
-        if "current_treatment" in data:
-            treatment_clean = {}
-            for key, items in data["current_treatment"].items():
-                if isinstance(items, list):
-                    if items and any(item and str(item).strip() for item in items):
-                        treatment_clean[key] = [item for item in items if item and str(item).strip()]
-                elif items and str(items).strip():
-                    treatment_clean[key] = items
-            if treatment_clean:
-                cleaned["current_treatment"] = treatment_clean
-        
-        # Only include work_status if it has any non-empty values
-        if "work_status" in data:
-            work_clean = {}
-            for key, value in data["work_status"].items():
-                if value and str(value).strip():
-                    work_clean[key] = value
-            if work_clean:
-                cleaned["work_status"] = work_clean
-        
-        # Always include important_dates with at least report_date
-        cleaned["important_dates"] = {
-            "report_date": data.get("important_dates", {}).get("report_date") or fallback_date
-        }
-        # Add other dates only if they exist
-        for key in ["examination_date", "follow_up_dates", "service_date", "collection_date"]:
-            value = data.get("important_dates", {}).get(key)
-            if value and str(value).strip():
-                cleaned["important_dates"][key] = value
-        
-        # Only include document_context if it has any non-empty values
-        if "document_context" in data:
-            context_clean = {}
-            for key, value in data["document_context"].items():
-                if value and str(value).strip():
-                    context_clean[key] = value
-            if context_clean:
-                cleaned["document_context"] = context_clean
-        
-        return cleaned
-    
-    def _clean_summary_text(self, text: str) -> str:
-        """Remove any unwanted phrases from summary text."""
+    def _clean_short_summary(self, text: str) -> str:
+        """Clean short summary text."""
+        # Remove unwanted phrases
         unwanted_phrases = [
             "unknown", "not specified", "not provided", "none", 
             "no information", "missing", "unavailable", "unspecified",
@@ -418,92 +360,11 @@ Create a clean pipe-delimited short summary with ONLY available information:
         for phrase in unwanted_phrases:
             cleaned = cleaned.replace(phrase, "")
         
-        # Clean up extra spaces but preserve formatting
-        lines = cleaned.split('\n')
-        cleaned_lines = []
-        for line in lines:
-            cleaned_line = ' '.join(line.split())
-            if cleaned_line.strip():
-                cleaned_lines.append(cleaned_line)
-        
-        return '\n'.join(cleaned_lines)
-    
-    def _clean_short_summary(self, text: str) -> str:
-        """Clean short summary text."""
-        # Remove unwanted phrases
-        text = self._clean_summary_text(text)
-        
         # Clean formatting
-        text = ' '.join(text.split())
-        text = text.strip('"').strip("'")
+        cleaned = ' '.join(cleaned.split())
+        cleaned = cleaned.strip('"').strip("'")
         
-        return text
-    
-    def _create_basic_medical_summary(self, extracted_data: Dict, doc_type: str) -> str:
-        """Create a basic medical summary from extracted data when LLM fails."""
-        dates = extracted_data.get("important_dates", {})
-        report_date = dates.get("report_date", "")
-        
-        sections = []
-        
-        # Header
-        header = f"MEDICAL SUMMARY - {doc_type.upper()}"
-        if report_date:
-            header += f"\nReport Date: {report_date}"
-        sections.append(header)
-        
-        # Patient info
-        patient = extracted_data.get("patient_details", {})
-        if patient:
-            patient_info = ["PATIENT INFORMATION"]
-            if patient.get("name"):
-                patient_info.append(f"• Name: {patient['name']}")
-            if patient.get("dob"):
-                patient_info.append(f"• DOB: {patient['dob']}")
-            if patient.get("mrn"):
-                patient_info.append(f"• MRN: {patient['mrn']}")
-            if len(patient_info) > 1:
-                sections.append("\n".join(patient_info))
-        
-        # Lab results
-        lab_results = extracted_data.get("lab_results", [])
-        if lab_results:
-            lab_section = ["LABORATORY RESULTS"]
-            for result in lab_results[:10]:
-                lab_section.append(f"• {result}")
-            sections.append("\n".join(lab_section))
-        
-        # Imaging findings
-        imaging = extracted_data.get("imaging_findings", [])
-        if imaging:
-            img_section = ["IMAGING FINDINGS"]
-            for finding in imaging[:10]:
-                img_section.append(f"• {finding}")
-            sections.append("\n".join(img_section))
-        
-        # Critical findings
-        critical = extracted_data.get("critical_findings", [])
-        if critical:
-            crit_section = ["CRITICAL FINDINGS"]
-            for finding in critical[:5]:
-                crit_section.append(f"• {finding}")
-            sections.append("\n".join(crit_section))
-        
-        if len(sections) > 1:
-            return "\n\n".join(sections)
-        
-        return f"{header}\n\nBasic medical information extracted. Review original document for details."
-    
-    def _create_basic_administrative_summary(self, extracted_data: Dict, doc_type: str) -> str:
-        """Create a basic administrative summary when LLM fails."""
-        dates = extracted_data.get("important_dates", {})
-        report_date = dates.get("report_date", "")
-        
-        header = f"ADMINISTRATIVE SUMMARY - {doc_type.upper()}"
-        if report_date:
-            header += f"\nDocument Date: {report_date}"
-        
-        return f"{header}\n\nAdministrative document processed. No clinical content identified."
+        return cleaned
     
     def _clean_pipes_from_summary(self, short_summary: str) -> str:
         """
@@ -529,18 +390,11 @@ Create a clean pipe-delimited short summary with ONLY available information:
         logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
         return cleaned_summary
     
-    def _create_fallback_extraction(self, fallback_date: str, doc_type: str) -> Dict:
-        """Create fallback extraction data with clean empty fields."""
-        return {
-            "important_dates": {
-                "report_date": fallback_date
-            }
-        }
-    
     def _create_error_response(self, doc_type: str, error_msg: str, fallback_date: str) -> Dict:
         """Create error response that still provides a summary."""
         return {
-            "long_summary": f"DOCUMENT SUMMARY - {doc_type.upper()}\n\nDocument processed. Basic information extracted.",
+            "long_summary": f"DOCUMENT SUMMARY - {doc_type.upper()}\n\nDocument processed. Basic information extracted. Error: {error_msg}",
             "short_summary": f"Report Title: {doc_type} | Date: {fallback_date}",
-            "content_type": "unknown"
+            "content_type": "unknown",
+            "mode": self.mode
         }

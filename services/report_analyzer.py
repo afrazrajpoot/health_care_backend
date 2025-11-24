@@ -61,7 +61,7 @@ class ReportAnalyzer:
         self.imaging_extractor = ImagingExtractorChained(self.llm)
         self.pr2_extractor = PR2ExtractorChained(self.llm)
         self.consult_extractor = ConsultExtractorChained(self.llm)
-        self.simple_extractor = SimpleExtractor(self.llm)
+        self.simple_extractor = SimpleExtractor(self.llm,mode=mode)
         self.decision_extractor = DecisionDocumentExtractor(self.llm)
         self.formal_medical_extractor = FormalMedicalReportExtractor(self.llm)
         self.clinical_note_extractor = ClinicalNoteExtractor(self.llm)

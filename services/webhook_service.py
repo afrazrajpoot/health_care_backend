@@ -214,7 +214,6 @@ class WebhookService:
         except Exception as e:
             logger.error(f"❌ Failed to save document {document_id} to Redis: {str(e)}")
             return False
-    
     async def perform_patient_lookup(self, db_service, processed_data: dict) -> dict:
         """Step 2: Perform patient lookup and update fields bidirectionally (NO DUPLICATE CHECK)"""
         physician_id = processed_data["physician_id"]
@@ -224,19 +223,44 @@ class WebhookService:
         
         logger.info(f"🔍 Performing patient lookup for physician: {physician_id}")
         
+        # Helper function to check if field is "bad" (not specified/empty)
+        def is_bad_field(value):
+            return not value or str(value).lower() in ["not specified", "unknown", "", "none", "null"]
+        
+        # 🚨 CRITICAL: Check if both DOB and claim number are not specified
+        dob_not_specified = is_bad_field(processed_data["dob"])
+        claim_not_specified = is_bad_field(claim_number)
+        
+        # If both DOB AND claim number are not specified, skip lookup and field updates
+        if dob_not_specified and claim_not_specified:
+            logger.warning("🚨 SKIPPING PATIENT LOOKUP: Both DOB and claim number are not specified - no updates will be performed")
+            
+            # Determine document status for this case
+            document_status = "failed"
+            pending_reason = "Missing both DOB and claim number - cannot identify patient"
+            
+            return {
+                "lookup_data": None,
+                "document_status": document_status,
+                "pending_reason": pending_reason,
+                "patient_name_to_use": patient_name or "Not specified",
+                "claim_to_save": claim_number or "Not specified", 
+                "document_analysis": document_analysis,
+                "field_updates": [],
+                "previous_docs_updated": 0,
+                "lookup_skipped": True  # New flag to indicate lookup was skipped
+            }
+        
+        # ✅ Continue with normal patient lookup for documents with at least DOB OR claim number
         # Verify Redis connection first
         redis_ok = await self.verify_redis_connection()
         if not redis_ok:
             logger.warning("⚠️ Redis not available - proceeding without cache")
         
-        # Helper function
-        def is_bad_field(value):
-            return not value or str(value).lower() in ["not specified", "unknown", "", "none"]
-        
         # Get patient lookup data (with Redis caching)
         lookup_data = await self._get_cached_patient_lookup(physician_id, patient_name, claim_number, processed_data["dob"], db_service)
         
-        # Bidirectional field updating logic
+        # Bidirectional field updating logic (only if we have lookup data)
         field_updates = []
         updated_previous_docs = 0
         
@@ -250,6 +274,7 @@ class WebhookService:
             fetched_doi = lookup_data.get("doi")
             
             # Update document analysis with good values from DB
+            # Only update if current document has bad values AND DB has good values
             if is_bad_field(document_analysis.patient_name) and not is_bad_field(fetched_patient_name):
                 old_name = document_analysis.patient_name
                 document_analysis.patient_name = fetched_patient_name
@@ -276,13 +301,17 @@ class WebhookService:
                 field_updates.append(f"doi: '{old_doi}' → '{fetched_doi}'")
                 logger.info(f"✅ Updated DOI from DB: '{old_doi}' → '{fetched_doi}'")
             
-            # Update previous documents with good values from current document
+            # 🚨 IMPORTANT: Update previous documents ONLY if current document has good identification
+            # Check if current document has at least one good identification field
             current_has_good_patient = not is_bad_field(document_analysis.patient_name)
             current_has_good_dob = hasattr(document_analysis, 'dob') and not is_bad_field(document_analysis.dob)
             current_has_good_claim = not is_bad_field(document_analysis.claim_number)
             current_has_good_doi = hasattr(document_analysis, 'doi') and not is_bad_field(document_analysis.doi)
             
-            if current_has_good_patient or current_has_good_dob or current_has_good_claim or current_has_good_doi:
+            # Only update previous documents if we have at least DOB OR claim number in current document
+            current_has_identification = current_has_good_dob or current_has_good_claim
+            
+            if current_has_identification and (current_has_good_patient or current_has_good_dob or current_has_good_claim or current_has_good_doi):
                 try:
                     update_patient = document_analysis.patient_name if current_has_good_patient else None
                     update_dob = document_analysis.dob if current_has_good_dob else None
@@ -309,6 +338,8 @@ class WebhookService:
                     
                 except Exception as update_err:
                     logger.error(f"❌ Error updating previous documents: {update_err}")
+            else:
+                logger.info("ℹ️ Skipping previous document updates - current document lacks sufficient identification")
             
             logger.info(f"🎯 Bidirectional updates completed: {field_updates}")
         
@@ -339,9 +370,9 @@ class WebhookService:
             "claim_to_save": processed_data["claim_number"] or "Not specified",
             "document_analysis": document_analysis,
             "field_updates": field_updates,
-            "previous_docs_updated": updated_previous_docs
+            "previous_docs_updated": updated_previous_docs,
+            "lookup_skipped": False  # Lookup was performed
         }
-    
     async def _get_cached_patient_lookup(self, physician_id: str, patient_name: str, claim_number: str, dob: str, db_service) -> dict:
         """Get patient lookup data from cache or database"""
         
@@ -518,6 +549,60 @@ class WebhookService:
         return created_tasks
     async def save_document(self, db_service, processed_data: dict, lookup_result: dict) -> dict:
         """Step 4: Save document to database and Redis cache"""
+        
+        # ✅ Check if both DOB and claim number are not specified
+        document_analysis = processed_data["document_analysis"]
+        dob_not_specified = (
+            not hasattr(document_analysis, 'dob') or 
+            not document_analysis.dob or 
+            str(document_analysis.dob).lower() in ["not specified", "none", ""]
+        )
+        
+        claim_not_specified = (
+            not lookup_result.get("claim_to_save") or 
+            str(lookup_result["claim_to_save"]).lower() in ["not specified", "none", ""]
+        )
+        
+        # If both DOB and claim number are not specified, save as fail document
+        if dob_not_specified and claim_not_specified:
+            # ✅ Get the actual parsed text from the result data
+            parsed_text = processed_data["result_data"].get("text", "")
+            
+            # ✅ Also get the brief summary and other analysis data
+            brief_summary = processed_data.get("brief_summary", "")
+            
+            # ✅ Combine text and summary for comprehensive document text
+            full_document_text = f"ORIGINAL TEXT:\n{parsed_text}\n\nSUMMARY:\n{brief_summary}"
+            
+            fail_doc_id = await db_service.save_fail_doc(
+                reason="Both DOB and claim number are not specified",
+                db=document_analysis.dob if hasattr(document_analysis, 'dob') else None,
+                claim_number=lookup_result.get("claim_to_save"),
+                patient_name=lookup_result.get("patient_name_to_use"),
+                physician_id=processed_data.get("physician_id"),
+                gcs_file_link=processed_data.get("gcs_url"),
+                file_name=processed_data.get("filename"),
+                file_hash=processed_data.get("file_hash"),
+                blob_path=processed_data.get("blob_path"),
+                mode=processed_data.get("mode"),
+                # ✅ SAVE THE PARSED TEXT AND SUMMARY
+                document_text=full_document_text,
+                doi=document_analysis.doi if hasattr(document_analysis, 'doi') else None
+            )
+            
+            # ✅ Decrement parse count even for failed documents since they consumed resources
+            parse_decremented = await db_service.decrement_parse_count(processed_data["physician_id"])
+            
+            return {
+                "status": "failed",
+                "document_id": fail_doc_id,
+                "parse_count_decremented": parse_decremented,  # Now True for failed docs too
+                "filename": processed_data["filename"],
+                "cache_success": False,
+                "failure_reason": "Both DOB and claim number are not specified"
+            }
+        
+        # Continue with normal document saving process...
         # Create ExtractionResult
         extraction_result = ExtractionResult(
             text=processed_data["result_data"].get("text", ""),
@@ -651,7 +736,7 @@ class WebhookService:
             document_summary=document_summary
         )
         
-        # SAVE TO REDIS CACHE
+        # SAVE TO REDIS CACHE (only for successful documents, not for fail documents)
         cache_success = False
         if document_id:
             # Prepare data for caching
@@ -682,7 +767,6 @@ class WebhookService:
             "filename": processed_data["filename"],
             "cache_success": cache_success
         }
-    
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
         Clean webhook processing pipeline WITHOUT duplicate prevention
@@ -744,12 +828,12 @@ class WebhookService:
    
     async def update_fail_document(self, fail_doc: Any, updated_fields: dict, user_id: str = None, db_service: Any = None) -> dict:
         """
-        Handles updating and processing a failed document using webhook-like logic.
-        Overrides fields from updated_fields, processes via service steps, saves, creates tasks, updates previous, and deletes fail_doc.
+        Updates and processes a failed document using the complete webhook-like logic.
+        Calls both EnhancedReportAnalyzer and ReportAnalyzer for comprehensive processing.
         """
         # Use updated values if provided, otherwise fallback to fail_doc values
         document_text = updated_fields.get("document_text") or fail_doc.documentText
-        dob_str = updated_fields.get("dob") or fail_doc.db
+        dob_str = updated_fields.get("dob") or fail_doc.dob  # ✅ FIXED: Changed from fail_doc.db to fail_doc.dob
         doi = updated_fields.get("doi") or fail_doc.doi
         claim_number = updated_fields.get("claim_number") or fail_doc.claimNumber
         patient_name = updated_fields.get("patient_name") or fail_doc.patientName
@@ -758,6 +842,7 @@ class WebhookService:
         gcs_url = fail_doc.gcsFileLink
         blob_path = fail_doc.blobPath
         file_hash = fail_doc.fileHash
+        mode = "wc"  # Default mode, you can extract from fail_doc if available
 
         # Construct webhook-like data
         result_data = {
@@ -774,217 +859,121 @@ class WebhookService:
             "document_id": f"update_fail_{fail_doc.id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         }
 
-        webhook_data = {
-            "result": result_data,
-            "filename": filename,
-            "gcs_url": gcs_url,
-            "blob_path": blob_path,
-            "physician_id": physician_id,
-            "file_size": 0,
-            "mime_type": "application/octet-stream",
-            "processing_time_ms": 0,
-            "file_hash": file_hash,
-            "user_id": user_id,
-            "document_id": str(fail_doc.id)
-        }
+       
 
-        # Step 1: Process document data
-        processed_data = await self.process_document_data(webhook_data)
+        try:
+            # Step 1: Process document data through BOTH EnhancedReportAnalyzer and ReportAnalyzer
+            logger.info(f"🔄 Processing failed document through LLM analysis: {fail_doc.id}")
+            
+            # Generate long summary using ReportAnalyzer (same as process_document_data)
+            report_analyzer = ReportAnalyzer(mode)
+            report_result = await asyncio.to_thread(
+                report_analyzer.extract_document,
+                document_text
+            )
+            
+            # ✅ STORE THE ACTUAL REPORT ANALYZER RESULT
+            long_summary = report_result.get("long_summary", "")
+            short_summary = report_result.get("short_summary", "")
+            
+            logger.info(f"✅ Generated long summary: {len(long_summary)} chars")
+            logger.info(f"✅ Generated short summary: {short_summary}")
+            
+            # Use EnhancedReportAnalyzer for detailed analysis
+            analyzer = EnhancedReportAnalyzer()
+            
+            # Run analysis and summary generation in parallel
+            analysis_task = asyncio.create_task(
+                asyncio.to_thread(
+                    analyzer.extract_document_data_with_reasoning, 
+                    long_summary,    # Use summary for analysis
+                    None,            # page_zones
+                    None,            # raw_text  
+                    mode             # mode
+                )
+            )
+            
+            summary_task = asyncio.create_task(
+                asyncio.to_thread(analyzer.generate_brief_summary, long_summary, mode)
+            )
+            
+            # Wait for both to complete
+            document_analysis, brief_summary = await asyncio.gather(analysis_task, summary_task)
+            
+            # Override with updated fields from the user
+            if updated_fields.get("patient_name") and str(updated_fields["patient_name"]).lower() != "not specified":
+                document_analysis.patient_name = updated_fields["patient_name"]
+                logger.info(f"✅ Overridden patient_name: {updated_fields['patient_name']}")
+            
+            if updated_fields.get("dob") and str(updated_fields["dob"]).lower() != "not specified":
+                document_analysis.dob = updated_fields["dob"]
+                logger.info(f"✅ Overridden DOB: {updated_fields['dob']}")
+            
+            if updated_fields.get("doi") and str(updated_fields["doi"]).lower() != "not specified":
+                document_analysis.doi = updated_fields["doi"]
+                logger.info(f"✅ Overridden DOI: {updated_fields['doi']}")
+            
+            if updated_fields.get("claim_number") and str(updated_fields["claim_number"]).lower() != "not specified":
+                document_analysis.claim_number = updated_fields["claim_number"]
+                logger.info(f"✅ Overridden claim_number: {updated_fields['claim_number']}")
 
-        # Override with updated fields
-        document_analysis = processed_data["document_analysis"]
-        if updated_fields.get("patient_name") and str(updated_fields["patient_name"]).lower() != "not specified":
-            document_analysis.patient_name = updated_fields["patient_name"]
-        if updated_fields.get("dob") and str(updated_fields["dob"]).lower() != "not specified":
-            document_analysis.dob = updated_fields["dob"]
-        if updated_fields.get("doi") and str(updated_fields["doi"]).lower() != "not specified":
-            document_analysis.doi = updated_fields["doi"]
-        if updated_fields.get("claim_number") and str(updated_fields["claim_number"]).lower() != "not specified":
-            document_analysis.claim_number = updated_fields["claim_number"]
-
-        # Re-parse dates after overrides
-        dob = document_analysis.dob if document_analysis.dob and str(document_analysis.dob).lower() != "not specified" else "Not specified"
-        rd = document_analysis.rd if document_analysis.rd and str(document_analysis.rd).lower() != "not specified" else "Not specified"
-        doi = document_analysis.doi if document_analysis.doi and str(document_analysis.doi).lower() != "not specified" else "Not specified"
-
-        # Parse DOB for query
-        dob_for_query = None
-        if dob and dob.lower() != "not specified":
-            try:
-                dob_for_query = datetime.strptime(dob, "%Y-%m-%d")
-            except ValueError:
-                has_date_reasoning = processed_data["has_date_reasoning"]
-                if has_date_reasoning:
-                    for date_str in document_analysis.date_reasoning.extracted_dates:
-                        try:
-                            dob_for_query = datetime.strptime(date_str, "%Y-%m-%d")
-                            logger.info(f"🔄 Used alternative date from reasoning for DOB: {date_str}")
-                            break
-                        except ValueError:
-                            continue
-
-        # Parse RD for DB (using 2025 as current year per route spec)
-        rd_for_db = None
-        if rd.lower() != "not specified":
-            try:
-                if '/' in rd:
-                    month, day = rd.split('/')
-                    year = 2025
-                    full_date_str = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-                elif '-' in rd:
-                    full_date_str = rd
-                else:
-                    raise ValueError("Invalid date format")
-                rd_for_db = datetime.strptime(full_date_str, "%Y-%m-%d")
-            except (ValueError, AttributeError):
-                has_date_reasoning = processed_data["has_date_reasoning"]
-                if has_date_reasoning:
-                    for date_str in document_analysis.date_reasoning.extracted_dates:
-                        try:
-                            rd_for_db = datetime.strptime(date_str, "%Y-%m-%d")
-                            logger.info(f"🔄 Used reasoning date for RD fallback: {date_str}")
-                            break
-                        except ValueError:
-                            continue
-
-        # Update processed_data
-        processed_data.update({
-            "dob": dob,
-            "doi": doi,
-            "dob_for_query": dob_for_query,
-            "rd_for_db": rd_for_db
-        })
-
-        # Ensure lookup-related processed fields reflect any overrides provided in updated_fields
-        # so that perform_patient_lookup uses the new claim/patient values
-        processed_data["claim_number_for_query"] = (
-            document_analysis.claim_number
-            if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified"
-            else None
-        )
-        processed_data["has_claim_number"] = bool(processed_data["claim_number_for_query"])
-        processed_data["patient_name_for_query"] = (
-            document_analysis.patient_name
-            if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified"
-            else None
-        )
-        processed_data["has_patient_name"] = bool(processed_data["patient_name_for_query"])
-
-        # Step 2: Perform patient lookup
-        lookup_result = await self.perform_patient_lookup(db_service, processed_data, physician_id)
-
-        # Step 3: Compare and determine status
-        status_result = await self.compare_and_determine_status(processed_data, lookup_result, db_service, physician_id)
-
-        # Integrate route-specific claim logic
-        claim_numbers_response = await db_service.get_patient_claim_numbers(
-            patient_name=lookup_result["updated_patient_name_for_query"],
-            physicianId=physician_id,
-            dob=processed_data["dob_for_query"]
-        )
-        claim_numbers_list = claim_numbers_response.get('claim_numbers', []) if isinstance(claim_numbers_response, dict) else claim_numbers_response if isinstance(claim_numbers_response, list) else []
-        claim_numbers_list = list(set(claim_numbers_list))
-        valid_claims_list = [c for c in claim_numbers_list if c and str(c).lower() != 'not specified']
-        has_new_claim = document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified"
-        previous_docs_count = len(lookup_result["lookup_data"].get("documents", []))
-
-        claim_to_use = None
-        claim_pending_reason = None
-        if has_new_claim:
-            claim_to_use = document_analysis.claim_number
-            logger.info(f"ℹ️ Using extracted claim '{claim_to_use}' for patient '{document_analysis.patient_name}'")
-        else:
-            if previous_docs_count == 0:
-                claim_to_use = "Not specified"
-                logger.info(f"ℹ️ First document for patient '{document_analysis.patient_name}': No claim specified, proceeding as OK")
-            elif len(valid_claims_list) == 0 and previous_docs_count > 0:
-                claim_to_use = None
-                claim_pending_reason = "No claim number specified and previous documents exist without valid claim"
-                logger.warning(f"⚠️ {claim_pending_reason} for file {filename}")
-            elif len(valid_claims_list) == 1:
-                claim_to_use = valid_claims_list[0]
-                logger.info(f"ℹ️ Using single previous valid claim '{claim_to_use}' for patient '{document_analysis.patient_name}'")
-            else:
-                claim_to_use = None
-                claim_pending_reason = "No claim number specified and multiple previous valid claims found"
-                logger.warning(f"⚠️ {claim_pending_reason} for file {filename}")
-
-        # Update status_result based on claim logic
-        if claim_to_use is None:
-            status_result["document_status"] = "failed"
-            status_result["pending_reason"] = claim_pending_reason or status_result["pending_reason"]
-            status_result["claim_to_save"] = "Not specified"
-        else:
-            status_result["claim_to_save"] = claim_to_use
-            # Override to success if claim resolved, unless other issues
-            pr = status_result.get("pending_reason") or ""
-            if status_result.get("document_status") == "failed" and (
-                "Missing required fields" in pr or
-                "Multiple conflicting claim numbers" in pr
-            ):
-                # If the pending_reason is a textual match (even with appended lists), accept the provided claim
-                status_result["document_status"] = "success"
-                status_result["pending_reason"] = None
-
-        document_status = status_result["document_status"]
-        pending_reason = status_result["pending_reason"]
-
-        # Early return on failure
-        if document_status == "failed":
-            logger.info(f"📡 Failed event processed for document: {fail_doc.id}")
-
-            return {
-                "status": "failed",
+            # Prepare processed_data similar to process_document_data
+            processed_data = {
+                "document_analysis": document_analysis,
+                "brief_summary": brief_summary,
+                "text_for_analysis": document_text,
+                "report_analyzer_result": report_result,
+                "patient_name": document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else None,
+                "claim_number": document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else None,
+                "dob": document_analysis.dob if hasattr(document_analysis, 'dob') and document_analysis.dob and str(document_analysis.dob).lower() != "not specified" else None,
+                "has_patient_name": bool(document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified"),
+                "has_claim_number": bool(document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified"),
+                "physician_id": physician_id,
+                "user_id": user_id,
+                "filename": filename,
+                "gcs_url": gcs_url,
+                "blob_path": blob_path,
+                "file_size": 0,
+                "mime_type": "application/octet-stream",
+                "processing_time_ms": 0,
+                "file_hash": file_hash,
+                "result_data": result_data,
                 "document_id": str(fail_doc.id),
-                "reason": pending_reason,
-                "pending_reason": pending_reason
+                "mode": mode
             }
 
-        # Step 4: Save and process (service handles saving, tasks, previous updates, emit)
-        save_result = await self.save_and_process_document(processed_data, status_result, webhook_data, db_service)
-
-        # Additional: Update previous claims if new claim provided
-        dob_str_for_query = None
-        if processed_data["dob_for_query"]:
-            dob_str_for_query = processed_data["dob_for_query"].strftime("%Y-%m-%d")
-
-        should_update_previous_claims = (
-            has_new_claim and
-            status_result["patient_name_to_use"] != "Not specified" and
-            dob_str_for_query is not None
-        )
-
-        if should_update_previous_claims:
-            db_response = await db_service.get_all_unverified_documents(
-                patient_name=status_result["patient_name_to_use"],
-                physicianId=physician_id,
-                claimNumber=None,
-                dob=processed_data["dob_for_query"]
-            )
-            previous_documents = db_response.get('documents', []) if db_response else []
-
-            has_null_claim_docs = any(
-                doc.get('claim_number') is None or str(doc.get('claim_number', '')).lower() == 'not specified'
-                for doc in previous_documents
-            )
-
-            if has_null_claim_docs:
-                await db_service.update_previous_fields(
-                    patient_name=status_result["patient_name_to_use"],
-                    dob=dob_str_for_query,
-                    physician_id=physician_id,
-                    claim_number=claim_to_use
+            # Step 2: Perform patient lookup with the updated data
+            logger.info("🔍 Performing patient lookup for updated failed document...")
+            lookup_result = await self.perform_patient_lookup(db_service, processed_data)
+            
+            # Step 3: Save document to database
+            logger.info("💾 Saving updated document to database...")
+            save_result = await self.save_document(db_service, processed_data, lookup_result)
+            
+            # Step 4: Create tasks if needed
+            tasks_created = 0
+            if save_result["document_id"] and save_result["status"] != "failed":
+                tasks_created = await self.create_tasks_if_needed(
+                    processed_data["document_analysis"],
+                    save_result["document_id"],
+                    processed_data["physician_id"],
+                    processed_data["filename"]
                 )
-                logger.info(f"🔄 Updated previous documents' claim numbers for patient '{status_result['patient_name_to_use']}' using claim '{claim_to_use}'")
+                save_result["tasks_created"] = tasks_created
+
+            # Step 5: Delete the FailDoc only if successful
+            if save_result["status"] != "failed" and save_result["document_id"]:
+                await db_service.delete_fail_doc(fail_doc.id)
+                logger.info(f"🗑️ Deleted fail doc {fail_doc.id} after successful update")
+                logger.info(f"📡 Success event processed for document: {save_result['document_id']}")
             else:
-                logger.info(f"ℹ️ No previous documents with null claims for patient '{status_result['patient_name_to_use']}; skipping update")
-        else:
-            logger.info(f"ℹ️ Skipping previous claim update: has_new_claim={has_new_claim}, patient={status_result['patient_name_to_use']}, has_dob={dob_str_for_query is not None}")
+                logger.warning(f"⚠️ Failed document update unsuccessful, keeping fail doc {fail_doc.id}")
+                # Optionally update the fail doc with the new failure reason
+                if save_result.get("failure_reason"):
+                    logger.info(f"📝 Updating fail doc reason: {save_result['failure_reason']}")
 
-        # Delete the FailDoc
-        await db_service.delete_fail_doc(fail_doc.id)
-        logger.info(f"🗑️ Deleted fail doc {fail_doc.id} after successful update")
+            return save_result
 
-        logger.info(f"📡 Success event processed for document: {save_result['document_id']}")
-
-        return save_result
+        except Exception as e:
+            logger.error(f"❌ Failed to update fail document {fail_doc.id}: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Update fail document processing failed: {str(e)}")
