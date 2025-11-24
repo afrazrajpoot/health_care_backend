@@ -60,8 +60,7 @@ class FormalMedicalReportExtractor:
         text: str,
         doc_type: str,
         fallback_date: str,
-        page_zones: Optional[Dict[str, Dict[str, str]]] = None,
-        raw_text: Optional[str] = None
+    
     ) -> Dict:
         """
         Extract Formal Medical Report data with FULL CONTEXT.

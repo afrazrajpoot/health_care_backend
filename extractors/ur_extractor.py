@@ -59,7 +59,7 @@ class DecisionDocumentExtractor:
         text: str,
         doc_type: str,
         fallback_date: str,
-        raw_text: Optional[str] = None
+   
     ) -> Dict:
         """
         Extract Decision Document data with FULL CONTEXT.

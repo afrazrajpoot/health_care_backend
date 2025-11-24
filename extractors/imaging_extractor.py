@@ -53,8 +53,7 @@ class ImagingExtractorChained:
         text: str,
         doc_type: str,
         fallback_date: str,
-        page_zones: Optional[Dict[str, Dict[str, str]]] = None,
-        raw_text: Optional[str] = None
+ 
     ) -> Dict:
         """
         Extract imaging data with FULL CONTEXT and 6-field focus.
@@ -64,7 +63,6 @@ class ImagingExtractorChained:
             text: Complete document text (layout-preserved)
             doc_type: Document type (MRI, CT, X-ray, Ultrasound, etc.)
             fallback_date: Fallback date if not found
-            page_zones: Per-page zone extraction
             raw_text: Original flat text (optional)
         """
         
@@ -76,7 +74,7 @@ class ImagingExtractorChained:
         
         try:
             # Step 1: Directly generate long summary with full context (no intermediate extraction)
-            long_summary = self._generate_long_summary_direct(text, doc_type, fallback_date, page_zones)
+            long_summary = self._generate_long_summary_direct(text, doc_type, fallback_date)
             
             # Step 2: Generate short summary from long summary (like QME extractor)
             short_summary = self._generate_short_summary_from_long_summary(long_summary)
@@ -103,7 +101,7 @@ class ImagingExtractorChained:
                 "short_summary": "Imaging summary not available"
             }
 
-    def _generate_long_summary_direct(self, text: str, doc_type: str, fallback_date: str, page_zones: Optional[Dict] = None) -> str:
+    def _generate_long_summary_direct(self, text: str, doc_type: str, fallback_date: str) -> str:
         """Directly generate raw imaging data using LLM with full context and integrated author detection"""
         # Build system prompt with 6-field imaging focus, including instructions for detecting the signing author
         system_prompt = SystemMessagePromptTemplate.from_template("""

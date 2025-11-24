@@ -167,7 +167,7 @@ class ReportAnalyzer:
                 text=text,
                 doc_type=doctype.value,
                 fallback_date=fallback_date,
-                raw_text=text  # Explicitly pass raw text
+         
             )
             if isinstance(qme_result, dict):
                 return qme_result
@@ -185,7 +185,7 @@ class ReportAnalyzer:
                 text=text,
                 doc_type=doctype.value,
                 fallback_date=fallback_date,
-                raw_text=text  # Explicitly pass raw text
+            
             )
             if isinstance(decision_result, dict):
                 return decision_result
@@ -210,7 +210,7 @@ class ReportAnalyzer:
                 text=text,
                 doc_type=doctype.value,
                 fallback_date=fallback_date,
-                raw_text=text  # Explicitly pass raw text
+                # raw_text=text  # Explicitly pass raw text
             )
             if isinstance(formal_medical_result, dict):
                 return formal_medical_result
@@ -233,7 +233,7 @@ class ReportAnalyzer:
                 text=text,
                 doc_type=doctype.value,
                 fallback_date=fallback_date,
-                raw_text=text  # Explicitly pass raw text
+             
             )
             if isinstance(clinical_note_result, dict):
                 return clinical_note_result
@@ -258,7 +258,7 @@ class ReportAnalyzer:
                 text=text,
                 doc_type=doctype.value,
                 fallback_date=fallback_date,
-                raw_text=text  # Explicitly pass raw text
+     
             )
             if isinstance(administrative_result, dict):
                 return administrative_result
@@ -278,7 +278,7 @@ class ReportAnalyzer:
                 text=text,
                 doc_type=doctype.value,
                 fallback_date=fallback_date,
-                raw_text=text  # Explicitly pass raw text
+                # raw_text=text  # Explicitly pass raw text
             )
             return self._convert_extraction_result_to_dict(imaging_result, fallback_date)
         
@@ -289,7 +289,7 @@ class ReportAnalyzer:
                 text=text,
                 doc_type=doctype.value,
                 fallback_date=fallback_date,
-                raw_text=text  # Explicitly pass raw text
+          
             )
             return self._convert_extraction_result_to_dict(pr2_result, fallback_date)
         

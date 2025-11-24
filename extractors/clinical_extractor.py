@@ -62,7 +62,7 @@ class ClinicalNoteExtractor:
         text: str,
         doc_type: str,
         fallback_date: str,
-        raw_text: Optional[str] = None
+   
     ) -> Dict:
         """
         Extract Clinical Note data with FULL CONTEXT.

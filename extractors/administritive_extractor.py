@@ -62,7 +62,7 @@ class AdministrativeExtractor:
         text: str,
         doc_type: str,
         fallback_date: str,
-        raw_text: Optional[str] = None
+    
     ) -> Dict:
         """
         Extract Administrative Document data with FULL CONTEXT.
