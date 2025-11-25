@@ -126,22 +126,17 @@ class WebhookService:
         analyzer = EnhancedReportAnalyzer()
         
         # Run analysis and summary generation in parallel
-        analysis_task = asyncio.create_task(
-            asyncio.to_thread(
-                analyzer.extract_document_data_with_reasoning, 
+        analysis_task = analyzer.extract_document_data_with_reasoning(
                 long_summary,    # Use summary for analysis
                 None,            # page_zones
                 None,            # raw_text  
                 mode             # mode
             )
-        )
         
-        summary_task = asyncio.create_task(
-            asyncio.to_thread(analyzer.generate_brief_summary, long_summary, mode)
-        )
+        summary_task = analyzer.generate_brief_summary(long_summary, mode)
         
         # Wait for both to complete
-        document_analysis, brief_summary = await asyncio.gather(analysis_task, summary_task)
+        document_analysis, brief_summary = await analysis_task, summary_task
         
         # Prepare data for patient lookup
         patient_name = document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else None
