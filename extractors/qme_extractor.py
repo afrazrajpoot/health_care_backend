@@ -315,6 +315,9 @@ class QMEExtractorChained:
     - **Report Type:** [QME/AME/IME]
     - **Report Date:** [extracted date]
     - **Evaluating Physician:** [extracted physician name and credentials]
+    Author:
+    hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
+    • Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
 
     ## DIAGNOSIS
     - Primary diagnoses with affected body parts
@@ -396,30 +399,30 @@ Generate the comprehensive long summary now following all the rules above.
                 return self._get_fallback_summary(doc_type, fallback_date)
 
     def _generate_short_summary_from_long_summary(self, long_summary: str, mode: str) -> str:
-            """
-            Generate a precise 30–60 word, pipe-delimited actionable summary in key-value format using LLM, tailored to mode.
-            """
-            logger.info(f"🎯 Generating LLM-based short summary tailored to mode: {mode.upper()} (30-60 words)...")
+        """
+        Generate a precise 30–60 word, pipe-delimited actionable summary in key-value format using LLM, tailored to mode.
+        """
+        logger.info(f"🎯 Generating LLM-based short summary tailored to mode: {mode.upper()} (30-60 words)...")
 
-            mode_focus = ""
-            if mode.lower() == "gm":
-                mode_focus = """
+        mode_focus = ""
+        if mode.lower() == "gm":
+            mode_focus = """
     MODE: GENERAL MEDICINE (GM)
     - Focus on: Diagnosis, Pain/Clinical Status, Medications, Treatment Recommendations
     - Keys: Diagnosis | Clinical Status | Medications | Recommendations
     - Clinical emphasis, actionable for care planning
     """
-            elif mode.lower() == "wc":
-                mode_focus = """
+        elif mode.lower() == "wc":
+            mode_focus = """
     MODE: WORKERS COMPENSATION (WC)
     - Focus on: MMI/WPI, Work Restrictions, Impairment, Claim-Relevant Recommendations
     - Keys: MMI Status | WPI | Work Status | Legal Recommendations
     - Legal/claims emphasis, concise for adjusters
     """
-            else:
-                mode_focus = "MODE: DEFAULT - Balanced clinical and legal keys"
+        else:
+            mode_focus = "MODE: DEFAULT - Balanced clinical and legal keys"
 
-            system_prompt = SystemMessagePromptTemplate.from_template(f"""
+        system_prompt = SystemMessagePromptTemplate.from_template(f"""
     You are a medical-legal extraction specialist generating mode-tailored short summaries.
 
     {mode_focus}
@@ -428,57 +431,96 @@ Generate the comprehensive long summary now following all the rules above.
     1. Word count MUST be between **30 and 60 words** (min 30, max 60).
     2. Format MUST be EXACTLY a single pipe-delimited line:
 
-    [Report Title] | [Author] | Date:[value] | [Mode-Specific Keys from above] | Critical Finding:[value]
+    [Report Title] | [Author] | Date:[value] | Body Parts:[value] | Diagnosis:[value] | Physical Examination:[value (only critical findings or abnormalities else skip)] | Critical Finding:[value (only abnormalities) if applicable] | Follow-up:[value] | Recommendations:[value] | Work Status:[value] | MMI Status:[value] | WPI:[value] | Medications:[value]
 
     3. DO NOT fabricate or infer missing data — simply SKIP entire key-value pairs that do not exist.
     4. Use ONLY information explicitly found in the long summary.
     5. Output must be a SINGLE LINE (no line breaks).
-    6. Prioritize mode-specific keys first, then general (Body Parts, Diagnosis if not covered).
-    7. ABSOLUTE NO: assumptions, clinical interpretation, invented data, narrative sentences.
-    8. If a field is missing, SKIP THE ENTIRE KEY-VALUE PAIR—do NOT include empty pairs.
+    6. Prioritize mode-specific keys first, then general (Body Parts, Diagnosis).
+    7. ABSOLUTELY NO: assumptions, invented data, narrative sentences.
+    8. If a field is missing, SKIP THE ENTIRE KEY-VALUE PAIR—do NOT include empty pairs OR placeholders like:
+    - "not included"
+    - "not listed"
+    - "no abnormalities detected"
+    - "not provided"
+    - "not discussed"
+
+    ABSOLUTELY FORBIDDEN:
+- Normal findings (ignore them entirely)
+- assumptions, interpretations, invented medications, or inferred diagnoses
+- placeholder text or "Not provided"
+- narrative writing
+- duplicate pipes or empty pipe fields (e.g., "||")
+- any patient details (patient name, DOB, ID)
 
     Your final output must be 30–60 words and MUST follow the exact format.
-            """)
+        """)
 
-            user_prompt = HumanMessagePromptTemplate.from_template("""
+        user_prompt = HumanMessagePromptTemplate.from_template("""
     LONG SUMMARY:
 
     {long_summary}
 
     Now produce the 30–60 word single-line summary following the strict mode-tailored rules.
-            """)
+        """)
 
-            chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
+        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
 
-            try:
-                chain = chat_prompt | self.llm
-                response = chain.invoke({"long_summary": long_summary})
-                summary = response.content.strip()
+        try:
+            chain = chat_prompt | self.llm
+            response = chain.invoke({"long_summary": long_summary})
+            summary = response.content.strip()
 
-                # Clean whitespace only
-                summary = re.sub(r'\s+', ' ', summary).strip()
+            # Clean whitespace only
+            summary = re.sub(r'\s+', ' ', summary).strip()
 
-                # Word count check
-                wc = len(summary.split())
-                if wc < 30 or wc > 60:
-                    logger.warning(f"⚠️ Summary outside word limit ({wc} words). Attempting auto-fix.")
-                    fix_prompt = ChatPromptTemplate.from_messages([
-                        SystemMessagePromptTemplate.from_template(
-                            f"Your previous summary had {wc} words. Rewrite it to be STRICTLY between 30 and 60 words while preserving accuracy, mode focus, and format. DO NOT add invented data."
-                        ),
-                        HumanMessagePromptTemplate.from_template(summary)
-                    ])
-                    chain2 = fix_prompt | self.llm
-                    fixed = chain2.invoke({})
-                    summary = re.sub(r'\s+', ' ', fixed.content.strip())
-                    logger.info(f"🔧 Fixed summary word count: {len(summary.split())} words")
+            # 🚀 Extra Cleanup: Remove any "not included / not provided / no X" pairs
+            forbidden_phrases = [
+                "not included", "not listed", "not provided", "not discussed",
+                "no abnormalities detected", "no critical findings", "none", "N/A"
+            ]
 
-                logger.info(f"✅ Final short summary: {len(summary.split())} words")
-                return summary
+            segments = [seg.strip() for seg in summary.split("|")]
+            cleaned_segments = []
 
-            except Exception as e:
-                logger.error(f"❌ Short summary generation failed: {e}")
-                return "Summary unavailable due to processing error."
+            for seg in segments:
+                if any(bad in seg.lower() for bad in forbidden_phrases):
+                    continue  # skip this key-value entirely
+                cleaned_segments.append(seg)
+
+            summary = " | ".join(cleaned_segments).strip()
+
+            # Word count check
+            wc = len(summary.split())
+            if wc < 30 or wc > 60:
+                logger.warning(f"⚠️ Summary outside word limit ({wc} words). Attempting auto-fix.")
+                fix_prompt = ChatPromptTemplate.from_messages([
+                    SystemMessagePromptTemplate.from_template(
+                        f"Your previous summary had {wc} words. Rewrite it to be STRICTLY between 30 and 60 words while preserving accuracy, mode focus, exact format, and skipping missing keys."
+                    ),
+                    HumanMessagePromptTemplate.from_template(summary)
+                ])
+                chain2 = fix_prompt | self.llm
+                fixed = chain2.invoke({})
+                summary = re.sub(r'\s+', ' ', fixed.content.strip())
+
+                # Remove placeholders after fix as well
+                segments = [seg.strip() for seg in summary.split("|")]
+                cleaned_segments = []
+                for seg in segments:
+                    if any(bad in seg.lower() for bad in forbidden_phrases):
+                        continue
+                    cleaned_segments.append(seg)
+                summary = " | ".join(cleaned_segments).strip()
+
+                logger.info(f"🔧 Fixed summary word count: {len(summary.split())} words")
+
+            logger.info(f"✅ Final short summary: {len(summary.split())} words")
+            return summary
+
+        except Exception as e:
+            logger.error(f"❌ Short summary generation failed: {e}")
+            return "Summary unavailable due to processing error."
 
     def _get_fallback_summary(self, doc_type: str, fallback_date: str) -> str:
         """Fallback summary when processing fails"""

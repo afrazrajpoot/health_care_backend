@@ -181,6 +181,10 @@ Exam Type: [extracted]
 Radiologist: [name]
 Imaging Center: [extracted]
 Referring Physician: [extracted]
+Author:
+hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
+
 
  ## PATIENT INFORMATION
     - **Name:** [extracted name]
@@ -323,7 +327,7 @@ Specialist Consultation: [extracted]
     1. Word count MUST be **between 30 and 60 words**.
     2. Output format MUST be EXACTLY:
 
-    [Report Title] | [Radiologist] | [Study Date] | Body Parts:[value] | Findings:[value] | Impression:[value] | Comparison:[value] | Critical Finding:[value] | Recommendations:[value]
+    [Report Title] | [Radiologist/Physician] | [Study Date] | Body Parts:[value] | Findings:[value] | Impression:[value] | Comparison:[value] | Critical Finding:[value] | Recommendations:[value]
 
     FORMAT & RULES:
     - MUST be **30–60 words**.

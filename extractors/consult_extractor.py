@@ -173,6 +173,10 @@ Primary Complaint: [extracted]
 Location: [extracted]
 Duration: [extracted]
 Radiation Pattern: [extracted]
+Author:
+hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
+
 
 🏥 DIAGNOSIS & ASSESSMENT
 --------------------------------------------------
@@ -325,49 +329,54 @@ Return to Work Plan: [extracted]
         logger.info("🎯 Generating 30–60 word consultation structured summary (key-value format)...")
 
         system_prompt = SystemMessagePromptTemplate.from_template("""
-    You are a medical-legal consultation specialist.
+You are a medical-legal consultation specialist.
 
-    TASK:
-    Create a concise, factual consultation summary using ONLY information explicitly stated in the long summary.
+TASK:
+Create a concise, factual consultation summary using ONLY information explicitly stated in the long summary.
+Include ONLY abnormal, critical, or clinically significant findings. Skip normal or non-critical findings entirely.
 
-    STRICT REQUIREMENTS:
-    1. Word count MUST be **between 30 and 60 words**.
-    2. Output format MUST be EXACTLY:
+STRICT REQUIREMENTS:
+1. Word count MUST be **between 30 and 60 words**.
+2. Output format MUST be EXACTLY:
 
-    [Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Key Findings:[value] | Medication:[value] | Treatments:[value] | Clinical Assessment:[value] | Plan:[value] | MMI Status:[value] | Work Status:[value] | Critical Finding:[value]
+[Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Key Findings:[value] | Medication:[value] | Treatments:[value] | Clinical Assessment:[value] | Plan:[value] | MMI Status:[value] | Work Status:[value] | Critical Finding:[value]
 
-    FORMAT & RULES:
-    - MUST be **30–60 words**.
-    - MUST be **ONE LINE**, pipe-delimited, no line breaks.
-    - NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
-    - NEVER fabricate: no invented dates, meds, findings, or recommendations.
-    - NO narrative sentences. Use short factual fragments ONLY.
-    - First three fields (Report Title, Author, Date) appear without keys
-    - All other fields use key-value format: Key:[value]
+KEY RULES:
+- ONLY include abnormal or critical findings.
+- If a value is missing or not extractable, omit the ENTIRE key-value pair.
+- NEVER output empty fields or placeholder text.
+- NEVER fabricate dates, meds, findings, or recommendations.
+- NO narrative sentences; use short factual fragments.
+- First three fields (Report Title, Author, Date) appear without keys.
+- All other fields use key-value format: Key:[value].
+- Key Findings and Physical Exam details include **only abnormalities or critical observations**.
+- Medications, Treatments, Plan, MMI Status, Work Status included only if explicitly stated in the summary.
 
-    CONTENT PRIORITY (only if provided in the long summary):
-    1. Report Title  
-    2. Author  
-    3. Visit Date  
-    4. Body parts  
-    5. Diagnosis  
-    6. Key objective findings  
-    7. Medications  
-    8. Treatments provided  
-    9. Clinical assessment  
-    10. Plan/next steps  
-    11. MMI status  
-    12. Work status  
-    13. Critical finding
+CONTENT PRIORITY (only if abnormal/critical and provided):
+1. Report Title  
+2. Author  
+3. Date  
+4. Abnormal Body Parts  
+5. Abnormal Diagnosis  
+6. Key objective findings (abnormal only)  
+7. Medications (explicit only)  
+8. Treatments provided (explicit only)  
+9. Clinical Assessment (abnormal/critical)  
+10. Plan/Next Steps (explicit)  
+11. MMI status (if abnormal or stated)  
+12. Work status (if abnormal or stated)  
+13. Critical finding
 
-    ABSOLUTELY FORBIDDEN:
-    - assumptions, interpretations, invented medications, or inferred diagnoses
-    - narrative writing
-    - placeholder text or "Not provided"
-    - duplicate pipes or empty pipe fields (e.g., "||")
+ABSOLUTELY FORBIDDEN:
+- Normal findings (ignore entirely)
+- Assumptions, interpretations, inferred diagnoses
+- Patient details (name, DOB, claim, MRN, etc.)
+- Narrative writing
+- Placeholder text or "Not provided"
+- Duplicate or empty pipes (||)
 
-    Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
-    """)
+Your final output MUST be between 30–60 words, single-line, pipe-delimited, and contain ONLY explicitly provided abnormal or critical information.
+""")
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
     CONSULTATION LONG SUMMARY:

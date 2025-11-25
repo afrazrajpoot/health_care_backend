@@ -284,7 +284,9 @@ From: [sender name]
   Title: [extracted]
 To: [recipient name]
   Organization: [extracted]
-Report Author/Signer: [author name, title, signature details if extracted]
+Author:
+hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
 Legal Representation: [attorney name]
   Firm: [extracted]
 
@@ -429,39 +431,44 @@ STRICT REQUIREMENTS:
 
 [Document Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Medication:[value] | MMI Status:[value] | Work Status:[value] | Restrictions:[value] | Action Items:[value] | Critical Finding:[value] | Follow-up:[value]
 
+NEW KEY RULES (IMPORTANT):
+- **ONLY include abnormalities or pathological findings. Skip normal findings entirely.**
+- **If a value is not extracted, omit the ENTIRE key-value pair.**
+- **Never output an empty key, an empty value, or placeholders.**
+- **No duplicate pipes, no empty pipes (no '||').**
+
 FORMAT & RULES:
 - MUST be **30–60 words**.
 - MUST be **ONE LINE**, pipe-delimited, no line breaks.
-- NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
-- NEVER fabricate: no invented dates, meds, restrictions, or findings.
-- NO narrative sentences. Use short factual fragments ONLY.
-- First three fields (Document Title, Author, Date) appear without keys
-- All other fields use key-value format: Key:[value]
-- Author refers to the report author/signer explicitly stated in the long summary
-- DO NOT include patient details (name, DOB, ID) in any field
+- First three fields (Document Title, Author, Date) appear without keys.
+- All other fields use key-value format: Key:[value].
+- DO NOT include patient details (name, DOB, ID).
+- NEVER fabricate any information or infer abnormalities.
 
-CONTENT PRIORITY (only if provided in the long summary):
-1. Document Title  
-2. Author (report signer)  
-3. Document Date  
-4. Body parts  
-5. Diagnosis  
-6. Medications  
-7. MMI status  
-8. Work status & restrictions  
-9. Key action items  
-10. Critical finding  
+CONTENT PRIORITY (ONLY IF ABNORMAL AND PRESENT IN THE SUMMARY):
+1. Document Title
+2. Author
+3. Date
+4. Abnormal body parts or injury locations
+5. Abnormal diagnoses
+6. Medications (only if explicitly listed)
+7. MMI status (only if explicitly stated)
+8. Work status & restrictions (only if abnormal)
+9. Action items (only if they indicate issues)
+10. Critical findings
 11. Follow-up requirements
 
 ABSOLUTELY FORBIDDEN:
+- Normal findings (ignore them entirely)
 - assumptions, interpretations, invented medications, or inferred diagnoses
-- narrative writing
 - placeholder text or "Not provided"
+- narrative writing
 - duplicate pipes or empty pipe fields (e.g., "||")
-- any patient details (e.g., patient name, DOB, ID)
+- any patient details (patient name, DOB, ID)
 
 Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
 """)
+
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
 LONG ADMINISTRATIVE SUMMARY:
@@ -503,6 +510,8 @@ Now produce a 30–60 word administrative structured summary following ALL rules
         except Exception as e:
             logger.error(f"❌ Administrative summary generation failed: {e}")
             return "Summary unavailable due to processing error."
+    
+    
     def _create_admin_fallback_summary(self, long_summary: str, doc_type: str) -> str:
         """Create comprehensive fallback administrative summary directly from long summary"""
         

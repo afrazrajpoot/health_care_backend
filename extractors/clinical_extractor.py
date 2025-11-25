@@ -337,6 +337,10 @@ Facility: [extracted]
 Treating Provider: [name, e.g., Radiologist or Referring]
   Credentials: [extracted]
   Specialty: [extracted]
+Author:
+hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
+
 
 🗣️ SUBJECTIVE FINDINGS
 --------------------------------------------------
@@ -511,50 +515,60 @@ Signer/Author:
         logger.info("🎯 Generating 30–60 word clinical structured summary (critical findings & abnormal actions only, strict author with type, Doc Type first)...")
 
         system_prompt = SystemMessagePromptTemplate.from_template("""
-    You are a clinical documentation specialist.
+You are a clinical documentation specialist.
 
-    TASK:
-    Create a concise, factual clinical summary using ONLY information explicitly present in the long summary.
-    Focus EXCLUSIVELY on critical findings and abnormal actions. NO patient details (name, DOB, etc.).
-    Include the signing author ONLY if explicitly stated in "SIGNATURE & AUTHOR" section as signed, with type (Physical/Electronic).
+TASK:
+Create a concise, factual clinical summary using ONLY information explicitly present in the long summary.
+Include ONLY abnormal, critical, or non-normal findings. Skip normal findings entirely.
+Include the signing author ONLY if explicitly stated in the "SIGNATURE & AUTHOR" section with a Physical or Electronic signature.
 
-    STRICT REQUIREMENTS:
-    1. Word count MUST be **between 30 and 60 words**.
-    2. Output format MUST be EXACTLY:
+STRICT REQUIREMENTS:
+1. Word count MUST be **between 30 and 60 words**.
+2. Output format MUST be EXACTLY:
 
-    Doc Type:[value] | Author:[value] | Critical Findings:[value] | Abnormal Actions:[value]
+[Report Title] | Author  | Date:[value] | Physical Exam:[value] | Diagnosis:[value] | Critical Findings:[value] | Abnormal Actions:[value] | Medications:[value] | Work Status:[value] | Recommendation:[value] | Follow-up:[value]
 
-    FORMAT & RULES:
-    - MUST be **30–60 words**.
-    - MUST be **ONE LINE**, pipe-delimited, no line breaks.
-    - NEVER include empty fields. If a field is missing (e.g., no explicit signer), SKIP that key and remove its pipe.
-    - NEVER fabricate: no invented findings, actions, or recommendations.
-    - NO narrative sentences. Use short factual fragments ONLY.
-    - Key-value format: Key:[value] (values as comma-separated lists if multiple)
-    - Doc Type: Always include the document type as the first field (e.g., "Doc Type: Progress Note")
-    - Author: ONLY from "SIGNATURE & AUTHOR" if explicitly signed with signing language (e.g., "Electronic Signature: Dr. Smith" -> "Author: Dr. Smith (Electronic)"); skip if omitted or no signing phrase. CRITICAL: Do not assume signing from provider names alone.
-    - Critical Findings: Significant clinical changes, worsening symptoms, new abnormalities, progress setbacks
-    - Abnormal Actions: Unexpected treatment responses, adverse reactions, compliance issues, abnormal exam results
+KEY RULES (VERY IMPORTANT):
+- **ONLY include abnormal, critical, or clinically significant findings**.
+- **If a value is missing or cannot be extracted, omit the ENTIRE key-value pair.**
+- **Do NOT output empty fields, empty values, or placeholder text.**
+- **Do NOT output double pipes (`||`).**
+- NO hallucination. NO invented findings, meds, or follow-up.
+- MUST be **one single line**, pipe-delimited, no line breaks.
 
-    CONTENT PRIORITY (only if provided in the long summary, no patient info):
-    1. Doc Type: Always "{doc_type}"
-    2. Author ONLY if explicit signature with type and signing language (e.g., "Physical Signature: John Doe, MD" -> "Author: John Doe, MD (Physical)"); OMIT if no explicit signing
-    3. Critical clinical findings from "CRITICAL CLINICAL FINDINGS" section
-    4. Abnormal objective findings (e.g., reduced ROM, low strength)
-    5. Adverse treatment reactions
-    6. Functional declines or barriers
-    7. Compliance or abnormal patient responses
+FIELD DEFINITIONS:
+- Doc Type: Always include this field first → `Doc Type: {doc_type}`
+- Author: Only if explicitly signed with signature type  
+  ("Electronic Signature: Dr. Smith" → "Author: Dr. Smith")  
+  If there is no signature text, omit the entire field.
+- Critical Findings: Significant abnormal clinical findings, worsening conditions, flagged issues.
+- Abnormal Actions: Any abnormal interventions, adverse reactions, abnormal therapy responses, compliance issues.
+- Medications: ONLY meds explicitly mentioned; skip if none.
+- Physical Exam: ONLY abnormal exam findings (reduced ROM, weakness, swelling, tenderness, abnormal vitals).
+- Follow-up: ONLY if explicitly stated (return date, re-eval, imaging follow-up, specialist referral).
 
-    ABSOLUTELY FORBIDDEN:
-    - Patient details (name, DOB, demographics)
-    - Using provider/radiologist as author unless explicitly signed with type and signing phrase (e.g., NO: "Provider: Joshua" -> do not make "Author: Joshua (Electronic)")
-    - assumptions, interpretations, or inferred issues
-    - narrative writing
-    - placeholder text or "Not provided"
-    - duplicate pipes or empty pipe fields (e.g., "||")
+CONTENT PRIORITY (ONLY IF ABNORMAL AND PRESENT):
+1. Doc Type: Always included
+2. Author (only explicit signed)
+3. Critical Findings
+4. Abnormal objective findings
+5. Abnormal actions or responses
+6. Medications
+7. Physical Exam abnormalities
+8. Follow-up instructions
 
-    Your final output MUST be between 30–60 words and follow the exact pipe-delimited style as string text.
-    """)
+ABSOLUTELY FORBIDDEN:
+- Normal findings (ignore entirely)
+- Patient details (name, DOB, demographics)
+- Using provider names as author without explicit signature
+- Assumptions, interpretations, or inferred issues
+- Narrative writing
+- Placeholder text (e.g., “None”, “Not provided”)
+- Duplicate pipes or empty fields
+
+Your final output MUST be between 30–60 words, follow the exact pipe-delimited key-value style, contain ONLY factual abnormal findings explicitly in the summary, and omit any fields not extracted.
+""")
+
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
     CLINICAL LONG SUMMARY:

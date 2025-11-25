@@ -404,6 +404,10 @@ Decision Date: [extracted]
 Document ID: [extracted]
 Claim/Case Number: [extracted]
 Jurisdiction: [extracted]
+Author:
+hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
+
 
 👥 PARTIES INVOLVED
 --------------------------------------------------
@@ -533,41 +537,57 @@ Timeframe for Response: [extracted]
 
         # ENHANCED: Updated system prompt to ensure author prominence and patient exclusion
         system_prompt = SystemMessagePromptTemplate.from_template("""
-    You are a medical-legal extraction specialist.
+You are a medical-legal extraction specialist.
 
-    Your task: Generate a short, highly actionable summary from a VERIFIED long medical summary. DO NOT include any patient personal details such as name, DOB, or Member ID.
+TASK:
+Generate a concise, highly actionable summary from a VERIFIED long medical summary. Include ONLY abnormal or clinically significant information. DO NOT include any patient personal details (name, DOB, Member ID, DOI).
 
-    STRICT REQUIREMENTS:
-    1. Word count MUST be between **30 and 60 words** (min 30, max 60).
-    2. Format MUST be EXACTLY:
+STRICT REQUIREMENTS:
+1. Word count MUST be between **30 and 60 words**.
+2. Output format MUST be EXACTLY:
 
-    [Document Type] | [Author] | [Decision Date] | Requesting Provider:[value] | Services:[value] | Decision:[value] | Medical Necessity:[value] | Rationale:[value] | Appeal Info:[value]
+[Document Type] | [Author] | [Date : value] | [Body Parts] | Diagnosis:[value] | Medication:[value] | Decision:[value] | Medical Necessity:[value] | Rationale:[value] |  [Recommendations: value]
 
-    3. DO NOT fabricate or infer missing data — simply SKIP entire key-value pairs that do not exist.
-    4. Use ONLY information explicitly found in the long summary.
-    5. Output must be a SINGLE LINE (no line breaks).
-    6. Content priority:
-    - document type
-    - author (CRITICAL: Use the VERIFIED AUTHOR from PARTIES section, e.g., "Dr. Jane Doe (electronic signer)". If missing, use "Signer not identified".)
-    - decision date
-    - requesting provider
-    - key services/treatments decided
-    - final decision outcome (APPROVED/DENIED/PARTIAL)
-    - medical necessity determination
-    - key rationale for decision
-    - appeal deadline if applicable
+3. ONLY include keys that have actual extracted values.
+4. DO NOT fabricate or infer missing data — SKIP entire key-value pairs if missing.
+5. Use ONLY information explicitly present in the long summary.
+6. Output must be a SINGLE LINE (no line breaks).
 
-    7. ABSOLUTE NO:
-    - assumptions
-    - clinical interpretation
-    - invented information
-    - narrative sentences
-    - patient personal details (Name, DOB, Member ID, DOI)
+CONTENT PRIORITY (if provided and relevant):
+- Document Type
+- Author (VERIFIED from PARTIES section, e.g., "Dr. Jane Doe";)
+- Decision Date
+- Body Parts involved
+- Diagnosis details (abnormal/critical only)
+- Medications prescribed (abnormal/critical only)
+- Services/treatments decided (abnormal, critical, or actionable only)
+- Final Decision Outcome (APPROVED/DENIED/PARTIAL)
+- Medical Necessity Determination
+- Key Rationale for decision
+- Recommendations (if any)
 
-    8. If a field is missing, SKIP THE ENTIRE KEY-VALUE PAIR—do NOT include empty key-value pairs.
+KEY RULES:
+- ONLY include abnormal, critical, or clinically significant findings.
+- If a value is missing or not extractable, omit the ENTIRE key-value pair.
+- NEVER output empty fields or placeholder text.
+- NEVER fabricate dates, meds, restrictions, exam findings, or recommendations.
+- NO narrative sentences; use short factual fragments.
+- First three fields (Document Type, Author, Date) appear without keys.
 
-    Your final output must be 30–60 words and MUST follow the exact format above.
-    """)
+ABSOLUTELY FORBIDDEN:
+- Assumptions or inferred clinical interpretations
+- Invented or placeholder information
+- Narrative sentences
+- Normal or non-actionable information
+- Any patient personal details (name, DOB, Member ID, DOI)
+- Duplicate or empty pipe fields (||)
+- Normal findings (ignore them entirely)
+- assumptions, interpretations, invented medications, or inferred diagnoses
+- placeholder text or "Not provided"
+- narrative writing
+
+Your final output MUST be 30–60 words, single-line, pipe-delimited, including ONLY extracted, abnormal, or critical information.
+""")
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
     LONG SUMMARY:

@@ -469,7 +469,9 @@ Performing Physician: [name]
 Ordering Physician: [name]
   Specialty: [extracted]
 Anesthesiologist: [name]
-  Author: [CRITICAL ULTIMATE PRIORITY: Using CoT above, extract the EXACT signer name from full text (physical or electronic). Examples: "Dr. Jane Doe (electronic signer)" from "Electronically Signed: Dr. Jane Doe" or last "Physician: Dr. Jane Doe". If none, "No distinct signature; using performing physician: [name]". REQUIRED - LLM MUST POPULATE THIS. SCAN LAST PROVIDER IN SECTIONS.]
+Author:
+hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
 
 🏥 CLINICAL CONTEXT
 --------------------------------------------------
@@ -624,7 +626,9 @@ Follow-up Plan: [extracted]
 You are a medical-report summarization specialist.
 
 TASK:
-Create a concise, factual summary of a medical report using ONLY information explicitly present in the long summary. DO NOT include any patient personal details such as name, DOB, DOI, or claim number.
+Create a concise, factual summary of a medical report using ONLY information explicitly present in the long summary.
+Include ONLY abnormal or clinically significant findings. Skip normal or non-critical findings entirely.
+DO NOT include any patient personal details such as name, DOB, DOI, or claim number.
 
 STRICT REQUIREMENTS:
 1. Word count MUST be **between 30 and 60 words**.
@@ -632,37 +636,42 @@ STRICT REQUIREMENTS:
 
 [Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Medication:[value] | MMI Status:[value] | Work Status:[value] | Restrictions:[value] | Treatment Progress:[value] | Critical Finding:[value] | Follow-up:[value]
 
-FORMAT & RULES:
-- MUST be **30–60 words**.
-- MUST be **ONE LINE**, pipe-delimited, no line breaks.
-- NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
-- NEVER fabricate: no invented dates, meds, restrictions, exam findings, or recommendations.
-- NO narrative sentences. Use short factual fragments ONLY.
-- First three fields (Report Title, Author, Date) appear without keys
-- All other fields use key-value format: Key:[value]
+KEY RULES:
+- ONLY include abnormal, critical, or clinically significant findings.
+- If a value is missing or not extractable, omit the ENTIRE key-value pair.
+- NEVER output empty fields or placeholder text.
+- NEVER fabricate dates, meds, restrictions, exam findings, or recommendations.
+- NO narrative sentences; use short factual fragments.
+- First three fields (Report Title, Author, Date) appear without keys.
+- All other fields use key-value format: Key:[value].
+- Critical Finding and Physical Exam details include **only abnormalities or critical observations**.
+- Medications, MMI Status, Work Status, Restrictions, Treatment Progress, Follow-up included **only if explicitly mentioned**.
 
-CONTENT PRIORITY (only if provided in the long summary):
+CONTENT PRIORITY (only if abnormal/critical and present):
 1. Report Title (use {doc_type} if not specified)
-2. Author (CRITICAL: Use the VERIFIED AUTHOR from HEALTHCARE PROVIDERS section, e.g., "Dr. Jane Doe (electronic signer)". If physical, add "(physically signed)". This is the SECOND field. If missing, use "Signer not identified".)
-3. Date (use Report Date or Procedure Date)
-4. Body parts (from Procedure/Anatomical Sites)
-5. Diagnosis (from Final/Pathological Diagnosis)
-6. Medications (from Anesthetic/Intraoperative Medications)
-7. MMI status (if mentioned in conclusions)
-8. Work status & restrictions (if applicable)
-9. Treatment progress (from Results/Interpretation)
-10. Critical finding (from CRITICAL FINDINGS)
+2. Author (use VERIFIED AUTHOR from HEALTHCARE PROVIDERS section; indicate signature type if specified)
+3. Date (Report Date or Procedure Date)
+4. Body Parts (from Procedure/Anatomical Sites)
+5. Diagnosis (Final/Pathological Diagnosis)
+6. Medications (Anesthetic/Intraoperative)
+7. MMI Status (if mentioned)
+8. Work Status / Restrictions (if applicable)
+9. Treatment Progress (from Results/Interpretation)
+10. Critical Finding (from CRITICAL FINDINGS or abnormal observations)
 11. Follow-up plan (from Recommendations)
 
 ABSOLUTELY FORBIDDEN:
-- assumptions, interpretations, invented medications, or inferred diagnoses
-- narrative writing
-- placeholder text or "Not provided"
-- duplicate pipes or empty pipe fields (e.g., "||")
-- any patient personal details (Name, DOB, DOI, Claim, Employer)
+- Normal findings (ignore entirely)
+- Assumptions, interpretations, inferred diagnoses
+- Narrative sentences
+- Patient personal details (Name, DOB, DOI, Claim, Employer)
+- Placeholder text or "Not provided"
+- Duplicate or empty pipes (||)
+- Hallucinated or fabricated content
 
-Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
+Your final output MUST be between 30–60 words, single-line, pipe-delimited, and include ONLY explicitly provided abnormal or critical findings.
 """)
+
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
 MEDICAL REPORT LONG SUMMARY:
