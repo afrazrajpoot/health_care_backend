@@ -161,7 +161,7 @@ class ReportAnalyzer:
             detection_result = detect_document_type(text)
             
             # Get the detected document type string
-            doc_type_str = detection_result.doc_type
+            doc_type_str = detection_result["doc_type"]
             is_standard_type = detection_result.is_standard_type
             
             logger.info(f"📄 Document type detected: {doc_type_str} (Standard: {is_standard_type})")
@@ -390,7 +390,7 @@ class ReportAnalyzer:
             
             # Get additional metadata
             detection_result = detect_document_type(text)
-            doc_type_str = detection_result.doc_type
+            doc_type_str = detection_result["doc_type"]
             is_standard_type = detection_result.is_standard_type
             
             return {
@@ -418,7 +418,7 @@ class ReportAnalyzer:
         """
         try:
             detection_result = detect_document_type(text)
-            doc_type_str = detection_result.doc_type
+            doc_type_str = detection_result["doc_type"]
             is_standard_type = detection_result.is_standard_type
             
             return {
