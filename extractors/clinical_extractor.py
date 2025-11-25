@@ -222,8 +222,9 @@ You are seeing the ENTIRE clinical note at once, allowing you to:
    - Do NOT extract from narrative text
 
 7. **SIGNATURE AUTHOR - STRICTLY FROM SIGN BLOCK ONLY (PHYSICAL/ELECTRONIC) - NO HALLUCINATIONS**
-   - Extract author name and credentials ONLY if there is an EXPLICIT signature section with signing language (e.g., "Electronically signed by [Name]", "Handwritten by [Name]", "Signed by [Name], MD", "Attested by [Name] with e-signature", "Signature: /s/ [Name]").
-   - Distinguish: Physical (e.g., "Handwritten by Dr. X", "Wet signature by Dr. X") vs Electronic (e.g., "Electronically signed by Dr. Y", "/s/ Dr. Y", "Digital signature by Dr. Y").
+    Author:
+    hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
+    • Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
    - List separately if both present; use exact names/titles from the document.
    - CRITICAL: DO NOT extract ANY name as signer if there is NO explicit signing phrase. Provider names, treating physicians, or mentioned authors are NOT signers unless the sign block explicitly says they signed.
    - Examples of INVALID extraction (DO NOT DO THIS):
@@ -337,9 +338,6 @@ Facility: [extracted]
 Treating Provider: [name, e.g., Radiologist or Referring]
   Credentials: [extracted]
   Specialty: [extracted]
-Author:
-hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
 
 
 🗣️ SUBJECTIVE FINDINGS
@@ -398,9 +396,10 @@ Functional Scores:
 
 ✍️ SIGNATURE & AUTHOR
 --------------------------------------------------
-Signer/Author:
-• Physical Signature: [extracted name/title ONLY if explicit physical signing phrase present; otherwise omit]
-• Electronic Signature: [extracted name/title ONLY if explicit electronic signing phrase present; otherwise omit]
+
+Author:
+hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
 
 🚨 CRITICAL CLINICAL FINDINGS
 --------------------------------------------------
@@ -509,10 +508,10 @@ Signer/Author:
         Generate a precise 30–60 word clinical note summary in key-value format.
         Pipe-delimited, zero hallucination, skips missing fields.
         Focuses ONLY on critical findings and abnormal actions (no patient details), includes author ONLY if explicitly signed with type.
-        Starts with Doc Type first.
+        Starts with Report Title first.
         """
 
-        logger.info("🎯 Generating 30–60 word clinical structured summary (critical findings & abnormal actions only, strict author with type, Doc Type first)...")
+        logger.info("🎯 Generating 30–60 word clinical structured summary (critical findings & abnormal actions only, strict author with type, Report Title first)...")
 
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are a clinical documentation specialist.
@@ -537,9 +536,9 @@ KEY RULES (VERY IMPORTANT):
 - MUST be **one single line**, pipe-delimited, no line breaks.
 
 FIELD DEFINITIONS:
-- Doc Type: Always include this field first → `Doc Type: {doc_type}`
+- Report Title: Always include this field first → `: {doc_type}`
 - Author: Only if explicitly signed with signature type  
-  ("Electronic Signature: Dr. Smith" → "Author: Dr. Smith")  
+  ("Signature: Dr. Smith" → "Author: Dr. Smith")  
   If there is no signature text, omit the entire field.
 - Critical Findings: Significant abnormal clinical findings, worsening conditions, flagged issues.
 - Abnormal Actions: Any abnormal interventions, adverse reactions, abnormal therapy responses, compliance issues.
@@ -548,7 +547,7 @@ FIELD DEFINITIONS:
 - Follow-up: ONLY if explicitly stated (return date, re-eval, imaging follow-up, specialist referral).
 
 CONTENT PRIORITY (ONLY IF ABNORMAL AND PRESENT):
-1. Doc Type: Always included
+1. Report Title: Always included
 2. Author (only explicit signed)
 3. Critical Findings
 4. Abnormal objective findings
@@ -575,7 +574,7 @@ Your final output MUST be between 30–60 words, follow the exact pipe-delimited
 
     {long_summary}
 
-    Now produce a 30–60 word structured clinical summary following ALL rules, starting with Doc Type, including author ONLY if explicitly signed with type and signing language, focusing only on critical findings and abnormal actions.
+    Now produce a 30–60 word structured clinical summary following ALL rules, starting with Report Title, including author ONLY if explicitly signed with type and signing language, focusing only on critical findings and abnormal actions.
     """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
@@ -599,8 +598,8 @@ Your final output MUST be between 30–60 words, follow the exact pipe-delimited
                 fix_prompt = ChatPromptTemplate.from_messages([
                     SystemMessagePromptTemplate.from_template(
                         f"Your prior summary contained {wc} words. Rewrite it to be between 30 and 60 words. "
-                        "DO NOT add fabricated details or patient info. Preserve all factual elements including author ONLY if explicit with type and signing language, Doc Type first. "
-                        "Maintain key-value pipe-delimited format: Doc Type:[value] | Author:[value] | Critical Findings:[value] | Abnormal Actions:[value] (skip missing keys)"
+                        "DO NOT add fabricated details or patient info. Preserve all factual elements including author ONLY if explicit with type and signing language, Report Title first. "
+                        "Maintain key-value pipe-delimited format: Report Title:[value] | Author:[value] | Critical Findings:[value] | Abnormal Actions:[value] (skip missing keys)"
                     ),
                     HumanMessagePromptTemplate.from_template(summary)
                 ])

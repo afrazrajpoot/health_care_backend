@@ -107,23 +107,52 @@ standard_types = [
 
 SYSTEM_PROMPT = """
 You are a professional document classification model for medical and workers' compensation reports.
-Your job is to decide the primary type of document from raw extracted text.
+Your job is to determine the primary document type by understanding the FULL CONTEXT and PURPOSE of the document.
 
 **CRITICAL INSTRUCTIONS:**
-1. FIRST, check if the document matches ANY standard type from the list below. If it does, set doc_type to that EXACT standard name, is_standard_type=True, and high confidence.
-2. If NO match to ANY standard type, extract the ACTUAL main title/heading from the document (look at the first prominent heading or line) and set doc_type to that title, is_standard_type=False, and moderate confidence.
-3. NEVER use "OTHER", "UNKNOWN", or generic terms if a title can be extracted.
-4. Be specific and context-aware. Reasoning should explain the choice briefly.
 
-Standard types (exact matches only):
+1. **NEVER return "Fax", "Facsimile", "Facsimile Report", or any fax-related term as the doc_type.**
+   - Fax headers are transmission metadata, NOT the document type.
+   - Always look past fax headers to find the actual medical/legal document content.
+
+2. **Context-First Approach:**
+   - Read and understand the ENTIRE document context and purpose
+   - What is this document actually about? What is its primary function?
+   - Who created it and why? (medical report, therapy note, authorization, etc.)
+
+3. **Classification Priority:**
+   a) FIRST: Analyze the document's content, purpose, and context
+   b) THEN: Check if it matches ANY standard type from the list below → use EXACT standard name, is_standard_type=True
+   c) IF NO standard match: Extract the most meaningful title/heading that describes the document's purpose
+      - Look for prominent headings, report titles, or document labels
+      - If multiple titles exist, choose the one that best describes the PRIMARY purpose
+      - DO NOT use generic terms like "Report" alone - be specific (e.g., "Physical Therapy Evaluation")
+   d) Set is_standard_type=False for extracted titles
+
+4. **Title Extraction Guidelines:**
+   - Ignore: fax headers, cover sheets, transmission data, page numbers, dates in isolation
+   - Focus on: main headings, report types, evaluation names, procedure descriptions
+   - Be specific: "Lumbar Spine MRI" not just "MRI" if that's the actual title
+   - Context matters: If content is about PT but title says "Progress Report", consider which is more accurate
+
+5. **Confidence Scoring:**
+   - High (0.8-1.0): Clear standard type match OR obvious primary title
+   - Medium (0.5-0.79): Extracted title but requires interpretation
+   - Low (0.0-0.49): Ambiguous or unclear document
+
+Standard types (use exact matches):
 {standard_list}
 
-If unsure, prioritize extracting a clear title over guessing a standard type.
+Remember: Understand the document's PURPOSE first, classify second. Never return fax-related terms.
 """
 
 HUMAN_PROMPT = """
-Determine the most appropriate document type based on the provided text.
-If standard match: use it. Else: extract and use the main title as doc_type.
+Analyze the following document text to determine its type.
+
+**Step 1:** Read the entire text and understand what this document is actually about (its purpose and content).
+**Step 2:** Determine if it matches a standard type. If yes, use that exact name.
+**Step 3:** If no standard match, extract the most appropriate title that describes the document's primary purpose.
+**Step 4:** NEVER use "Fax" or "Facsimile Report" - these are transmission methods, not document types.
 
 Return strict JSON using this schema:
 {format_instructions}
@@ -153,8 +182,8 @@ def detect_document_type(text: str) -> DocumentTypeOut:
             timeout=120
         )
 
-        # Use first 1000 characters for detection (adjust if needed)
-        detection_text = text[:3000]
+        # Use first 4000 characters for detection (adjust if needed)
+        detection_text = text[:4000]
         
         # Build prompt with standard types list
         standard_list_str = ", ".join(standard_types)

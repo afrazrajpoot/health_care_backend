@@ -125,10 +125,8 @@ Report Date: [extracted or {fallback_date}]
 Claim Number: [extracted if present; otherwise omit]
 Patient Name: [extracted]
 Provider: [extracted]
-Author:
-hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
 
+                                                               
 👤 PATIENT & CLINICAL INFORMATION
 --------------------------------------------------
 Name: [extracted]
@@ -173,9 +171,9 @@ Document Type: {doc_type}
 Document Date: [extracted or {fallback_date}]
 Claim Number: [extracted if present; otherwise omit]
 Purpose: [extracted]
-Signer/Author:
-• Physical Signature: [extracted name/title if physical signature present; otherwise omit]
-• Electronic Signature: [extracted name/title if electronic signature present; otherwise omit]
+Author:
+hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
 
 👥 KEY PARTIES
 --------------------------------------------------
@@ -282,7 +280,7 @@ Next Steps: [extracted]
 
     ***ADDITIONAL FORMAT RULES:***
     - Keep keys descriptive and relevant.
-    - For Author/Signer: Combine name + signature type, e.g. "Author/Physician/Signer: Dr. Smith (Electronic)"
+    - For Author: Combine name + signature type, e.g. "Author: Dr. Smith"
     - Signature Type should only appear separately if not already included in the Author field.
     - Output MUST be a SINGLE LINE, pipe-delimited.
     - No narrative sentences.
