@@ -259,11 +259,9 @@ ABSOLUTE RULES - NO EXCEPTIONS:
 
 CRITICAL: If you see terms like "Decision: [empty]" or "Medical Necessity: [empty]" in your output - YOU ARE DOING IT WRONG. Simply don't include those keys.
 
-Possible fields (include ONLY if real data exists; NO patient details like name, DOB, MRN):
+Possible fields (include ONLY if real data exists; NO need to include patient details like name, DOB, MRN, Claim #, Signature Type etc.):
    - Report Title
-   - Claim Number
    - Author
-   - Signature Type (Physical/Electronic)
    - Date
    - Body Parts
    - Diagnosis
@@ -322,7 +320,7 @@ LONG SUMMARY:
 Create a clean pipe-delimited short summary following these rules:
 1. Include ONLY fields that have actual values (no [empty], no placeholders)
 2. If a field has no data, skip it entirely - don't include the key
-3. Exclude all patient identifying details (name, DOB, MRN)
+3. Exclude all patient identifying details (name, DOB, MRN, claim number)
 4. Keep between 30-60 words
 5. Single line, pipe-delimited format
 
