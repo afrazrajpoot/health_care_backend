@@ -96,55 +96,70 @@ class WebhookService:
             return False
     
     async def process_document_data(self, data: dict) -> dict:
-        """Step 1: Process document data using EnhancedReportAnalyzer"""
+        """Step 1: Process document data without threads, fully async"""
         logger.info(f"📥 Processing document: {data.get('document_id', 'unknown')}")
-        
+
         # Validate required fields
         if not data.get("result") or not data.get("filename") or not data.get("gcs_url"):
             raise HTTPException(status_code=400, detail="Missing required fields")
-        
+
         result_data = data["result"]
         text = result_data.get("text", "")
         mode = data.get("mode", "wc")
-        
+
         logger.info(f"📋 Document mode: {mode}")
-        
-        # Generate long summary using ReportAnalyzer
+
+        # ReportAnalyzer should have async version of extract_document()
         report_analyzer = ReportAnalyzer(mode)
-        report_result = await asyncio.to_thread(
-            report_analyzer.extract_document,
-            text
-        )
-        
+        report_result = await report_analyzer.extract_document(text)
+
         long_summary = report_result.get("long_summary", "")
         short_summary = report_result.get("short_summary", "")
-        
+
         logger.info(f"✅ Generated long summary: {len(long_summary)} chars")
         logger.info(f"✅ Generated short summary: {short_summary}")
-        
-        # Use EnhancedReportAnalyzer for detailed analysis
+
+        # EnhancedReportAnalyzer async logic
         analyzer = EnhancedReportAnalyzer()
-        
-        # Run analysis and summary generation in parallel
-        analysis_task = analyzer.extract_document_data_with_reasoning(
-                long_summary,    # Use summary for analysis
-                None,            # page_zones
-                None,            # raw_text  
-                mode             # mode
+
+        # Run both async functions concurrently
+        analysis_task = asyncio.create_task(
+            analyzer.extract_document_data_with_reasoning(
+                long_summary,     # Use summary
+                None,             # page_zones
+                None,             # raw_text
+                mode
             )
-        
-        summary_task = analyzer.generate_brief_summary(long_summary, mode)
-        
-        # Wait for both to complete
-        document_analysis, brief_summary = await analysis_task, summary_task
-        
-        # Prepare data for patient lookup
-        patient_name = document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else None
-        claim_number = document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else None
-        
-        # Extract DOB from document_analysis
-        dob = document_analysis.dob if hasattr(document_analysis, 'dob') and document_analysis.dob and str(document_analysis.dob).lower() != "not specified" else None
-        
+        )
+
+        summary_task = asyncio.create_task(
+            analyzer.generate_brief_summary(long_summary, mode)
+        )
+
+        document_analysis, brief_summary = await asyncio.gather(
+            analysis_task, summary_task
+        )
+
+        # Extract fields
+        patient_name = (
+            document_analysis.patient_name
+            if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified"
+            else None
+        )
+
+        claim_number = (
+            document_analysis.claim_number
+            if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified"
+            else None
+        )
+
+        dob = (
+            document_analysis.dob
+            if hasattr(document_analysis, 'dob') and document_analysis.dob and str(document_analysis.dob).lower() != "not specified"
+            else None
+        )
+
+        # Return same structure
         return {
             "document_analysis": document_analysis,
             "brief_summary": brief_summary,
