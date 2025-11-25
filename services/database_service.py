@@ -358,76 +358,112 @@ class DatabaseService:
             raise
     
     async def get_document_by_patient_details(
-            self, 
-            patient_name: str,
-            physicianId: Optional[str] = None,
-            dob: Optional[str] = None,
-            claim_number: Optional[str] = None
-        ) -> Dict[str, Any]:
-            """
-            Retrieve last two documents for patient.
-            Handles dob and doi as strings (or converts datetime to string if needed).
-            """
-            try:
-                where_clause = {"patientName": patient_name}
+        self, 
+        patient_name: str,
+        physicianId: Optional[str] = None,
+        dob: Optional[str] = None,
+        claim_number: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Retrieve last two documents for patient.
+        Handles dob and doi as strings (or converts datetime to string if needed).
+        Matches claim_number ignoring dashes, spaces, and case (normalizes to uppercase alphanumeric).
+        Matches patient_name flexibly: treats swapped first/last names as equivalent if DOB matches (assumes two-part names).
+        """
+        try:
+            # Normalize patient_name parts for fuzzy matching (split, sort, join)
+            name_parts = patient_name.strip().split()
+            if len(name_parts) != 2:
+                # For non-two-part names, use exact match
+                normalized_name = patient_name
+                use_fuzzy = False
+            else:
+                normalized_name = ' '.join(sorted(name_parts))
+                use_fuzzy = True
+
+            where_clause = {}
+
+            # Always start with patient_name if no DOB or fuzzy not applicable
+            if not dob or not use_fuzzy:
+                where_clause["patientName"] = patient_name
+            # If DOB provided and fuzzy applicable, we'll fetch by DOB and filter names post-fetch
+
+            if physicianId:
+                where_clause["physicianId"] = physicianId
+
+            # ✅ Handle dob (string or datetime)
+            if dob:
+                if isinstance(dob, datetime):
+                    dob_str = dob.strftime("%Y-%m-%d")
+                else:
+                    # Try parsing string into datetime for normalization
+                    try:
+                        parsed_dob = datetime.fromisoformat(dob)
+                        dob_str = parsed_dob.strftime("%Y-%m-%d")
+                    except ValueError:
+                        dob_str = dob  # Already correct format
+                where_clause["dob"] = dob_str
+
+            logger.info(f"🔍 Fetching documents with filters (pre-claim/post-name normalization): {where_clause}")
+            
+            documents = await self.prisma.document.find_many(
+                where=where_clause,
+                include={
+                    "summarySnapshot": True,
+                    "adl": True,
+                    "documentSummary": True,
+                    "bodyPartSnapshots": True  # ✅ ADDED: Include body part snapshots
+                },
+                order={"createdAt": "desc"},
+                # take=2  # Uncomment if you want to limit to last 2 regardless of claim filter
+            )
+
+            # ✅ If DOB provided and fuzzy matching applicable, filter by normalized name
+            if dob and use_fuzzy:
+                def name_matches(db_name: str) -> bool:
+                    db_parts = db_name.strip().split()
+                    if len(db_parts) != 2:
+                        return db_name.lower() == patient_name.lower()  # Fallback to exact case-insensitive
+                    return ' '.join(sorted(db_parts)) == normalized_name
+
+                documents = [doc for doc in documents if name_matches(doc.patientName)]
+                logger.info(f"📋 Fuzzy filtered to {len(documents)} documents matching normalized name '{normalized_name}' for '{patient_name}'")
+
+            # ✅ Normalize and filter by claim_number if provided
+            if claim_number:
+                normalized_claim = ''.join(c for c in str(claim_number).upper() if c.isalnum())
+                logger.info(f"🔍 Normalizing claim_number to: {normalized_claim}")
                 
-                if physicianId:
-                    where_clause["physicianId"] = physicianId
+                documents = [
+                    doc for doc in documents
+                    if ''.join(c for c in str(doc.claimNumber).upper() if c.isalnum()) == normalized_claim
+                ]
+                logger.info(f"📋 Filtered to {len(documents)} documents matching normalized claim")
 
-                # ✅ Handle dob (string or datetime)
-                if dob:
-                    if isinstance(dob, datetime):
-                        dob_str = dob.strftime("%Y-%m-%d")
-                    else:
-                        # Try parsing string into datetime for normalization
-                        try:
-                            parsed_dob = datetime.fromisoformat(dob)
-                            dob_str = parsed_dob.strftime("%Y-%m-%d")
-                        except ValueError:
-                            dob_str = dob  # Already correct format
-                    where_clause["dob"] = dob_str
+            logger.info(f"📋 Final: Found {len(documents)} documents for {patient_name}")
 
-                if claim_number:
-                    where_clause["claimNumber"] = claim_number
+            response = {
+                "patient_name": patient_name,
+                "total_documents": len(documents),
+                "documents": []
+            }
 
-                logger.info(f"🔍 Fetching last 2 documents with filters: {where_clause}")
-                
-                documents = await self.prisma.document.find_many(
-                    where=where_clause,
-                    include={
-                        "summarySnapshot": True,
-                        "adl": True,
-                        "documentSummary": True,
-                        "bodyPartSnapshots": True  # ✅ ADDED: Include body part snapshots
-                    },
-                    order={"createdAt": "desc"},
-                    # take=2
-                )
+            for i, doc in enumerate(documents):
+                doc_data = doc.dict()
+                doc_data["document_index"] = i + 1
+                doc_data["is_latest"] = i == 0
+                response["documents"].append(doc_data)
+                logger.info(f"📄 Added document {i+1}: ID {doc.id} with {len(doc.bodyPartSnapshots)} body part snapshots")
 
-                logger.info(f"📋 Found {len(documents)} documents for {patient_name}")
+            return response
 
-                response = {
-                    "patient_name": patient_name,
-                    "total_documents": len(documents),
-                    "documents": []
-                }
-
-                for i, doc in enumerate(documents):
-                    doc_data = doc.dict()
-                    doc_data["document_index"] = i + 1
-                    doc_data["is_latest"] = i == 0
-                    response["documents"].append(doc_data)
-                    logger.info(f"📄 Added document {i+1}: ID {doc.id} with {len(doc.bodyPartSnapshots)} body part snapshots")
-
-                return response
-
-            except Exception as e:
-                logger.error(f"❌ Error retrieving documents for {patient_name}: {str(e)}")
-                return {
-                    "patient_name": patient_name,
-                    "total_documents": 0,
-                    "documents": []
-                }
+        except Exception as e:
+            logger.error(f"❌ Error retrieving documents for {patient_name}: {str(e)}")
+            return {
+                "patient_name": patient_name,
+                "total_documents": 0,
+                "documents": []
+            }
     async def get_tasks_by_document_ids(self, document_ids: list[str], physician_id: Optional[str] = None) -> list[dict]:
         """Fetch tasks (with quickNotes and description) by document IDs, optionally filtered by physician_id"""
         where_clause = {
