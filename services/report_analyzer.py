@@ -2,13 +2,13 @@
 Main report analyzer orchestrator with LLM chaining - Optimized version.
 Coordinates all extractors and maintains the extraction pipeline.
 """
+
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dataclasses import asdict
 from langchain_openai import AzureChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
-
 from config.settings import CONFIG
 from utils.document_detector import detect_document_type
 from utils.extraction_verifier import ExtractionVerifier
@@ -24,7 +24,6 @@ from extractors.administritive_extractor import AdministrativeExtractor
 
 logger = logging.getLogger("document_ai")
 
-
 class ReportAnalyzer:
     """
     Optimized orchestrator with LLM chaining.
@@ -35,17 +34,15 @@ class ReportAnalyzer:
     DOCUMENT_CATEGORIES = {
         # QME/AME/IME Evaluations
         "qme_evaluations": [
-            "QME", "AME", "IME", "QUALIFIED MEDICAL EVALUATION", 
+            "QME", "AME", "IME", "QUALIFIED MEDICAL EVALUATION",
             "AGREED MEDICAL EVALUATION", "INDEPENDENT MEDICAL EXAM"
         ],
-        
         # Decision Documents
         "decision_documents": [
-            "UR", "IMR", "APPEAL", "AUTHORIZATION", "RFA", "DFR", 
-            "UTILIZATION REVIEW", "INDEPENDENT MEDICAL REVIEW", 
+            "UR", "IMR", "APPEAL", "AUTHORIZATION", "RFA", "DFR",
+            "UTILIZATION REVIEW", "INDEPENDENT MEDICAL REVIEW",
             "REQUEST FOR AUTHORIZATION", "DETERMINATION OF MEDICAL NECESSITY"
         ],
-        
         # Formal Medical Reports
         "formal_medical_reports": [
             "SURGERY REPORT", "ANESTHESIA REPORT", "PATHOLOGY", "BIOPSY", "GENETIC TESTING",
@@ -55,41 +52,36 @@ class ReportAnalyzer:
             "EKG", "ECG", "ECHO", "HOLTER MONITOR", "STRESS TEST", "NERVE CONDUCTION",
             "ELECTROCARDIOGRAM", "ECHOCARDIOGRAM"
         ],
-        
         # Clinical Notes
         "clinical_notes": [
             "PROGRESS NOTE", "OFFICE VISIT", "CLINIC NOTE", "PHYSICAL THERAPY", "Chart Notes",
             "OCCUPATIONAL THERAPY", "CHIROPRACTIC", "ACUPUNCTURE", "PAIN MANAGEMENT",
             "PSYCHIATRY", "PSYCHOLOGY", "PSYCHOTHERAPY", "BEHAVIORAL HEALTH",
             "MED REFILL", "PRESCRIPTION", "TELEMEDICINE", "MASSAGE THERAPY",
-            "CLINICAL NOTE", "NURSING", "NURSING NOTE", "VITAL SIGNS", 
+            "CLINICAL NOTE", "NURSING", "NURSING NOTE", "VITAL SIGNS",
             "MEDICATION ADMINISTRATION"
         ],
-        
         # Administrative Documents
         "administrative_documents": [
-            "ADJUSTER", "ATTORNEY", "NCM", "SIGNATURE REQUEST", "REFERRAL", 
+            "ADJUSTER", "ATTORNEY", "NCM", "SIGNATURE REQUEST", "REFERRAL",
             "CORRESPONDENCE", "DENIAL LETTER", "APPROVAL LETTER", "WORK STATUS",
             "WORK RESTRICTIONS", "RETURN TO WORK", "DISABILITY", "CLAIM FORM",
             "EMPLOYER REPORT", "VOCATIONAL REHAB", "JOB ANALYSIS", "WORK CAPACITY",
             "PHARMACY", "MEDICATION LIST", "PRIOR AUTH", "DEPOSITION",
             "INTERROGATORY", "SUBPOENA", "AFFIDAVIT", "ADMINISTRATIVE"
         ],
-        
         # Imaging Reports
         "imaging_reports": [
             "MRI", "CT", "X-RAY", "ULTRASOUND", "EMG", "MAMMOGRAM", "PET SCAN",
             "BONE SCAN", "DEXA SCAN", "FLUOROSCOPY", "ANGIOGRAM",
             "MAGNETIC RESONANCE IMAGING", "COMPUTED TOMOGRAPHY"
         ],
-        
         # Progress Reports
         "progress_reports": ["PR-2", "PR2", "PR-4", "PR4"],
-        
         # Consultations
         "consultations": ["CONSULT", "CONSULTATION"]
     }
-    
+
     def __init__(self, mode):
         """Initialize LLM and all extraction components"""
         self.llm = AzureChatOpenAI(
@@ -126,9 +118,9 @@ class ReportAnalyzer:
         self.administrative_extractor = AdministrativeExtractor(self.llm)
         
         logger.info("✅ ReportAnalyzer initialized (Dictionary-based type matching)")
-    
+
     def compare_with_previous_documents(
-        self, 
+        self,
         current_raw_text: str
     ) -> Dict[str, str]:
         """
@@ -137,10 +129,8 @@ class ReportAnalyzer:
         try:
             # extract_document returns dict with both summaries
             result_dict = self.extract_document(current_raw_text)
-            
             # Return the dictionary directly (no bullet points)
             return result_dict
-            
         except Exception as e:
             logger.error(f"❌ Extraction pipeline failed: {e}")
             fallback_date = datetime.now().strftime("%m/%d/%y")
@@ -149,7 +139,7 @@ class ReportAnalyzer:
                 "long_summary": error_msg,
                 "short_summary": error_msg
             }
-    
+
     def extract_document(self, text: str) -> Dict[str, str]:
         """
         Optimized pipeline - returns dictionary with both summaries.
@@ -160,11 +150,15 @@ class ReportAnalyzer:
             # Stage 1: Detect document type
             detection_result = detect_document_type(text)
             
-            # Get the detected document type string
-            doc_type_str = detection_result["doc_type"]
-            is_standard_type = detection_result.is_standard_type
+            # Get the detected document type string (FIXED: dictionary access)
+            # Using .get() with fallback to avoid KeyError if key is missing
+            doc_type_str = detection_result.get("doc_type", "Unknown")
             
-            logger.info(f"📄 Document type detected: {doc_type_str} (Standard: {is_standard_type})")
+            # Safely get other fields if they exist, defaulting if not
+            is_standard_type = detection_result.get("is_standard_type", False)
+            confidence = detection_result.get("confidence", 0.0)
+            
+            logger.info(f"📄 Document type detected: {doc_type_str} (Conf: {confidence})")
             
             # Stage 2: Direct extraction - get dictionary with both summaries
             result_dict = self._route_to_extractor(
@@ -210,7 +204,7 @@ class ReportAnalyzer:
                 self.qme_extractor.extract, text, doc_type_str, fallback_date,
                 f"{fallback_date}: QME report processed"
             )
-        
+            
         # Priority 2: Progress Reports (specific forms)
         elif any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["progress_reports"]):
             logger.info(f"🎯 Routing to PR-2 extractor for {doc_type_str}")
@@ -218,7 +212,7 @@ class ReportAnalyzer:
                 self.pr2_extractor.extract, text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} progress report"
             )
-        
+            
         # Priority 3: Imaging (technical reports)
         elif any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["imaging_reports"]):
             logger.info(f"🎯 Routing to Imaging extractor for {doc_type_str}")
@@ -226,7 +220,7 @@ class ReportAnalyzer:
                 self.imaging_extractor.extract, text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} imaging report"
             )
-        
+            
         # Priority 4: Consultations
         elif any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["consultations"]):
             logger.info(f"🎯 Routing to Consult extractor for {doc_type_str}")
@@ -234,7 +228,7 @@ class ReportAnalyzer:
                 self.consult_extractor.extract, text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} consultation"
             )
-        
+            
         # Priority 5: Decision Documents
         elif any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["decision_documents"]):
             logger.info(f"🎯 Routing to Decision Document extractor for {doc_type_str}")
@@ -242,7 +236,7 @@ class ReportAnalyzer:
                 self.decision_extractor.extract, text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} decision processed"
             )
-
+            
         # Priority 6: Formal Medical Reports
         elif any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["formal_medical_reports"]):
             logger.info(f"🎯 Routing to Formal Medical Report extractor for {doc_type_str}")
@@ -250,7 +244,7 @@ class ReportAnalyzer:
                 self.formal_medical_extractor.extract, text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} report processed"
             )
-
+            
         # Priority 7: Clinical Notes
         elif any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["clinical_notes"]):
             logger.info(f"🎯 Routing to Clinical Note extractor for {doc_type_str}")
@@ -258,7 +252,7 @@ class ReportAnalyzer:
                 self.clinical_note_extractor.extract, text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} note processed"
             )
-
+            
         # Priority 8: Administrative (catch-all for non-clinical)
         elif any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["administrative_documents"]):
             logger.info(f"🎯 Routing to Administrative extractor for {doc_type_str}")
@@ -266,7 +260,7 @@ class ReportAnalyzer:
                 self.administrative_extractor.extract, text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} document processed"
             )
-        
+            
         # All other document types (including custom titles)
         else:
             logger.info(f"🎯 Routing to Simple extractor for custom type: {doc_type_str}")
@@ -285,10 +279,8 @@ class ReportAnalyzer:
                 doc_type=doc_type,
                 fallback_date=fallback_date,
             )
-            
             # Convert result to dictionary format
             return self._convert_extraction_result_to_dict(result, fallback_date, fallback_short)
-            
         except Exception as e:
             logger.error(f"❌ Extraction failed for {doc_type}: {e}")
             return {
@@ -349,11 +341,11 @@ class ReportAnalyzer:
             # If long summary is short enough, use it directly
             if len(long_summary) <= 150:
                 return long_summary
-            
+                
             system_prompt = """You are a medical documentation specialist creating concise summaries.
-            Create a 1-2 sentence summary focusing on the most critical findings.
-            Be brief and focus on key medical-legal points."""
-            
+Create a 1-2 sentence summary focusing on the most critical findings.
+Be brief and focus on key medical-legal points."""
+
             user_prompt = f"LONG SUMMARY:\n{long_summary}\n\nCreate a 1-2 sentence concise summary:"
             
             system_msg = SystemMessagePromptTemplate.from_template(system_prompt)
@@ -362,7 +354,6 @@ class ReportAnalyzer:
             
             chain = chat_prompt | self.llm
             response = chain.invoke({"long_summary": long_summary})
-            
             return response.content.strip()
             
         except Exception as e:
@@ -379,20 +370,26 @@ class ReportAnalyzer:
         return bullet_points if bullet_points else [
             "• No significant new findings identified in current document"
         ]
-    
+
     def get_structured_extraction(self, text: str) -> Dict[str, Any]:
         """
         Get full structured extraction as dictionary (for API/storage).
         """
         try:
+            # Get additional metadata (FIXED: dictionary access)
+            detection_result = detect_document_type(text)
+            
+            # Ensure we handle both dict and object returns just in case
+            if isinstance(detection_result, dict):
+                doc_type_str = detection_result.get("doc_type", "Unknown")
+                is_standard_type = detection_result.get("is_standard_type", False)
+            else:
+                doc_type_str = getattr(detection_result, "doc_type", "Unknown")
+                is_standard_type = getattr(detection_result, "is_standard_type", False)
+
             # Get both summaries
             summaries_dict = self.extract_document(text)
-            
-            # Get additional metadata
-            detection_result = detect_document_type(text)
-            doc_type_str = detection_result["doc_type"]
-            is_standard_type = detection_result.is_standard_type
-            
+
             return {
                 "document_type": doc_type_str,
                 "is_standard_type": is_standard_type,
@@ -401,6 +398,7 @@ class ReportAnalyzer:
                 "extracted_at": datetime.now().isoformat(),
                 "text_length": len(text)
             }
+            
         except Exception as e:
             logger.error(f"❌ Structured extraction failed: {e}")
             fallback_date = datetime.now().strftime("%m/%d/%y")
@@ -411,15 +409,21 @@ class ReportAnalyzer:
                 "short_summary": f"{fallback_date}: Extraction failed",
                 "error": str(e)
             }
-    
+
     def get_extraction_metadata(self, text: str) -> Dict[str, Any]:
         """
         Get extraction metadata without full processing (useful for validation).
         """
         try:
+            # FIXED: dictionary access
             detection_result = detect_document_type(text)
-            doc_type_str = detection_result["doc_type"]
-            is_standard_type = detection_result.is_standard_type
+            
+            if isinstance(detection_result, dict):
+                doc_type_str = detection_result.get("doc_type", "Unknown")
+                is_standard_type = detection_result.get("is_standard_type", False)
+            else:
+                doc_type_str = getattr(detection_result, "doc_type", "Unknown")
+                is_standard_type = getattr(detection_result, "is_standard_type", False)
             
             return {
                 "document_type": doc_type_str,
@@ -428,6 +432,7 @@ class ReportAnalyzer:
                 "text_length": len(text),
                 "preview": text[:200] + "..." if len(text) > 200 else text
             }
+            
         except Exception as e:
             logger.error(f"❌ Metadata extraction failed: {e}")
             return {
