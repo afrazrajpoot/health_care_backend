@@ -290,19 +290,19 @@ Possible fields (include ONLY if real data exists; NO need to include patient de
 EXAMPLES (reference only - adapt to your document):
 
 Lab Report with complete data:
-"Lab Results | Author: Jones | Date: 10/22/2025 | Critical Finding: Elevated WBC 15.2 (H), Glucose 245 mg/dL (H) | Lab Results: Hemoglobin 12.1, Creatinine 1.2 | Recommendation: Repeat CBC in 1 week, endocrinology consult"
+"Lab Results | Jones Doe | Date: 10/22/2025 | Critical Finding: Elevated WBC 15.2 (H), Glucose 245 mg/dL (H) | Lab Results: Hemoglobin 12.1, Creatinine 1.2 | Recommendation: Repeat CBC in 1 week, endocrinology consult"
 
 Imaging Report:
-"MRI Report | Author: Dr. Lee | Date: 09/15/2025 | Body Parts: L4-L5, L5-S1 | Imaging Findings: Moderate central stenosis L4-L5, broad-based disc herniation L5-S1 | Recommendation: Epidural steroid injection, neurosurgery consultation"
+"MRI Report | Dr. Lee | Date: 09/15/2025 | Body Parts: L4-L5, L5-S1 | Imaging Findings: Moderate central stenosis L4-L5, broad-based disc herniation L5-S1 | Recommendation: Epidural steroid injection, neurosurgery consultation"
 
 Clinical Note with limited data:
-"Follow-up Visit | Author: Smith | Date: 08/20/2025 | Body Parts: Right knee | Diagnosis: Post-op ACL reconstruction | Work Status: Modified duty"
+"Follow-up Visit | Smith | Date: 08/20/2025 | Body Parts: Right knee | Diagnosis: Post-op ACL reconstruction | Work Status: Modified duty"
 
 Notice: Only fields with actual values are included. No [empty] or placeholder fields.
 
 WHAT NOT TO DO:
-❌ "Report | Author: Dr. Smith | Decision: [empty] | Medical Necessity: [empty]"
-✅ "Report | Author: Dr. Smith | Date: 04/13/2017 | Diagnosis: Meniscus tear"
+❌ "Report | Dr. Smith | Decision: [empty] | Medical Necessity: [empty]"
+✅ "Report | Dr. Smith | Date: 04/13/2017 | Diagnosis: Meniscus tear"
 
 FINAL CHECKLIST BEFORE OUTPUT:
 - Does my output contain [empty], [unknown], or any placeholder? → REMOVE THOSE FIELDS
