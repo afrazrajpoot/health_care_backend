@@ -51,8 +51,21 @@ class DecisionDocumentExtractor:
             'dfr': re.compile(r'\b(DFR|Doctor First Report|First Report|Initial Report)\b', re.IGNORECASE),
             'denial': re.compile(r'\b(Denial|Notice of Denial|Determination of Denial)\b', re.IGNORECASE)
         }
+
+        # ENHANCED: Pre-compile regex for signature extraction to assist LLM
+        self.signature_patterns = {
+            'electronic_signature': re.compile(r'(electronically signed|signature|e-signed|signed by|authenticated by|digital signature|verified by)[:\s]*([A-Za-z\s\.,]+?)(?=\n|\s{2,}|$)', re.IGNORECASE | re.DOTALL),
+            'signed_date': re.compile(r'(signed|signature|date)[:\s]*([A-Za-z\s\.,]+?)\s*(\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}\s*(AM|PM))?', re.IGNORECASE),
+            'provider_signature': re.compile(r'(provider|doctor|dc|md|do|reviewer|physician)[:\s]*([A-Za-z\s\.,]+?)(?=\s{2,}|\n\n|$)', re.IGNORECASE),
+            # NEW: Patterns for physical signatures, footers, or stamps
+            'physical_signature': re.compile(r'(handwritten signature|ink signature|physical sign)[:\s]*([A-Za-z\s\.,]+?)(?=\n|$)', re.IGNORECASE),
+            'footer_signature': re.compile(r'^(?:\s*[-=]{3,}.*?\n){0,3}([A-Za-z\s\.,]+?)\s*(?:\d{1,2}/\d{1,2}/\d{4}.*)?$', re.IGNORECASE | re.MULTILINE | re.DOTALL),
+            'auth_stamp': re.compile(r'(authentica|stamp|seal)[:\s]*([A-Za-z\s\.,]+?)(?=\s{2,}|$)', re.IGNORECASE),
+            # ENHANCED: Specific pattern for last provider/signer
+            'last_provider_sign': re.compile(r'(Provider:\s*)([A-Za-z\s\.,]+?)(?=\s*\(|Review|\n{2,})', re.IGNORECASE | re.DOTALL)
+        }
         
-        logger.info("✅ DecisionDocumentExtractor initialized (Full Context)")
+        logger.info("✅ DecisionDocumentExtractor initialized (Full Context + Enhanced Signature Extraction)")
 
     def extract(
         self,
@@ -88,12 +101,20 @@ class DecisionDocumentExtractor:
             logger.warning(f"⚠️ Document very large ({token_estimate:,} tokens)")
             logger.warning("⚠️ May exceed GPT-4o context window (128K tokens)")
         
+        # ENHANCED: Pre-extract potential signatures using regex to guide LLM
+        potential_signatures = self._pre_extract_signatures(text)
+        logger.info(f"🔍 Pre-extracted potential signatures: {potential_signatures}")
+        
         # Stage 1: Directly generate long summary with FULL CONTEXT (no intermediate extraction)
         long_summary = self._generate_long_summary_direct(
             text=text,
             doc_type=doc_type,
-            fallback_date=fallback_date
+            fallback_date=fallback_date,
+            potential_signatures=potential_signatures  # Pass to prompt for guidance
         )
+        # ENHANCED: Verify and inject author into long summary if needed
+        verified_author = self._verify_and_extract_author(long_summary, text, potential_signatures)
+        long_summary = self._inject_author_into_long_summary(long_summary, verified_author)
 
         # Stage 2: Generate short summary from long summary
         short_summary = self._generate_short_summary_from_long_summary(long_summary, doc_type)
@@ -108,11 +129,140 @@ class DecisionDocumentExtractor:
             "short_summary": short_summary
         }
 
+    def _pre_extract_signatures(self, text: str) -> List[str]:
+        """
+        ENHANCED: Pre-extract potential signature candidates using regex to assist LLM extraction.
+        NEW: Scan last 30% of document first for priority, then full scan.
+        """
+        candidates = []
+        text_length = len(text)
+        end_slice = text[text_length // 3 * 2:]  # Last ~33% for footers/signatures
+        
+        # Scan end first
+        for pattern_name, pattern in self.signature_patterns.items():
+            matches = pattern.findall(end_slice)
+            for match in matches:
+                if isinstance(match, tuple):
+                    candidate = ' '.join([m.strip() for m in match if m.strip()])
+                else:
+                    candidate = match.strip()
+                if candidate and len(candidate) > 5:
+                    candidates.append(f"{pattern_name}: {candidate}")
+        
+        # Full scan as fallback (limit to avoid noise)
+        if len(candidates) < 3:
+            for pattern_name, pattern in self.signature_patterns.items():
+                matches = pattern.findall(text)
+                for match in matches:
+                    if isinstance(match, tuple):
+                        candidate = ' '.join([m.strip() for m in match if m.strip()])
+                    else:
+                        candidate = match.strip()
+                    if candidate and len(candidate) > 5 and f"{pattern_name}: {candidate}" not in candidates:
+                        candidates.append(f"{pattern_name}: {candidate}")
+                        if len(candidates) >= 3:
+                            break
+                if len(candidates) >= 3:
+                    break
+        
+        unique_candidates = list(set(candidates))[:5]  # Top 5 now
+        logger.debug(f"Pre-extracted signature candidates (end-priority): {unique_candidates}")
+        return unique_candidates
+
+    def _verify_and_extract_author(self, long_summary: str, full_text: str, potential_signatures: List[str]) -> str:
+        """
+        ENHANCED: Use LLM to double-check author extraction, with stronger focus on last signer.
+        Falls back to regex if fails. Prioritizes electronic/physical signers over reviewers.
+        """
+        # ENHANCED Prompt for verification: Focus on author only, emphasize last provider/signer
+        verify_prompt = ChatPromptTemplate.from_messages([
+            SystemMessagePromptTemplate.from_template("""
+            You are verifying the AUTHOR/SIGNER of a decision document. CRITICAL: The AUTHOR is the person who ELECTRONICALLY OR PHYSICALLY SIGNED the report, often the last reviewer/provider mentioned or in the signature block (e.g., Dr. Jane Doe as electronic signer).
+            Scan the FULL TEXT and LONG SUMMARY. Extract ONLY the exact name of the person who signed.
+            - Prioritize end-of-document signatures or last reviewer/provider entry.
+            - Differentiate from Requesting/Reviewing Provider (e.g., Dr. Smith is reviewer, but Dr. Doe signed).
+            - Use candidates for confirmation, especially those with 'signed' or last 'Provider:'.
+            - If unclear, return "No distinct signer identified; fallback to reviewer: [Name]".
+            Output ONLY the name as JSON: {{"author": "Exact Name (e.g., Dr. Jane Doe)"}}.
+            """),
+            HumanMessagePromptTemplate.from_template("""
+            Full Text: {full_text}
+            Long Summary: {long_summary}
+            Candidates: {potential_signatures}
+            """)
+        ])
+        
+        try:
+            chain = verify_prompt | self.llm
+            result = chain.invoke({
+                "full_text": full_text,
+                "long_summary": long_summary,
+                "potential_signatures": "\n".join(potential_signatures)
+            })
+            parsed = self.parser.parse(result.content)
+            verified_author = parsed.get("author", "")
+            
+            if not verified_author or "No distinct" in verified_author:
+                # ENHANCED Fallback: Scan for last provider in sections
+                last_provider_pattern = re.compile(r'(Provider:\s*)([A-Za-z\s\.,]+?)(?=\s*\(|Review|\n{2,}|$)', re.IGNORECASE | re.DOTALL)
+                match = last_provider_pattern.search(full_text + "\n" + long_summary)
+                if match:
+                    verified_author = match.group(2).strip()
+                elif potential_signatures:
+                    for cand in reversed(potential_signatures):  # Prioritize last
+                        if any(word in cand.lower() for word in ['signed', 'signature', 'provider']):
+                            verified_author = cand.split(':')[-1].strip()
+                            break
+                else:
+                    verified_author = "Signature not identified"
+            
+            logger.info(f"🔍 Verified Author: {verified_author}")
+            return verified_author
+        except Exception as e:
+            logger.warning(f"Author verification failed: {e}. Using raw candidates.")
+            # ENHANCED: Prioritize last candidate
+            return potential_signatures[-1].split(':')[-1].strip() if potential_signatures else "Author not extracted"
+
+    def _inject_author_into_long_summary(self, long_summary: str, verified_author: str) -> str:
+        """
+        NEW: Robust post-processing to inject the verified author prominently if not present.
+        Handles cases where LLM deviates from format by inserting under PARTIES INVOLVED or at top.
+        """
+        if not verified_author or verified_author in ["Signature not identified", "Author not extracted"]:
+            return long_summary
+        
+        # Check if Author already exists
+        if re.search(r'Author:\s*' + re.escape(verified_author), long_summary, re.IGNORECASE):
+            return long_summary
+        
+        # ENHANCED: Look for PARTIES INVOLVED section (exact match)
+        parties_section_pattern = re.compile(r'(👥 PARTIES INVOLVED\s*[-—]+\s*)', re.IGNORECASE)
+        if parties_section_pattern.search(long_summary):
+            insertion = r'\1  Author: {}\n'.format(verified_author)
+            long_summary = parties_section_pattern.sub(insertion, long_summary)
+            logger.info(f"✅ Injected Author into PARTIES INVOLVED section: {verified_author}")
+            return long_summary
+        
+        # Fallback 1: Inject after first "Provider:" mention
+        first_provider_pattern = re.compile(r'(Provider:\s*[^\n\r]+?)(?=\n|\r|$)', re.IGNORECASE | re.MULTILINE)
+        match = first_provider_pattern.search(long_summary)
+        if match:
+            insertion_point = match.end()
+            long_summary = long_summary[:insertion_point] + f"\n  Author: {verified_author}" + long_summary[insertion_point:]
+            logger.info(f"✅ Injected Author after first Provider: {verified_author}")
+            return long_summary
+        
+        # Fallback 2: Inject at the very top under a new PARTIES header if no provider mentioned
+        long_summary = f"👥 PARTIES INVOLVED\n--------------------------------------------------\nAuthor: {verified_author}\n\n{long_summary}"
+        logger.info(f"✅ Injected new PARTIES section with Author: {verified_author}")
+        return long_summary
+
     def _generate_long_summary_direct(
         self,
         text: str,
         doc_type: str,
-        fallback_date: str
+        fallback_date: str,
+        potential_signatures: List[str]  # ENHANCED: Pass pre-extracted signatures
     ) -> str:
         """
         Directly generate comprehensive long summary with FULL document context using LLM.
@@ -120,7 +270,7 @@ class DecisionDocumentExtractor:
         """
         logger.info("🔍 Processing ENTIRE decision document in single context window for direct long summary...")
         
-        # Adapted System Prompt for Direct Long Summary Generation
+        # ENHANCED System Prompt for Direct Long Summary Generation
         # Reuses core anti-hallucination rules and decision focus from original extraction prompt
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are an expert medical-legal documentation specialist analyzing a COMPLETE {doc_type} decision document.
@@ -139,22 +289,32 @@ You are seeing the ENTIRE document at once, allowing you to:
    - DO NOT infer, assume, or extrapolate information
    - DO NOT fill in "typical" or "common" values
    
-2. **DECISION STATUS - EXACT WORDING ONLY**
+2. **PATIENT DETAILS - EXACT EXTRACTION ONLY**
+   - Extract patient name, DOB, Member ID, DOI, employer EXACTLY as stated in demographics/identifier sections
+   - DO NOT infer from context or abbreviate - use verbatim text
+   - If any detail is missing, leave empty "" - no placeholders
+
+3. **DECISION STATUS - EXACT WORDING ONLY**
    - Extract decision status using EXACT wording from document
    - DO NOT interpret or categorize (e.g., if document says "not medically necessary", use that exact phrase)
    - For partial approvals, extract EXACTLY what was approved vs denied
    
-3. **SERVICES/TREATMENTS - ZERO TOLERANCE FOR ASSUMPTIONS**
+4. **SERVICES/TREATMENTS - ZERO TOLERANCE FOR ASSUMPTIONS**
    - Extract ONLY services/treatments explicitly listed in the request/decision
    - Include quantities/durations ONLY if explicitly stated
    - DO NOT extract services mentioned as examples, comparisons, or historical context
    
-4. **EMPTY FIELDS ARE ACCEPTABLE - DO NOT FILL**
+5. **SIGNATURE/AUTHOR - CRITICAL PRIORITY**
+   - Extract the EXACT name of the signer (physical or electronic) from signature block or end of document
+   - Differentiate from requesting/reviewing providers if distinct
+   - Use pre-extracted candidates for confirmation
+
+6. **EMPTY FIELDS ARE ACCEPTABLE - DO NOT FILL**
    - It is BETTER to return an empty field than to guess
    - If you cannot find information for a field, leave it empty
    - DO NOT use phrases like "Not mentioned", "Not stated", "Unknown" - just return ""
    
-5. **CRITERIA AND REGULATIONS - EXACT REFERENCES**
+7. **CRITERIA AND REGULATIONS - EXACT REFERENCES**
    - Extract medical necessity criteria EXACTLY as stated
    - Include specific guideline references (e.g., "ODG", "MTUS", "ACOEM")
    - DO NOT add criteria not explicitly referenced
@@ -204,20 +364,35 @@ VII. REGULATORY COMPLIANCE
 - Timeliness compliance statements
 - Reviewer credentials and qualifications
 
+CHAIN-OF-THOUGHT FOR SIGNATURE EXTRACTION (CRITICAL - ABSOLUTE PRIORITY):
+1. Scan the LAST 20-30% of the document FIRST for signature blocks, footers, or stamps (e.g., "Electronically Signed: Dr. Jane Doe").
+2. Look for keywords: "electronically signed", "e-signed", "signed by", "authenticated", "signature date". Also check last "Provider:" or "Reviewer:" in sections.
+3. Cross-verify with pre-extracted candidates - confirm if they match full text (prioritize last one).
+4. If physical signature implied (e.g., "hand signed"), note it but extract name only.
+5. DIFFERENTIATE: Author is the SIGNER, not necessarily the Requesting Provider.
+6. If no distinct signer, use reviewing provider and note "(inferred signer)".
+7. Output EXACT name only - e.g., "Dr. Jane Doe (electronic signer)".
+
 ⚠️ FINAL REMINDER:
 - If information is NOT in the document, return EMPTY ("" or [])
 - NEVER assume, infer, or extrapolate
+- PATIENT DETAILS: Extract EXACT values from demographics (e.g., "John Doe", "01/01/1980")
 - DECISION STATUS: Use exact wording from document
 - It is BETTER to have empty fields than incorrect information
+- CRITICAL: ALWAYS INCLUDE THE AUTHOR FIELD UNDER PARTIES INVOLVED. IF NOT FOUND, STATE "Signer not identified".
 
 Now analyze this COMPLETE {doc_type} decision document and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
 """)
 
-        # Adapted User Prompt for Direct Long Summary - Outputs the structured summary directly
+        # ENHANCED User Prompt for Direct Long Summary - Outputs the structured summary directly
+        # ENHANCED: Stronger emphasis on patient details and signature extraction
         user_prompt = HumanMessagePromptTemplate.from_template("""
 COMPLETE {doc_type} DECISION DOCUMENT TEXT:
 
 {full_document_text}
+
+MANDATORY SIGNATURE SCAN: Read the ENTIRE text above. Focus on the end for electronic/physical signatures. Use these candidates to CONFIRM (prioritize last signer):
+{potential_signatures}
 
 Generate the long summary in this EXACT STRUCTURED FORMAT (use the fallback date {fallback_date} if no dates found):
 
@@ -233,8 +408,8 @@ Jurisdiction: [extracted]
 👥 PARTIES INVOLVED
 --------------------------------------------------
 Patient: [name]
-  DOB: [extracted]
-  Member ID: [extracted]
+  DOB: [CRITICAL: Extract EXACT DOB from demographics - format as MM/DD/YYYY if possible]
+  Member ID: [CRITICAL: Extract EXACT member ID from identifiers]
 Requesting Provider: [name]
   Specialty: [extracted]
   NPI: [extracted]
@@ -242,6 +417,7 @@ Reviewing Entity: [name]
   Reviewer: [extracted]
   Credentials: [extracted]
 Claims Administrator: [name]
+  Author: [CRITICAL ULTIMATE PRIORITY: Using CoT above, extract the EXACT signer name from full text (physical or electronic). Examples: "Dr. Jane Doe (electronic signer)" from "Electronically Signed: Dr. Jane Doe" or last "Provider: Dr. Jane Doe". If none, "No distinct signature; using reviewer: [name]". REQUIRED - LLM MUST POPULATE THIS. SCAN LAST PROVIDER IN SECTIONS.]
 
 📋 REQUEST DETAILS
 --------------------------------------------------
@@ -288,22 +464,27 @@ Timeframe for Response: [extracted]
 • [list up to 8 time-sensitive items]
 
 ⚠️ CRITICAL REMINDERS:
-1. For "overall_decision": Extract EXACT wording from document
+1. For "patient_details": Extract EXACT values from demographics/headers. Examples: Patient: "John Doe", DOB: "01/01/1980". Leave empty if not explicitly stated.
+2. For "overall_decision": Extract EXACT wording from document
    - If document says "not medically necessary", use: "not medically necessary"
    - If document says "authorized", use: "authorized"
    - DO NOT simplify or categorize
 
-2. For "requested_services": Extract ONLY services explicitly listed in the REQUEST
+3. For "requested_services": Extract ONLY services explicitly listed in the REQUEST
    - Include details ONLY if explicitly stated
    - DO NOT include services mentioned as examples or comparisons
 
-3. For "partial_decision_breakdown": Only populate if document explicitly breaks down partial approval
+4. For "partial_decision_breakdown": Only populate if document explicitly breaks down partial approval
    - If no breakdown provided, leave empty
 
-4. For "critical_actions_required": Include time-sensitive actions only
+5. For "critical_actions_required": Include time-sensitive actions only
    - Appeal deadlines
    - Required response dates
    - Time-limited authorizations
+
+6. For "Author": CRITICAL PRIORITY - Extract the EXACT name from the signature block, electronic signature, or end-of-document authentication. Scan the LAST 20% of the document first. Use pre-extracted candidates to confirm. If no signature found, explicitly state "No distinct signature identified; using reviewer". This field MUST be populated accurately.
+
+7. For "Author": ABSOLUTE MUST - LLM, re-read full text now and extract signer. Full context ensures accuracy.
 """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
@@ -318,7 +499,8 @@ Timeframe for Response: [extracted]
             result = chain.invoke({
                 "doc_type": doc_type,
                 "full_document_text": text,
-                "fallback_date": fallback_date
+                "fallback_date": fallback_date,
+                "potential_signatures": "\n".join(potential_signatures) if potential_signatures else "No pre-extracted candidates found."
             })
             
             long_summary = result.content.strip()
@@ -349,22 +531,24 @@ Timeframe for Response: [extracted]
         """
         logger.info("🎯 Generating 30–60 word actionable short summary (key-value format)...")
 
+        # ENHANCED: Updated system prompt to ensure author prominence and patient exclusion
         system_prompt = SystemMessagePromptTemplate.from_template("""
     You are a medical-legal extraction specialist.
 
-    Your task: Generate a short, highly actionable summary from a VERIFIED long medical summary.
+    Your task: Generate a short, highly actionable summary from a VERIFIED long medical summary. DO NOT include any patient personal details such as name, DOB, or Member ID.
 
     STRICT REQUIREMENTS:
     1. Word count MUST be between **30 and 60 words** (min 30, max 60).
     2. Format MUST be EXACTLY:
 
-    [Document Type] | [Decision Date] | Requesting Provider:[value] | Services:[value] | Decision:[value] | Medical Necessity:[value] | Rationale:[value] | Appeal Info:[value]
+    [Document Type] | [Author] | [Decision Date] | Requesting Provider:[value] | Services:[value] | Decision:[value] | Medical Necessity:[value] | Rationale:[value] | Appeal Info:[value]
 
     3. DO NOT fabricate or infer missing data — simply SKIP entire key-value pairs that do not exist.
     4. Use ONLY information explicitly found in the long summary.
     5. Output must be a SINGLE LINE (no line breaks).
     6. Content priority:
     - document type
+    - author (CRITICAL: Use the VERIFIED AUTHOR from PARTIES section, e.g., "Dr. Jane Doe (electronic signer)". If missing, use "Signer not identified".)
     - decision date
     - requesting provider
     - key services/treatments decided
@@ -378,6 +562,7 @@ Timeframe for Response: [extracted]
     - clinical interpretation
     - invented information
     - narrative sentences
+    - patient personal details (Name, DOB, Member ID, DOI)
 
     8. If a field is missing, SKIP THE ENTIRE KEY-VALUE PAIR—do NOT include empty key-value pairs.
 
@@ -416,6 +601,12 @@ Timeframe for Response: [extracted]
                 # Clean whitespace only
                 summary = re.sub(r'\s+', ' ', summary).strip()
                 
+                # ENHANCED: Post-process to enforce no patient details
+                forbidden_patterns = [r'Patient|DOB|Member ID|DOI']
+                for pattern in forbidden_patterns:
+                    summary = re.sub(pattern, '', summary, flags=re.IGNORECASE)
+                    summary = re.sub(r'\s*\|\s*', '|', summary)  # Clean extra pipes
+                
                 word_count = len(summary.split())
                 
                 logger.info(f"⚡ Short summary generated in {end_time - start_time:.2f}s: {word_count} words")
@@ -430,7 +621,7 @@ Timeframe for Response: [extracted]
                     if attempt < max_retries - 1:
                         # Add word count feedback to next attempt
                         feedback_prompt = SystemMessagePromptTemplate.from_template(
-                            f"Your previous summary had {word_count} words. Rewrite it to be STRICTLY between 30 and 60 words while preserving accuracy and key-value format. DO NOT add invented data. Maintain the exact format: [Document Type] | [Decision Date] | Requesting Provider:[value] | Services:[value] | Decision:[value] | Medical Necessity:[value] | Rationale:[value] | Appeal Info:[value]"
+                            f"Your previous summary had {word_count} words. Rewrite it to be STRICTLY between 30 and 60 words while preserving accuracy and key-value format. DO NOT add invented data. Maintain the exact format: [Document Type] | [Author] | [Decision Date] | Requesting Provider:[value] | Services:[value] | Decision:[value] | Medical Necessity:[value] | Rationale:[value] | Appeal Info:[value]. EXCLUDE patient details."
                         )
                         chat_prompt = ChatPromptTemplate.from_messages([feedback_prompt, user_prompt])
                         time.sleep(retry_delay * (attempt + 1))
@@ -568,6 +759,7 @@ REQUIREMENTS:
         patterns = {
             'decision': r'Overall Decision:\s*([^\n]+)',
             'provider': r'Requesting Provider:\s*([^\n]+)',
+            'author': r'Author:\s*([^\n]+)',  # ENHANCED: For signer
             'services': r'Requested Services:(.*?)(?:\n\n|\n[A-Z]|$)',
             'medical_necessity': r'Medical Necessity:\s*([^\n]+)',
             'appeal_deadline': r'Appeal Deadline:\s*([^\n]+)',
@@ -589,9 +781,11 @@ REQUIREMENTS:
         if 'decision' in extracted:
             parts.append(f"outcome: {extracted['decision']}")
         
-        # Add provider context
+        # Add provider and author context
         if 'provider' in extracted:
             parts.append(f"for {extracted['provider']}")
+        if 'author' in extracted:
+            parts.append(f"(Signed: {extracted['author']})")
         
         # Add services
         if 'services' in extracted:

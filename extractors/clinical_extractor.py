@@ -1,6 +1,7 @@
 """
 ClinicalNoteExtractor - Enhanced Extractor for Clinical Progress Notes and Therapy Reports
 Optimized for accuracy using Gemini-style full-document processing with contextual guidance
+Version: 1.3 - Strict Anti-Hallucination for Signatures
 """
 import logging
 import re
@@ -27,6 +28,8 @@ class ClinicalNoteExtractor:
     - Optimized for accuracy matching Gemini's approach
     - Supports Progress Notes, PT/OT/Chiro/Acupuncture, Pain Management, Psychiatry, Nursing Notes
     - Direct LLM generation for long summary (removes intermediate extraction)
+    - Extracts patient details and signature author for long summary (strict extraction from sign block only)
+    - Short summary focuses only on critical findings and abnormal actions (no patient details), includes author if explicitly signed
     """
 
     def __init__(self, llm: AzureChatOpenAI):
@@ -55,14 +58,27 @@ class ClinicalNoteExtractor:
             'treatment_codes': re.compile(r'\b(CPT[:\s]*(\d{4,5})|(9716[01234]|9753[05]|9775[05]))', re.IGNORECASE)
         }
         
-        logger.info("✅ ClinicalNoteExtractor initialized (Full Context + Context-Aware)")
+        # Patterns for patient details
+        self.patient_patterns = {
+            'name': re.compile(r'\b(patient name|name|mr\.?\s*mrs\.?\s*ms\.?\s*)\s*[:\-]?\s*([A-Z][a-z]+\s+[A-Z][a-z]+)', re.IGNORECASE),
+            'dob': re.compile(r'\b(dob|date of birth|birthdate)\s*[:\-]?\s*(\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2})', re.IGNORECASE)
+        }
+        
+        # Enhanced patterns for signature (more comprehensive, distinguish physical/electronic)
+        self.signature_patterns = {
+            'physical_author': re.compile(r'(?i)(?:handwritten|wet|physical signature|ink signature)\s*[:\-]?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s*(?:,?\s*(?:MD|DO|PA|NP|RN|PT|OT|DPT|DC|PhD|etc\.?))?)', re.DOTALL),
+            'electronic_author': re.compile(r'(?i)(?:electronically signed|e-signature|digital signature|/s/|typed signature)\s*[:\-]?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s*(?:,?\s*(?:MD|DO|PA|NP|RN|PT|OT|DPT|DC|PhD|etc\.?))?)', re.DOTALL),
+            'sign_block': re.compile(r'(?i)(signature|sign off|attestation|certification|approval)\s*(?:section|block)?[:\-]?\s*(.*?)(?=\n{2,}|\Z)', re.DOTALL)
+        }
+        
+        logger.info("✅ ClinicalNoteExtractor v1.3 initialized (Full Context + Strict Anti-Hallucination for Signatures)")
 
     def extract(
         self,
         text: str,
         doc_type: str,
         fallback_date: str,
-   
+     
     ) -> Dict:
         """
         Extract Clinical Note data with FULL CONTEXT.
@@ -155,12 +171,11 @@ class ClinicalNoteExtractor:
     ) -> str:
         """
         Directly generate comprehensive long summary with FULL document context using LLM.
-        Adapted from original extraction prompt to output structured summary directly.
+        Enhanced for strict extraction of physical/electronic signature author only from explicit sign blocks.
         """
         logger.info("🔍 Processing ENTIRE clinical note in single context window for direct long summary...")
         
-        # Adapted System Prompt for Direct Long Summary Generation
-        # Reuses core anti-hallucination rules and clinical focus from original extraction prompt
+        # Enhanced System Prompt with stricter rules for signature extraction (physical/electronic) - Anti-Hallucination Focus
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are an expert clinical documentation specialist analyzing a COMPLETE {doc_type}.
 
@@ -170,8 +185,10 @@ You are seeing the ENTIRE clinical note at once, allowing you to:
 - Track progress across multiple visits and treatment sessions
 - Identify patterns in symptoms, functional limitations, and treatment response
 - Provide comprehensive extraction without information loss
+- Extract patient details from demographics/header sections
+- Extract signature author STRICTLY from explicit sign block/signature section at the end (e.g., "Electronically signed by", "Signature:", "Attested by"). Distinguish physical (handwritten/wet) vs electronic (e-signature/digital).
 
-⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY):
+⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY - ABSOLUTE FOR SIGNATURES):
 
 1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
    - If a field/value is NOT explicitly mentioned in the note, return EMPTY string "" or empty list []
@@ -199,21 +216,40 @@ You are seeing the ENTIRE clinical note at once, allowing you to:
    - Include treatment plan details verbatim
    - DO NOT interpret clinical reasoning
 
-EXTRACTION FOCUS - 8 CRITICAL CLINICAL NOTE CATEGORIES:
+6. **PATIENT DETAILS - FROM DEMOGRAPHICS/HEADER**
+   - Extract patient name, DOB, ID ONLY if explicitly stated in patient info section (e.g., "## PATIENT INFORMATION")
+   - Use exact formatting from note
+   - Do NOT extract from narrative text
+
+7. **SIGNATURE AUTHOR - STRICTLY FROM SIGN BLOCK ONLY (PHYSICAL/ELECTRONIC) - NO HALLUCINATIONS**
+   - Extract author name and credentials ONLY if there is an EXPLICIT signature section with signing language (e.g., "Electronically signed by [Name]", "Handwritten by [Name]", "Signed by [Name], MD", "Attested by [Name] with e-signature", "Signature: /s/ [Name]").
+   - Distinguish: Physical (e.g., "Handwritten by Dr. X", "Wet signature by Dr. X") vs Electronic (e.g., "Electronically signed by Dr. Y", "/s/ Dr. Y", "Digital signature by Dr. Y").
+   - List separately if both present; use exact names/titles from the document.
+   - CRITICAL: DO NOT extract ANY name as signer if there is NO explicit signing phrase. Provider names, treating physicians, or mentioned authors are NOT signers unless the sign block explicitly says they signed.
+   - Examples of INVALID extraction (DO NOT DO THIS):
+     - If note says "Provider: Joshua T. Ritter, D.C." but no "signed by" -> OMIT entirely, do not assume electronic.
+     - If only "Dictated by Joshua" but no signature block -> OMIT.
+     - If "Report prepared by Joshua" without signing language -> OMIT.
+   - If no explicit sign block with signing language found, leave COMPLETELY EMPTY (no "Not explicitly signed" - just omit the bullets).
+   - Scan the ENTIRE document, but prioritize the end for sign blocks.
+
+EXTRACTION FOCUS - 10 CRITICAL CLINICAL NOTE CATEGORIES:
 
 I. NOTE IDENTITY & ENCOUNTER CONTEXT
 - Note type, dates, encounter information
-- Provider details and credentials
-- Visit type and duration
+- Provider details and credentials (treating/radiologist/referring)
 
-II. SUBJECTIVE FINDINGS (PATIENT'S PERSPECTIVE)
+II. PATIENT INFORMATION
+- Patient name, DOB, other demographics from explicit header sections
+
+III. SUBJECTIVE FINDINGS (PATIENT'S PERSPECTIVE)
 - Chief complaint and history of present illness
 - Pain characteristics: location, intensity, quality, timing
 - Functional limitations and impact on daily activities
 - Patient's goals and expectations
 - Relevant medical and social history
 
-III. OBJECTIVE EXAMINATION FINDINGS (CLINICIAN'S OBSERVATIONS)
+IV. OBJECTIVE EXAMINATION FINDINGS (CLINICIAN'S OBSERVATIONS)
 - Vital signs and general appearance
 - Physical examination findings:
   * Range of motion (ROM) measurements with specific degrees
@@ -224,7 +260,7 @@ III. OBJECTIVE EXAMINATION FINDINGS (CLINICIAN'S OBSERVATIONS)
 - Functional capacity assessments
 - Observation of movement patterns and gait
 
-IV. TREATMENT PROVIDED (SESSION-SPECIFIC)
+V. TREATMENT PROVIDED (SESSION-SPECIFIC)
 - Specific techniques and modalities used:
   * Manual therapy techniques
   * Therapeutic exercises prescribed
@@ -234,27 +270,30 @@ IV. TREATMENT PROVIDED (SESSION-SPECIFIC)
 - Patient response to treatment
 - Any adverse reactions or complications
 
-V. ASSESSMENT & CLINICAL IMPRESSION
+VI. ASSESSMENT & CLINICAL IMPRESSION
 - Clinical assessment and diagnosis
 - Progress since last visit
 - Changes in functional status
 - Barriers to recovery
 - Prognosis and expected outcomes
 
-VI. TREATMENT PLAN & GOALS
+VII. TREATMENT PLAN & GOALS
 - Short-term and long-term goals
 - Specific plan for next visit
 - Home exercise program details
 - Frequency and duration of continued care
 - Referrals or consultations needed
 
-VII. WORK STATUS & FUNCTIONAL CAPACITY
+VIII. WORK STATUS & FUNCTIONAL CAPACITY
 - Current work restrictions
 - Functional limitations
 - Ability to perform job duties
 - Expected return to work timeline
 
-VIII. OUTCOME MEASURES & PROGRESS TRACKING
+IX. SIGNATURE & AUTHOR (STRICT PHYSICAL/ELECTRONIC - NO ASSUMPTIONS)
+- Signed by author from explicit sign block only, distinguishing physical/electronic - OMIT if not explicit
+
+X. OUTCOME MEASURES & PROGRESS TRACKING
 - Standardized outcome measures (ODI, NDI, DASH, etc.)
 - Pain scale ratings (0-10)
 - Functional improvement metrics
@@ -262,21 +301,28 @@ VIII. OUTCOME MEASURES & PROGRESS TRACKING
 
 ⚠️ FINAL REMINDER:
 - If information is NOT in the note, return EMPTY ("" or [])
-- NEVER assume, infer, or extrapolate clinical information
+- NEVER assume, infer, or extrapolate clinical information - ESPECIALLY FOR SIGNATURES
 - PAIN SCALES: Extract exact numbers (e.g., "6/10") not descriptions
 - ROM MEASUREMENTS: Extract exact degrees, not ranges
-- It is BETTER to have empty fields than incorrect clinical information
+- SIGNATURE: ONLY from explicit sign block with signing language; distinguish physical vs electronic; OMIT if no explicit signing phrase; provider names are NOT signers unless specified with "signed by"
+- It is BETTER to have empty fields than incorrect clinical information - EMPTY SIGNATURE > WRONG SIGNER
 
 Now analyze this COMPLETE {doc_type} and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
 """)
 
-        # Adapted User Prompt for Direct Long Summary - Outputs the structured summary directly
+        # User Prompt updated for physical/electronic distinction
         user_prompt = HumanMessagePromptTemplate.from_template("""
 COMPLETE {doc_type} TEXT:
 
 {full_document_text}
 
 Generate the long summary in this EXACT STRUCTURED FORMAT (use the fallback date {fallback_date} if no visit date found):
+
+👤 PATIENT INFORMATION
+--------------------------------------------------
+Name: [extracted from explicit demographics/header, e.g., "## PATIENT INFORMATION"]
+DOB: [extracted]
+Other Details: [extracted, e.g., ID, gender, claim number, DOI]
 
 📋 CLINICAL ENCOUNTER OVERVIEW
 --------------------------------------------------
@@ -287,15 +333,8 @@ Duration: [extracted]
 Facility: [extracted]
 
 👨‍⚕️ PROVIDER INFORMATION
-                                                               
- ## PATIENT INFORMATION
-    - **Name:** [extracted name]
-    - **Date of Birth:** [extracted DOB] 
-    - **Claim Number:** [extracted claim number]
-    - **Date of Injury:** [extracted DOI]
-    - **Employer:** [extracted employer]                                                            
 --------------------------------------------------
-Treating Provider: [name]
+Treating Provider: [name, e.g., Radiologist or Referring]
   Credentials: [extracted]
   Specialty: [extracted]
 
@@ -309,7 +348,7 @@ Functional Limitations:
 🔍 OBJECTIVE EXAMINATION
 --------------------------------------------------
 Range of Motion:
-• [list up to 5, with body part, motion, degrees]
+• [list up to 5, with body part, motion, degrees or qualitative if no degrees]
 Manual Muscle Testing:
 • [list up to 3, with muscle and grade/5]
 Special Tests:
@@ -353,14 +392,20 @@ Pain Scale: [extracted, e.g., 6/10]
 Functional Scores:
 • [list up to 3, with measure and value]
 
+✍️ SIGNATURE & AUTHOR
+--------------------------------------------------
+Signer/Author:
+• Physical Signature: [extracted name/title ONLY if explicit physical signing phrase present; otherwise omit]
+• Electronic Signature: [extracted name/title ONLY if explicit electronic signing phrase present; otherwise omit]
+
 🚨 CRITICAL CLINICAL FINDINGS
 --------------------------------------------------
 • [list up to 8 most significant items]
 
 ⚠️ CRITICAL CLINICAL REMINDERS:
-1. For "range_of_motion": Extract EXACT measurements with degrees
-   - Include body part, motion, and specific degrees
-   - Example: "Shoulder flexion: 120 degrees" not "limited shoulder flexion"
+1. For "range_of_motion": Extract EXACT measurements with degrees; use qualitative (e.g., "mildly reduced") if no numbers
+   - Include body part, motion, and specific degrees/qualitative
+   - Example: "Cervical flexion: mildly reduced with pain"
 
 2. For "pain_scale": Extract EXACT numerical values (0-10 scale)
    - Example: "6/10" not "moderate pain"
@@ -379,6 +424,14 @@ Functional Scores:
    - New neurological findings
    - Significant progress or setbacks
    - Compliance issues affecting treatment
+
+6. For patient details: Extract ONLY from explicit demographics sections (e.g., "## PATIENT INFORMATION")
+   - Do not infer from narrative or provider sections
+
+7. For signature author: Extract STRICTLY from sign block/signature section (usually at end), distinguishing physical vs electronic
+   - MUST have explicit signing language (e.g., "Electronically signed by [Name]", "Handwritten by [Name]")
+   - Radiologist/Referring Physician is NOT a signer unless in sign block with signing phrase
+   - If absent or no signing language, OMIT the entire Signer/Author section - do not add "Not explicitly signed"
 """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
@@ -416,6 +469,7 @@ Functional Scores:
             
             # Fallback: Generate a minimal summary
             return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
+    
     def _clean_pipes_from_summary(self, short_summary: str) -> str:
         """
         Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.
@@ -441,7 +495,7 @@ Functional Scores:
                 cleaned_parts.append(stripped_part)
         
         # Join back with pipes - only include parts with actual content
-        cleaned_summary = ' . '.join(cleaned_parts)
+        cleaned_summary = ' | '.join(cleaned_parts)
         
         logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
         return cleaned_summary
@@ -450,53 +504,56 @@ Functional Scores:
         """
         Generate a precise 30–60 word clinical note summary in key-value format.
         Pipe-delimited, zero hallucination, skips missing fields.
+        Focuses ONLY on critical findings and abnormal actions (no patient details), includes author ONLY if explicitly signed with type.
+        Starts with Doc Type first.
         """
 
-        logger.info("🎯 Generating 30–60 word clinical structured summary (key-value format)...")
+        logger.info("🎯 Generating 30–60 word clinical structured summary (critical findings & abnormal actions only, strict author with type, Doc Type first)...")
 
         system_prompt = SystemMessagePromptTemplate.from_template("""
     You are a clinical documentation specialist.
 
     TASK:
     Create a concise, factual clinical summary using ONLY information explicitly present in the long summary.
+    Focus EXCLUSIVELY on critical findings and abnormal actions. NO patient details (name, DOB, etc.).
+    Include the signing author ONLY if explicitly stated in "SIGNATURE & AUTHOR" section as signed, with type (Physical/Electronic).
 
     STRICT REQUIREMENTS:
     1. Word count MUST be **between 30 and 60 words**.
     2. Output format MUST be EXACTLY:
 
-    [Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Key Findings:[value] | Medication:[value] | Treatments:[value] | Clinical Assessment:[value] | Plan:[value] | MMI Status:[value] | Work Status:[value] | Critical Finding:[value]
+    Doc Type:[value] | Author:[value] | Critical Findings:[value] | Abnormal Actions:[value]
 
     FORMAT & RULES:
     - MUST be **30–60 words**.
     - MUST be **ONE LINE**, pipe-delimited, no line breaks.
-    - NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
-    - NEVER fabricate: no invented dates, meds, findings, or recommendations.
+    - NEVER include empty fields. If a field is missing (e.g., no explicit signer), SKIP that key and remove its pipe.
+    - NEVER fabricate: no invented findings, actions, or recommendations.
     - NO narrative sentences. Use short factual fragments ONLY.
-    - First three fields (Report Title, Author, Date) appear without keys
-    - All other fields use key-value format: Key:[value]
+    - Key-value format: Key:[value] (values as comma-separated lists if multiple)
+    - Doc Type: Always include the document type as the first field (e.g., "Doc Type: Progress Note")
+    - Author: ONLY from "SIGNATURE & AUTHOR" if explicitly signed with signing language (e.g., "Electronic Signature: Dr. Smith" -> "Author: Dr. Smith (Electronic)"); skip if omitted or no signing phrase. CRITICAL: Do not assume signing from provider names alone.
+    - Critical Findings: Significant clinical changes, worsening symptoms, new abnormalities, progress setbacks
+    - Abnormal Actions: Unexpected treatment responses, adverse reactions, compliance issues, abnormal exam results
 
-    CONTENT PRIORITY (only if provided in the long summary):
-    1. Report Title  
-    2. Author  
-    3. Visit Date  
-    4. Body parts  
-    5. Diagnosis  
-    6. Key objective findings  
-    7. Medications  
-    8. Treatments provided  
-    9. Clinical assessment  
-    10. Plan/next steps  
-    11. MMI status  
-    12. Work status  
-    13. Critical finding
+    CONTENT PRIORITY (only if provided in the long summary, no patient info):
+    1. Doc Type: Always "{doc_type}"
+    2. Author ONLY if explicit signature with type and signing language (e.g., "Physical Signature: John Doe, MD" -> "Author: John Doe, MD (Physical)"); OMIT if no explicit signing
+    3. Critical clinical findings from "CRITICAL CLINICAL FINDINGS" section
+    4. Abnormal objective findings (e.g., reduced ROM, low strength)
+    5. Adverse treatment reactions
+    6. Functional declines or barriers
+    7. Compliance or abnormal patient responses
 
     ABSOLUTELY FORBIDDEN:
-    - assumptions, interpretations, invented medications, or inferred diagnoses
+    - Patient details (name, DOB, demographics)
+    - Using provider/radiologist as author unless explicitly signed with type and signing phrase (e.g., NO: "Provider: Joshua" -> do not make "Author: Joshua (Electronic)")
+    - assumptions, interpretations, or inferred issues
     - narrative writing
     - placeholder text or "Not provided"
     - duplicate pipes or empty pipe fields (e.g., "||")
 
-    Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
+    Your final output MUST be between 30–60 words and follow the exact pipe-delimited style as string text.
     """)
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
@@ -504,7 +561,7 @@ Functional Scores:
 
     {long_summary}
 
-    Now produce a 30–60 word structured clinical summary following ALL rules.
+    Now produce a 30–60 word structured clinical summary following ALL rules, starting with Doc Type, including author ONLY if explicitly signed with type and signing language, focusing only on critical findings and abnormal actions.
     """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
@@ -528,7 +585,8 @@ Functional Scores:
                 fix_prompt = ChatPromptTemplate.from_messages([
                     SystemMessagePromptTemplate.from_template(
                         f"Your prior summary contained {wc} words. Rewrite it to be between 30 and 60 words. "
-                        "DO NOT add fabricated details. Preserve all factual elements. Maintain key-value pipe-delimited format: [Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | etc."
+                        "DO NOT add fabricated details or patient info. Preserve all factual elements including author ONLY if explicit with type and signing language, Doc Type first. "
+                        "Maintain key-value pipe-delimited format: Doc Type:[value] | Author:[value] | Critical Findings:[value] | Abnormal Actions:[value] (skip missing keys)"
                     ),
                     HumanMessagePromptTemplate.from_template(summary)
                 ])
@@ -539,7 +597,7 @@ Functional Scores:
                 # No pipe cleaning after auto-fix
 
             logger.info(f"✅ Clinical summary generated: {len(summary.split())} words")
-            return summary
+            return self._clean_pipes_from_summary(summary)
 
         except Exception as e:
             logger.error(f"❌ Clinical summary generation failed: {e}")

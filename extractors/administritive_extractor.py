@@ -211,6 +211,8 @@ II. PARTIES INVOLVED
 - Roles and relationships (sender, recipient, cc'd parties)
 - Complete contact information for all parties
 - Legal representation details if applicable
+- Patient details (name, DOB, ID) if explicitly stated
+- Report author/signer (name, title, signature details) if explicitly stated
 
 III. KEY DATES & DEADLINES (MOST CRITICAL)
 - Document date, effective dates, response deadlines
@@ -276,11 +278,13 @@ Document ID: [extracted]
 
 👥 PARTIES INVOLVED
 --------------------------------------------------
+Patient Details: [name, DOB, ID if extracted]
 From: [sender name]
   Organization: [extracted]
   Title: [extracted]
 To: [recipient name]
   Organization: [extracted]
+Report Author/Signer: [author name, title, signature details if extracted]
 Legal Representation: [attorney name]
   Firm: [extracted]
 
@@ -360,6 +364,12 @@ Response Format: [extracted]
    - Critical compliance requirements
    - Urgent action items
    - If none explicit, derive from deadlines/actions (but prioritize explicit)
+
+6. For "patient_details": Extract ONLY if explicitly stated (name, DOB, patient ID)
+   - Do not infer patient information
+
+7. For "report_author_signer": Extract signer/author name, title, and signature details verbatim from end of document or signature block
+   - Look for phrases like "Signed by", "Prepared by", or signature lines
 """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
@@ -402,6 +412,7 @@ Response Format: [extracted]
         """
         Generate a precise 30–60 word administrative summary in key-value format.
         Pipe-delimited, zero hallucination, skips missing fields.
+        Includes Author (report signer) but excludes patient details.
         """
 
         logger.info("🎯 Generating 30–60 word administrative structured summary (key-value format)...")
@@ -426,10 +437,12 @@ FORMAT & RULES:
 - NO narrative sentences. Use short factual fragments ONLY.
 - First three fields (Document Title, Author, Date) appear without keys
 - All other fields use key-value format: Key:[value]
+- Author refers to the report author/signer explicitly stated in the long summary
+- DO NOT include patient details (name, DOB, ID) in any field
 
 CONTENT PRIORITY (only if provided in the long summary):
 1. Document Title  
-2. Author  
+2. Author (report signer)  
 3. Document Date  
 4. Body parts  
 5. Diagnosis  
@@ -445,6 +458,7 @@ ABSOLUTELY FORBIDDEN:
 - narrative writing
 - placeholder text or "Not provided"
 - duplicate pipes or empty pipe fields (e.g., "||")
+- any patient details (e.g., patient name, DOB, ID)
 
 Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
 """)
@@ -474,7 +488,7 @@ Now produce a 30–60 word administrative structured summary following ALL rules
 
                 fix_prompt = ChatPromptTemplate.from_messages([
                     SystemMessagePromptTemplate.from_template(
-                        f"Your prior output contained {wc} words. Rewrite it to be STRICTLY between 30 and 60 words while keeping all facts accurate and key-value pipe-delimited format. DO NOT add fabricated details. Maintain format: [Document Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | etc."
+                        f"Your prior output contained {wc} words. Rewrite it to be STRICTLY between 30 and 60 words while keeping all facts accurate and key-value pipe-delimited format. DO NOT add fabricated details. Maintain format: [Document Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | etc. DO NOT include patient details."
                     ),
                     HumanMessagePromptTemplate.from_template(summary)
                 ])
