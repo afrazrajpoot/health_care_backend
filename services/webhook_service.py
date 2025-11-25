@@ -11,9 +11,13 @@ from services.task_creation import TaskCreator
 from services.resoning_agent import EnhancedReportAnalyzer
 from utils.logger import logger
 from prisma import Prisma
+from concurrent.futures import ThreadPoolExecutor
 import asyncio
 import re
 import json
+
+# Dedicated thread pool for LLM operations (shared across all WebhookService instances)
+LLM_EXECUTOR = ThreadPoolExecutor(max_workers=10)
 
 class WebhookService:
     """
@@ -107,9 +111,12 @@ class WebhookService:
 
         logger.info(f"📋 Document mode: {mode}")
 
-        # ⛔ extract_document is sync → do NOT await
+        # Run ReportAnalyzer in dedicated LLM executor for better batch performance
         report_analyzer = ReportAnalyzer(mode)
-        report_result = report_analyzer.extract_document(text)
+        loop = asyncio.get_event_loop()
+        report_result = await loop.run_in_executor(
+            LLM_EXECUTOR, report_analyzer.extract_document, text
+        )
 
         long_summary = report_result.get("long_summary", "")
         short_summary = report_result.get("short_summary", "")
@@ -119,19 +126,16 @@ class WebhookService:
 
         analyzer = EnhancedReportAnalyzer()
 
-        # ⛔ Both analyzer functions are sync → do NOT await
-        # They must be wrapped into asyncio tasks manually
-        loop = asyncio.get_event_loop()
-
+        # Run both analyzer functions in parallel using dedicated LLM executor
         analysis_task = loop.run_in_executor(
-            None,
+            LLM_EXECUTOR,
             lambda: analyzer.extract_document_data_with_reasoning(
                 long_summary, None, None, mode
             )
         )
 
         summary_task = loop.run_in_executor(
-            None,
+            LLM_EXECUTOR,
             lambda: analyzer.generate_brief_summary(long_summary, mode)
         )
 
