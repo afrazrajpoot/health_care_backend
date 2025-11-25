@@ -248,13 +248,21 @@ Next Steps: [extracted]
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You create CONCISE pipe-delimited summaries for ANY type of medical document.
 
-STRICT REQUIREMENTS:
+ABSOLUTE RULES - NO EXCEPTIONS:
 1. Word count MUST be **between 30 and 60 words**.
 2. Output format MUST be pipe-delimited with ONLY fields that have actual data.
-3. Possible fields (include ONLY if data exists; NO patient details like name, DOB, MRN):
+3. NEVER output a key if you don't have the value.
+4. NEVER output [empty], [unknown], [not provided], [N/A], or ANY placeholder text.
+5. NEVER output empty strings, blank values, or null markers.
+6. If a field has no real value in the text, DO NOT include that field AT ALL.
+7. Skip the entire "Key: Value" segment if no value exists.
+
+CRITICAL: If you see terms like "Decision: [empty]" or "Medical Necessity: [empty]" in your output - YOU ARE DOING IT WRONG. Simply don't include those keys.
+
+Possible fields (include ONLY if real data exists; NO patient details like name, DOB, MRN):
    - Report Title
    - Claim Number
-   - Author/Physician/Signer
+   - Author
    - Signature Type (Physical/Electronic)
    - Date
    - Body Parts
@@ -268,58 +276,57 @@ STRICT REQUIREMENTS:
    - Recommendation
    - Critical Finding
    - Urgent Next Steps
+   - Rationale
+   - Treatment Plan
+   - Procedure
+   - Test Results
 
-***IMPORTANT FORMAT RULES***
-- Each segment must be **Key: Value**
-- If a field has NO VALUE, SKIP THE ENTIRE SEGMENT
-- NEVER output empty fields or keys without values
+***FORMAT RULES***
+- Each segment: **Key: Value** (separated by pipes |)
+- If NO VALUE exists → SKIP THE ENTIRE SEGMENT
+- NEVER output: [empty], [unknown], blank spaces as values
 - NEVER produce double pipes (||)
-- ONLY include segments with real data
-- Keep keys descriptive and relevant
-- For Author/Signer: Combine name and type, e.g., "Author/Physician/Signer: Dr. Smith (Electronic)"
-- For Signature Type: Only if distinct from author field
+- ONLY include segments with actual, real data
+- For Author: Include name with credentials if available, e.g., "Author: Dr. Smith, M.D."
 
-EXAMPLES:
+EXAMPLES (reference only - adapt to your document):
 
-Lab Report:
-"Report Title: Lab Results | Claim Number: ABC-123 | Date: 10/22/2025 | Author/Physician/Signer: Dr. Jones (Electronic) | Critical Finding: Elevated WBC 15.2 (H), Glucose 245 mg/dL (H) | Lab Results: Hemoglobin 12.1, Creatinine 1.2 | Recommendation: Repeat CBC in 1 week, endocrinology consult for diabetes management"
+Lab Report with complete data:
+"Lab Results | Author: Jones | Date: 10/22/2025 | Critical Finding: Elevated WBC 15.2 (H), Glucose 245 mg/dL (H) | Lab Results: Hemoglobin 12.1, Creatinine 1.2 | Recommendation: Repeat CBC in 1 week, endocrinology consult"
 
 Imaging Report:
-"Report Title: MRI Lumbar Spine | Claim Number: 45678 | Date: 09/15/2025 | Author/Physician/Signer: Dr. Lee (Physical) | Body Parts: L4-L5, L5-S1 | Imaging Findings: Moderate central stenosis L4-L5, broad-based disc herniation L5-S1 with nerve root impingement | Recommendation: Consider epidural steroid injection, neurosurgery consultation if conservative management fails"
+"MRI Report | Author: Dr. Lee | Date: 09/15/2025 | Body Parts: L4-L5, L5-S1 | Imaging Findings: Moderate central stenosis L4-L5, broad-based disc herniation L5-S1 | Recommendation: Epidural steroid injection, neurosurgery consultation"
 
-Clinical Note:
-"Report Title: Follow-up Visit | Author/Physician/Signer: Dr. Smith (Electronic) | Date: 08/20/2025 | Body Parts: Right knee | Diagnosis: Post-operative status ACL reconstruction | Work Status: Modified duty, no squatting/kneeling | Recommendation: Continue PT 2x/week, f/u 6 weeks"
+Clinical Note with limited data:
+"Follow-up Visit | Author: Smith | Date: 08/20/2025 | Body Parts: Right knee | Diagnosis: Post-op ACL reconstruction | Work Status: Modified duty"
 
-3. DO NOT fabricate or infer missing data – simply SKIP segments that don't exist
-4. Use ONLY information explicitly found in the long summary
-5. Output must be a SINGLE LINE (no line breaks)
-6. Priority information (include if present):
-   - Report title/type
-   - Claim Number
-   - Author/Signer (with type if available)
-   - Date
-   - Critical findings or abnormal results
-   - Key test results (labs/imaging)
-   - Diagnoses
-   - Recommendations or next steps
-   - Work status if mentioned
-   - Medications if mentioned
-7. ABSOLUTE NO:
-   - Patient details (name, DOB, MRN, etc.)
-   - Assumptions or inferences
-   - Empty fields or placeholders
-   - Invented data
-   - Narrative sentences
-   - Extra pipes for missing fields
+Notice: Only fields with actual values are included. No [empty] or placeholder fields.
 
-Your final output must be **30–60 words** with ONLY available information in pipe-delimited format.
+WHAT NOT TO DO:
+❌ "Report | Author: Dr. Smith | Decision: [empty] | Medical Necessity: [empty]"
+✅ "Report | Author: Dr. Smith | Date: 04/13/2017 | Diagnosis: Meniscus tear"
+
+FINAL CHECKLIST BEFORE OUTPUT:
+- Does my output contain [empty], [unknown], or any placeholder? → REMOVE THOSE FIELDS
+- Does my output have any keys without real values? → REMOVE THOSE KEYS
+- Is every field populated with actual information from the text? → YES = GOOD
+- Word count between 30-60? → CHECK
+
+Your output must be a SINGLE LINE with ONLY available information in pipe-delimited format.
 """)
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
 LONG SUMMARY:
 {long_summary}
 
-Create a clean pipe-delimited short summary with ONLY available information (exclude patient details):
+Create a clean pipe-delimited short summary following these rules:
+1. Include ONLY fields that have actual values (no [empty], no placeholders)
+2. If a field has no data, skip it entirely - don't include the key
+3. Exclude all patient identifying details (name, DOB, MRN)
+4. Keep between 30-60 words
+5. Single line, pipe-delimited format
+
+Short summary:
 """)
         
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
@@ -331,6 +338,9 @@ Create a clean pipe-delimited short summary with ONLY available information (exc
             
             short_summary = self._clean_short_summary(short_summary)
             short_summary = self._clean_pipes_from_summary(short_summary)
+            
+            # Additional safety: Remove any segments with [empty] or similar placeholders
+            short_summary = self._remove_empty_segments(short_summary)
             
             word_count = len(short_summary.split())
             logger.info(f"✅ Short summary: {word_count} words")
@@ -345,6 +355,48 @@ Create a clean pipe-delimited short summary with ONLY available information (exc
         except Exception as e:
             logger.error(f"❌ Short summary generation failed: {e}")
             return self._clean_pipes_from_summary(f"Report Title: {doc_type} | Date: Unknown")
+    
+    def _remove_empty_segments(self, text: str) -> str:
+        """
+        Remove any segments that contain empty values, placeholders, or unwanted markers.
+        """
+        # Split by pipe
+        segments = text.split('|')
+        cleaned_segments = []
+        
+        # Patterns to detect empty/placeholder values
+        empty_patterns = [
+            '[empty]', '[unknown]', '[not provided]', '[n/a]', '[na]',
+            'unknown', 'not specified', 'not provided', 'not available',
+            'not mentioned', 'not stated', 'none', 'n/a', 'na'
+        ]
+        
+        for segment in segments:
+            segment = segment.strip()
+            if not segment:
+                continue
+            
+            # Check if segment contains a colon (Key: Value format)
+            if ':' in segment:
+                key, value = segment.split(':', 1)
+                value = value.strip()
+                
+                # Skip if value is empty or matches empty patterns
+                if not value:
+                    continue
+                
+                # Check against empty patterns (case-insensitive)
+                value_lower = value.lower()
+                if any(pattern in value_lower for pattern in empty_patterns):
+                    continue
+                
+                # Keep this segment
+                cleaned_segments.append(segment)
+            else:
+                # If no colon, keep as-is (shouldn't happen but safety)
+                cleaned_segments.append(segment)
+        
+        return ' | '.join(cleaned_segments)
     
     def _clean_empty_fields(self, data: Dict, fallback_date: str) -> Dict:
         """Remove all empty fields and ensure clean structure."""
@@ -457,8 +509,7 @@ Create a clean pipe-delimited short summary with ONLY available information (exc
         text = ' '.join(text.split())
         text = text.strip('"').strip("'")
         
-        return text
-    
+        return text 
     def _create_basic_medical_summary(self, extracted_data: Dict, doc_type: str) -> str:
         """Create a basic medical summary from extracted data when LLM fails."""
         dates = extracted_data.get("important_dates", {})
