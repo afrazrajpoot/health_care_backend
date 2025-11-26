@@ -1069,6 +1069,90 @@ class WebhookService:
         except Exception as e:
             logger.error(f"❌ Webhook processing failed: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+    async def handle_webhook_with_retry(self, data: dict, db_service, max_retries: int = 1) -> dict:
+        """
+        Wrapper that retries handle_webhook once on failure.
+        If all retries fail, saves the document to FailDocs.
+        
+        Args:
+            data: The webhook data
+            db_service: Database service instance
+            max_retries: Number of retry attempts (default: 1)
+        
+        Returns:
+            Result dict with status and document_id
+        """
+        last_error = None
+        filename = data.get("filename", "unknown")
+        
+        for attempt in range(max_retries + 1):
+            try:
+                logger.info(f"🔄 Processing attempt {attempt + 1}/{max_retries + 1} for document: {filename}")
+                result = await self.handle_webhook(data, db_service)
+                
+                # If we reach here, processing succeeded
+                if attempt > 0:
+                    logger.info(f"✅ Retry successful for document: {filename} (attempt {attempt + 1})")
+                
+                return result
+                
+            except Exception as e:
+                last_error = e
+                logger.warning(f"⚠️ Attempt {attempt + 1} failed for {filename}: {str(e)}")
+                
+                if attempt < max_retries:
+                    # Wait briefly before retry
+                    logger.info(f"⏳ Waiting 2 seconds before retry for {filename}...")
+                    await asyncio.sleep(2)
+                else:
+                    # All retries exhausted - save to FailDocs
+                    logger.error(f"❌ All {max_retries + 1} attempts failed for {filename}: {str(last_error)}")
+        
+        # All retries failed - save to FailDocs
+        try:
+            logger.info(f"💾 Saving failed document to FailDocs: {filename}")
+            
+            result_data = data.get("result", {})
+            document_text = result_data.get("text", "")
+            mode = data.get("mode", "wc")
+            
+            fail_doc_id = await db_service.save_fail_doc(
+                reason=f"Processing failed after {max_retries + 1} attempts: {str(last_error)}",
+                db=None,  # DOB unknown since processing failed
+                claim_number=None,
+                patient_name=None,
+                physician_id=data.get("physician_id"),
+                gcs_file_link=data.get("gcs_url"),
+                file_name=filename,
+                file_hash=data.get("file_hash"),
+                blob_path=data.get("blob_path"),
+                mode=mode,
+                document_text=document_text,
+                doi=None
+            )
+            
+            # Decrement parse count for failed documents too
+            parse_decremented = await db_service.decrement_parse_count(data.get("physician_id"))
+            
+            logger.info(f"✅ Failed document saved to FailDocs with ID: {fail_doc_id}")
+            
+            return {
+                "status": "failed",
+                "document_id": fail_doc_id,
+                "filename": filename,
+                "parse_count_decremented": parse_decremented,
+                "failure_reason": f"Processing failed after {max_retries + 1} attempts: {str(last_error)}",
+                "retries_attempted": max_retries + 1
+            }
+            
+        except Exception as save_error:
+            logger.error(f"❌ Failed to save to FailDocs: {str(save_error)}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Processing failed and could not save to FailDocs: {str(last_error)}"
+            )
+
     async def update_fail_document(self, fail_doc: Any, updated_fields: dict, user_id: str = None, db_service: Any = None) -> dict:
         """
         Updates and processes a failed document using the complete webhook-like logic.

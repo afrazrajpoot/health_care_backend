@@ -176,8 +176,23 @@ class EnhancedReportAnalyzer:
         return """
     ━━━ STAGE 1: WORKERS COMP DOCUMENT ANALYSIS ━━━
     - Focus on: Work-related injuries, body parts, claim numbers, work restrictions
-    - Extract: claim_number, doi (date of injury), body_part, work_restrictions
+    - Extract: Patient/Patient name, claim/claim_number, doi (date of injury), body_part, work_restrictions
     - WC-specific fields: injury_type, work_relatedness, mmi_status, return_to_work_plan
+    
+    ━━━ CLAIM NUMBER EXTRACTION PATTERNS ━━━
+    CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
+    
+    Common claim number patterns (case-insensitive):
+    - "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
+    - "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
+    - "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
+    - "WC Claim: XXXXXXXXX" or "Workers Comp Claim: XXXXXXXXX"
+    - "Policy/Claim: XXXXXXXXX"
+    - In "cc:" lines: "Broadspire [Claim #XXXXXXXXX]"
+    - In subject lines or reference fields: "Claim #XXXXXXX"
+    
+    Extract the FULL claim number including any suffixes (e.g., -001, -002).
+    If multiple claim numbers found, use the one that appears most prominently or in the header/footer.
 
     ━━━ STAGE 2: WORKERS COMP CLINICAL EXTRACTION ━━━
     - body_part: Primary body part injured

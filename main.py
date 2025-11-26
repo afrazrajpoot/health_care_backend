@@ -195,7 +195,8 @@ async def get_progress(task_id: str):
 @app.post("/webhook/save-document")
 async def save_document_webhook(request: Request):
     """
-    Main webhook handler: Uses WebhookService to process the request.
+    Main webhook handler: Uses WebhookService with retry logic.
+    Retries once on failure, then saves to FailDocs if still fails.
     ✅ Registered on FastAPI app (not socket_app)
     """
     try:
@@ -205,7 +206,9 @@ async def save_document_webhook(request: Request):
         db_service = await get_database_service()
         redis_client = await get_redis_client()  # 🆕 Get Redis client
         service = WebhookService(redis_client=redis_client)  # 🆕 Pass Redis to service
-        result = await service.handle_webhook(data, db_service)
+        
+        # Use retry wrapper - retries once on failure, saves to FailDocs if both attempts fail
+        result = await service.handle_webhook_with_retry(data, db_service, max_retries=1)
 
         return result
 
