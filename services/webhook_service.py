@@ -726,25 +726,85 @@ class WebhookService:
             consulting_doctor = document_analysis.consulting_doctor or ""
             
             def normalize_name(name):
+                """
+                Advanced name normalization:
+                - Removes titles (Dr, Dr., MD, M.D, DO, D.O, Prof, etc.)
+                - Removes commas
+                - Handles "LastName, FirstName" and "FirstName LastName" formats
+                - Converts to lowercase for comparison
+                """
                 if not name:
                     return ""
-                name = re.sub(r'^(Dr\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?)\s*', '', name, flags=re.IGNORECASE)
-                return name.strip().lower()
+                
+                # Remove all titles (case-insensitive, with or without dots)
+                name = re.sub(r'\b(Dr\.?|M\.?D\.?|D\.?O\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?|Doctor)\b', '', name, flags=re.IGNORECASE)
+                
+                # Remove commas
+                name = name.replace(',', ' ')
+                
+                # Remove extra whitespace and convert to lowercase
+                name = ' '.join(name.split()).lower()
+                
+                return name.strip()
+            
+            def get_name_variants(name):
+                """
+                Generate name variants to handle different name formats:
+                - "John Smith" → ["john smith", "smith john"]
+                - "Smith, John" → ["smith john", "john smith"]
+                """
+                if not name:
+                    return []
+                
+                normalized = normalize_name(name)
+                parts = normalized.split()
+                
+                if len(parts) < 2:
+                    return [normalized]
+                
+                variants = [
+                    normalized,  # Original normalized form
+                    ' '.join(reversed(parts))  # Reversed (FirstName LastName ↔ LastName FirstName)
+                ]
+                
+                return list(set(variants))  # Remove duplicates
 
-            normalized_consulting_doctor = normalize_name(consulting_doctor)
+            # Get all possible variants of consulting doctor name
+            consulting_doctor_variants = get_name_variants(consulting_doctor)
+            logger.info(f"🔍 Consulting doctor variants to match: {consulting_doctor_variants}")
+            
             matching_user = None
 
             for user in users:
                 user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
-                normalized_user_name = normalize_name(user_full_name)
                 
-                if normalized_user_name and normalized_consulting_doctor and normalized_user_name == normalized_consulting_doctor:
-                    matching_user = user
-                    logger.info(f"✅ Physician matches consulting doctor - User ID: {user.id}")
+                # Get all variants of user's name
+                user_name_variants = get_name_variants(user_full_name)
+                logger.info(f"🔍 Checking user '{user_full_name}' with variants: {user_name_variants}")
+                
+                # Check if ANY variant of consulting doctor matches ANY variant of user name
+                for consulting_variant in consulting_doctor_variants:
+                    if not consulting_variant:
+                        continue
+                    for user_variant in user_name_variants:
+                        if not user_variant:
+                            continue
+                        if consulting_variant == user_variant:
+                            matching_user = user
+                            logger.info(f"✅ Physician name MATCH found!")
+                            logger.info(f"   User: '{user_full_name}' (variant: '{user_variant}')")
+                            logger.info(f"   Consulting Doctor: '{consulting_doctor}' (variant: '{consulting_variant}')")
+                            logger.info(f"   User ID: {user.id}")
+                            break
+                    if matching_user:
+                        break
+                if matching_user:
                     break
             
             if not matching_user:
-                logger.warning(f"⚠️ No physician name matches consulting doctor - skipping task creation")
+                logger.warning(f"⚠️ No physician name matches consulting doctor '{consulting_doctor}'")
+                logger.warning(f"   Tried variants: {consulting_doctor_variants}")
+                logger.warning(f"   Available users: {[f'{u.firstName} {u.lastName}' for u in users]}")
                 return 0
             
             # Generate and create tasks
