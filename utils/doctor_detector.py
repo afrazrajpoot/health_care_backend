@@ -168,7 +168,7 @@ class DoctorDetector:
 Extract the NAME of the {role} from the text.
 
 RULES:
-1. Look for name near: "signed by", "electronically signed", "signature:", "/s/", "provider:", "physician:"
+1. Look for name near: "signed by", "electronically signed", "signature:", "/s/", "provider:", "physician:", "doctor:", "examining physician", "treating physician", "qualified medical evaluator", "qme", "ame", "ime", "consultant", "consulting physician", "prescriber"
 2. Name can be: Dr. X, John Doe, Jane Smith, MD, PA, NP, PT, etc.
 3. Title is OPTIONAL
 4. REJECT:

@@ -736,11 +736,15 @@ class WebhookService:
                 if not name:
                     return ""
                 
-                # Remove all titles (case-insensitive, with or without dots)
-                name = re.sub(r'\b(Dr\.?|M\.?D\.?|D\.?O\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?|Doctor)\b', '', name, flags=re.IGNORECASE)
+                # Remove all titles and credentials (case-insensitive, with or without dots)
+                # This handles: Dr, Dr., MD, M.D, M.D., DO, D.O, D.O., DPM, DC, NP, PA, etc.
+                name = re.sub(r'\b(Dr\.?|M\.?D\.?|D\.?O\.?|D\.?P\.?M\.?|D\.?C\.?|N\.?P\.?|P\.?A\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?|Doctor)\b', '', name, flags=re.IGNORECASE)
                 
-                # Remove commas
+                # Remove all commas
                 name = name.replace(',', ' ')
+                
+                # Remove all standalone periods and extra whitespace
+                name = name.replace('.', ' ')
                 
                 # Remove extra whitespace and convert to lowercase
                 name = ' '.join(name.split()).lower()
@@ -774,7 +778,10 @@ class WebhookService:
             logger.info(f"🔍 Consulting doctor variants to match: {consulting_doctor_variants}")
             
             matching_user = None
+            matched_doctor_name = None
+            match_source = None
 
+            # STEP 1: Try to match consulting_doctor first (highest priority)
             for user in users:
                 user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
                 
@@ -791,7 +798,9 @@ class WebhookService:
                             continue
                         if consulting_variant == user_variant:
                             matching_user = user
-                            logger.info(f"✅ Physician name MATCH found!")
+                            matched_doctor_name = consulting_doctor
+                            match_source = "consulting_doctor"
+                            logger.info(f"✅ Physician name MATCH found in CONSULTING DOCTOR!")
                             logger.info(f"   User: '{user_full_name}' (variant: '{user_variant}')")
                             logger.info(f"   Consulting Doctor: '{consulting_doctor}' (variant: '{consulting_variant}')")
                             logger.info(f"   User ID: {user.id}")
@@ -801,11 +810,63 @@ class WebhookService:
                 if matching_user:
                     break
             
+            # STEP 2: If no match in consulting_doctor, try all_doctors list
             if not matching_user:
-                logger.warning(f"⚠️ No physician name matches consulting doctor '{consulting_doctor}'")
-                logger.warning(f"   Tried variants: {consulting_doctor_variants}")
+                logger.info(f"⚠️ No match found in consulting_doctor, checking all_doctors list...")
+                
+                # Get all_doctors list from document_analysis
+                all_doctors = []
+                if hasattr(document_analysis, 'all_doctors') and document_analysis.all_doctors:
+                    all_doctors = document_analysis.all_doctors
+                    logger.info(f"📋 Found {len(all_doctors)} doctors in all_doctors: {all_doctors}")
+                else:
+                    logger.info(f"📋 No all_doctors list found in document_analysis")
+                
+                # Try to match each doctor in all_doctors list
+                for doctor_name in all_doctors:
+                    if not doctor_name or doctor_name == consulting_doctor:
+                        # Skip empty or already tried consulting_doctor
+                        continue
+                    
+                    doctor_variants = get_name_variants(doctor_name)
+                    logger.info(f"🔍 Trying doctor from all_doctors: '{doctor_name}' with variants: {doctor_variants}")
+                    
+                    for user in users:
+                        user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
+                        user_name_variants = get_name_variants(user_full_name)
+                        
+                        # Check if ANY variant of this doctor matches ANY variant of user name
+                        for doctor_variant in doctor_variants:
+                            if not doctor_variant:
+                                continue
+                            for user_variant in user_name_variants:
+                                if not user_variant:
+                                    continue
+                                if doctor_variant == user_variant:
+                                    matching_user = user
+                                    matched_doctor_name = doctor_name
+                                    match_source = "all_doctors"
+                                    logger.info(f"✅ Physician name MATCH found in ALL_DOCTORS!")
+                                    logger.info(f"   User: '{user_full_name}' (variant: '{user_variant}')")
+                                    logger.info(f"   Doctor from all_doctors: '{doctor_name}' (variant: '{doctor_variant}')")
+                                    logger.info(f"   User ID: {user.id}")
+                                    break
+                            if matching_user:
+                                break
+                        if matching_user:
+                            break
+                    if matching_user:
+                        break
+            
+            # STEP 3: If still no match found, return 0
+            if not matching_user:
+                logger.warning(f"⚠️ No physician name matches found in consulting_doctor or all_doctors")
+                logger.warning(f"   Consulting doctor: '{consulting_doctor}'")
+                logger.warning(f"   All doctors: {all_doctors if all_doctors else '[]'}")
                 logger.warning(f"   Available users: {[f'{u.firstName} {u.lastName}' for u in users]}")
                 return 0
+            
+            logger.info(f"🎯 Final match: User='{matching_user.firstName} {matching_user.lastName}', Doctor='{matched_doctor_name}', Source='{match_source}'")
             
             # Generate and create tasks
             task_creator = TaskCreator()

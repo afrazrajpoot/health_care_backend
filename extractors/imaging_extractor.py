@@ -183,7 +183,7 @@ Imaging Center: [extracted]
 Referring Physician: [extracted]
 Author:
 hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
 
 
  ## PATIENT INFORMATION
@@ -191,7 +191,31 @@ hint: check the signature block mainly last pages of the report and the closing 
     - **Date of Birth:** [extracted DOB] 
     - **Claim Number:** [extracted claim number]
     - **Date of Injury:** [extracted DOI]
-    - **Employer:** [extracted employer]   
+    - **Employer:** [extracted employer] 
+
+━━━ CLAIM NUMBER EXTRACTION PATTERNS ━━━
+CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
+
+Common claim number patterns (case-insensitive) and make sure to extract EXACTLY as written and must be claim number not just random numbers (like chart numbers, or id numbers) that look similar:
+- "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
+- "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
+- "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
+- "WC Claim: XXXXXXXXX" or "Workers Comp Claim: XXXXXXXXX"
+- "Policy/Claim: XXXXXXXXX"
+- In "cc:" lines: "Broadspire [Claim #XXXXXXXXX]"
+- In subject lines or reference fields: "Claim #XXXXXXX" 
+
+All Doctors Involved:
+• [list all extracted doctors with names and titles]
+━━━ ALL DOCTORS EXTRACTION ━━━
+- Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
+- Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
+- Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
+- Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
+- Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
+- If no doctors found, leave list empty [].
+
+
 🎯 CLINICAL INDICATION
 --------------------------------------------------
 Clinical Indication: [extracted]
@@ -322,12 +346,14 @@ Specialist Consultation: [extracted]
 
     TASK:
     Produce a concise structured summary of an imaging report using ONLY details explicitly present in the long summary.
+    - **ONLY include, critical, or clinically significant findings**.
+    - **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
 
     STRICT REQUIREMENTS:
     1. Word count MUST be **between 30 and 60 words**.
     2. Output format MUST be EXACTLY:
 
-    [Report Title] | [Radiologist/Physician] | [Study Date] | Body Parts:[value] | Findings:[value] | Impression:[value] | Comparison:[value] | Critical Finding:[value] | Recommendations:[value]
+    [Report Title] | [Radiologist/Physician] | [Study Date] | Body Parts:[value] | Findings:[value] | Impression:[value] | Comparison:[value] | Physical Exam:[value] | Vital Signs:[value] | Critical Finding:[value] | Recommendations:[value]
 
     FORMAT & RULES:
     - MUST be **30–60 words**.
@@ -346,9 +372,11 @@ Specialist Consultation: [extracted]
     4. Body parts studied  
     5. Key imaging findings  
     6. Radiologist's impression  
-    7. Comparison to prior studies  
-    8. Critical/urgent findings  
-    9. Recommendations for follow-up
+    7. Physical Exam (only abnormal findings if mentioned)  
+    8. Vital Signs (only abnormal values if mentioned)  
+    9. Comparison to prior studies  (if relevant)  
+    10. Critical/urgent findings  
+    11. Recommendations (only if explicitly stated)
 
     ABSOLUTELY FORBIDDEN:
     - assumptions, interpretations, or invented findings

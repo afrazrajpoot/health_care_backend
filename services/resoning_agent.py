@@ -208,6 +208,14 @@ class EnhancedReportAnalyzer:
     - It is NOT mandatory that this author is a qualified doctor; extract the name as explicitly signed, regardless of credentials.
     - Extract specialty only if explicitly stated near the signature.
     - If no clear signer is found, leave empty.
+    
+    ━━━ ALL DOCTORS EXTRACTION ━━━
+    - Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
+    - Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, QME, AME, IME, radiologist, etc.
+    - Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
+    - Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
+    - Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
+    - If no doctors found, leave list empty [].
     """
 
     def _get_gm_specific_instructions(self) -> str:
@@ -230,8 +238,17 @@ class EnhancedReportAnalyzer:
     ━━━ CONSULTING PHYSICIAN/AUTHOR DETECTION ━━━
     - Identify the author who signed the report as the "consulting_doctor" name (e.g., from signature block, "Dictated by:", or closing statement).
     - It is NOT mandatory that this author is a qualified doctor; extract the name as explicitly signed, regardless of credentials.
+    - But it should be a valid person name, not a business or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.
     - Extract specialty only if explicitly stated near the signature.
     - If no clear signer is found, leave empty.
+    
+    ━━━ ALL DOCTORS EXTRACTION ━━━
+    - Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
+    - Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
+    - Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
+    - Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
+    - Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
+    - If no doctors found, leave list empty [].
     """
     def extract_document_data_with_reasoning(
         self,
@@ -311,6 +328,7 @@ class EnhancedReportAnalyzer:
             logger.info(f"   - Document Type: {analysis.document_type}")
             logger.info(f"   - Mode: {mode}")
             logger.info(f"   - CONSULTING DOCTOR: {analysis.consulting_doctor}")
+            logger.info(f"   - ALL DOCTORS: {analysis.all_doctors if analysis.all_doctors else '[]'}")
             logger.info(f"   - Confidence: {analysis.extraction_confidence:.2f}")
 
             return analysis
@@ -362,7 +380,7 @@ Focus: Patient condition, key findings, recommendations. Use clinical language a
 
         except Exception as e:
             logger.error(f"❌ {mode.upper()} summary generation failed: {str(e)}")
-            return f"{mode_upper()} brief summary unavailable"
+            return f"{mode.upper()} brief summary unavailable"
 
     def create_fallback_analysis(self, mode: str = "wc") -> DocumentAnalysis:
         """Create mode-aware fallback analysis when extraction fails"""
@@ -394,6 +412,7 @@ Focus: Patient condition, key findings, recommendations. Use clinical language a
             adls_affected="Not specified",
             work_restrictions="Not specified",
             consulting_doctor="Not specified",
+            all_doctors=[],
             referral_doctor="Not specified",
             ai_outcome=ai_outcome,
             document_type="medical_document",

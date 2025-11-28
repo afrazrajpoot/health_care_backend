@@ -166,6 +166,16 @@ Name: [extracted]
 Date of Birth: [extracted]
 Date of Injury: [extracted]
 Claim Number: [extracted]
+                                                               
+All Doctors Involved:
+• [list all extracted doctors with names and titles]
+━━━ ALL DOCTORS EXTRACTION ━━━
+- Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
+- Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
+- Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
+- Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
+- Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
+- If no doctors found, leave list empty [].
 
 🎯 CHIEF COMPLAINT
 --------------------------------------------------
@@ -175,7 +185,7 @@ Duration: [extracted]
 Radiation Pattern: [extracted]
 Author:
 hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
 
 
 🏥 DIAGNOSIS & ASSESSMENT
@@ -333,16 +343,16 @@ You are a medical-legal consultation specialist.
 
 TASK:
 Create a concise, factual consultation summary using ONLY information explicitly stated in the long summary.
-Include ONLY abnormal, critical, or clinically significant findings. Skip normal or non-critical findings entirely.
-
+- **ONLY include, critical, or clinically significant findings**.
+- **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
 STRICT REQUIREMENTS:
 1. Word count MUST be **between 30 and 60 words**.
 2. Output format MUST be EXACTLY:
 
-[Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Key Findings:[value] | Medication:[value] | Treatments:[value] | Clinical Assessment:[value] | Plan:[value] | MMI Status:[value] | Work Status:[value] | Critical Finding:[value]
+[Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Physical Exam:[value] | Vital Signs:[value] | Key Findings:[value] | Medication:[value] | Treatments:[value] | Clinical Assessment:[value] | Plan:[value] | MMI Status:[value] | Work Status:[value] | Critical Finding:[value]
 
 KEY RULES:
-- ONLY include abnormal or critical findings.
+- ONLY include abnormal or critical findings for these fields (physical exam, vital signs).
 - If a value is missing or not extractable, omit the ENTIRE key-value pair.
 - NEVER output empty fields or placeholder text.
 - NEVER fabricate dates, meds, findings, or recommendations.
@@ -352,23 +362,24 @@ KEY RULES:
 - Key Findings and Physical Exam details include **only abnormalities or critical observations**.
 - Medications, Treatments, Plan, MMI Status, Work Status included only if explicitly stated in the summary.
 
-CONTENT PRIORITY (only if abnormal/critical and provided):
+CONTENT PRIORITY (only if critical and provided):
 1. Report Title  
 2. Author  
 3. Date  
-4. Abnormal Body Parts  
-5. Abnormal Diagnosis  
-6. Key objective findings (abnormal only)  
-7. Medications (explicit only)  
-8. Treatments provided (explicit only)  
-9. Clinical Assessment (abnormal/critical)  
-10. Plan/Next Steps (explicit)  
-11. MMI status (if abnormal or stated)  
-12. Work status (if abnormal or stated)  
-13. Critical finding
+4. Body Parts  
+5. Diagnosis  
+6. Physical Exam (abnormal only if present)  
+7. Vital Signs (abnormal only if present)  
+8. Key objective findings (abnormal only)  
+9. Treatment plan (given explicit only)
+10. Medications (given explicit only)  
+11. Recommendations (if explicitly stated) or Plan (if explicitly or stated)  
+12. MMI status (if stated)  
+13. Work status (if stated)  
+14. Critical finding
 
 ABSOLUTELY FORBIDDEN:
-- Normal findings (ignore entirely)
+- Normal findings (ignore entirely for physical exam and vital signs)
 - Assumptions, interpretations, inferred diagnoses
 - Patient details (name, DOB, claim, MRN, etc.)
 - Narrative writing

@@ -406,7 +406,7 @@ Claim/Case Number: [extracted]
 Jurisdiction: [extracted]
 Author:
 hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
 
 
 👥 PARTIES INVOLVED
@@ -423,6 +423,28 @@ Reviewing Entity: [name]
 Claims Administrator: [name]
   Author: [CRITICAL ULTIMATE PRIORITY: Using CoT above, extract the EXACT signer name from full text (physical or electronic). Examples: "Dr. Jane Doe (electronic signer)" from "Electronically Signed: Dr. Jane Doe" or last "Provider: Dr. Jane Doe". If none, "No distinct signature; using reviewer: [name]". REQUIRED - LLM MUST POPULATE THIS. SCAN LAST PROVIDER IN SECTIONS.]
 
+All Doctors Involved:
+• [list all extracted doctors with names and titles]
+━━━ ALL DOCTORS EXTRACTION ━━━
+- Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
+- Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
+- Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
+- Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
+- Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
+- If no doctors found, leave list empty [].
+                                                               
+━━━ CLAIM NUMBER EXTRACTION PATTERNS ━━━
+CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
+
+Common claim number patterns (case-insensitive) and make sure to extract EXACTLY as written and must be claim number not just random numbers (like chart numbers, or id numbers) that look similar:
+- "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
+- "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
+- "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
+- "WC Claim: XXXXXXXXX" or "Workers Comp Claim: XXXXXXXXX"
+- "Policy/Claim: XXXXXXXXX"
+- In "cc:" lines: "Broadspire [Claim #XXXXXXXXX]"
+- In subject lines or reference fields: "Claim #XXXXXXX"
+                                                               
 📋 REQUEST DETAILS
 --------------------------------------------------
 Date of Service Requested: [extracted]
@@ -542,6 +564,7 @@ You are a medical-legal extraction specialist.
 TASK:
 Generate a concise, highly actionable summary from a VERIFIED long medical summary. Include ONLY abnormal or clinically significant information. DO NOT include any patient personal details (name, DOB, Member ID, DOI).
 
+
 STRICT REQUIREMENTS:
 1. Word count MUST be between **30 and 60 words**.
 2. Output format MUST be EXACTLY:
@@ -562,12 +585,12 @@ CONTENT PRIORITY (if provided and relevant):
 - Medications prescribed (abnormal/critical only)
 - Services/treatments decided (abnormal, critical, or actionable only)
 - Final Decision Outcome (APPROVED/DENIED/PARTIAL)
-- Medical Necessity Determination
-- Key Rationale for decision
-- Recommendations (if any)
+- Medical Necessity Determination (if any given)
+- Key Rationale for decision (if any given)
+- Recommendations (if any given)
 
 KEY RULES:
-- ONLY include abnormal, critical, or clinically significant findings.
+- ONLY include critical, or clinically significant findings.
 - If a value is missing or not extractable, omit the ENTIRE key-value pair.
 - NEVER output empty fields or placeholder text.
 - NEVER fabricate dates, meds, restrictions, exam findings, or recommendations.

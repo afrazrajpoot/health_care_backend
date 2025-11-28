@@ -202,7 +202,7 @@ Time Since Injury: [extracted]
 Time Since Last Visit: [extracted]
 Author:
 hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
 
 
 👤 PATIENT INFORMATION
@@ -220,6 +220,30 @@ Claims Administrator: [extracted]
 Primary Complaint: [extracted]
 Location: [extracted]
 Description: [extracted]
+
+━━━ CLAIM NUMBER EXTRACTION PATTERNS ━━━
+CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
+
+Common claim number patterns (case-insensitive) and make sure to extract EXACTLY as written and must be claim number not just random numbers (like chart numbers, or id numbers) that look similar:
+- "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
+- "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
+- "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
+- "WC Claim: XXXXXXXXX" or "Workers Comp Claim: XXXXXXXXX"
+- "Policy/Claim: XXXXXXXXX"
+- In "cc:" lines: "Broadspire [Claim #XXXXXXXXX]"
+- In subject lines or reference fields: "Claim #XXXXXXX"
+
+All Doctors Involved:
+• [list all extracted doctors with names and titles]
+━━━ ALL DOCTORS EXTRACTION ━━━
+- Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
+- Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
+- Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
+- Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
+- Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
+- If no doctors found, leave list empty [].
+                                                               
+
 
 💬 SUBJECTIVE ASSESSMENT
 --------------------------------------------------
@@ -380,9 +404,10 @@ Return Sooner If: [extracted]
 
     TASK:
     Create a concise, accurate PR-2 Progress Report summary using ONLY the information explicitly present in the long summary.
-
+    - **ONLY include, critical, or clinically significant findings**.
+    - **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
     STRICT OUTPUT FORMAT (include fields only when data exists):
-    [Title] | [Author] | [Date] | Work Status:[value] | Restrictions:[value] | Meds:[value] | Physical Exam:[value] | Treatment Progress:[value] | Auth Requests:[value] | Follow-up:[value] | Critical Finding:[value]
+    [Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Physical Exam:[value] | Vital Signs:[value] | Treatment plan:[value] | Auth Requests:[value] | Work Status:[value] | Restrictions:[value] | Meds:[value] | Recommendations:[value] | Follow-up:[value] | Critical Finding:[value]
 
     FORMAT & RULES:
     - MUST be **30–60 words**.
@@ -400,11 +425,15 @@ Return Sooner If: [extracted]
     • Title = Report title (without key)
     • Author = MD/DO/PA/NP or signer (without key)  
     • Date = Visit or exam date (without key)
+    • Body Parts:[value] = anatomical sites only (if given)
+    • Diagnosis:[value] = final diagnosis only (if given)
+    • Physical Exam:[value] = objective exam findings only (if given only if these are abnormal and given)
+    • Vital Signs:[value] = vital signs only (if given only if these are abnormal and given)
+    • Treatment plan:[value] = plan or response (if given)
     • Work Status:[value] = current status (if given)  
     • Restrictions:[value] = physical restrictions (if given)  
     • Meds:[value] = medications explicitly listed (if given)
-    • Physical Exam:[value] = objective exam findings only (if given)
-    • Treatment Progress:[value] = progress or response (if given)
+    • Recommendations:[value] = recommended actions (if given)
     • Auth Requests:[value] = items requested for authorization (if given)
     • Follow-up:[value] = next appointment or instruction (if given)
     • Critical Finding:[value] = one most clinically important finding (if given)
@@ -413,13 +442,17 @@ Return Sooner If: [extracted]
     1. Report Title  
     2. Author  
     3. Visit Date  
-    4. Work status & restrictions  
-    5. Medications  
-    6. Physical examination details  
-    7. Treatment progress  
-    8. Authorization requests  
-    9. Follow-up plan  
-    10. Critical finding
+    4. Body Parts  
+    5. Diagnosis  
+    6. Physical Exam  
+    7. Vital Signs  
+    8. Treatment Plan  
+    9. Authorization Requests  
+    10. Recommendations                                                      
+    11. Work status & restrictions  
+    12. Medications  
+    13. Follow-up plan  
+    14. Critical finding
 
     ABSOLUTELY FORBIDDEN:
     - assumptions, interpretations, invented medications, or inferred diagnoses

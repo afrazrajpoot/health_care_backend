@@ -126,10 +126,7 @@ Report Date: [extracted or {fallback_date}]
 Claim Number: [extracted if present; otherwise omit]
 Patient Name: [extracted]
 Provider: [extracted]
-Signer/Author:
-• Physical Signature: [extracted name/title if physical signature present; otherwise omit]
-• Electronic Signature: [extracted name/title if electronic signature present; otherwise omit]
-
+                                                         
 👤 PATIENT & CLINICAL INFORMATION
 --------------------------------------------------
 Name: [extracted]
@@ -137,6 +134,29 @@ DOB: [extracted]
 Chief Complaint: [extracted]
 Clinical History: [extracted]
 
+                                                               
+All Doctors Involved:
+• [list all extracted doctors with names and titles]
+━━━ ALL DOCTORS EXTRACTION ━━━
+- Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
+- Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
+- Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
+- Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
+- Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
+- If no doctors found, leave list empty [].
+
+━━━ CLAIM NUMBER EXTRACTION PATTERNS ━━━
+CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
+
+Common claim number patterns (case-insensitive) and make sure to extract EXACTLY as written and must be claim number not just random numbers (like chart numbers, or id numbers) that look similar:
+- "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
+- "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
+- "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
+- "WC Claim: XXXXXXXXX" or "Workers Comp Claim: XXXXXXXXX"
+- "Policy/Claim: XXXXXXXXX"
+- In "cc:" lines: "Broadspire [Claim #XXXXXXXXX]"
+- In subject lines or reference fields: "Claim #XXXXXXX"
+                                                               
 🚨 CRITICAL FINDINGS
 --------------------------------------------------
 • [list up to 5 critical items, e.g., abnormal labs, urgent diagnoses]
@@ -174,9 +194,9 @@ Document Type: {doc_type}
 Document Date: [extracted or {fallback_date}]
 Claim Number: [extracted if present; otherwise omit]
 Purpose: [extracted]
-Signer/Author:
-• Physical Signature: [extracted name/title if physical signature present; otherwise omit]
-• Electronic Signature: [extracted name/title if electronic signature present; otherwise omit]
+Author:
+hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
 
 👥 KEY PARTIES
 --------------------------------------------------
@@ -247,6 +267,9 @@ Next Steps: [extracted]
         
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You create CONCISE pipe-delimited summaries for ANY type of medical document.
+- **ONLY include, critical, or clinically significant findings**.
+- **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
+    
 
 ABSOLUTE RULES - NO EXCEPTIONS:
 1. Word count MUST be **between 30 and 60 words**.
@@ -265,6 +288,8 @@ Possible fields (include ONLY if real data exists; NO need to include patient de
    - Date
    - Body Parts
    - Diagnosis
+   - Physical Exam (only abnormal findings and observations else skip)
+   - Vital Signs (key abnormal findings only else skip)
    - Lab Results (key abnormal findings)
    - Imaging Findings (key observations)
    - Medication
@@ -288,6 +313,9 @@ Possible fields (include ONLY if real data exists; NO need to include patient de
 - For Author: Include name with credentials if available, e.g., "Author: Dr. Smith, M.D."
 
 EXAMPLES (reference only - adapt to your document):
+                                                                  
+general layout:
+"[Report Title] | [Author] | [Date] | Body Parts: [value] | Diagnosis: [value] | Physical Exam: [value (only abnormal findings and observations else skip)] | Vital Signs: [value (key abnormal findings only else skip)] | Medication: [value] | MMI Status: [value] | Work Status: [value] | Recommendation: [value] | Critical Finding: [value] | Urgent Next Steps: [value] | Rationale: [value] | Treatment Plan: [value]"
 
 Lab Report with complete data:
 "Lab Results | Jones Doe | Date: 10/22/2025 | Critical Finding: Elevated WBC 15.2 (H), Glucose 245 mg/dL (H) | Lab Results: Hemoglobin 12.1, Creatinine 1.2 | Recommendation: Repeat CBC in 1 week, endocrinology consult"

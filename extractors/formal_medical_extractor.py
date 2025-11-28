@@ -471,8 +471,30 @@ Ordering Physician: [name]
 Anesthesiologist: [name]
 Author:
 hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
 
+ ━━━ CLAIM NUMBER EXTRACTION PATTERNS ━━━
+CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
+
+Common claim number patterns (case-insensitive) and make sure to extract EXACTLY as written and must be claim number not just random numbers (like chart numbers, or id numbers) that look similar:
+- "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
+- "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
+- "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
+- "WC Claim: XXXXXXXXX" or "Workers Comp Claim: XXXXXXXXX"
+- "Policy/Claim: XXXXXXXXX"
+- In "cc:" lines: "Broadspire [Claim #XXXXXXXXX]"
+- In subject lines or reference fields: "Claim #XXXXXXX"
+
+All Doctors Involved:
+• [list all extracted doctors with names and titles]
+━━━ ALL DOCTORS EXTRACTION ━━━
+- Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
+- Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
+- Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
+- Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
+- Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
+- If no doctors found, leave list empty [].
+                                                               
 🏥 CLINICAL CONTEXT
 --------------------------------------------------
 Indications: [extracted]
@@ -627,17 +649,18 @@ You are a medical-report summarization specialist.
 
 TASK:
 Create a concise, factual summary of a medical report using ONLY information explicitly present in the long summary.
-Include ONLY abnormal or clinically significant findings. Skip normal or non-critical findings entirely.
+- **ONLY include, critical, or clinically significant findings**.
+- **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
 DO NOT include any patient personal details such as name, DOB, DOI, or claim number.
 
 STRICT REQUIREMENTS:
 1. Word count MUST be **between 30 and 60 words**.
 2. Output format MUST be EXACTLY:
 
-[Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Medication:[value] | MMI Status:[value] | Work Status:[value] | Restrictions:[value] | Treatment Progress:[value] | Critical Finding:[value] | Follow-up:[value]
+[Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Physical Exam:[value] | Vital Signs:[value] | Medication:[value] | MMI Status:[value] | Work Status:[value] | Restrictions:[value] | Treatment Plan:[value] | Recommendations:[value] | Critical Finding:[value] | Follow-up:[value]
 
 KEY RULES:
-- ONLY include abnormal, critical, or clinically significant findings.
+- ONLY include critical, or clinically significant findings .
 - If a value is missing or not extractable, omit the ENTIRE key-value pair.
 - NEVER output empty fields or placeholder text.
 - NEVER fabricate dates, meds, restrictions, exam findings, or recommendations.
@@ -653,15 +676,18 @@ CONTENT PRIORITY (only if abnormal/critical and present):
 3. Date (Report Date or Procedure Date)
 4. Body Parts (from Procedure/Anatomical Sites)
 5. Diagnosis (Final/Pathological Diagnosis)
-6. Medications (Anesthetic/Intraoperative)
-7. MMI Status (if mentioned)
-8. Work Status / Restrictions (if applicable)
-9. Treatment Progress (from Results/Interpretation)
-10. Critical Finding (from CRITICAL FINDINGS or abnormal observations)
-11. Follow-up plan (from Recommendations)
+6. Physical Exam (only abnormal findings if mentioned)
+7. Vital Signs (only abnormal values if mentioned)
+8. Medications (Anesthetic/Intraoperative meds if mentioned)
+9. MMI Status (if mentioned)
+10. Work Status / Restrictions (if applicable and mentioned)
+11. Treatment Plan (from Results/Interpretation if mentioned)
+12. Critical Finding (from CRITICAL FINDINGS or abnormal observations if mentioned)
+13. Recommendations (from Recommendations section)
+14. Follow-up plan (from Recommendations)
 
 ABSOLUTELY FORBIDDEN:
-- Normal findings (ignore entirely)
+- Normal findings (ignore entirely for Physical Exam and Vital Signs)
 - Assumptions, interpretations, inferred diagnoses
 - Narrative sentences
 - Patient personal details (Name, DOB, DOI, Claim, Employer)

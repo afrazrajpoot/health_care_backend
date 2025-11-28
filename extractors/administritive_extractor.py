@@ -286,9 +286,31 @@ To: [recipient name]
   Organization: [extracted]
 Author:
 hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
 Legal Representation: [attorney name]
   Firm: [extracted]
+                                                               
+━━━ CLAIM NUMBER EXTRACTION PATTERNS ━━━
+CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
+
+Common claim number patterns (case-insensitive) and make sure to extract EXACTLY as written and must be claim number not just random numbers (like chart numbers, or id numbers) that look similar:
+- "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
+- "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
+- "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
+- "WC Claim: XXXXXXXXX" or "Workers Comp Claim: XXXXXXXXX"
+- "Policy/Claim: XXXXXXXXX"
+- In "cc:" lines: "Broadspire [Claim #XXXXXXXXX]"
+- In subject lines or reference fields: "Claim #XXXXXXX"
+                                                               
+All Doctors Involved:
+• [list all extracted doctors with names and titles]
+━━━ ALL DOCTORS EXTRACTION ━━━
+- Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
+- Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
+- Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
+- Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
+- Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
+- If no doctors found, leave list empty [].
 
 📅 KEY DATES & DEADLINES
 --------------------------------------------------
@@ -429,10 +451,11 @@ STRICT REQUIREMENTS:
 1. Word count MUST be **between 30 and 60 words**.
 2. Output format MUST be EXACTLY:
 
-[Document Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Medication:[value] | MMI Status:[value] | Work Status:[value] | Restrictions:[value] | Action Items:[value] | Critical Finding:[value] | Follow-up:[value]
+[Document Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Physical Exam:[value] | Vital Signs:[value] | Medication:[value] | MMI Status:[value] | Work Status:[value] | Restrictions:[value] | Action Items:[value] | Recommendations:[value] | Critical Finding:[value] | Follow-up:[value]
 
 NEW KEY RULES (IMPORTANT):
-- **ONLY include abnormalities or pathological findings. Skip normal findings entirely.**
+- **ONLY include, critical, or clinically significant findings**.
+- **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
 - **If a value is not extracted, omit the ENTIRE key-value pair.**
 - **Never output an empty key, an empty value, or placeholders.**
 - **No duplicate pipes, no empty pipes (no '||').**
@@ -445,21 +468,24 @@ FORMAT & RULES:
 - DO NOT include patient details (name, DOB, ID).
 - NEVER fabricate any information or infer abnormalities.
 
-CONTENT PRIORITY (ONLY IF ABNORMAL AND PRESENT IN THE SUMMARY):
+CONTENT PRIORITY (ONLY IF AND PRESENT IN THE SUMMARY):
 1. Document Title
 2. Author
 3. Date
-4. Abnormal body parts or injury locations
-5. Abnormal diagnoses
-6. Medications (only if explicitly listed)
-7. MMI status (only if explicitly stated)
-8. Work status & restrictions (only if abnormal)
-9. Action items (only if they indicate issues)
-10. Critical findings
-11. Follow-up requirements
+4. body parts or injury locations
+5. diagnoses
+6. Physical exam (only abnormalities)
+7. Vital signs (only abnormalities)
+8. Medications (only if explicitly listed)
+9. MMI status (only if explicitly stated)
+10. Work status & restrictions (only if given)
+11. Action items (only if they indicate issues)
+12. Critical findings
+13. Follow-up requirements
+14. Recommendations (only if given)
 
 ABSOLUTELY FORBIDDEN:
-- Normal findings (ignore them entirely)
+- Normal findings (ignore them entirely for these fields: physical exam, vital signs)
 - assumptions, interpretations, invented medications, or inferred diagnoses
 - placeholder text or "Not provided"
 - narrative writing

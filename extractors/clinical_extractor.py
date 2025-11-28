@@ -224,7 +224,7 @@ You are seeing the ENTIRE clinical note at once, allowing you to:
 7. **SIGNATURE AUTHOR - STRICTLY FROM SIGN BLOCK ONLY (PHYSICAL/ELECTRONIC) - NO HALLUCINATIONS**
     Author:
     hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-    • Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
+    • Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
    - List separately if both present; use exact names/titles from the document.
    - CRITICAL: DO NOT extract ANY name as signer if there is NO explicit signing phrase. Provider names, treating physicians, or mentioned authors are NOT signers unless the sign block explicitly says they signed.
    - Examples of INVALID extraction (DO NOT DO THIS):
@@ -339,6 +339,27 @@ Treating Provider: [name, e.g., Radiologist or Referring]
   Credentials: [extracted]
   Specialty: [extracted]
 
+━━━ CLAIM NUMBER EXTRACTION PATTERNS ━━━
+CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
+
+Common claim number patterns (case-insensitive) and make sure to extract EXACTLY as written and must be claim number not just random numbers (like chart numbers, or id numbers) that look similar:
+- "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
+- "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
+- "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
+- "WC Claim: XXXXXXXXX" or "Workers Comp Claim: XXXXXXXXX"
+- "Policy/Claim: XXXXXXXXX"
+- In "cc:" lines: "Broadspire [Claim #XXXXXXXXX]"
+- In subject lines or reference fields: "Claim #XXXXXXX"
+
+All Doctors Involved:
+• [list all extracted doctors with names and titles]
+━━━ ALL DOCTORS EXTRACTION ━━━
+- Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
+- Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
+- Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
+- Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
+- Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
+- If no doctors found, leave list empty [].
 
 🗣️ SUBJECTIVE FINDINGS
 --------------------------------------------------
@@ -399,7 +420,7 @@ Functional Scores:
 
 Author:
 hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
+• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
 
 🚨 CRITICAL CLINICAL FINDINGS
 --------------------------------------------------
@@ -518,17 +539,17 @@ You are a clinical documentation specialist.
 
 TASK:
 Create a concise, factual clinical summary using ONLY information explicitly present in the long summary.
-Include ONLY abnormal, critical, or non-normal findings. Skip normal findings entirely.
-Include the signing author ONLY if explicitly stated in the "SIGNATURE & AUTHOR" section with a Physical or Electronic signature.
+- **ONLY include, critical, or clinically significant findings**.
+- **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
 
 STRICT REQUIREMENTS:
 1. Word count MUST be **between 30 and 60 words**.
 2. Output format MUST be EXACTLY:
 
-[Report Title] | Author  | Date:[value] | Physical Exam:[value] | Diagnosis:[value] | Critical Findings:[value] | Abnormal Actions:[value] | Medications:[value] | Work Status:[value] | Recommendation:[value] | Follow-up:[value]
+[Report Title] | Author:[value] | Date:[value] | Diagnosis:[value] | Physical Exam:[value] | Vital Signs:[value] | Critical Findings:[value] | Actions:[value] | Medications:[value] | Work Status:[value] | Recommendation:[value] | Follow-up:[value]
 
 KEY RULES (VERY IMPORTANT):
-- **ONLY include abnormal, critical, or clinically significant findings**.
+- **ONLY include, critical, or clinically significant findings**.
 - **If a value is missing or cannot be extracted, omit the ENTIRE key-value pair.**
 - **Do NOT output empty fields, empty values, or placeholder text.**
 - **Do NOT output double pipes (`||`).**
@@ -540,8 +561,8 @@ FIELD DEFINITIONS:
 - Author: Only if explicitly signed with signature type  
   ("Signature: Dr. Smith" → "Author: Dr. Smith")  
   If there is no signature text, omit the entire field.
-- Critical Findings: Significant abnormal clinical findings, worsening conditions, flagged issues.
-- Abnormal Actions: Any abnormal interventions, adverse reactions, abnormal therapy responses, compliance issues.
+- Critical Findings: Significant clinical findings, worsening conditions, flagged issues.
+- Abnormal Actions: Any abnormal interventions, adverse reactions, therapy responses, compliance issues.
 - Medications: ONLY meds explicitly mentioned; skip if none.
 - Physical Exam: ONLY abnormal exam findings (reduced ROM, weakness, swelling, tenderness, abnormal vitals).
 - Follow-up: ONLY if explicitly stated (return date, re-eval, imaging follow-up, specialist referral).
@@ -550,14 +571,17 @@ CONTENT PRIORITY (ONLY IF ABNORMAL AND PRESENT):
 1. Report Title: Always included
 2. Author (only explicit signed)
 3. Critical Findings
-4. Abnormal objective findings
-5. Abnormal actions or responses
+4. objective findings
+5. actions or responses
 6. Medications
-7. Physical Exam abnormalities
+7. Physical Exam ( abnormal only if present)
 8. Follow-up instructions
+9. Vital Signs (abnormal only if present)
+10. Recommendations (if given)
+11. Work Status (if given)
 
 ABSOLUTELY FORBIDDEN:
-- Normal findings (ignore entirely)
+- Normal findings for physical exam and vital signs (ignore these fields if all normal)
 - Patient details (name, DOB, demographics)
 - Using provider names as author without explicit signature
 - Assumptions, interpretations, or inferred issues

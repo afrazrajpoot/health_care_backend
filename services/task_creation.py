@@ -302,7 +302,7 @@ class TaskCreator:
 
             validated_tasks = [task]  # Return as list with single task
 
-            logger.info(f"✅ Generated 1 AI-driven task for patient: {patient_name}")
+            logger.info(f"✅ Generated 1 AI-driven task: {validated_tasks[0]['description']} (Department: {validated_tasks[0]['department']})")
 
             # Database operations for analytics
             await self._update_workflow_analytics(validated_tasks)

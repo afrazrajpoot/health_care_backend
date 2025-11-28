@@ -237,6 +237,7 @@ class DocumentAnalysis(BaseModel):
     adls_affected: str = Field(..., description="Activities affected in 2-3 words")
     work_restrictions: str = Field(..., description="Work restrictions in 2-3 words")
     consulting_doctor: str = Field(default="Not specified", description="Name of consultant doctor")
+    all_doctors: List[str] = Field(default=[], description="List of all doctors mentioned in the document")
     referral_doctor: str = Field(default="Not specified", description="Name of referral doctor if available")
     ai_outcome: str = Field(..., description="AI-generated key outcome prediction keywords/phrases")
     document_type: str = Field(..., description="Type of document")

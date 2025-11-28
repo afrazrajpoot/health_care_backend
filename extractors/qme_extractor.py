@@ -310,15 +310,36 @@ class QMEExtractorChained:
     - **Claim Number:** [extracted claim number]
     - **Date of Injury:** [extracted DOI]
     - **Employer:** [extracted employer]
-
     ## REPORT DETAILS
     - **Report Type:** [QME/AME/IME]
     - **Report Date:** [extracted date]
     - **Evaluating Physician:** [extracted physician name and credentials]
     Author:
     hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-    • Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit]
+    • Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
+    
+   ## All Doctors Involved:
+    • [list all extracted doctors with names and titles]
+    ━━━ ALL DOCTORS EXTRACTION ━━━
+    - Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
+    - Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
+    - Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
+    - Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
+    - Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
+    - If no doctors found, leave list empty []. 
+    
+    ━━━ CLAIM NUMBER EXTRACTION PATTERNS ━━━
+    CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
 
+    Common claim number patterns (case-insensitive) and make sure to extract EXACTLY as written and must be claim number not just random numbers (like chart numbers, or id numbers) that look similar:
+    - "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
+    - "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
+    - "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
+    - "WC Claim: XXXXXXXXX" or "Workers Comp Claim: XXXXXXXXX"
+    - "Policy/Claim: XXXXXXXXX"
+    - In "cc:" lines: "Broadspire [Claim #XXXXXXXXX]"
+    - In subject lines or reference fields: "Claim #XXXXXXX"
+                                                                      
     ## DIAGNOSIS
     - Primary diagnoses with affected body parts
     - ICD-10 codes if available
@@ -430,8 +451,11 @@ Generate the comprehensive long summary now following all the rules above.
     STRICT REQUIREMENTS:
     1. Word count MUST be between **30 and 60 words** (min 30, max 60).
     2. Format MUST be EXACTLY a single pipe-delimited line:
-
-    [Report Title] | [Author] | Date:[value] | Body Parts:[value] | Diagnosis:[value] | Physical Examination:[value (only critical findings or abnormalities else skip)] | Critical Finding:[value (only abnormalities) if applicable] | Follow-up:[value] | Recommendations:[value] | Work Status:[value] | MMI Status:[value] | WPI:[value] | Medications:[value]
+    - **ONLY include, critical, or clinically significant findings**.
+    - **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
+    
+    Make sure to follow this EXACT format:
+    [Report Title] | [Author] | Date:[value] | Body Parts:[value] | Diagnosis:[value] | Physical Examination:[value (only critical findings or abnormalities else skip)] | Vital Signs:[value (only critical vital signs else skip)] | Treatment Plan:[value] | Critical Finding:[value (only abnormalities) if applicable] | Follow-up:[value] | Recommendations:[value] | Work Status:[value] | MMI Status:[value] | WPI:[value] | Medications:[value]
 
     3. DO NOT fabricate or infer missing data — simply SKIP entire key-value pairs that do not exist.
     4. Use ONLY information explicitly found in the long summary.
