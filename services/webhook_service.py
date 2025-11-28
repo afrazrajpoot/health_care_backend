@@ -695,7 +695,7 @@ class WebhookService:
             "previous_docs_updated": updated_previous_docs,
             "lookup_skipped": False
         }
-    async def create_tasks_if_needed(self, document_analysis, document_id: str, physician_id: str, filename: str) -> int:
+    async def create_tasks_if_needed(self, document_analysis, document_id: str, physician_id: str, filename: str, processed_data: dict = None) -> int:
         """Step 3: Create tasks if conditions are met"""
         if not document_analysis.is_task_needed:
             logger.info(f"ℹ️ No tasks needed for document {filename}")
@@ -875,7 +875,17 @@ class WebhookService:
             document_data["document_id"] = document_id
             document_data["physician_id"] = physician_id
             
-            tasks = await task_creator.generate_tasks(document_data, filename)
+            # Get full document text for better task generation
+            full_text = ""
+            if processed_data:
+                full_text = processed_data.get("text_for_analysis", "")
+                if not full_text:
+                    result_data = processed_data.get("result_data", {})
+                    full_text = result_data.get("text", "")
+            
+            logger.info(f"📝 Passing {len(full_text)} characters of full text to task generator")
+            
+            tasks = await task_creator.generate_tasks(document_data, filename, full_text)
             logger.info(f"📋 Generated {len(tasks)} tasks")
 
             # Save tasks to database
@@ -1164,7 +1174,8 @@ class WebhookService:
                     processed_data["document_analysis"],
                     save_result["document_id"],
                     processed_data["physician_id"],
-                    processed_data["filename"]
+                    processed_data["filename"],
+                    processed_data  # Pass full processed_data for document text access
                 )
             
             # DEBUG: Final Redis check
@@ -1405,7 +1416,8 @@ class WebhookService:
                     processed_data["document_analysis"],
                     save_result["document_id"],
                     processed_data["physician_id"],
-                    processed_data["filename"]
+                    processed_data["filename"],
+                    processed_data  # Pass full processed_data for document text access
                 )
                 save_result["tasks_created"] = tasks_created
 
