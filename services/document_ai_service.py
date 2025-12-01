@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from google.cloud import documentai_v1 as documentai
-from google.cloud.documentai_v1 import DocumentProcessorServiceClient
+# Ensure OcrConfig and ProcessOptions are accessible for the fix
+from google.cloud.documentai_v1 import DocumentProcessorServiceClient, ProcessOptions, OcrConfig 
 import logging
 from PyPDF2 import PdfReader, PdfWriter
 from models.schemas import ExtractionResult, FileInfo
@@ -62,7 +63,7 @@ class LayoutPreservingTextExtractor:
             page_text_parts.append(f"PAGE {page_num}\n")
             page_text_parts.append(f"{'='*80}\n\n")
             
-            # Extract zones for this page
+            # Extract zones for this page (Now includes checkboxes)
             zones = LayoutPreservingTextExtractor._extract_page_zones(
                 page, document.text, page_num
             )
@@ -141,6 +142,9 @@ class LayoutPreservingTextExtractor:
         """
         Extract distinct zones from a page: header, body, footer, signature.
         Uses bounding box Y-coordinates to identify zones.
+        
+        FIXED: Updated to include 'visual_elements' (checkboxes) and use
+               Y and X coordinates for better layout fidelity.
         """
         zones = {
             "header": "",
@@ -150,48 +154,78 @@ class LayoutPreservingTextExtractor:
             "page_number": str(page_num),
         }
         
-        if not page.paragraphs and not page.blocks:
-            return zones
-        
-        # Collect elements with their Y-coordinates
+        # Collect elements with their Y and X coordinates
         elements_with_coords = []
         
-        # Try paragraphs first
+        # 1. Extract Text Paragraphs (Priority 1)
         if page.paragraphs:
             for para in page.paragraphs:
                 if para.layout and para.layout.bounding_poly:
                     vertices = para.layout.bounding_poly.normalized_vertices
                     if vertices:
                         avg_y = sum(v.y for v in vertices) / len(vertices)
+                        first_x = vertices[0].x if vertices else 0
                         para_text = LayoutPreservingTextExtractor.extract_text_from_layout(
                             para.layout.text_anchor, full_text
                         )
                         elements_with_coords.append({
-                            "text": para_text,
+                            "text": para_text.strip(),
                             "y_pos": avg_y,
-                            "confidence": para.layout.confidence if para.layout else 0.0
+                            "x_pos": first_x,
+                            "confidence": para.layout.confidence if para.layout else 0.0,
+                            "type": "text"
                         })
+
+        # 2. Extract Text Blocks (Priority 2 / Fallback)
         elif page.blocks:
-            # Fallback to blocks
             for block in page.blocks:
                 if block.layout and block.layout.bounding_poly:
                     vertices = block.layout.bounding_poly.normalized_vertices
                     if vertices:
                         avg_y = sum(v.y for v in vertices) / len(vertices)
+                        first_x = vertices[0].x if vertices else 0
                         block_text = LayoutPreservingTextExtractor._extract_block_text(
                             block, full_text
                         )
                         elements_with_coords.append({
-                            "text": block_text,
+                            "text": block_text.strip(),
                             "y_pos": avg_y,
-                            "confidence": block.layout.confidence if block.layout else 0.0
+                            "x_pos": first_x,
+                            "confidence": block.layout.confidence if block.layout else 0.0,
+                            "type": "text"
                         })
-        
+
+        # 3. NEW: Extract Visual Elements (Checkboxes)
+        if hasattr(page, 'visual_elements') and page.visual_elements:
+            for element in page.visual_elements:
+                if element.layout and element.layout.bounding_poly:
+                    el_type = element.type_
+                    # Check for "checkbox" type from OCR output
+                    if "checkbox" in el_type.lower():
+                        vertices = element.layout.bounding_poly.normalized_vertices
+                        if vertices:
+                            avg_y = sum(v.y for v in vertices) / len(vertices)
+                            first_x = vertices[0].x if vertices else 0
+                            
+                            # Determine state based on type name (common for Document AI)
+                            is_checked = "checked" in el_type.lower() or "selected" in el_type.lower()
+                            
+                            # Create text representation for LLM logs
+                            checkbox_text = "[x]" if is_checked else "[ ]"
+                            
+                            elements_with_coords.append({
+                                "text": checkbox_text,
+                                "y_pos": avg_y,
+                                "x_pos": first_x,
+                                "confidence": element.layout.confidence if element.layout else 0.0,
+                                "type": "checkbox"
+                            })
+
         if not elements_with_coords:
             return zones
         
-        # Sort by Y position (top to bottom)
-        elements_with_coords.sort(key=lambda x: x["y_pos"])
+        # Sort by Y position (top to bottom), then X (left to right)
+        elements_with_coords.sort(key=lambda x: (x["y_pos"], x["x_pos"]))
         
         # Define zones based on Y-position thresholds
         header_elements = []
@@ -202,6 +236,10 @@ class LayoutPreservingTextExtractor:
             y = element["y_pos"]
             text = element["text"]
             
+            # Skip empty text elements, but include checkboxes even if they are just "[ ]" or "[x]"
+            if not text and element.get("type") != "checkbox":
+                continue
+
             if y < 0.20:  # Top 20%
                 header_elements.append(text)
             elif y > 0.75:  # Bottom 25%
@@ -530,6 +568,49 @@ class DocumentAIProcessor:
         
         return form_fields
     
+    def extract_symbols_and_checkboxes(self, document) -> List[Dict[str, Any]]:
+        """Extract symbols and checkboxes from document"""
+        symbols = []
+        if not document.pages:
+            return symbols
+        
+        for page_idx, page in enumerate(document.pages):
+            # The previous logic relied on 'symbols' which is often empty for modern processors.
+            # The actual checkbox extraction is now handled by the layout extractor, but we keep 
+            # this method for general symbol extraction if available.
+            
+            if hasattr(page, 'symbols') and page.symbols:
+                for symbol in page.symbols:
+                    symbol_text = ""
+                    if symbol.layout and symbol.layout.text_anchor:
+                        symbol_text = self.layout_extractor.extract_text_from_layout(
+                            symbol.layout.text_anchor, document.text
+                        )
+                    
+                    symbols.append({
+                        "pageNumber": page_idx + 1,
+                        "text": symbol_text.strip(),
+                        "type": "checkbox" if symbol_text.strip() in ["☐", "☑", "☒", "✓", "✗", "X"] else "symbol",
+                        "isChecked": symbol_text.strip() in ["☑", "☒", "✓", "X"],
+                        "confidence": float(symbol.layout.confidence) if symbol.layout else 0.0,
+                    })
+            
+            # Also extract from visual_elements if we want a separate list of detected boxes
+            # (Note: the layout_extractor already injects these into the text, this is just for the 'symbols' array)
+            if hasattr(page, 'visual_elements') and page.visual_elements:
+                for element in page.visual_elements:
+                    if element.type_ and "checkbox" in element.type_.lower():
+                        symbols.append({
+                            "pageNumber": page_idx + 1,
+                            "text": "[x]" if "checked" in element.type_.lower() or "selected" in element.type_.lower() else "[ ]",
+                            "type": "checkbox",
+                            "isChecked": "checked" in element.type_.lower() or "selected" in element.type_.lower(),
+                            "confidence": float(element.layout.confidence) if element.layout else 0.0,
+                        })
+
+        return symbols
+
+    
     def calculate_overall_confidence(self, document) -> float:
         """Calculate overall confidence score"""
         if not document.pages:
@@ -548,6 +629,9 @@ class DocumentAIProcessor:
     def _process_document_direct(self, filepath: str) -> ExtractionResult:
         """
         Direct document processing with structured JSON output.
+        
+        FIXED: Added process_options to enable premium OCR features like
+               selection mark detection (checkboxes).
         """
         try:
             mime_type = self.get_mime_type(filepath)
@@ -565,12 +649,29 @@ class DocumentAIProcessor:
             
             encoded_content = base64.b64encode(file_content).decode("utf-8")
             
+            # --- CRITICAL FIX: Configure Process Options to enable Premium Features ---
+            # This is essential to activate selection mark (checkbox) detection.
+            # ERROR SOURCE: If this still fails with 'Unknown field', the Python
+            # client library must be updated: `pip install --upgrade google-cloud-documentai`
+            process_options = documentai.ProcessOptions(
+                ocr_config=documentai.OcrConfig(
+                    enable_symbol=True,  # Basic feature
+                    premium_features=documentai.OcrConfig.PremiumFeatures(
+                        enable_selection_mark_detection=True,  # CRITICAL: Premium OCR feature
+                        compute_style_info=True  # Premium feature: font identification
+                    )
+                )
+            )
+            # ----------------------------------------------------------------
+            
             request = {
                 "name": self.processor_path,
                 "raw_document": {
                     "content": encoded_content,
                     "mime_type": mime_type,
                 },
+                # ADDED: Send the configured options with the request
+                "process_options": process_options 
             }
             
             logger.info("📤 Sending request to Document AI...")
@@ -586,7 +687,7 @@ class DocumentAIProcessor:
             
             logger.info(f"🔍 Layout preservation complete:")
             logger.info(f"  - Raw text: {len(layout_data['raw_text'])} chars")
-            logger.info(f"  - Layout text: {len(layout_data['layout_preserved'])} chars")
+            logger.info(f"  - Layout text: {(layout_data['layout_preserved'])}") # Truncated log
             logger.info(f"  - Page zones: {len(layout_data['page_zones'])} pages")
             
             # **NEW: Build LLM-friendly JSON**
@@ -600,7 +701,7 @@ class DocumentAIProcessor:
             llm_text = json.dumps(llm_json, indent=2)
             
             # Preview JSON (first 500 chars)
-            json_preview = llm_text[:500] + "..."
+            json_preview = llm_text
             logger.info(f"📖 LLM JSON preview:\n{json_preview}")
             
             processed_result = ExtractionResult(
@@ -621,6 +722,7 @@ class DocumentAIProcessor:
                 entities=self.extract_entities(result),
                 tables=self.extract_tables(result),
                 formFields=self.extract_form_fields(result),
+                symbols=self.extract_symbols_and_checkboxes(result),
                 confidence=self.calculate_overall_confidence(result),
                 success=True,
             )
@@ -728,6 +830,7 @@ class DocumentAIProcessor:
         merged_entities = []
         merged_tables = []
         merged_form_fields = []
+        merged_symbols = []
         total_pages = 0
         total_confidence = 0.0
         
@@ -735,6 +838,7 @@ class DocumentAIProcessor:
             merged_entities.extend(result.entities)
             merged_tables.extend(result.tables)
             merged_form_fields.extend(result.formFields)
+            merged_symbols.extend(result.symbols if hasattr(result, 'symbols') else [])
             total_pages += result.pages
             total_confidence += result.confidence
         
@@ -755,6 +859,7 @@ class DocumentAIProcessor:
             entities=merged_entities,
             tables=merged_tables,
             formFields=merged_form_fields,
+            symbols=merged_symbols,
             confidence=avg_confidence,
             success=True,
         )

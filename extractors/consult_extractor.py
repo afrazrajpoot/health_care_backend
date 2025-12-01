@@ -96,7 +96,7 @@ You are seeing the ENTIRE consultation report at once, allowing you to:
 - Identify ALL treatment recommendations with medical necessity rationale
 - Extract complete work capacity and restriction changes
 
-⚠️ CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY):
+⚠️ CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY) (donot include in output, for LLM use only):
 
 1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
    - If NOT explicitly mentioned, return EMPTY string "" or empty list []
@@ -262,7 +262,7 @@ Return to Work Plan: [extracted]
 --------------------------------------------------
 • [list up to 8 most actionable items for claims administration]
 
-⚠️ MANDATORY EXTRACTION RULES:
+⚠️ MANDATORY EXTRACTION RULES (donot include in output, for LLM use only):
 1. Field 3 (Diagnosis): Use EXACT diagnostic terminology, include ALL secondary diagnoses
 2. Field 5 (Prior Treatment): Include quantified relief ("50% improvement", "no relief")
 3. Field 6 (Objective): Extract EXACT measurements and imaging findings with anatomical specificity

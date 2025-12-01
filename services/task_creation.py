@@ -65,6 +65,27 @@ You will receive ANY type of medical document:
 
 **Your job:** Extract EACH distinct action that must happen based on the document's content.
 
+### 👩‍💼 ADMINISTRATIVE DOCUMENT TASK FOCUS
+
+For administrative documents (authorizations, EOBs, denials, referrals, credentialing), generate **Staff Action Tasks** focused on Revenue Cycle Management (RCM), Scheduling, and administrative workflows. These are actionable follow-up items for staff, not clinical summaries for physicians.
+
+**Key Administrative Document Types & Task Generation:**
+
+| Document Type | Staff Task Generated | Focus |
+|---------------|---------------------|-------|
+| **Prior Authorization (PA) Approval** | Schedule service and attach PA number to claim | RCM: Ensure authorized service is delivered and properly billed |
+| **Prior Authorization Denial** | File appeal by [date] or obtain peer-to-peer review | RCM: Recover denied authorization through proper channels |
+| **EOB with Denial Codes** | - CARC 29: File timely filing appeal (High Priority)<br>- PR-1/PR-3: Bill patient (Medium Priority)<br>- CARC 97/16: Recode and resubmit (Medium Priority) | RCM: Resolve claim denials through appropriate action |
+| **External Referral (Outgoing)** | Follow up with specialist to confirm appointment booked and kept | Coordination: Track continuity of care |
+| **Credentialing/Contracting Renewals** | Renew payer contract by [date] or update provider credentials | Compliance: Ensure continued payment eligibility |
+
+**Administrative Task Characteristics:**
+- Focus on billing, scheduling, compliance workflows
+- Include specific action items (appeal, bill, schedule, follow-up)
+- Prioritize based on financial/compliance impact
+- Reference specific codes, dates, authorization numbers
+- Route to appropriate administrative department (not clinical)
+
 ---
 
 ## 🔢 MULTIPLE TASKS RULES
@@ -118,6 +139,7 @@ Ask yourself:
 - IMR processes needing management
 - Peer-to-peer coordination requests
 - Authorization expirations requiring renewal
+- Prior authorization approvals needing claim attachment
 
 **Administrative Triggers → Administrative/Compliance:**
 - Legal communications requiring response
@@ -125,6 +147,9 @@ Ask yourself:
 - QME/AME administrative coordination
 - Attorney correspondence requiring file updates
 - Record requests or document distribution
+- EOB processing and denial code resolution
+- Credentialing and payer contracting renewals
+- External referral tracking and follow-up
 
 ### **Step 3: Extract Specifics**
 From the document, capture:
@@ -210,11 +235,30 @@ Base due dates on document content analysis:
 - ❌ Bad: "Process legal letter"
 - ✅ Good: "Review attorney deposition request by 1/20"
 
+**Administrative Document Examples:**
+- ❌ Bad: "Handle PA approval"
+- ✅ Good: "Schedule approved lumbar MRI and attach PA #12345 to claim"
+
+- ❌ Bad: "Process EOB"
+- ✅ Good: "File timely filing appeal for CARC 29 denial by 1/25"
+
+- ❌ Bad: "Follow up on referral"
+- ✅ Good: "Confirm orthopedic specialist appointment kept on 2/10"
+
+- ❌ Bad: "Handle credentialing"
+- ✅ Good: "Renew Blue Shield contract by 2/15 to prevent payment lapse"
+
 **Multi-Task Example:**
 Authorization report approves MRI, PT, and orthopedic consult:
 Task 1: "Schedule authorized lumbar MRI within 7 days" → Scheduling
 Task 2: "Schedule approved physical therapy sessions" → Scheduling
 Task 3: "Schedule orthopedic specialist consultation" → Scheduling
+
+**EOB with Multiple Denials Example:**
+EOB shows CARC 29 (timely filing), PR-1 (patient responsibility), CARC 97 (invalid code):
+Task 1: "File timely filing appeal for $500 claim by 1/30" → Authorizations & Denials (High Priority)
+Task 2: "Bill patient $150 balance after adjustment" → Administrative/Compliance (Medium Priority)
+Task 3: "Recode procedure 99213→99214 and resubmit" → Administrative/Compliance (Medium Priority)
 
 ---
 

@@ -136,4 +136,6 @@ class ExtractionResult(BaseModel):
     document_id: str = ""
     error: Optional[str] = None
     database_error: Optional[str] = None
+    symbols: List[Dict[str, Any]] = Field(default_factory=list)
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional metadata including checkboxes and handwritten text")
     

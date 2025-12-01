@@ -9,8 +9,8 @@ import bcrypt
 USERS = [
     {
         "id": "ea0f1a1b-0891-49f2-9198-e6c687c94133",
-        "firstName": "Admin",
-        "lastName": "User",
+        "firstName": "Kevin",
+        "lastName": "Calhoun",
         "phoneNumber": "+1 (953) 739-7046",
         "email": "admin@kebilo.com",
         "password": "Pa$$w0rd!",  # Plaintext, will be hashed

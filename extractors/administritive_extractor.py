@@ -250,7 +250,7 @@ VIII. CONTACT & FOLLOW-UP PROCEDURES
 - Required response formats
 - Follow-up procedures
 
-⚠️ FINAL REMINDER:
+⚠️ FINAL REMINDER (donot include in output, for LLM use only):
 - If information is NOT in the document, return EMPTY ("" or [])
 - NEVER assume, infer, or extrapolate administrative information
 - DEADLINES: Use exact wording from document
@@ -365,7 +365,7 @@ Response Format: [extracted]
 --------------------------------------------------
 • [list up to 8 most actionable/time-sensitive items]
 
-⚠️ CRITICAL ADMINISTRATIVE REMINDERS:
+⚠️ CRITICAL ADMINISTRATIVE REMINDERS (donot include in output, for LLM use only):
 1. For "key_dates_deadlines": Extract EXACT date wording from document
    - Include phrases like "within 30 days", "by close of business", etc.
    - Do not interpret or calculate actual dates
@@ -484,7 +484,7 @@ CONTENT PRIORITY (ONLY IF AND PRESENT IN THE SUMMARY):
 13. Follow-up requirements
 14. Recommendations (only if given)
 
-ABSOLUTELY FORBIDDEN:
+ABSOLUTELY FORBIDDEN (donot include in output, for LLM use only):
 - Normal findings (ignore them entirely for these fields: physical exam, vital signs)
 - assumptions, interpretations, invented medications, or inferred diagnoses
 - placeholder text or "Not provided"

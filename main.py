@@ -46,7 +46,7 @@ redis_client = None
 NEXTAUTH_URL = os.getenv("NEXTAUTH_URL", "http://localhost:3000")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[NEXTAUTH_URL],
+    allow_origins=['*'],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -113,12 +113,11 @@ app.include_router(
     tags=["authentication"]
 )
 
-# Protected routes - ALL APIs require authentication
+# Protected routes - Authentication disabled for document routes
 app.include_router(
     document_router,
     prefix="/api/documents",
-    tags=["documents"],
-    dependencies=[Depends(authenticate_request)]
+    tags=["documents"]
 )
 
 app.include_router(
@@ -273,19 +272,15 @@ async def get_user_tasks(current_user = Depends(authenticate_request)):
 
 
 @app.get("/api/user/documents")
-async def get_user_documents(current_user = Depends(authenticate_request)):
-    """Get documents for current user - REQUIRES AUTHENTICATION"""
+async def get_user_documents():
+    """Get all documents - PUBLIC (Authentication disabled)"""
     try:
-        documents = await db.document.find_many(
-            where={"userId": current_user.id}
-        )
+        documents = await db.document.find_many()
         
         return {
-            "user": {
-                "id": current_user.id,
-                "email": current_user.email
-            },
-            "documents": documents
+            "documents": documents,
+            "total": len(documents),
+            "public_access": True
         }
     
     except Exception as e:

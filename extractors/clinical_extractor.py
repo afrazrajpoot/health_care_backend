@@ -188,7 +188,7 @@ You are seeing the ENTIRE clinical note at once, allowing you to:
 - Extract patient details from demographics/header sections
 - Extract signature author STRICTLY from explicit sign block/signature section at the end (e.g., "Electronically signed by", "Signature:", "Attested by"). Distinguish physical (handwritten/wet) vs electronic (e-signature/digital).
 
-⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY - ABSOLUTE FOR SIGNATURES):
+⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY - ABSOLUTE FOR SIGNATURES) (donot include in output, for LLM use only):
 
 1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
    - If a field/value is NOT explicitly mentioned in the note, return EMPTY string "" or empty list []
@@ -300,7 +300,7 @@ X. OUTCOME MEASURES & PROGRESS TRACKING
 - Functional improvement metrics
 - Patient satisfaction measures
 
-⚠️ FINAL REMINDER:
+⚠️ FINAL REMINDER (donot include in output, for LLM use only):
 - If information is NOT in the note, return EMPTY ("" or [])
 - NEVER assume, infer, or extrapolate clinical information - ESPECIALLY FOR SIGNATURES
 - PAIN SCALES: Extract exact numbers (e.g., "6/10") not descriptions
@@ -426,7 +426,7 @@ hint: check the signature block mainly last pages of the report and the closing 
 --------------------------------------------------
 • [list up to 8 most significant items]
 
-⚠️ CRITICAL CLINICAL REMINDERS:
+⚠️ CRITICAL CLINICAL REMINDERS (donot include in output, for LLM use only):
 1. For "range_of_motion": Extract EXACT measurements with degrees; use qualitative (e.g., "mildly reduced") if no numbers
    - Include body part, motion, and specific degrees/qualitative
    - Example: "Cervical flexion: mildly reduced with pain"

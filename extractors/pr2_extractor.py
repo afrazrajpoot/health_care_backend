@@ -138,7 +138,7 @@ You are seeing the ENTIRE PR-2 document at once, allowing you to:
 - Connect objective findings with work capacity changes
 - Extract complete medication regimen and changes
 
-⚠️ CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY):
+⚠️ CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY) (donot include in output, for LLM use only):
 
 1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
 - If NOT explicitly mentioned, return EMPTY string "" or empty list []
@@ -318,7 +318,7 @@ Return Sooner If: [extracted]
 --------------------------------------------------
 • [list up to 5 most actionable items]
 
-⚠️ MANDATORY EXTRACTION RULES:
+⚠️ MANDATORY EXTRACTION RULES (donot include in output, for LLM use only):
 1. "work_limitations": Use EXACT wording (don't add weight/time limits not stated)
 2. "treatment_authorization_request": The MOST CRITICAL field - be specific
 3. "critical_findings": Only 3-5 most actionable items for claims administrator

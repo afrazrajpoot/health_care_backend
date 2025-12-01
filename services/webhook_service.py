@@ -695,12 +695,9 @@ class WebhookService:
             "previous_docs_updated": updated_previous_docs,
             "lookup_skipped": False
         }
+    
     async def create_tasks_if_needed(self, document_analysis, document_id: str, physician_id: str, filename: str, processed_data: dict = None) -> int:
         """Step 3: Create tasks if conditions are met"""
-        if not document_analysis.is_task_needed:
-            logger.info(f"ℹ️ No tasks needed for document {filename}")
-            return 0
-        
         logger.info(f"🔧 Creating tasks for document {filename}")
         created_tasks = 0
         
@@ -737,8 +734,7 @@ class WebhookService:
                     return ""
                 
                 # Remove all titles and credentials (case-insensitive, with or without dots)
-                # This handles: Dr, Dr., MD, M.D, M.D., DO, D.O, D.O., DPM, DC, NP, PA, etc.
-                name = re.sub(r'\b(Dr\.?|M\.?D\.?|D\.?O\.?|D\.?P\.?M\.?|D\.?C\.?|N\.?P\.?|P\.?A\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?|Doctor)\b', '', name, flags=re.IGNORECASE)
+                name = re.sub(r'\b(Dr\.?|M\.?D\.?|D\.?O\.?|D\.?P\.?M\.?|D\.?C\.?|N\.?P\.?|P\.?A\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?|Doctor|QME)\b', '', name, flags=re.IGNORECASE)
                 
                 # Remove all commas
                 name = name.replace(',', ' ')
@@ -751,64 +747,114 @@ class WebhookService:
                 
                 return name.strip()
             
-            def get_name_variants(name):
+            def extract_name_parts(name):
                 """
-                Generate name variants to handle different name formats:
-                - "John Smith" → ["john smith", "smith john"]
-                - "Smith, John" → ["smith john", "john smith"]
+                Extract first name and last name, ignoring middle initials/names.
+                Returns: (first_name, last_name, middle_parts)
+                
+                Examples:
+                - "Kevin B. Calhoun" → ("kevin", "calhoun", ["b"])
+                - "Kevin Calhoun" → ("kevin", "calhoun", [])
+                - "Calhoun, Kevin B." → ("kevin", "calhoun", ["b"])
                 """
                 if not name:
-                    return []
+                    return ("", "", [])
                 
                 normalized = normalize_name(name)
                 parts = normalized.split()
                 
-                if len(parts) < 2:
-                    return [normalized]
-                
-                variants = [
-                    normalized,  # Original normalized form
-                    ' '.join(reversed(parts))  # Reversed (FirstName LastName ↔ LastName FirstName)
-                ]
-                
-                return list(set(variants))  # Remove duplicates
-
-            # Get all possible variants of consulting doctor name
-            consulting_doctor_variants = get_name_variants(consulting_doctor)
-            logger.info(f"🔍 Consulting doctor variants to match: {consulting_doctor_variants}")
+                if len(parts) == 0:
+                    return ("", "", [])
+                elif len(parts) == 1:
+                    return (parts[0], "", [])
+                elif len(parts) == 2:
+                    # Could be "FirstName LastName" or "LastName FirstName"
+                    return (parts[0], parts[1], [])
+                else:
+                    # 3+ parts: assume first is first name, last is last name, middle are middle names/initials
+                    return (parts[0], parts[-1], parts[1:-1])
             
-            matching_user = None
-            matched_doctor_name = None
-            match_source = None
-
-            # STEP 1: Try to match consulting_doctor first (highest priority)
-            for user in users:
-                user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
+            def names_match(name1, name2, match_type="exact"):
+                """
+                Compare two names with different matching strategies.
                 
-                # Get all variants of user's name
-                user_name_variants = get_name_variants(user_full_name)
-                logger.info(f"🔍 Checking user '{user_full_name}' with variants: {user_name_variants}")
+                match_type options:
+                - "exact": First and last name must match exactly
+                - "partial": Either first OR last name matches
+                - "fuzzy": First AND last name match (ignoring middle names)
                 
-                # Check if ANY variant of consulting doctor matches ANY variant of user name
-                for consulting_variant in consulting_doctor_variants:
-                    if not consulting_variant:
-                        continue
-                    for user_variant in user_name_variants:
-                        if not user_variant:
-                            continue
-                        if consulting_variant == user_variant:
-                            matching_user = user
-                            matched_doctor_name = consulting_doctor
-                            match_source = "consulting_doctor"
-                            logger.info(f"✅ Physician name MATCH found in CONSULTING DOCTOR!")
-                            logger.info(f"   User: '{user_full_name}' (variant: '{user_variant}')")
-                            logger.info(f"   Consulting Doctor: '{consulting_doctor}' (variant: '{consulting_variant}')")
-                            logger.info(f"   User ID: {user.id}")
+                Returns: (is_match, confidence_score, match_details)
+                """
+                first1, last1, middle1 = extract_name_parts(name1)
+                first2, last2, middle2 = extract_name_parts(name2)
+                
+                # Exact match on first + last (ignoring middle)
+                if first1 and last1 and first1 == first2 and last1 == last2:
+                    return (True, 1.0, f"Exact match: {first1} {last1}")
+                
+                # Partial match: first name OR last name
+                if match_type in ["partial", "fuzzy"]:
+                    if first1 and first1 == first2:
+                        return (True, 0.8, f"First name match: {first1}")
+                    if last1 and last1 == last2:
+                        return (True, 0.8, f"Last name match: {last1}")
+                
+                # Check reversed order (LastName, FirstName vs FirstName LastName)
+                if first1 and last1 and first1 == last2 and last1 == first2:
+                    return (True, 0.9, f"Reversed match: {first1} {last1}")
+                
+                return (False, 0.0, "No match")
+            
+            def find_best_match(doctor_name, users):
+                """
+                Find the best matching user for a given doctor name.
+                Returns: (matching_user, confidence, match_details) or (None, 0, "")
+                """
+                best_match = None
+                best_confidence = 0.0
+                best_details = ""
+                
+                for user in users:
+                    user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
+                    
+                    # Try exact match first
+                    is_match, confidence, details = names_match(doctor_name, user_full_name, "exact")
+                    
+                    if is_match and confidence > best_confidence:
+                        best_match = user
+                        best_confidence = confidence
+                        best_details = details
+                        
+                        # If we found a perfect match, we can stop
+                        if confidence >= 1.0:
                             break
-                    if matching_user:
-                        break
-                if matching_user:
-                    break
+                
+                # If no exact match, try partial matching
+                if best_confidence < 1.0:
+                    for user in users:
+                        user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
+                        is_match, confidence, details = names_match(doctor_name, user_full_name, "partial")
+                        
+                        if is_match and confidence > best_confidence:
+                            best_match = user
+                            best_confidence = confidence
+                            best_details = details
+                
+                return (best_match, best_confidence, best_details)
+            
+            # STEP 1: Try to match consulting_doctor first (highest priority)
+            logger.info(f"🔍 Looking for match with consulting doctor: '{consulting_doctor}'")
+            matching_user, confidence, match_details = find_best_match(consulting_doctor, users)
+            match_source = "consulting_doctor"
+            
+            if matching_user:
+                user_full_name = f"{matching_user.firstName or ''} {matching_user.lastName or ''}".strip()
+                logger.info(f"✅ Physician name MATCH found in CONSULTING DOCTOR!")
+                logger.info(f"   User: '{user_full_name}'")
+                logger.info(f"   Consulting Doctor: '{consulting_doctor}'")
+                logger.info(f"   Match Details: {match_details}")
+                logger.info(f"   Confidence: {confidence}")
+                logger.info(f"   User ID: {matching_user.id}")
             
             # STEP 2: If no match in consulting_doctor, try all_doctors list
             if not matching_user:
@@ -823,50 +869,47 @@ class WebhookService:
                     logger.info(f"📋 No all_doctors list found in document_analysis")
                 
                 # Try to match each doctor in all_doctors list
+                best_overall_match = None
+                best_overall_confidence = 0.0
+                best_overall_details = ""
+                matched_doctor_name = None
+                
                 for doctor_name in all_doctors:
                     if not doctor_name or doctor_name == consulting_doctor:
-                        # Skip empty or already tried consulting_doctor
                         continue
                     
-                    doctor_variants = get_name_variants(doctor_name)
-                    logger.info(f"🔍 Trying doctor from all_doctors: '{doctor_name}' with variants: {doctor_variants}")
+                    logger.info(f"🔍 Trying doctor from all_doctors: '{doctor_name}'")
+                    user_match, conf, details = find_best_match(doctor_name, users)
                     
-                    for user in users:
-                        user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
-                        user_name_variants = get_name_variants(user_full_name)
-                        
-                        # Check if ANY variant of this doctor matches ANY variant of user name
-                        for doctor_variant in doctor_variants:
-                            if not doctor_variant:
-                                continue
-                            for user_variant in user_name_variants:
-                                if not user_variant:
-                                    continue
-                                if doctor_variant == user_variant:
-                                    matching_user = user
-                                    matched_doctor_name = doctor_name
-                                    match_source = "all_doctors"
-                                    logger.info(f"✅ Physician name MATCH found in ALL_DOCTORS!")
-                                    logger.info(f"   User: '{user_full_name}' (variant: '{user_variant}')")
-                                    logger.info(f"   Doctor from all_doctors: '{doctor_name}' (variant: '{doctor_variant}')")
-                                    logger.info(f"   User ID: {user.id}")
-                                    break
-                            if matching_user:
-                                break
-                        if matching_user:
-                            break
-                    if matching_user:
-                        break
+                    if user_match and conf > best_overall_confidence:
+                        best_overall_match = user_match
+                        best_overall_confidence = conf
+                        best_overall_details = details
+                        matched_doctor_name = doctor_name
+                
+                if best_overall_match:
+                    matching_user = best_overall_match
+                    confidence = best_overall_confidence
+                    match_details = best_overall_details
+                    match_source = "all_doctors"
+                    
+                    user_full_name = f"{matching_user.firstName or ''} {matching_user.lastName or ''}".strip()
+                    logger.info(f"✅ Physician name MATCH found in ALL_DOCTORS!")
+                    logger.info(f"   User: '{user_full_name}'")
+                    logger.info(f"   Doctor from all_doctors: '{matched_doctor_name}'")
+                    logger.info(f"   Match Details: {match_details}")
+                    logger.info(f"   Confidence: {confidence}")
+                    logger.info(f"   User ID: {matching_user.id}")
             
             # STEP 3: If still no match found, return 0
             if not matching_user:
                 logger.warning(f"⚠️ No physician name matches found in consulting_doctor or all_doctors")
                 logger.warning(f"   Consulting doctor: '{consulting_doctor}'")
-                logger.warning(f"   All doctors: {all_doctors if all_doctors else '[]'}")
+                logger.warning(f"   All doctors: {all_doctors if 'all_doctors' in locals() else '[]'}")
                 logger.warning(f"   Available users: {[f'{u.firstName} {u.lastName}' for u in users]}")
                 return 0
             
-            logger.info(f"🎯 Final match: User='{matching_user.firstName} {matching_user.lastName}', Doctor='{matched_doctor_name}', Source='{match_source}'")
+            logger.info(f"🎯 Final match: User='{matching_user.firstName} {matching_user.lastName}', Confidence={confidence}, Source='{match_source}'")
             
             # Generate and create tasks
             task_creator = TaskCreator()
@@ -898,7 +941,7 @@ class WebhookService:
                         "description": task.get("description"),
                         "department": task.get("department"),
                         "status": "Open",
-                        "dueDate": datetime.now(),  # Set default due date
+                        "dueDate": datetime.now(),
                         "patient": task.get("patient", "Unknown"),
                         "actions": task.get("actions") if isinstance(task.get("actions"), list) else [],
                         "sourceDocument": task.get("source_document") or filename,
@@ -921,7 +964,6 @@ class WebhookService:
             logger.error(f"❌ Error in task creation: {str(e)}")
         
         return created_tasks
-
     async def save_document(self, db_service, processed_data: dict, lookup_result: dict) -> dict:
         """Step 4: Save document to database and Redis cache"""
         

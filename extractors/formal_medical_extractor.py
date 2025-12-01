@@ -324,7 +324,7 @@ You are seeing the ENTIRE medical report at once, allowing you to:
 - Identify relationships between clinical indications, procedures performed, and results
 - Provide comprehensive extraction without information loss
 
-⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY):
+⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY) (donot include in output, for LLM use only):
 
 1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
    - If a field/value is NOT explicitly mentioned in the report, return EMPTY string "" or empty list []
@@ -422,7 +422,7 @@ CHAIN-OF-THOUGHT FOR SIGNATURE EXTRACTION (CRITICAL - ABSOLUTE PRIORITY):
 6. If no distinct signer, use performing physician and note "(inferred signer)".
 7. Output EXACT name only - e.g., "Dr. Jane Doe (electronic signer)".
 
-⚠️ FINAL REMINDER:
+⚠️ FINAL REMINDER (donot include in output, for LLM use only):
 - If information is NOT in the report, return EMPTY ("" or [])
 - NEVER assume, infer, or extrapolate medical information
 - PATIENT DETAILS: Extract EXACT values from demographics (e.g., "John Doe", "01/01/1980")
@@ -539,7 +539,7 @@ Follow-up Plan: [extracted]
 --------------------------------------------------
 • [list up to 8 most significant items]
 
-⚠️ CRITICAL MEDICAL REMINDERS:
+⚠️ CRITICAL MEDICAL REMINDERS (donot include in output, for LLM use only):
 1. For "patient_information": Extract EXACT values from demographics/headers. Examples: Name: "John Doe", DOB: "01/01/1980". Leave empty if not explicitly stated.
 2. For "procedure_details": Extract EXACT procedure names from report
    - Include anatomical specifics ONLY if explicitly stated

@@ -82,7 +82,7 @@ DETERMINE DOCUMENT TYPE AUTOMATICALLY:
 CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
 You are seeing the ENTIRE document at once, allowing comprehensive extraction without loss.
 
-⚠️ CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY):
+⚠️ CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY) (donot include in output, for LLM use only):
 1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION** - Empty if not mentioned
 2. **NO ASSUMPTIONS** - Do not infer or add typical values
 3. **ADAPT STRUCTURE** - Use medical sections for clinical content, administrative for non-clinical
@@ -221,7 +221,7 @@ Deadlines: [extracted]
 Contact Information: [extracted]
 Next Steps: [extracted]
 
-⚠️ MANDATORY EXTRACTION RULES:
+⚠️ MANDATORY EXTRACTION RULES (donot include in output, for LLM use only):
 1. Adapt structure to content: Medical if clinical data present, Administrative if not
 2. Extract ONLY explicit information - omit sections with no data
 3. Use exact wording for medical terms, dates, names, signatures, and claim numbers

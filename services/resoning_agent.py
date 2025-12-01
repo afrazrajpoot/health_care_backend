@@ -338,7 +338,7 @@ class EnhancedReportAnalyzer:
             return self.create_fallback_analysis(mode)
     def generate_brief_summary(self, document_text: str, mode: str = "wc") -> str:
         """
-        Generate a brief summary of the medical document.
+        Generate a brief summary of the medical document with detailed clinical specifics.
         """
         logger.info(f"🔍 Generating summary for {mode.upper()} mode...")
         try:
@@ -348,22 +348,41 @@ class EnhancedReportAnalyzer:
             mode_focus = "workers compensation injury" if mode == "wc" else "general medical condition"
             
             system_prompt = SystemMessagePromptTemplate.from_template(
-                f"You are a medical summarization expert. Generate concise 1-2 sentence professional summaries with {mode_focus} focus."
+                f"""You are a medical summarization expert. Generate concise 2-3 sentence professional summaries with {mode_focus} focus.
+                
+    CRITICAL RULES:
+    - Extract ONLY information explicitly stated in the document
+    - Include specific names: medications (with dosages if mentioned), procedures, therapies, diagnoses
+    - Use exact medical terminology from the document
+    - Never infer, assume, or add information not present
+    - If specific details are absent, do not fabricate them"""
             )
 
             human_prompt = HumanMessagePromptTemplate.from_template(
-                f"""Analyze the following medical document for {mode.upper()} mode. Identify the report type and extract all critical, actionable findings specific to {mode_focus}.
+                f"""Analyze the following medical document for {mode.upper()} mode and create a detailed yet concise summary.
 
-Generate a highly detailed, professional summary that immediately provides the physician with the most crucial {mode_focus} information.
+    DOCUMENT TEXT:
+    {{document_text}}
 
-DOCUMENT TEXT:
-{{document_text}}
+    CURRENT DATE: {{current_date}}
 
-CURRENT DATE: {{current_date}}
+    SUMMARY REQUIREMENTS:
+    1. Include the specific diagnosis/condition (use exact terms from document)
+    2. List key findings or test results (with specific values if mentioned)
+    3. Mention specific treatments:
+    - Medication names (include dosages if stated: e.g., "ibuprofen 600mg")
+    - Therapy types (e.g., "physical therapy", "cognitive behavioral therapy")
+    - Procedures performed or recommended (e.g., "MRI of lumbar spine", "arthroscopic surgery")
+    4. Include actionable recommendations (e.g., "follow-up in 2 weeks", "continue current regimen")
+    5. For {mode_focus}: emphasize work-relatedness, restrictions, or return-to-work status if mentioned
 
-Focus: Patient condition, key findings, recommendations. Use clinical language appropriate for {mode.upper()} mode.
+    OUTPUT FORMAT:
+    - 2-3 clear, information-dense sentences
+    - Clinical terminology appropriate for physician review
+    - ONLY use information explicitly present in the document
+    - If a detail category (medication/therapy/procedure) is not mentioned, omit it entirely
 
-{{format_instructions}}"""
+    {{format_instructions}}"""
             )
 
             summary_prompt = ChatPromptTemplate.from_messages([system_prompt, human_prompt])
@@ -381,7 +400,6 @@ Focus: Patient condition, key findings, recommendations. Use clinical language a
         except Exception as e:
             logger.error(f"❌ {mode.upper()} summary generation failed: {str(e)}")
             return f"{mode.upper()} brief summary unavailable"
-
     def create_fallback_analysis(self, mode: str = "wc") -> DocumentAnalysis:
         """Create mode-aware fallback analysis when extraction fails"""
         timestamp = datetime.now().strftime("%Y-%m-%d")

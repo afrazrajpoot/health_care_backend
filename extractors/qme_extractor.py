@@ -122,7 +122,7 @@ class QMEExtractorChained:
     - Identify relationships between symptoms, diagnoses, and recommendations
     - Provide comprehensive, context-aware extraction without information loss
 
-    ⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY):
+    ⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY) (donot include in output, for LLM use only):
 
     1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
     - If a field/value is NOT explicitly mentioned in the document, return EMPTY string "" or empty list []
@@ -293,7 +293,7 @@ class QMEExtractorChained:
     * Include positional restrictions: "no overhead reaching", "no kneeling/squatting"
     * Include duration if stated: "restrictions for 8 weeks"
 
-    ⚠️ FINAL REMINDER:
+    ⚠️ FINAL REMINDER (donot include in output, for LLM use only):
     - If information is NOT in the document, return EMPTY ("" or [])
     - NEVER assume, infer, or extrapolate
     - MEDICATIONS: Only extract what is explicitly listed as current

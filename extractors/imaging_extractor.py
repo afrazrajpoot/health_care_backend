@@ -264,7 +264,7 @@ Follow-up Timing: [extracted]
 Clinical Correlation Needed: [extracted]
 Specialist Consultation: [extracted]
 
-⚠️ MANDATORY EXTRACTION RULES:
+⚠️ MANDATORY EXTRACTION RULES (donot include in output, for LLM use only):
 1. Field 1: Extract EXACT dates and names from report
 2. Field 2: Use EXACT clinical indication wording from report
 3. Field 3: Contrast status must be EXPLICIT (with/without/not stated)

@@ -282,7 +282,7 @@ You are seeing the ENTIRE document at once, allowing you to:
 - Identify all services/treatments being decided upon
 - Provide comprehensive extraction without information loss
 
-⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY):
+⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY) (donot include in output, for LLM use only):
 
 1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
    - If a field/value is NOT explicitly mentioned in the document, return EMPTY string "" or empty list []
@@ -373,7 +373,7 @@ CHAIN-OF-THOUGHT FOR SIGNATURE EXTRACTION (CRITICAL - ABSOLUTE PRIORITY):
 6. If no distinct signer, use reviewing provider and note "(inferred signer)".
 7. Output EXACT name only - e.g., "Dr. Jane Doe (electronic signer)".
 
-⚠️ FINAL REMINDER:
+⚠️ FINAL REMINDER (donot include in output, for LLM use only):
 - If information is NOT in the document, return EMPTY ("" or [])
 - NEVER assume, infer, or extrapolate
 - PATIENT DETAILS: Extract EXACT values from demographics (e.g., "John Doe", "01/01/1980")
@@ -433,7 +433,7 @@ All Doctors Involved:
 - Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
 - If no doctors found, leave list empty [].
                                                                
-━━━ CLAIM NUMBER EXTRACTION PATTERNS ━━━
+━━━ CLAIM NUMBER EXTRACTION PATTERNS  ━━━
 CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
 
 Common claim number patterns (case-insensitive) and make sure to extract EXACTLY as written and must be claim number not just random numbers (like chart numbers, or id numbers) that look similar:
@@ -489,7 +489,7 @@ Timeframe for Response: [extracted]
 --------------------------------------------------
 • [list up to 8 time-sensitive items]
 
-⚠️ CRITICAL REMINDERS:
+⚠️ CRITICAL REMINDERS (donot include in output, for LLM use only):
 1. For "patient_details": Extract EXACT values from demographics/headers. Examples: Patient: "John Doe", DOB: "01/01/1980". Leave empty if not explicitly stated.
 2. For "overall_decision": Extract EXACT wording from document
    - If document says "not medically necessary", use: "not medically necessary"
@@ -552,78 +552,79 @@ Timeframe for Response: [extracted]
 
     def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
         """
-        Generate a precise 30–60 word, pipe-delimited actionable summary in key-value format.
+        Generate a precise 20-50 word, pipe-delimited actionable summary in key-value format.
         No hallucination, no assumptions. Missing fields are omitted.
         """
-        logger.info("🎯 Generating 30–60 word actionable short summary (key-value format)...")
+        logger.info("🎯 Generating 20-50 word actionable short summary (key-value format)...")
 
-        # ENHANCED: Updated system prompt to ensure author prominence and patient exclusion
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are a medical-legal extraction specialist.
 
 TASK:
-Generate a concise, highly actionable summary from a VERIFIED long medical summary. Include ONLY abnormal or clinically significant information. DO NOT include any patient personal details (name, DOB, Member ID, DOI).
+Generate a concise, highly actionable summary from a VERIFIED long medical summary. 
 
+MANDATORY FORMAT - EXACTLY THIS STRUCTURE:
+[Document Type] | [Author] | [Date : value] | [Body Parts] | Decision:[value] | [Recommendations: value]
 
 STRICT REQUIREMENTS:
-1. Word count MUST be between **30 and 60 words**.
-2. Output format MUST be EXACTLY:
-
-[Document Type] | [Author] | [Date : value] | [Body Parts] | Diagnosis:[value] | Medication:[value] | Decision:[value] | Medical Necessity:[value] | Rationale:[value] |  [Recommendations: value]
-
-3. ONLY include keys that have actual extracted values.
-4. DO NOT fabricate or infer missing data — SKIP entire key-value pairs if missing.
-5. Use ONLY information explicitly present in the long summary.
+1. Word count MUST be between **20 and 50 words** (count carefully).
+2. Output format MUST be EXACTLY as shown above.
+3. Use pipe separators (|) between fields.
+4. ONLY include fields that have actual extracted values - omit entire field if missing.
+5. DO NOT fabricate or infer missing data.
 6. Output must be a SINGLE LINE (no line breaks).
 
-CONTENT PRIORITY (if provided and relevant):
-- Document Type
-- Author (VERIFIED from PARTIES section, e.g., "Dr. Jane Doe";)
-- Decision Date
-- Body Parts involved
-- Diagnosis details (abnormal/critical only)
-- Medications prescribed (abnormal/critical only)
-- Services/treatments decided (abnormal, critical, or actionable only)
-- Final Decision Outcome (APPROVED/DENIED/PARTIAL)
-- Medical Necessity Determination (if any given)
-- Key Rationale for decision (if any given)
-- Recommendations (if any given)
-
-KEY RULES:
-- ONLY include critical, or clinically significant findings.
-- If a value is missing or not extractable, omit the ENTIRE key-value pair.
-- NEVER output empty fields or placeholder text.
-- NEVER fabricate dates, meds, restrictions, exam findings, or recommendations.
-- NO narrative sentences; use short factual fragments.
-- First three fields (Document Type, Author, Date) appear without keys.
+FIELD EXTRACTION RULES:
+- **Document Type**: Extract exact type (e.g., "UR Decision", "IMR Appeal", "Authorization")
+- **Author**: Extract VERIFIED signer name from PARTIES section (e.g., "Dr. Jane Doe")
+  * If no distinct author found, OMIT this field entirely
+  * Do NOT use generic titles or business names
+- **Date**: Extract decision/document date with key (e.g., "Date : 01/15/2025")
+- **Body Parts**: List affected body parts if mentioned (e.g., "Body Parts : Lumbar Spine, Right Knee")
+  * If no body parts mentioned, OMIT this field
+- **Decision**: Extract decision outcome (e.g., "Decision: APPROVED", "Decision: DENIED", "Decision: PARTIAL")
+- **Recommendations**: Extract key recommendations if present (e.g., "Recommendations: File appeal by 02/01")
+  * If no recommendations, OMIT this field
 
 ABSOLUTELY FORBIDDEN:
-- Assumptions or inferred clinical interpretations
+- Patient personal details (name, DOB, Member ID, DOI)
 - Invented or placeholder information
+- Empty pipe fields (||)
+- Generic text like "Not provided" or "Unknown"
 - Narrative sentences
-- Normal or non-actionable information
-- Any patient personal details (name, DOB, Member ID, DOI)
-- Duplicate or empty pipe fields (||)
-- Normal findings (ignore them entirely)
-- assumptions, interpretations, invented medications, or inferred diagnoses
-- placeholder text or "Not provided"
-- narrative writing
+- Word count outside 20-50 range
 
-Your final output MUST be 30–60 words, single-line, pipe-delimited, including ONLY extracted, abnormal, or critical information.
+EXAMPLES:
+✅ GOOD: "UR Decision | Dr. Smith | Date : 01/15/2025 | Body Parts : Lumbar Spine | Decision: DENIED | Recommendations: File IMR appeal by 02/01"
+
+✅ GOOD (minimal): "IMR Appeal | Date : 01/20/2025 | Decision: APPROVED | Recommendations: Schedule MRI within 7 days"
+
+❌ BAD: "UR Decision | | | | Decision: DENIED |" (too many empty fields)
+❌ BAD: "This is a UR decision letter that was denied..." (narrative format)
+
+Your final output MUST be 20-50 words, single-line, pipe-delimited, including ONLY extracted information.
 """)
 
         user_prompt = HumanMessagePromptTemplate.from_template("""
-    LONG SUMMARY:
+LONG SUMMARY:
 
-    {long_summary}
+{long_summary}
 
-    Now produce the 30–60 word single-line summary following the strict rules.
-    """)
+Generate the summary in EXACTLY this format:
+[Document Type] | [Author] | [Date : value] | [Body Parts] | Decision:[value] | [Recommendations: value]
+
+Remember:
+- 20-50 words total
+- Single line
+- Omit fields if not found
+- NO patient details
+- Count words before responding
+""")
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
         
         # Retry configuration
-        max_retries = 3
+        max_retries = 4
         retry_delay = 1
         
         for attempt in range(max_retries):
@@ -641,36 +642,51 @@ Your final output MUST be 30–60 words, single-line, pipe-delimited, including 
                 summary = response.content.strip()
                 end_time = time.time()
                 
-                # Clean whitespace only
+                # Clean whitespace and normalize pipes
                 summary = re.sub(r'\s+', ' ', summary).strip()
+                summary = re.sub(r'\s*\|\s*', ' | ', summary)  # Normalize pipe spacing
                 
-                # ENHANCED: Post-process to enforce no patient details
-                forbidden_patterns = [r'Patient|DOB|Member ID|DOI']
+                # Remove patient details
+                forbidden_patterns = [r'Patient[:\s]+[^|]+\|?', r'DOB[:\s]+[^|]+\|?', r'Member\s+ID[:\s]+[^|]+\|?', r'DOI[:\s]+[^|]+\|?']
                 for pattern in forbidden_patterns:
                     summary = re.sub(pattern, '', summary, flags=re.IGNORECASE)
-                    summary = re.sub(r'\s*\|\s*', '|', summary)  # Clean extra pipes
+                
+                # Clean up double pipes
+                summary = re.sub(r'\|\s*\|', '|', summary)
+                summary = re.sub(r'\s+', ' ', summary).strip()
                 
                 word_count = len(summary.split())
                 
                 logger.info(f"⚡ Short summary generated in {end_time - start_time:.2f}s: {word_count} words")
+                logger.info(f"📝 Summary: {summary}")
                 
-                # Validate word count
-                if 30 <= word_count <= 60:
-                    logger.info("✅ Perfect 30-60 word summary generated!")
+                # Validate word count (20-50 words)
+                if 20 <= word_count <= 50:
+                    logger.info("✅ Perfect 20-50 word summary generated!")
                     return summary
                 else:
-                    logger.warning(f"⚠️ Summary has {word_count} words (expected 30-60), attempt {attempt + 1}")
+                    logger.warning(f"⚠️ Summary has {word_count} words (expected 20-50), attempt {attempt + 1}")
                     
                     if attempt < max_retries - 1:
-                        # Add word count feedback to next attempt
+                        # Add specific feedback based on word count
+                        if word_count > 50:
+                            feedback = f"Your previous summary had {word_count} words (TOO LONG). Remove less critical details. Target: 20-50 words. Keep ONLY: Document Type, Author (if found), Date, Body Parts (if mentioned), Decision, Recommendations (if given). Use format: [Document Type] | [Author] | [Date : value] | [Body Parts] | Decision:[value] | [Recommendations: value]"
+                        else:
+                            feedback = f"Your previous summary had {word_count} words (TOO SHORT). Add more specific details to reach 20-50 words. Include decision rationale or specific service details. Use format: [Document Type] | [Author] | [Date : value] | [Body Parts] | Decision:[value] | [Recommendations: value]"
+                        
                         feedback_prompt = SystemMessagePromptTemplate.from_template(
-                            f"Your previous summary had {word_count} words. Rewrite it to be STRICTLY between 30 and 60 words while preserving accuracy and key-value format. DO NOT add invented data. Maintain the exact format: [Document Type] | [Author] | [Decision Date] | Requesting Provider:[value] | Services:[value] | Decision:[value] | Medical Necessity:[value] | Rationale:[value] | Appeal Info:[value]. EXCLUDE patient details."
+                            f"{feedback}\n\nCRITICAL: Count words before responding. Output must be 20-50 words, single line, pipe-delimited."
                         )
                         chat_prompt = ChatPromptTemplate.from_messages([feedback_prompt, user_prompt])
                         time.sleep(retry_delay * (attempt + 1))
                         continue
                     else:
                         logger.warning(f"⚠️ Final summary has {word_count} words after {max_retries} attempts")
+                        # Force adjust if close enough
+                        if word_count > 50:
+                            words = summary.split()
+                            summary = ' '.join(words[:50])
+                            logger.info(f"🔧 Force-trimmed to 50 words")
                         return summary
                         
             except Exception as e:
@@ -681,9 +697,9 @@ Your final output MUST be 30–60 words, single-line, pipe-delimited, including 
                     time.sleep(retry_delay * (attempt + 1))
                 else:
                     logger.error(f"❌ All {max_retries} attempts failed for short summary generation")
-                    return "Summary unavailable due to processing error."
+                    return f"{doc_type} | Decision processing failed"
         
-        return "Summary unavailable due to processing error."
+        return f"{doc_type} | Decision processing failed"
     def _get_word_count_feedback_prompt(self, actual_word_count: int, doc_type: str) -> SystemMessagePromptTemplate:
         """Get feedback prompt for word count adjustment for decision documents"""
         
