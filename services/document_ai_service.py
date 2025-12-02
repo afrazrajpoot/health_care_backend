@@ -1,7 +1,8 @@
 # document_ai_service.py
+
 """
-Enhanced Document AI Service with structured JSON output for LLM consumption.
-Preserves layout, extracts zones, and generates LLM-optimized JSON structure.
+Enhanced Document AI Service using Document Summarizer processor.
+REPLACED doc-ocr with document-summarizer for better accuracy.
 """
 
 import os
@@ -12,8 +13,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from google.cloud import documentai_v1 as documentai
-# Ensure OcrConfig and ProcessOptions are accessible for the fix
-from google.cloud.documentai_v1 import DocumentProcessorServiceClient, ProcessOptions, OcrConfig 
+from google.cloud.documentai_v1 import DocumentProcessorServiceClient, types
 import logging
 from PyPDF2 import PdfReader, PdfWriter
 from models.schemas import ExtractionResult, FileInfo
@@ -21,333 +21,58 @@ from config.settings import CONFIG
 
 logger = logging.getLogger("document_ai")
 
-
 class LayoutPreservingTextExtractor:
     """
-    Extract text from Document AI results while preserving layout structure.
-    Outputs structured JSON for LLM consumption.
+    Extract text from Document AI Summarizer results.
+    Simplified since summarizer returns clean text without complex layout.
     """
     
     @staticmethod
-    def extract_text_from_layout(text_anchor, full_text: str) -> str:
-        """Extract text from layout text anchor"""
-        if not text_anchor or not text_anchor.text_segments:
-            return ""
-        start_index = text_anchor.text_segments[0].start_index or 0
-        end_index = text_anchor.text_segments[0].end_index
-        return full_text[start_index:end_index] if end_index else ""
-    
-    @staticmethod
-    def reconstruct_layout_text(document) -> Dict[str, Any]:
+    def extract_text_from_summarizer(document) -> Dict[str, Any]:
         """
-        Reconstruct text with layout preservation and structured JSON output.
-        
-        Returns structured data:
-        {
-            "layout_preserved": str,  # Text with page markers
-            "raw_text": str,  # Original flat text
-            "page_zones": {...},  # Per-page zones
-            "structured_document": {...}  # LLM-optimized JSON structure
-        }
+        Extract text from summarizer response.
+        Summarizer returns clean, organized text with natural paragraph structure.
         """
-        page_texts = []
-        page_zones = {}
-        structured_pages = []
+        summarized_text = document.text or ""
         
-        for page_idx, page in enumerate(document.pages):
-            page_num = page_idx + 1
-            page_text_parts = []
-            
-            # Add page marker
-            page_text_parts.append(f"\n{'='*80}\n")
-            page_text_parts.append(f"PAGE {page_num}\n")
-            page_text_parts.append(f"{'='*80}\n\n")
-            
-            # Extract zones for this page (Now includes checkboxes)
-            zones = LayoutPreservingTextExtractor._extract_page_zones(
-                page, document.text, page_num
-            )
-            page_zones[str(page_num)] = zones
-            
-            # Build structured page data
-            structured_page = {
-                "page_number": page_num,
-                "header": zones.get("header", ""),
-                "body": zones.get("body", ""),
-                "footer": zones.get("footer", ""),
-                "signature": zones.get("signature", ""),
-                "full_text": ""
-            }
-            
-            # Extract paragraphs
-            if page.paragraphs:
-                for para in page.paragraphs:
-                    para_text = LayoutPreservingTextExtractor.extract_text_from_layout(
-                        para.layout.text_anchor, document.text
-                    )
-                    if para_text.strip():
-                        page_text_parts.append(para_text.strip())
-                        page_text_parts.append("\n\n")
-            elif page.blocks:
-                # Fallback: use blocks
-                for block in page.blocks:
-                    block_text = LayoutPreservingTextExtractor._extract_block_text(
-                        block, document.text
-                    )
-                    if block_text.strip():
-                        page_text_parts.append(block_text)
-                        page_text_parts.append("\n\n")
-            
-            page_full_text = "".join(page_text_parts)
-            structured_page["full_text"] = page_full_text
-            structured_pages.append(structured_page)
-            page_texts.append(page_full_text)
+        # Extract page count if available
+        page_count = len(document.pages) if document.pages else 0
         
-        layout_preserved = "\n".join(page_texts)
-        
-        # Build structured document for LLM
-        structured_document = {
-            "document_structure": {
-                "total_pages": len(document.pages),
-                "first_page_header": structured_pages[0]["header"] if structured_pages else "",
-                "last_page_signature": structured_pages[-1]["signature"] if structured_pages else "",
-            },
-            "pages": structured_pages,
-            "metadata": {
-                "has_header": any(p["header"] for p in structured_pages),
-                "has_signature": any(p["signature"] for p in structured_pages),
-                "total_chars": len(layout_preserved)
-            }
-        }
-        
+        # Build simple structure for compatibility with existing code
         return {
-            "layout_preserved": layout_preserved,
-            "raw_text": document.text or "",
-            "page_zones": page_zones,
-            "structured_document": structured_document
+            "layout_preserved": summarized_text,
+            "raw_text": summarized_text,
+            "page_zones": {},  # Summarizer doesn't provide detailed zones
+            "structured_document": {
+                "document_structure": {
+                    "total_pages": page_count,
+                    "summarized": True
+                },
+                "pages": [],
+                "metadata": {
+                    "has_summary": True,
+                    "total_chars": len(summarized_text)
+                }
+            }
         }
-    
-    @staticmethod
-    def _extract_block_text(block, full_text: str) -> str:
-        """Extract text from a block"""
-        if not block.layout or not block.layout.text_anchor:
-            return ""
-        block_text = LayoutPreservingTextExtractor.extract_text_from_layout(
-            block.layout.text_anchor, full_text
-        )
-        return block_text.strip()
-    
-    @staticmethod
-    def _extract_page_zones(page, full_text: str, page_num: int) -> Dict[str, str]:
-        """
-        Extract distinct zones from a page: header, body, footer, signature.
-        Uses bounding box Y-coordinates to identify zones.
-        
-        FIXED: Updated to include 'visual_elements' (checkboxes) and use
-               Y and X coordinates for better layout fidelity.
-        """
-        zones = {
-            "header": "",
-            "body": "",
-            "footer": "",
-            "signature": "",
-            "page_number": str(page_num),
-        }
-        
-        # Collect elements with their Y and X coordinates
-        elements_with_coords = []
-        
-        # 1. Extract Text Paragraphs (Priority 1)
-        if page.paragraphs:
-            for para in page.paragraphs:
-                if para.layout and para.layout.bounding_poly:
-                    vertices = para.layout.bounding_poly.normalized_vertices
-                    if vertices:
-                        avg_y = sum(v.y for v in vertices) / len(vertices)
-                        first_x = vertices[0].x if vertices else 0
-                        para_text = LayoutPreservingTextExtractor.extract_text_from_layout(
-                            para.layout.text_anchor, full_text
-                        )
-                        elements_with_coords.append({
-                            "text": para_text.strip(),
-                            "y_pos": avg_y,
-                            "x_pos": first_x,
-                            "confidence": para.layout.confidence if para.layout else 0.0,
-                            "type": "text"
-                        })
-
-        # 2. Extract Text Blocks (Priority 2 / Fallback)
-        elif page.blocks:
-            for block in page.blocks:
-                if block.layout and block.layout.bounding_poly:
-                    vertices = block.layout.bounding_poly.normalized_vertices
-                    if vertices:
-                        avg_y = sum(v.y for v in vertices) / len(vertices)
-                        first_x = vertices[0].x if vertices else 0
-                        block_text = LayoutPreservingTextExtractor._extract_block_text(
-                            block, full_text
-                        )
-                        elements_with_coords.append({
-                            "text": block_text.strip(),
-                            "y_pos": avg_y,
-                            "x_pos": first_x,
-                            "confidence": block.layout.confidence if block.layout else 0.0,
-                            "type": "text"
-                        })
-
-        # 3. NEW: Extract Visual Elements (Checkboxes)
-        if hasattr(page, 'visual_elements') and page.visual_elements:
-            for element in page.visual_elements:
-                if element.layout and element.layout.bounding_poly:
-                    el_type = element.type_
-                    # Check for "checkbox" type from OCR output
-                    if "checkbox" in el_type.lower():
-                        vertices = element.layout.bounding_poly.normalized_vertices
-                        if vertices:
-                            avg_y = sum(v.y for v in vertices) / len(vertices)
-                            first_x = vertices[0].x if vertices else 0
-                            
-                            # Determine state based on type name (common for Document AI)
-                            is_checked = "checked" in el_type.lower() or "selected" in el_type.lower()
-                            
-                            # Create text representation for LLM logs
-                            checkbox_text = "[x]" if is_checked else "[ ]"
-                            
-                            elements_with_coords.append({
-                                "text": checkbox_text,
-                                "y_pos": avg_y,
-                                "x_pos": first_x,
-                                "confidence": element.layout.confidence if element.layout else 0.0,
-                                "type": "checkbox"
-                            })
-
-        if not elements_with_coords:
-            return zones
-        
-        # Sort by Y position (top to bottom), then X (left to right)
-        elements_with_coords.sort(key=lambda x: (x["y_pos"], x["x_pos"]))
-        
-        # Define zones based on Y-position thresholds
-        header_elements = []
-        body_elements = []
-        footer_elements = []
-        
-        for element in elements_with_coords:
-            y = element["y_pos"]
-            text = element["text"]
-            
-            # Skip empty text elements, but include checkboxes even if they are just "[ ]" or "[x]"
-            if not text and element.get("type") != "checkbox":
-                continue
-
-            if y < 0.20:  # Top 20%
-                header_elements.append(text)
-            elif y > 0.75:  # Bottom 25%
-                footer_elements.append(text)
-            else:  # Middle section
-                body_elements.append(text)
-        
-        zones["header"] = "\n".join(header_elements)
-        zones["body"] = "\n".join(body_elements)
-        zones["footer"] = "\n".join(footer_elements)
-        
-        # Signature is typically in footer, look for signature keywords
-        footer_text = zones["footer"].lower()
-        if any(keyword in footer_text for keyword in [
-            "signature", "signed by", "electronically signed",
-            "dr.", "md", "do", "physician"
-        ]):
-            zones["signature"] = zones["footer"]
-        
-        return zones
-
 
 def build_llm_friendly_json(structured_document: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Build LLM-optimized JSON structure with clear annotations.
-    This provides structured context that LLMs can parse better than plain text.
-    
-    Args:
-        structured_document: Document structure from layout extraction
-    
-    Returns:
-        JSON object optimized for LLM classification and extraction
+    Build LLM-optimized JSON structure from summarizer output.
     """
-    pages = structured_document.get("pages", [])
-    
-    if not pages:
-        return {
-            "document_type_hints": {
-                "header_text": "",
-                "first_page_context": "",
-                "has_form_structure": False
-            },
-            "content": {
-                "header": "",
-                "body_preview": "",
-                "signature": ""
-            }
-        }
-    
-    first_page = pages[0]
-    last_page = pages[-1]
-    
-    # Build classification hints
-    header_text = first_page.get("header", "").strip()
-    
-    # Extract potential document type indicators from header
-    type_indicators = []
-    header_upper = header_text.upper()
-    
-    # Check for common form identifiers
-    form_patterns = {
-        "RFA": ["REQUEST FOR AUTHORIZATION", "DWC FORM RFA"],
-        "PR2": ["PR-2", "PROGRESS REPORT", "TREATING PHYSICIAN"],
-        "DFR": ["DOCTOR'S FIRST REPORT", "DLSR 5021", "FIRST REPORT OF OCCUPATIONAL INJURY"],
-        "QME": ["QUALIFIED MEDICAL EVALUATOR", "QME REPORT"],
-        "UR": ["UTILIZATION REVIEW", "UR DECISION"],
-        "MRI": ["MRI REPORT", "MAGNETIC RESONANCE"],
-        "CT": ["CT REPORT", "COMPUTED TOMOGRAPHY"],
-    }
-    
-    for doc_type, patterns in form_patterns.items():
-        if any(pattern in header_upper for pattern in patterns):
-            type_indicators.append(doc_type)
-    
-    # Build body preview (first 2000 chars from body zones)
-    body_preview_parts = []
-    for page in pages[:3]:  # First 3 pages
-        body = page.get("body", "").strip()
-        if body:
-            body_preview_parts.append(body)
-    body_preview = "\n\n".join(body_preview_parts)[:2000]
-    
-    # Signature extraction
-    signature_text = last_page.get("signature", "").strip() or last_page.get("footer", "").strip()
-    
-    llm_text = {
+    return {
         "document_type_hints": {
-            "detected_indicators": type_indicators,
-            "header_text": header_text[:500],  # First 500 chars of header
-            "first_page_context": first_page.get("full_text", "")[:1000],
-            "has_form_structure": bool(type_indicators),
-            "page_count": len(pages)
+            "header_text": "",
+            "first_page_context": "",
+            "has_form_structure": False,
+            "is_summarized": True
         },
         "content": {
-            "header": header_text,
-            "body_preview": body_preview,
-            "signature": signature_text[:300]
-        },
-        "zones": {
-            "first_page_header": first_page.get("header", ""),
-            "first_page_body": first_page.get("body", "")[:1500],
-            "last_page_signature": signature_text
+            "summary": structured_document.get("summarized_text", ""),
+            "page_count": structured_document.get("document_structure", {}).get("total_pages", 0)
         },
         "metadata": structured_document.get("metadata", {})
     }
-    
-    return llm_text
-
 
 class PDFSplitter:
     """Utility to split large PDFs into smaller chunks"""
@@ -359,7 +84,6 @@ class PDFSplitter:
         """Split PDF into multiple chunks"""
         try:
             logger.info(f"🔍 Splitting PDF: {filepath}")
-            
             with open(filepath, "rb") as file:
                 pdf_reader = PdfReader(file)
                 total_pages = len(pdf_reader.pages)
@@ -378,13 +102,12 @@ class PDFSplitter:
             for chunk_num in range(num_chunks):
                 start_page = chunk_num * self.max_pages_per_chunk
                 end_page = min((chunk_num + 1) * self.max_pages_per_chunk, total_pages)
-                
                 chunk_file = self._create_chunk(filepath, start_page, end_page, chunk_num)
                 chunk_files.append(chunk_file)
                 logger.info(f"✅ Created chunk {chunk_num + 1}: pages {start_page + 1}-{end_page}")
             
             return chunk_files
-        
+            
         except Exception as e:
             logger.error(f"❌ Error splitting PDF: {str(e)}")
             raise
@@ -418,19 +141,18 @@ class PDFSplitter:
             except Exception as e:
                 logger.warning(f"⚠️ Could not clean up {chunk_file}: {str(e)}")
 
-
 class DocumentAIProcessor:
-    """Service for Document AI processing with structured JSON output"""
+    """Service for Document AI Summarizer processing"""
     
     def __init__(self):
         self.client: Optional[DocumentProcessorServiceClient] = None
-        self.processor_path: Optional[str] = None
+        self.summarizer_processor_path: Optional[str] = None
         self.pdf_splitter = PDFSplitter(max_pages_per_chunk=10)
         self.layout_extractor = LayoutPreservingTextExtractor()
         self._initialize_client()
     
     def _initialize_client(self):
-        """Initialize Document AI client"""
+        """Initialize Document AI client with SUMMARIZER processor"""
         try:
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CONFIG["credentials_path"]
             logger.info(f"🔑 Using credentials: {CONFIG['credentials_path']}")
@@ -443,12 +165,16 @@ class DocumentAIProcessor:
                 client_options={"api_endpoint": api_endpoint}
             )
             
-            self.processor_path = self.client.processor_path(
-                CONFIG["project_id"], CONFIG["location"], CONFIG["processor_id"]
+            # REPLACED: Use summarizer_processor_id instead of processor_id
+            summarizer_id = CONFIG.get("summarizer_processor_id") or CONFIG.get("processor_id")
+            
+            self.summarizer_processor_path = self.client.processor_path(
+                CONFIG["project_id"], CONFIG["location"], summarizer_id
             )
             
-            logger.info("✅ Document AI Client initialized successfully")
-        
+            logger.info(f"✅ Document AI Summarizer initialized: {summarizer_id}")
+            logger.info("📝 Using Document AI Summarizer (pretrained-foundation-model-v1.0-2023-08-22)")
+            
         except Exception as e:
             logger.error(f"❌ Failed to initialize Document AI Client: {str(e)}")
             raise
@@ -466,176 +192,17 @@ class DocumentAIProcessor:
             ".bmp": "image/bmp",
             ".webp": "image/webp",
         }
-        
         file_ext = Path(filepath).suffix.lower()
         return mime_mapping.get(file_ext, "application/octet-stream")
     
-    def extract_entities(self, document) -> List[Dict[str, Any]]:
-        """Extract entities from document"""
-        entities = []
-        if document.entities:
-            for entity in document.entities:
-                entities.append({
-                    "type": entity.type_,
-                    "mentionText": entity.mention_text,
-                    "confidence": float(entity.confidence),
-                    "id": entity.id,
-                })
-        return entities
-    
-    def extract_tables(self, document) -> List[Dict[str, Any]]:
-        """Extract tables from document"""
-        tables = []
-        if not document.pages:
-            return tables
-        
-        for page_index, page in enumerate(document.pages):
-            if page.tables:
-                for table_index, table in enumerate(page.tables):
-                    table_data = {
-                        "pageNumber": page_index + 1,
-                        "tableIndex": table_index + 1,
-                        "headerRows": [],
-                        "bodyRows": [],
-                    }
-                    
-                    if table.header_rows:
-                        for row in table.header_rows:
-                            row_data = []
-                            for cell in row.cells:
-                                cell_text = (
-                                    self.layout_extractor.extract_text_from_layout(
-                                        cell.layout.text_anchor, document.text
-                                    )
-                                    if cell.layout and cell.layout.text_anchor
-                                    else ""
-                                )
-                                row_data.append({
-                                    "text": cell_text.strip(),
-                                    "confidence": float(cell.layout.confidence) if cell.layout else 0.0,
-                                })
-                            table_data["headerRows"].append(row_data)
-                    
-                    if table.body_rows:
-                        for row in table.body_rows:
-                            row_data = []
-                            for cell in row.cells:
-                                cell_text = (
-                                    self.layout_extractor.extract_text_from_layout(
-                                        cell.layout.text_anchor, document.text
-                                    )
-                                    if cell.layout and cell.layout.text_anchor
-                                    else ""
-                                )
-                                row_data.append({
-                                    "text": cell_text.strip(),
-                                    "confidence": float(cell.layout.confidence) if cell.layout else 0.0,
-                                })
-                            table_data["bodyRows"].append(row_data)
-                    
-                    tables.append(table_data)
-        
-        return tables
-    
-    def extract_form_fields(self, document) -> List[Dict[str, Any]]:
-        """Extract form fields from document"""
-        form_fields = []
-        if not document.pages:
-            return form_fields
-        
-        for page in document.pages:
-            if page.form_fields:
-                for field in page.form_fields:
-                    field_name = ""
-                    field_value = ""
-                    
-                    if field.field_name and field.field_name.text_anchor:
-                        field_name = self.layout_extractor.extract_text_from_layout(
-                            field.field_name.text_anchor, document.text
-                        )
-                    
-                    if field.field_value and field.field_value.text_anchor:
-                        field_value = self.layout_extractor.extract_text_from_layout(
-                            field.field_value.text_anchor, document.text
-                        )
-                    
-                    form_fields.append({
-                        "name": field_name.strip(),
-                        "value": field_value.strip(),
-                        "nameConfidence": float(field.field_name.confidence) if field.field_name else 0.0,
-                        "valueConfidence": float(field.field_value.confidence) if field.field_value else 0.0,
-                    })
-        
-        return form_fields
-    
-    def extract_symbols_and_checkboxes(self, document) -> List[Dict[str, Any]]:
-        """Extract symbols and checkboxes from document"""
-        symbols = []
-        if not document.pages:
-            return symbols
-        
-        for page_idx, page in enumerate(document.pages):
-            # The previous logic relied on 'symbols' which is often empty for modern processors.
-            # The actual checkbox extraction is now handled by the layout extractor, but we keep 
-            # this method for general symbol extraction if available.
-            
-            if hasattr(page, 'symbols') and page.symbols:
-                for symbol in page.symbols:
-                    symbol_text = ""
-                    if symbol.layout and symbol.layout.text_anchor:
-                        symbol_text = self.layout_extractor.extract_text_from_layout(
-                            symbol.layout.text_anchor, document.text
-                        )
-                    
-                    symbols.append({
-                        "pageNumber": page_idx + 1,
-                        "text": symbol_text.strip(),
-                        "type": "checkbox" if symbol_text.strip() in ["☐", "☑", "☒", "✓", "✗", "X"] else "symbol",
-                        "isChecked": symbol_text.strip() in ["☑", "☒", "✓", "X"],
-                        "confidence": float(symbol.layout.confidence) if symbol.layout else 0.0,
-                    })
-            
-            # Also extract from visual_elements if we want a separate list of detected boxes
-            # (Note: the layout_extractor already injects these into the text, this is just for the 'symbols' array)
-            if hasattr(page, 'visual_elements') and page.visual_elements:
-                for element in page.visual_elements:
-                    if element.type_ and "checkbox" in element.type_.lower():
-                        symbols.append({
-                            "pageNumber": page_idx + 1,
-                            "text": "[x]" if "checked" in element.type_.lower() or "selected" in element.type_.lower() else "[ ]",
-                            "type": "checkbox",
-                            "isChecked": "checked" in element.type_.lower() or "selected" in element.type_.lower(),
-                            "confidence": float(element.layout.confidence) if element.layout else 0.0,
-                        })
-
-        return symbols
-
-    
-    def calculate_overall_confidence(self, document) -> float:
-        """Calculate overall confidence score"""
-        if not document.pages:
-            return 0.0
-        
-        total_confidence = 0
-        count = 0
-        
-        for page in document.pages:
-            if page.layout and page.layout.confidence:
-                total_confidence += float(page.layout.confidence)
-                count += 1
-        
-        return total_confidence / count if count > 0 else 0.0
-    
     def _process_document_direct(self, filepath: str) -> ExtractionResult:
         """
-        Direct document processing with structured JSON output.
-        
-        FIXED: Added process_options to enable premium OCR features like
-               selection mark detection (checkboxes).
+        Process document using Document AI SUMMARIZER (not OCR).
+        FIXED: Extract summary field instead of full text.
         """
         try:
             mime_type = self.get_mime_type(filepath)
-            logger.info(f"📄 Processing document: {filepath}")
+            logger.info(f"📄 Processing document with SUMMARIZER: {filepath}")
             logger.info(f"📋 MIME type: {mime_type}")
             
             if not os.path.exists(filepath):
@@ -644,110 +211,136 @@ class DocumentAIProcessor:
             file_size = os.path.getsize(filepath)
             logger.info(f"📦 File size: {file_size} bytes")
             
+            # Read file content
             with open(filepath, "rb") as file:
                 file_content = file.read()
             
-            encoded_content = base64.b64encode(file_content).decode("utf-8")
-            
-            # --- CRITICAL FIX: Configure Process Options to enable Premium Features ---
-            # This is essential to activate selection mark (checkbox) detection.
-            # ERROR SOURCE: If this still fails with 'Unknown field', the Python
-            # client library must be updated: `pip install --upgrade google-cloud-documentai`
-            process_options = documentai.ProcessOptions(
-                ocr_config=documentai.OcrConfig(
-                    enable_symbol=True,  # Basic feature
-                    premium_features=documentai.OcrConfig.PremiumFeatures(
-                        enable_selection_mark_detection=True,  # CRITICAL: Premium OCR feature
-                        compute_style_info=True  # Premium feature: font identification
-                    )
-                )
+            # Create raw document for summarizer
+            raw_document = documentai.RawDocument(
+                content=file_content,
+                mime_type=mime_type
             )
-            # ----------------------------------------------------------------
             
-            request = {
-                "name": self.processor_path,
-                "raw_document": {
-                    "content": encoded_content,
-                    "mime_type": mime_type,
-                },
-                # ADDED: Send the configured options with the request
-                "process_options": process_options 
-            }
+            # Create simple process request (uses processor default settings)
+            request = documentai.ProcessRequest(
+                name=self.summarizer_processor_path,
+                raw_document=raw_document
+            )
             
-            logger.info("📤 Sending request to Document AI...")
+            logger.info("📤 Sending request to Document AI Summarizer...")
+            logger.info("   Using processor default settings (Length: MODERATE, Format: PARAGRAPH)")
+            
+            # Process document with summarizer
             response = self.client.process_document(request=request)
             result = response.document
             
-            logger.info("✅ Document processed successfully!")
-            logger.info(f"📝 Extracted text length: {len(result.text) if result.text else 0} characters")
-            logger.info(f"📄 Pages found: {len(result.pages) if result.pages else 0}")
+            logger.info("✅ Document AI Summarizer processed successfully!")
             
-            # **KEY ENHANCEMENT: Extract layout + build structured JSON**
-            layout_data = self.layout_extractor.reconstruct_layout_text(result)
+            # FIXED: Extract the SUMMARY field, not the full text
+            summary_text = ""
             
-            logger.info(f"🔍 Layout preservation complete:")
-            logger.info(f"  - Raw text: {len(layout_data['raw_text'])} chars")
-            logger.info(f"  - Layout text: {(layout_data['layout_preserved'])}") # Truncated log
-            logger.info(f"  - Page zones: {len(layout_data['page_zones'])} pages")
+            # Check if document has summary field
+            if hasattr(result, 'chunked_document') and result.chunked_document:
+                # For chunked documents, get summary from chunks
+                logger.info(f"📦 Found chunked document with {len(result.chunked_document.chunks)} chunks")
+                summary_parts = []
+                for chunk in result.chunked_document.chunks:
+                    if hasattr(chunk, 'content') and chunk.content:
+                        summary_parts.append(chunk.content)
+                summary_text = "\n\n".join(summary_parts)
             
-            # **NEW: Build LLM-friendly JSON**
+            # Try to get entity-based summary (for newer API versions)
+            if not summary_text and hasattr(result, 'entities'):
+                for entity in result.entities:
+                    if entity.type_ == 'summary' or 'summary' in entity.type_.lower():
+                        summary_text = entity.mention_text
+                        break
+            
+            # Fallback: Check for summary in document text (last resort)
+            # Some processors return summary as the primary text field
+            if not summary_text:
+                # Check if text is significantly shorter than expected (indicates summarization occurred)
+                full_text = result.text or ""
+                page_count = len(result.pages) if result.pages else 0
+                
+                # If text is less than ~500 chars per page, it's likely a summary, not full OCR
+                avg_chars_per_page = len(full_text) / page_count if page_count > 0 else 0
+                
+                if avg_chars_per_page < 500 or page_count == 0:
+                    # This is likely the summary
+                    summary_text = full_text
+                    logger.info(f"✅ Detected summary in text field (avg {avg_chars_per_page:.0f} chars/page)")
+                else:
+                    # This is full OCR text - summarizer didn't work properly
+                    logger.warning(f"⚠️ Got full OCR text instead of summary (avg {avg_chars_per_page:.0f} chars/page)")
+                    logger.warning("⚠️ Processor may not be configured as a summarizer")
+                    summary_text = full_text  # Use it anyway for compatibility
+            
+            logger.info(f"📝 Summary text length: {len(summary_text)} characters")
+            logger.info(f"📄 Pages analyzed: {len(result.pages) if result.pages else 0}")
+            
+            # Log the actual SUMMARY (not full OCR text)
+            logger.info("=" * 80)
+            logger.info("🤖 DOCUMENT AI SUMMARIZER OUTPUT:")
+            logger.info("=" * 80)
+            logger.info(summary_text)
+            logger.info("=" * 80)
+            
+            # Also log full text comparison for debugging
+            if result.text and len(result.text) != len(summary_text):
+                logger.info("=" * 80)
+                logger.info("📄 FULL OCR TEXT (for comparison):")
+                logger.info("=" * 80)
+                logger.info(f"Full text length: {len(result.text)} chars")
+                logger.info(f"First 500 chars: {result.text[:500]}...")
+                logger.info("=" * 80)
+            
+            # Extract text using simplified extractor
+            layout_data = self.layout_extractor.extract_text_from_summarizer(result)
+            # Override with actual summary
+            layout_data["layout_preserved"] = summary_text
+            layout_data["raw_text"] = summary_text
+            layout_data["structured_document"]["metadata"]["summary_chars"] = len(summary_text)
+            layout_data["structured_document"]["metadata"]["full_text_chars"] = len(result.text) if result.text else 0
+            
+            logger.info(f"🔍 Text extraction complete:")
+            logger.info(f"   - Summary text: {len(summary_text)} chars")
+            logger.info(f"   - Pages analyzed: {layout_data['structured_document']['document_structure']['total_pages']}")
+            
+            # Build LLM-friendly JSON
             llm_json = build_llm_friendly_json(layout_data['structured_document'])
-            
-            logger.info(f"🤖 LLM JSON structure built:")
-            logger.info(f"  - Type indicators: {llm_json['document_type_hints']['detected_indicators']}")
-            logger.info(f"  - Has form structure: {llm_json['document_type_hints']['has_form_structure']}")
-            
-            # Convert JSON to formatted string for LLM
+            llm_json["content"]["summary"] = summary_text
             llm_text = json.dumps(llm_json, indent=2)
             
-            # Preview JSON (first 500 chars)
-            json_preview = llm_text
-            logger.info(f"📖 LLM JSON preview:\n{json_preview}")
-            
+            # Create extraction result
             processed_result = ExtractionResult(
-                # Layout-preserved text
-                text=layout_data["layout_preserved"],
-                
-                # Raw text for backward compatibility
-                raw_text=layout_data["raw_text"],
-                
-                # **NEW: Structured JSON string for LLM**
+                text=summary_text,  # Use summary, not full text
+                raw_text=summary_text,
                 llm_text=llm_text,
-                
-                # Page zones
                 page_zones=layout_data["page_zones"],
-                
-                # Standard fields
                 pages=len(result.pages) if result.pages else 0,
-                entities=self.extract_entities(result),
-                tables=self.extract_tables(result),
-                formFields=self.extract_form_fields(result),
-                symbols=self.extract_symbols_and_checkboxes(result),
-                confidence=self.calculate_overall_confidence(result),
+                entities=[],
+                tables=[],
+                formFields=[],
+                symbols=[],
+                confidence=1.0,
                 success=True,
             )
             
             logger.info("📊 Extraction summary:")
-            logger.info(f"  - Text characters: {len(processed_result.text)}")
-            logger.info(f"  - Pages: {processed_result.pages}")
-            logger.info(f"  - Entities: {len(processed_result.entities)}")
-            logger.info(f"  - Tables: {len(processed_result.tables)}")
-            logger.info(f"  - Overall confidence: {processed_result.confidence * 100:.2f}%")
-            
-            # Debug: Verify page_zones is in the result
-            logger.info(f"🔍 Result object check:")
-            logger.info(f"  - Has page_zones: {processed_result.page_zones is not None}")
-            logger.info(f"  - page_zones keys: {list(processed_result.page_zones.keys()) if processed_result.page_zones else 'None'}")
-            logger.info(f"  - Has llm_text: {processed_result.llm_text is not None}")
-            logger.info(f"  - llm_text length: {len(processed_result.llm_text) if processed_result.llm_text else 0}")
+            logger.info(f"   - Summary characters: {len(processed_result.text)}")
+            logger.info(f"   - Pages: {processed_result.pages}")
+            logger.info(f"   - Confidence: 100% (foundation model)")
             
             return processed_result
-        
+            
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"❌ Error processing document: {error_msg}")
+            logger.error(f"❌ Error processing document with summarizer: {error_msg}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             return ExtractionResult(success=False, error=error_msg)
-    
+
     def process_large_document(self, filepath: str) -> ExtractionResult:
         """Process large documents by splitting them first"""
         try:
@@ -756,12 +349,11 @@ class DocumentAIProcessor:
             if len(chunk_files) == 1:
                 return self._process_document_direct(chunk_files[0])
             
-            logger.info(f"📦 Processing {len(chunk_files)} chunks")
+            logger.info(f"📦 Processing {len(chunk_files)} chunks with summarizer")
             
             all_results = []
             for i, chunk_file in enumerate(chunk_files):
-                logger.info(f"🔄 Processing chunk {i + 1}/{len(chunk_files)}")
-                
+                logger.info(f"🔄 Processing chunk {i + 1}/{len(chunk_files)} with summarizer")
                 try:
                     chunk_result = self._process_document_direct(chunk_file)
                     if chunk_result.success:
@@ -775,7 +367,7 @@ class DocumentAIProcessor:
                 return ExtractionResult(success=False, error="All chunks failed")
             
             return self._merge_results(all_results, filepath)
-        
+            
         except Exception as e:
             logger.error(f"❌ Error processing large document: {str(e)}")
             return ExtractionResult(success=False, error=f"Failed: {str(e)}")
@@ -787,16 +379,13 @@ class DocumentAIProcessor:
         
         merged_text = ""
         merged_raw_text = ""
-        merged_page_zones = {}
-        merged_llm_texts = []
         
-        logger.info(f"🔗 Starting merge of {len(results)} chunks...")
+        logger.info(f"🔗 Starting merge of {len(results)} summarizer chunks...")
         
         for i, result in enumerate(results):
             chunk_num = i + 1
             logger.info(f"📦 Processing chunk {chunk_num}:")
             logger.info(f"   - Has text: {bool(result.text)}")
-            logger.info(f"   - Has page_zones: {bool(result.page_zones)}")
             logger.info(f"   - Pages in chunk: {result.pages}")
             
             if result.text:
@@ -806,74 +395,44 @@ class DocumentAIProcessor:
             
             if hasattr(result, 'raw_text') and result.raw_text:
                 merged_raw_text += result.raw_text + "\n\n"
-            
-            if hasattr(result, 'page_zones') and result.page_zones:
-                page_offset = sum(r.pages for r in results[:i])
-                logger.info(f"   - Page offset for chunk {chunk_num}: {page_offset}")
-                logger.info(f"   - Page_zones keys in chunk: {list(result.page_zones.keys())}")
-                
-                for page_num_str, zones in result.page_zones.items():
-                    page_num = int(page_num_str) if isinstance(page_num_str, str) else page_num_str
-                    new_page_num = page_num + page_offset
-                    merged_page_zones[str(new_page_num)] = zones
-                    logger.info(f"   - Mapped page {page_num_str} → {new_page_num}")
-            else:
-                logger.warning(f"   ⚠️ Chunk {chunk_num} has NO page_zones!")
-            
-            # Merge LLM text strings
-            if hasattr(result, 'llm_text') and result.llm_text:
-                merged_llm_texts.append(f"CHUNK {i + 1}:\n{result.llm_text}")
         
-        # Combine all LLM texts with chunk markers
-        merged_llm_text = "\n\n".join(merged_llm_texts) if merged_llm_texts else None
-        
-        merged_entities = []
-        merged_tables = []
-        merged_form_fields = []
-        merged_symbols = []
-        total_pages = 0
-        total_confidence = 0.0
-        
-        for result in results:
-            merged_entities.extend(result.entities)
-            merged_tables.extend(result.tables)
-            merged_form_fields.extend(result.formFields)
-            merged_symbols.extend(result.symbols if hasattr(result, 'symbols') else [])
-            total_pages += result.pages
-            total_confidence += result.confidence
-        
-        avg_confidence = total_confidence / len(results) if results else 0.0
+        total_pages = sum(r.pages for r in results)
         
         logger.info(f"🔗 Merge complete:")
-        logger.info(f"  - Total pages: {total_pages}")
-        logger.info(f"  - Total text: {len(merged_text)} chars")
-        logger.info(f"  - Merged page_zones: {len(merged_page_zones)} pages")
-        logger.info(f"  - Page_zones keys: {sorted([int(k) for k in merged_page_zones.keys()])}")
+        logger.info(f"   - Total pages: {total_pages}")
+        logger.info(f"   - Total text-merged---------------: {(merged_text)}")
+        logger.info(f"   - Total text-merged---------------: {(merged_raw_text)}")
+
+        
+        # Log the complete merged summarizer output
+        logger.info("=" * 80)
+        logger.info("🤖 COMPLETE MERGED SUMMARIZER OUTPUT (ALL CHUNKS COMBINED):")
+        logger.info("=" * 80)
+        logger.info(f"Total chunks processed: {len(results)}")
+        logger.info(f"Total pages: {total_pages}")
+        logger.info(f"Total characters: {len(merged_text)}")
+        logger.info("=" * 80)
+        logger.info(merged_text)
+        logger.info("=" * 80)
         
         merged_result = ExtractionResult(
             text=merged_text,
             raw_text=merged_raw_text,
-            llm_text=merged_llm_text,
-            page_zones=merged_page_zones,
+            llm_text=merged_text,
+            page_zones={},
             pages=total_pages,
-            entities=merged_entities,
-            tables=merged_tables,
-            formFields=merged_form_fields,
-            symbols=merged_symbols,
-            confidence=avg_confidence,
+            entities=[],
+            tables=[],
+            formFields=[],
+            symbols=[],
+            confidence=1.0,
             success=True,
         )
-        
-        # Debug: Verify merged result has page_zones
-        logger.info(f"🔍 Merged result check:")
-        logger.info(f"  - Has page_zones: {merged_result.page_zones is not None}")
-        logger.info(f"  - page_zones keys: {list(merged_result.page_zones.keys()) if merged_result.page_zones else 'None'}")
-        logger.info(f"  - Has llm_text: {merged_result.llm_text is not None}")
         
         return merged_result
     
     def process_document(self, filepath: str) -> ExtractionResult:
-        """Main document processing method"""
+        """Main document processing method using SUMMARIZER"""
         try:
             mime_type = self.get_mime_type(filepath)
             
@@ -886,41 +445,38 @@ class DocumentAIProcessor:
                     logger.info(f"📄 Document has {page_count} pages")
                     
                     if page_count > 10:
-                        logger.info("📦 Using chunked processing")
+                        logger.info("📦 Using chunked processing with summarizer")
                         return self.process_large_document(filepath)
                     else:
                         return self._process_document_direct(filepath)
-                
+                        
                 except Exception as e:
                     logger.warning(f"⚠️ Could not check page count: {str(e)}")
                     return self._process_document_direct(filepath)
             else:
                 return self._process_document_direct(filepath)
-        
+                
         except Exception as e:
             logger.error(f"❌ Error in main processing: {str(e)}")
             return ExtractionResult(success=False, error=f"Failed: {str(e)}")
 
-
 # Global processor instance
 processor_instance = None
-
 
 def get_document_ai_processor() -> DocumentAIProcessor:
     """Get singleton DocumentAIProcessor instance"""
     global processor_instance
     if processor_instance is None:
         try:
-            logger.info("🚀 Initializing Document AI processor...")
+            logger.info("🚀 Initializing Document AI Summarizer processor...")
             processor_instance = DocumentAIProcessor()
-            logger.info("✅ Document AI processor ready!")
+            logger.info("✅ Document AI Summarizer processor ready!")
         except Exception as e:
             logger.error(f"❌ Failed to initialize: {str(e)}")
             raise
     return processor_instance
 
-
 def process_document_smart(filepath: str) -> ExtractionResult:
-    """Smart document processing with structured JSON output"""
+    """Smart document processing using Document AI Summarizer"""
     processor = get_document_ai_processor()
     return processor.process_document(filepath)

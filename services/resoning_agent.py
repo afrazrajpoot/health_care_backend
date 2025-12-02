@@ -336,11 +336,21 @@ class EnhancedReportAnalyzer:
         except Exception as e:
             logger.error(f"❌ {mode.upper()} mode extraction failed: {str(e)}")
             return self.create_fallback_analysis(mode)
-    def generate_brief_summary(self, document_text: str, mode: str = "wc") -> str:
+    def generate_brief_summary(self, summarizer_output: str, mode: str = "wc") -> str:
         """
-        Generate a brief summary of the medical document with detailed clinical specifics.
+        Generate a brief summary from Document AI Summarizer output.
+        The input is the complete summarizer output (single or merged from multiple chunks).
+        
+        Args:
+            summarizer_output: Complete text from Document AI Summarizer (🤖 DOCUMENT AI SUMMARIZER OUTPUT)
+            mode: "wc" for workers comp or "gm" for general medicine
+        
+        Returns:
+            Brief 2-3 sentence summary capturing all important clinical details
         """
-        logger.info(f"🔍 Generating summary for {mode.upper()} mode...")
+        logger.info(f"🔍 Generating summary from Document AI Summarizer output ({mode.upper()} mode)...")
+        logger.info(f"📄 Summarizer output length: {len(summarizer_output)} characters")
+        
         try:
             current_date = datetime.now().strftime("%Y-%m-%d")
 
@@ -349,38 +359,45 @@ class EnhancedReportAnalyzer:
             
             system_prompt = SystemMessagePromptTemplate.from_template(
                 f"""You are a medical summarization expert. Generate concise 2-3 sentence professional summaries with {mode_focus} focus.
+
+    INPUT SOURCE: You are receiving the COMPLETE Document AI Summarizer output. This is already a summarized version of the full document, so you must preserve ALL key clinical details.
                 
     CRITICAL RULES:
-    - Extract ONLY information explicitly stated in the document
-    - Include specific names: medications (with dosages if mentioned), procedures, therapies, diagnoses
+    - Extract ONLY information explicitly stated in the summarizer output
+    - Include ALL specific names: medications (with dosages), procedures, therapies, diagnoses
     - Use exact medical terminology from the document
+    - Never omit important clinical findings, test results, or recommendations
     - Never infer, assume, or add information not present
-    - If specific details are absent, do not fabricate them"""
+    - If specific details are absent, do not fabricate them
+    - Preserve all key dates, measurements, and clinical values"""
             )
 
             human_prompt = HumanMessagePromptTemplate.from_template(
-                f"""Analyze the following medical document for {mode.upper()} mode and create a detailed yet concise summary.
+                f"""Analyze the following Document AI Summarizer output for {mode.upper()} mode and create a detailed yet concise summary.
 
-    DOCUMENT TEXT:
-    {{document_text}}
+    DOCUMENT AI SUMMARIZER OUTPUT:
+    {{summarizer_output}}
 
     CURRENT DATE: {{current_date}}
 
     SUMMARY REQUIREMENTS:
     1. Include the specific diagnosis/condition (use exact terms from document)
-    2. List key findings or test results (with specific values if mentioned)
-    3. Mention specific treatments:
-    - Medication names (include dosages if stated: e.g., "ibuprofen 600mg")
-    - Therapy types (e.g., "physical therapy", "cognitive behavioral therapy")
-    - Procedures performed or recommended (e.g., "MRI of lumbar spine", "arthroscopic surgery")
-    4. Include actionable recommendations (e.g., "follow-up in 2 weeks", "continue current regimen")
+    2. List ALL key findings or test results (with specific values if mentioned)
+    3. Mention ALL specific treatments:
+       - Medication names (include dosages if stated: e.g., "ibuprofen 600mg")
+       - Therapy types (e.g., "physical therapy", "cognitive behavioral therapy")
+       - Procedures performed or recommended (e.g., "MRI of lumbar spine", "arthroscopic surgery")
+    4. Include ALL actionable recommendations (e.g., "follow-up in 2 weeks", "continue current regimen")
     5. For {mode_focus}: emphasize work-relatedness, restrictions, or return-to-work status if mentioned
+    6. Preserve important dates, body parts, and clinical measurements
+    7. DO NOT omit any clinically significant information from the summarizer output
 
     OUTPUT FORMAT:
     - 2-3 clear, information-dense sentences
     - Clinical terminology appropriate for physician review
-    - ONLY use information explicitly present in the document
+    - ONLY use information explicitly present in the summarizer output
     - If a detail category (medication/therapy/procedure) is not mentioned, omit it entirely
+    - Capture ALL important clinical details without losing information
 
     {{format_instructions}}"""
             )
@@ -388,13 +405,13 @@ class EnhancedReportAnalyzer:
             summary_prompt = ChatPromptTemplate.from_messages([system_prompt, human_prompt])
             chain = summary_prompt | self.llm | self.brief_summary_parser
             result = chain.invoke({
-                "document_text": document_text,
+                "summarizer_output": summarizer_output,
                 "current_date": current_date,
                 "format_instructions": self.brief_summary_parser.get_format_instructions()
             })
 
             brief_summary = result.get('brief_summary', 'Not specified')
-            logger.info(f"✅ Generated {mode.upper()} summary: {brief_summary}")
+            logger.info(f"--------------------------✅ Generated {mode.upper()} summary-------------------------------------------: {brief_summary}")
             return brief_summary
 
         except Exception as e:

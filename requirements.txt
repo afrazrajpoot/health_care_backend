@@ -8,7 +8,7 @@ distro==1.9.0
 fastapi==0.117.1
 google-api-core==2.25.1
 google-auth==2.40.3
-google-cloud-documentai==3.6.0
+google-cloud-documentai>=2.18.0
 googleapis-common-protos==1.70.0
 grpcio==1.75.0
 grpcio-status==1.75.0
@@ -70,3 +70,16 @@ python-jose
 jose
 apscheduler
 PyJWT
+cryptography
+python-socketio>=5.11.0
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+PyPDF2
+google-cloud-dlp>=3.0.0
+aiohttp
+langchain-community>=0.3.0
+tavily-python>=0.3.0
+passlib
+pydantic[email]>=2.0.0
+bcrypt>=4.0.0
