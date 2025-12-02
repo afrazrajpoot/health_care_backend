@@ -292,7 +292,7 @@ class DocumentAIProcessor:
                 logger.info("📄 FULL OCR TEXT (for comparison):")
                 logger.info("=" * 80)
                 logger.info(f"Full text length: {len(result.text)} chars")
-                logger.info(f"First 500 chars: {result.text[:500]}...")
+                logger.info(f"First 500 chars: {result.text}")
                 logger.info("=" * 80)
             
             # Extract text using simplified extractor
@@ -311,10 +311,12 @@ class DocumentAIProcessor:
             llm_json = build_llm_friendly_json(layout_data['structured_document'])
             llm_json["content"]["summary"] = summary_text
             llm_text = json.dumps(llm_json, indent=2)
+
+            logger.info(f'summary text----------------- : {summary_text}')
             
             # Create extraction result
             processed_result = ExtractionResult(
-                text=summary_text,  # Use summary, not full text
+                text=result.text,  #full OCR text
                 raw_text=summary_text,
                 llm_text=llm_text,
                 page_zones=layout_data["page_zones"],
@@ -400,7 +402,6 @@ class DocumentAIProcessor:
         
         logger.info(f"🔗 Merge complete:")
         logger.info(f"   - Total pages: {total_pages}")
-        logger.info(f"   - Total text-merged---------------: {(merged_text)}")
         logger.info(f"   - Total text-merged---------------: {(merged_raw_text)}")
 
         
@@ -416,9 +417,9 @@ class DocumentAIProcessor:
         logger.info("=" * 80)
         
         merged_result = ExtractionResult(
-            text=merged_text,
+            text=merged_raw_text,
             raw_text=merged_raw_text,
-            llm_text=merged_text,
+            llm_text=merged_raw_text,
             page_zones={},
             pages=total_pages,
             entities=[],

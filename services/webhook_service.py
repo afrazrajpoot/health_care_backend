@@ -107,15 +107,21 @@ class WebhookService:
 
         result_data = data["result"]
         text = result_data.get("text", "")
+        raw_text = result_data.get("raw_text") or ""  # Handle None case
         mode = data.get("mode", "wc")
 
         logger.info(f"📋 Document mode: {mode}")
+        logger.info(f"📊 Text lengths - Full OCR: {len(text)} chars, Document AI summary: {len(raw_text)} chars")
+        
+        # Log if raw_text is missing to help debug
+        if not raw_text:
+            logger.warning("⚠️ raw_text is empty - Document AI summarizer output not available, will use full OCR text as fallback")
 
         # Run ReportAnalyzer in dedicated LLM executor for better batch performance
         report_analyzer = ReportAnalyzer(mode)
         loop = asyncio.get_event_loop()
         report_result = await loop.run_in_executor(
-            LLM_EXECUTOR, report_analyzer.extract_document, text
+            LLM_EXECUTOR, report_analyzer.extract_document, text, raw_text
         )
 
         long_summary = report_result.get("long_summary", "")
@@ -136,7 +142,7 @@ class WebhookService:
 
         summary_task = loop.run_in_executor(
             LLM_EXECUTOR,
-            lambda: analyzer.generate_brief_summary(long_summary, mode)
+            lambda: analyzer.generate_brief_summary(raw_text, mode)
         )
 
         document_analysis, brief_summary = await asyncio.gather(
@@ -165,6 +171,7 @@ class WebhookService:
             "document_analysis": document_analysis,
             "brief_summary": brief_summary,
             "text_for_analysis": text,
+            "raw_text": raw_text,
             "report_analyzer_result": report_result,
             "patient_name": patient_name,
             "claim_number": claim_number,
@@ -918,15 +925,19 @@ class WebhookService:
             document_data["document_id"] = document_id
             document_data["physician_id"] = physician_id
             
-            # Get full document text for better task generation
+            # Get document text for task generation - prioritize raw_text (Document AI summarizer output)
             full_text = ""
             if processed_data:
-                full_text = processed_data.get("text_for_analysis", "")
+                # PRIMARY: Use raw_text (Document AI summarizer output) for accurate context
+                full_text = processed_data.get("raw_text", "")
+                # FALLBACK: Use full OCR text only if raw_text is not available
                 if not full_text:
-                    result_data = processed_data.get("result_data", {})
-                    full_text = result_data.get("text", "")
+                    full_text = processed_data.get("text_for_analysis", "")
+                    if not full_text:
+                        result_data = processed_data.get("result_data", {})
+                        full_text = result_data.get("text", "")
             
-            logger.info(f"📝 Passing {len(full_text)} characters of full text to task generator")
+            logger.info(f"📝 Passing {len(full_text)} characters to task generator (from {'Document AI summarizer' if processed_data.get('raw_text') else 'OCR text'})")
             
             tasks = await task_creator.generate_tasks(document_data, filename, full_text)
             logger.info(f"📋 Generated {len(tasks)} tasks")

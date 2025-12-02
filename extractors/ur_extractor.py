@@ -70,30 +70,30 @@ class DecisionDocumentExtractor:
     def extract(
         self,
         text: str,
+        raw_text: str,
         doc_type: str,
-        fallback_date: str,
-   
+        fallback_date: str
     ) -> Dict:
         """
-        Extract Decision Document data with FULL CONTEXT.
+        Extract Decision Document data with FULL CONTEXT using raw text.
         
         Args:
             text: Complete document text (layout-preserved)
+            raw_text: Summarized original context from Document AI
             doc_type: Document type (UR/IMR/Appeal/Authorization/RFA/DFR)
             fallback_date: Fallback date if not found
-            raw_text: Original flat text (optional)
             
         Returns:
             Dict with long_summary and short_summary
         """
         logger.info("=" * 80)
-        logger.info("⚖️ STARTING DECISION DOCUMENT EXTRACTION (FULL CONTEXT)")
+        logger.info("⚖️ STARTING DECISION DOCUMENT EXTRACTION (FULL CONTEXT + RAW TEXT)")
         logger.info("=" * 80)
         
         logger.info(f"📋 Document Type: {doc_type}")
         
         # Check document size
-        text_length = len(text)
+        text_length = len(raw_text)
         token_estimate = text_length // 4
         logger.info(f"📄 Document size: {text_length:,} chars (~{token_estimate:,} tokens)")
         
@@ -105,13 +105,15 @@ class DecisionDocumentExtractor:
         potential_signatures = self._pre_extract_signatures(text)
         logger.info(f"🔍 Pre-extracted potential signatures: {potential_signatures}")
         
-        # Stage 1: Directly generate long summary with FULL CONTEXT (no intermediate extraction)
+        # Stage 1: Generate long summary with dual-context approach (raw_text + text)
         long_summary = self._generate_long_summary_direct(
             text=text,
+            raw_text=raw_text,
             doc_type=doc_type,
             fallback_date=fallback_date,
-            potential_signatures=potential_signatures  # Pass to prompt for guidance
+            potential_signatures=potential_signatures
         )
+        
         # ENHANCED: Verify and inject author into long summary if needed
         verified_author = self._verify_and_extract_author(long_summary, text, potential_signatures)
         long_summary = self._inject_author_into_long_summary(long_summary, verified_author)
@@ -120,7 +122,7 @@ class DecisionDocumentExtractor:
         short_summary = self._generate_short_summary_from_long_summary(long_summary, doc_type)
 
         logger.info("=" * 80)
-        logger.info("✅ DECISION DOCUMENT EXTRACTION COMPLETE (FULL CONTEXT)")
+        logger.info("✅ DECISION DOCUMENT EXTRACTION COMPLETE (2 LLM CALLS ONLY)")
         logger.info("=" * 80)
 
         # Return dictionary with both summaries
@@ -260,64 +262,62 @@ class DecisionDocumentExtractor:
     def _generate_long_summary_direct(
         self,
         text: str,
+        raw_text: str,
         doc_type: str,
         fallback_date: str,
-        potential_signatures: List[str]  # ENHANCED: Pass pre-extracted signatures
+        potential_signatures: List[str]
     ) -> str:
         """
-        Directly generate comprehensive long summary with FULL document context using LLM.
-        Adapted from original extraction prompt to output structured summary directly.
-        """
-        logger.info("🔍 Processing ENTIRE decision document in single context window for direct long summary...")
+        Generate long summary with PRIORITIZED context hierarchy:
+        1. PRIMARY SOURCE: raw_text (accurate Document AI summarized context)
+        2. SUPPLEMENTARY: text (full OCR extraction for missing details only)
         
-        # ENHANCED System Prompt for Direct Long Summary Generation
-        # Reuses core anti-hallucination rules and decision focus from original extraction prompt
+        This ensures accurate context preservation while capturing all necessary details.
+        """
+        logger.info("🔍 Processing decision document with DUAL-CONTEXT approach...")
+        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
+        logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        
+        # Build system prompt with CLEAR PRIORITY INSTRUCTIONS
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are an expert medical-legal documentation specialist analyzing a COMPLETE {doc_type} decision document.
 
-CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
-You are seeing the ENTIRE document at once, allowing you to:
-- Understand the complete decision rationale from start to finish
-- Connect request details with decision criteria and justification
-- Identify all services/treatments being decided upon
-- Provide comprehensive extraction without information loss
+🎯 CRITICAL CONTEXT HIERARCHY (HIGHEST PRIORITY):
 
-⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY) (donot include in output, for LLM use only):
+You are provided with TWO versions of the document:
 
-1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
-   - If a field/value is NOT explicitly mentioned in the document, return EMPTY string "" or empty list []
-   - DO NOT infer, assume, or extrapolate information
-   - DO NOT fill in "typical" or "common" values
-   
-2. **PATIENT DETAILS - EXACT EXTRACTION ONLY**
-   - Extract patient name, DOB, Member ID, DOI, employer EXACTLY as stated in demographics/identifier sections
-   - DO NOT infer from context or abbreviate - use verbatim text
-   - If any detail is missing, leave empty "" - no placeholders
+1. **PRIMARY SOURCE - "ACCURATE CONTEXT" (raw_text)**:
+   - This is the MOST ACCURATE, context-aware summary generated by Google's Document AI foundation model
+   - It has been intelligently processed to preserve CRITICAL DECISION CONTEXT
+   - **USE THIS AS YOUR PRIMARY SOURCE OF TRUTH**
+   - This contains the CORRECT decision interpretations, accurate findings, and proper context
+   - **ALWAYS PRIORITIZE information from this source**
 
-3. **DECISION STATUS - EXACT WORDING ONLY**
-   - Extract decision status using EXACT wording from document
-   - DO NOT interpret or categorize (e.g., if document says "not medically necessary", use that exact phrase)
-   - For partial approvals, extract EXACTLY what was approved vs denied
-   
-4. **SERVICES/TREATMENTS - ZERO TOLERANCE FOR ASSUMPTIONS**
-   - Extract ONLY services/treatments explicitly listed in the request/decision
-   - Include quantities/durations ONLY if explicitly stated
-   - DO NOT extract services mentioned as examples, comparisons, or historical context
-   
-5. **SIGNATURE/AUTHOR - CRITICAL PRIORITY**
-   - Extract the EXACT name of the signer (physical or electronic) from signature block or end of document
-   - Differentiate from requesting/reviewing providers if distinct
-   - Use pre-extracted candidates for confirmation
+2. **SUPPLEMENTARY SOURCE - "FULL TEXT EXTRACTION" (text)**:
+   - This is the complete OCR text extraction (may have formatting noise, OCR artifacts)
+   - Use ONLY to fill in SPECIFIC DETAILS that may be missing from the accurate context
+   - Examples of acceptable supplementary use:
+       * Exact claim numbers or identifiers
+       * Additional doctor names mentioned
+       * Precise dates or measurements
+       * Specific CPT codes or authorization numbers
+   - **DO NOT let this override the decision context from the primary source**
 
-6. **EMPTY FIELDS ARE ACCEPTABLE - DO NOT FILL**
-   - It is BETTER to return an empty field than to guess
-   - If you cannot find information for a field, leave it empty
-   - DO NOT use phrases like "Not mentioned", "Not stated", "Unknown" - just return ""
-   
-7. **CRITERIA AND REGULATIONS - EXACT REFERENCES**
-   - Extract medical necessity criteria EXACTLY as stated
-   - Include specific guideline references (e.g., "ODG", "MTUS", "ACOEM")
-   - DO NOT add criteria not explicitly referenced
+⚠️ ANTI-HALLUCINATION RULES FOR DUAL-CONTEXT:
+
+1. **CONTEXT PRIORITY ENFORCEMENT**:
+   - When both sources provide information about the SAME decision element:
+     ✅ ALWAYS use interpretation from PRIMARY SOURCE (accurate context)
+     ❌ NEVER override with potentially inaccurate full text version
+
+2. **EXTRACT ONLY EXPLICITLY STATED INFORMATION** - Empty if not mentioned
+3. **NO ASSUMPTIONS** - Do not infer or add typical values
+4. **PATIENT DETAILS - EXACT EXTRACTION ONLY** - Use verbatim text from either source
+5. **DECISION STATUS - EXACT WORDING ONLY** - From primary source preferred
+6. **SERVICES/TREATMENTS - ZERO TOLERANCE FOR ASSUMPTIONS** - Only explicitly listed
+7. **SIGNATURE/AUTHOR - CRITICAL PRIORITY** - Check both sources, use pre-extracted candidates
+8. **EMPTY FIELDS BETTER THAN GUESSES** - Omit if not found
+9. **CRITERIA AND REGULATIONS - EXACT REFERENCES** - From primary source preferred
 
 EXTRACTION FOCUS - 7 CRITICAL DECISION DOCUMENT CATEGORIES:
 
@@ -384,26 +384,41 @@ CHAIN-OF-THOUGHT FOR SIGNATURE EXTRACTION (CRITICAL - ABSOLUTE PRIORITY):
 Now analyze this COMPLETE {doc_type} decision document and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
 """)
 
-        # ENHANCED User Prompt for Direct Long Summary - Outputs the structured summary directly
-        # ENHANCED: Stronger emphasis on patient details and signature extraction
+        # User prompt with DUAL-CONTEXT input
         user_prompt = HumanMessagePromptTemplate.from_template("""
-COMPLETE {doc_type} DECISION DOCUMENT TEXT:
+DOCUMENT TYPE: {doc_type}
 
-{full_document_text}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📌 PRIMARY SOURCE - ACCURATE CONTEXT (USE THIS FIRST):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-MANDATORY SIGNATURE SCAN: Read the ENTIRE text above. Focus on the end for electronic/physical signatures. Use these candidates to CONFIRM (prioritize last signer):
+{primary_source}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📄 SUPPLEMENTARY SOURCE - FULL TEXT (USE ONLY FOR MISSING DETAILS):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{supplementary_source}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MANDATORY SIGNATURE SCAN: Read BOTH SOURCES above. Focus on the end for electronic/physical signatures. Use these candidates to CONFIRM (prioritize last signer):
 {potential_signatures}
 
-Generate the long summary in this EXACT STRUCTURED FORMAT (use the fallback date {fallback_date} if no dates found):
+CURRENT DATE: {fallback_date}
+
+**INSTRUCTIONS**: Generate a comprehensive structured summary following the DUAL-CONTEXT hierarchy. Prioritize PRIMARY SOURCE for decision context. Use SUPPLEMENTARY SOURCE only for specific details (claim numbers, exact dates, additional names, CPT codes) not found in PRIMARY SOURCE.
+
+Generate the long summary in this EXACT STRUCTURED FORMAT:
 
 📋 DECISION DOCUMENT OVERVIEW
 --------------------------------------------------
 Document Type: {doc_type}
 Document Date: [extracted or {fallback_date}]
-Decision Date: [extracted]
-Document ID: [extracted]
-Claim/Case Number: [extracted]
-Jurisdiction: [extracted]
+Decision Date: [extracted from PRIMARY SOURCE]
+Document ID: [extracted from either source]
+Claim/Case Number: [extracted from either source]
+Jurisdiction: [extracted from PRIMARY SOURCE]
 Author:
 hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
 • Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
@@ -411,22 +426,22 @@ hint: check the signature block mainly last pages of the report and the closing 
 
 👥 PARTIES INVOLVED
 --------------------------------------------------
-Patient: [name]
+Patient: [name from either source]
   DOB: [CRITICAL: Extract EXACT DOB from demographics - format as MM/DD/YYYY if possible]
   Member ID: [CRITICAL: Extract EXACT member ID from identifiers]
-Requesting Provider: [name]
-  Specialty: [extracted]
-  NPI: [extracted]
-Reviewing Entity: [name]
-  Reviewer: [extracted]
-  Credentials: [extracted]
-Claims Administrator: [name]
-  Author: [CRITICAL ULTIMATE PRIORITY: Using CoT above, extract the EXACT signer name from full text (physical or electronic). Examples: "Dr. Jane Doe (electronic signer)" from "Electronically Signed: Dr. Jane Doe" or last "Provider: Dr. Jane Doe". If none, "No distinct signature; using reviewer: [name]". REQUIRED - LLM MUST POPULATE THIS. SCAN LAST PROVIDER IN SECTIONS.]
+Requesting Provider: [name from PRIMARY SOURCE]
+  Specialty: [extracted from PRIMARY SOURCE]
+  NPI: [extracted from either source]
+Reviewing Entity: [name from PRIMARY SOURCE]
+  Reviewer: [extracted from PRIMARY SOURCE]
+  Credentials: [extracted from PRIMARY SOURCE]
+Claims Administrator: [name from PRIMARY SOURCE]
+  Author: [CRITICAL ULTIMATE PRIORITY: Using CoT above, extract the EXACT signer name from both sources (physical or electronic). Examples: "Dr. Jane Doe (electronic signer)" from "Electronically Signed: Dr. Jane Doe" or last "Provider: Dr. Jane Doe". If none, "No distinct signature; using reviewer: [name]". REQUIRED - LLM MUST POPULATE THIS. SCAN LAST PROVIDER IN SECTIONS.]
 
 All Doctors Involved:
-• [list all extracted doctors with names and titles]
+• [list all extracted doctors with names and titles from BOTH sources]
 ━━━ ALL DOCTORS EXTRACTION ━━━
-- Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
+- Extract ALL physician/doctor names mentioned ANYWHERE in BOTH sources.
 - Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
 - Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
 - Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
@@ -434,9 +449,9 @@ All Doctors Involved:
 - If no doctors found, leave list empty [].
                                                                
 ━━━ CLAIM NUMBER EXTRACTION PATTERNS  ━━━
-CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
+CRITICAL: Scan BOTH SOURCES (header, footer, cc: lines, letterhead) for claim numbers.
 
-Common claim number patterns (case-insensitive) and make sure to extract EXACTLY as written and must be claim number not just random numbers (like chart numbers, or id numbers) that look similar:
+Common claim number patterns (case-insensitive):
 - "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
 - "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
 - "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
@@ -447,19 +462,19 @@ Common claim number patterns (case-insensitive) and make sure to extract EXACTLY
                                                                
 📋 REQUEST DETAILS
 --------------------------------------------------
-Date of Service Requested: [extracted]
-Request Received: [extracted]
+Date of Service Requested: [extracted from PRIMARY SOURCE]
+Request Received: [extracted from PRIMARY SOURCE]
 Requested Services:
-• [list up to 10 with procedure names, CPT, body parts, frequency/duration]
-Clinical Reason: [extracted]
+• [list up to 10 from PRIMARY SOURCE with procedure names, CPT from either source, body parts, frequency/duration]
+Clinical Reason: [extracted from PRIMARY SOURCE]
 
 ⚖️ DECISION OUTCOME
 --------------------------------------------------
-Overall Decision: [extracted, exact wording]
-Decision Details: [extracted]
+Overall Decision: [extracted from PRIMARY SOURCE, exact wording]
+Decision Details: [extracted from PRIMARY SOURCE]
 Partial Decision Breakdown:
-• [list up to 5 with service: decision/quantity approved/denied]
-Effective Dates: [start/end]
+• [list up to 5 from PRIMARY SOURCE with service: decision/quantity approved/denied]
+Effective Dates: [start/end from either source]
 
 🏥 MEDICAL NECESSITY DETERMINATION
 --------------------------------------------------
@@ -518,13 +533,14 @@ Timeframe for Response: [extracted]
         try:
             start_time = time.time()
             
-            logger.info("🤖 Invoking LLM for direct full-context decision long summary generation...")
+            logger.info("🤖 Invoking LLM for direct full-context decision long summary generation with DUAL-CONTEXT...")
             
-            # Single LLM call with FULL document context to generate long summary directly
+            # Single LLM call with DUAL-CONTEXT (primary + supplementary sources)
             chain = chat_prompt | self.llm
             result = chain.invoke({
                 "doc_type": doc_type,
-                "full_document_text": text,
+                "primary_source": raw_text,  # PRIMARY: Document AI summarizer output
+                "supplementary_source": text,  # SUPPLEMENTARY: Full OCR text
                 "fallback_date": fallback_date,
                 "potential_signatures": "\n".join(potential_signatures) if potential_signatures else "No pre-extracted candidates found."
             })
@@ -534,8 +550,10 @@ Timeframe for Response: [extracted]
             end_time = time.time()
             processing_time = end_time - start_time
             
-            logger.info(f"⚡ Direct decision long summary generation completed in {processing_time:.2f}s")
-            logger.info(f"✅ Generated long summary from complete {len(text):,} char document")
+            logger.info(f"⚡ Direct decision long summary generation completed with DUAL-CONTEXT in {processing_time:.2f}s")
+            logger.info(f"✅ Generated long summary using:")
+            logger.info(f"   - PRIMARY SOURCE: {len(raw_text):,} chars")
+            logger.info(f"   - SUPPLEMENTARY SOURCE: {len(text):,} chars")
             
             return long_summary
             

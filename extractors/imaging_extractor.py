@@ -48,43 +48,51 @@ class ImagingExtractorChained:
         
         logger.info("✅ ImagingExtractorChained initialized (6-Field Imaging Focus)")
 
+    # imaging_extractor.py - UPDATED with dual-context priority
+
     def extract(
         self,
         text: str,
+        raw_text: str,
         doc_type: str,
         fallback_date: str,
- 
     ) -> Dict:
         """
         Extract imaging data with FULL CONTEXT and 6-field focus.
-        Returns dictionary with long_summary and short_summary like QME extractor.
         
         Args:
-            text: Complete document text (layout-preserved)
+            text: Complete document text (full OCR extraction)
+            raw_text: Accurate summarized context from Document AI Summarizer (PRIMARY SOURCE)
             doc_type: Document type (MRI, CT, X-ray, Ultrasound, etc.)
             fallback_date: Fallback date if not found
-            raw_text: Original flat text (optional)
-        """
         
+        Returns dictionary with long_summary and short_summary like QME extractor.
+        """
         logger.info("=" * 80)
-        logger.info("📊 STARTING IMAGING EXTRACTION (6-FIELD FOCUS)")
+        logger.info("📊 STARTING IMAGING EXTRACTION (DUAL-CONTEXT PRIORITY)")
         logger.info("=" * 80)
+        
+        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
+        logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
         
         start_time = time.time()
         
         try:
-            # Step 1: Directly generate long summary with full context (no intermediate extraction)
-            long_summary = self._generate_long_summary_direct(text, doc_type, fallback_date)
+            # Step 1: Directly generate long summary with DUAL-CONTEXT (raw_text PRIMARY + text SUPPLEMENTARY)
+            long_summary = self._generate_long_summary_direct(
+                text=text,
+                raw_text=raw_text,
+                doc_type=doc_type,
+                fallback_date=fallback_date
+            )
             
             # Step 2: Generate short summary from long summary (like QME extractor)
             short_summary = self._generate_short_summary_from_long_summary(long_summary)
             
             elapsed_time = time.time() - start_time
             logger.info(f"⚡ Full-context imaging extraction completed in {elapsed_time:.2f}s")
-            logger.info(f"✅ Extracted imaging data from complete {len(text):,} char document")
-            
             logger.info("=" * 80)
-            logger.info("✅ IMAGING EXTRACTION COMPLETE (6-FIELD FOCUS)")
+            logger.info("✅ IMAGING EXTRACTION COMPLETE (DUAL-CONTEXT)")
             logger.info("=" * 80)
             
             # Return dictionary with both summaries like QME extractor
@@ -92,7 +100,7 @@ class ImagingExtractorChained:
                 "long_summary": long_summary,
                 "short_summary": short_summary
             }
-        
+            
         except Exception as e:
             logger.error(f"❌ Extraction failed: {str(e)}")
             # Return fallback result structure
@@ -101,204 +109,293 @@ class ImagingExtractorChained:
                 "short_summary": "Imaging summary not available"
             }
 
-    def _generate_long_summary_direct(self, text: str, doc_type: str, fallback_date: str) -> str:
-        """Directly generate raw imaging data using LLM with full context and integrated author detection"""
-        # Build system prompt with 6-field imaging focus, including instructions for detecting the signing author
+    def _generate_long_summary_direct(
+        self,
+        text: str,
+        raw_text: str,
+        doc_type: str,
+        fallback_date: str
+    ) -> str:
+        """
+        Directly generate comprehensive long summary with DUAL-CONTEXT PRIORITY.
+        
+        PRIMARY SOURCE: raw_text (accurate Document AI summarized context)
+        SUPPLEMENTARY: text (full OCR extraction for missing details only)
+        """
+        logger.info("🔍 Processing imaging report with DUAL-CONTEXT approach...")
+        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
+        logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        
+        # Build system prompt with DUAL-CONTEXT PRIORITY and 6-field imaging focus
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are an expert radiological report specialist analyzing a COMPLETE imaging report.
+    You are an expert radiological report specialist analyzing a COMPLETE imaging report.
 
-PRIMARY PURPOSE: Generate a comprehensive, structured long summary of the 6 critical imaging fields for accurate medical documentation.
+    🎯 CRITICAL CONTEXT HIERARCHY (HIGHEST PRIORITY):
 
-CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY):
+    You are provided with TWO versions of the document:
 
-1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
-   - If NOT explicitly mentioned in report, return EMPTY string "" or empty list []
-   - DO NOT infer, assume, extrapolate, or use medical knowledge to fill gaps
-   - DO NOT add typical findings, standard protocols, or common measurements
-   - DO NOT use radiological training to "complete" incomplete information
+    1. **PRIMARY SOURCE - "ACCURATE CONTEXT" (raw_text)**:
+    - This is the MOST ACCURATE, context-aware summary from Google's Document AI foundation model
+    - It preserves CRITICAL RADIOLOGICAL CONTEXT with accurate interpretations
+    - **USE THIS AS YOUR PRIMARY SOURCE OF TRUTH**
+    - Contains CORRECT radiological impressions, accurate findings context, proper interpretations
+    - **ALWAYS PRIORITIZE information from this source**
 
-Examples of INCORRECT extractions:
-   ❌ Report says "mass in right upper lobe" → DO NOT extract size if not stated
-   ❌ Report mentions "findings suggest tear" → DO NOT extract "rotator cuff tear" (upgrades certainty)
-   ❌ Report shows "mild degenerative changes" → DO NOT upgrade to "moderate" findings
-   ❌ Report says "no acute fracture" → DO NOT list fracture as a finding
+    2. **SUPPLEMENTARY SOURCE - "FULL TEXT EXTRACTION" (text)**:
+    - Complete OCR text extraction (may have formatting noise, OCR artifacts)
+    - Use ONLY to fill in SPECIFIC DETAILS missing from the accurate context
+    - Examples of acceptable supplementary use:
+        * Exact measurements (sizes, dimensions) if not in primary
+        * Specific anatomical locations if more precise in full text
+        * Patient demographics in headers if not in primary
+        * Technical parameters (contrast details, protocols) if missing
+    - **DO NOT let this override the radiological context from the primary source**
 
-2. **FINDINGS - ZERO TOLERANCE FOR ASSUMPTIONS**
-   - Extract ONLY findings explicitly described in FINDINGS or IMPRESSION sections
-   - Include measurements ONLY if explicitly stated (not estimated)
-   - Include severity qualifiers EXACTLY as stated (mild/moderate/severe)
-   - DO NOT extract "possible" or "rule out" as confirmed findings
-   - DO NOT add normal variants unless explicitly highlighted as findings
+    ⚠️ ANTI-HALLUCINATION RULES FOR DUAL-CONTEXT:
 
-3. **TECHNICAL DETAILS - EXACT WORDING**
-   - Contrast status: Use EXACT report wording (with/without/not specified)
-   - Body part: Include specific anatomical location and laterality
-   - Protocol: Extract only if explicitly named in technique section
-   - Quality: Extract only if explicitly assessed in report
+    1. **CONTEXT PRIORITY ENFORCEMENT**:
+    - When both sources provide information about the SAME radiological finding:
+        ✅ ALWAYS use interpretation from PRIMARY SOURCE (accurate context)
+        ❌ NEVER override with potentially inaccurate full text version
+    
+    2. **RADIOLOGICAL FINDINGS PRIORITY**:
+    - PRIMARY SOURCE provides accurate radiological interpretations and significance
+    - Use FULL TEXT only for exact measurements if missing
+    - NEVER change radiological interpretation based on full text alone
 
-4. **EMPTY FIELDS ARE ACCEPTABLE - DO NOT FILL**
-   - It is BETTER to return empty field than to guess
-   - DO NOT use "Not mentioned", "Not stated", "Unknown" - just return ""
-   - DO NOT assume standard protocols or typical measurements
+    3. **IMPRESSION & DIAGNOSIS**:
+    - PRIMARY SOURCE contains accurate impressions and diagnostic conclusions
+    - Use FULL TEXT only for specific details if missing
+    - DO NOT add diagnoses from full text if they contradict primary source
 
-5. **RADIOLOGIST'S EXACT LANGUAGE**
-   - Use EXACT terminology from report
-   - Preserve certainty qualifiers: "suspicious", "likely", "consistent with", "probable"
-   - DO NOT remove nuanced descriptions: "subtle", "questionable", "mild enhancement"
-   - DO NOT interpret radiological significance beyond what's stated
+    4. **MEASUREMENTS & DIMENSIONS**:
+    - PRIMARY SOURCE for clinical significance of measurements
+    - Use FULL TEXT for exact dimensions if more precise
+    - DO NOT add measurements from full text without context from primary
 
-6. **RADIOLOGIST/AUTHOR DETECTION**:
-   - Identify the author who signed the report as the "radiologist" name (e.g., from signature block, "Dictated by:", or closing statement).
-   - It is NOT mandatory that this author is a qualified doctor; extract the name as explicitly signed, regardless of credentials.
-   - Extract credentials only if explicitly stated near the signature.
-   - If no clear signer is found, leave "name" empty.
+    5. **TECHNICAL DETAILS**:
+    - PRIMARY SOURCE for technique context and protocols
+    - FULL TEXT for specific parameters (contrast type, sequences) if missing
+    - Check both sources for contrast status - use most clear/accurate
 
-6 CRITICAL IMAGING FIELDS:
+    6. **PATIENT DEMOGRAPHICS**:
+    - Check both sources for patient name, DOB
+    - FULL TEXT headers often better for exact demographics
+    - Use most complete/accurate version
 
-FIELD 1: HEADER & CONTEXT (Report Identity & Date)
-FIELD 2: CLINICAL DATA/INDICATION (Reason for the Study)
-FIELD 3: TECHNIQUE/PRIOR STUDIES (Methodology & Comparison)
-FIELD 4: KEY FINDINGS - POSITIVE/NEGATIVE (Evidence of Pathology)
-FIELD 5: IMPRESSION/CONCLUSION (Radiologist's Final Diagnosis)
-FIELD 6: RECOMMENDATIONS/FOLLOW-UP (Actionable Next Steps)
+    7. **RADIOLOGIST/AUTHOR**:
+    - Check PRIMARY SOURCE first for signing radiologist
+    - If not clear, scan FULL TEXT signature blocks (usually last pages)
+    - Extract ONLY from explicit sign blocks
 
-Now analyze this COMPLETE imaging report and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
-""")
-        
-        # Build user prompt
+    🔍 EXTRACTION WORKFLOW:
+
+    Step 1: Read PRIMARY SOURCE (accurate context) thoroughly for radiological understanding
+    Step 2: Extract ALL findings, impressions, diagnoses from PRIMARY SOURCE
+    Step 3: Check SUPPLEMENTARY SOURCE (full text) ONLY for:
+    - Exact measurements missing from primary
+    - Patient demographics in headers
+    - Technical parameters if missing
+    - Additional specific details
+    Step 4: Verify no contradictions between sources (if conflict, PRIMARY wins)
+
+    PRIMARY PURPOSE: Generate a comprehensive, structured long summary of the 6 critical imaging fields for accurate medical documentation.
+
+    CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY):
+
+    1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
+    - If NOT explicitly mentioned in PRIMARY SOURCE, check SUPPLEMENTARY
+    - If still not found, return EMPTY string "" or empty list []
+    - DO NOT infer, assume, extrapolate, or use medical knowledge to fill gaps
+
+    2. **FINDINGS - ZERO TOLERANCE FOR ASSUMPTIONS**
+    - Extract from PRIMARY SOURCE for accurate radiological context
+    - Supplement with exact measurements from FULL TEXT if missing
+    - DO NOT extract "possible" or "rule out" as confirmed findings
+
+    3. **TECHNICAL DETAILS - EXACT WORDING**
+    - PRIMARY SOURCE for technique context
+    - FULL TEXT for specific parameters if missing
+    - Contrast status: Use clearest version from either source
+
+    4. **EMPTY FIELDS ARE ACCEPTABLE - DO NOT FILL**
+    - Better to return empty field than to guess
+    - DO NOT use "Not mentioned", "Not stated", "Unknown" - just return ""
+
+    5. **RADIOLOGIST'S EXACT LANGUAGE**
+    - PRIMARY SOURCE for radiological interpretations
+    - Use FULL TEXT only for exact wording if more specific
+    - Preserve certainty qualifiers: "suspicious", "likely", "consistent with", "probable"
+
+    6. **RADIOLOGIST/AUTHOR DETECTION**:
+    - Check PRIMARY SOURCE first
+    - If not clear, scan FULL TEXT signature blocks (last pages)
+    - Extract name as explicitly signed
+
+    6 CRITICAL IMAGING FIELDS:
+
+    FIELD 1: HEADER & CONTEXT (Report Identity & Date)
+    FIELD 2: CLINICAL DATA/INDICATION (Reason for the Study)
+    FIELD 3: TECHNIQUE/PRIOR STUDIES (Methodology & Comparison)
+    FIELD 4: KEY FINDINGS - POSITIVE/NEGATIVE (Evidence of Pathology)
+    FIELD 5: IMPRESSION/CONCLUSION (Radiologist's Final Diagnosis)
+    FIELD 6: RECOMMENDATIONS/FOLLOW-UP (Actionable Next Steps)
+
+    Now analyze this COMPLETE imaging report using the DUAL-CONTEXT PRIORITY approach and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
+    """)
+
+        # Build user prompt with clear source separation
         user_prompt = HumanMessagePromptTemplate.from_template("""
-COMPLETE IMAGING REPORT TEXT:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    📌 PRIMARY SOURCE - ACCURATE CONTEXT (Use this as your MAIN reference):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-{full_document_text}
+    {document_actual_context}
 
-Generate the long summary in this EXACT STRUCTURED FORMAT (use the fallback date {fallback_date} if no exam date found):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    📄 SUPPLEMENTARY SOURCE - FULL TEXT EXTRACTION (Use ONLY for missing details):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-📋 IMAGING OVERVIEW
---------------------------------------------------
-Document Type: {doc_type}
-Exam Date: [extracted or {fallback_date}]
-Exam Type: [extracted]
-Radiologist: [name]
-Imaging Center: [extracted]
-Referring Physician: [extracted]
-Author:
-hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
+    {full_document_text}
 
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
- ## PATIENT INFORMATION
-    - **Name:** [extracted name]
-    - **Date of Birth:** [extracted DOB] 
-    - **Claim Number:** [extracted claim number]
-    - **Date of Injury:** [extracted DOI]
-    - **Employer:** [extracted employer] 
+    Document Type: {doc_type}
+    Report Date: {fallback_date}
 
-━━━ CLAIM NUMBER EXTRACTION PATTERNS ━━━
-CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
+    Generate the long summary in this EXACT STRUCTURED FORMAT using the DUAL-CONTEXT PRIORITY rules:
 
-Common claim number patterns (case-insensitive) and make sure to extract EXACTLY as written and must be claim number not just random numbers (like chart numbers, or id numbers) that look similar:
-- "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
-- "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
-- "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
-- "WC Claim: XXXXXXXXX" or "Workers Comp Claim: XXXXXXXXX"
-- "Policy/Claim: XXXXXXXXX"
-- In "cc:" lines: "Broadspire [Claim #XXXXXXXXX]"
-- In subject lines or reference fields: "Claim #XXXXXXX" 
+    📋 IMAGING OVERVIEW
+    --------------------------------------------------
+    Document Type: {doc_type}
+    Exam Date: [from primary, supplement if needed]
+    Exam Type: [from primary]
+    Radiologist: [from primary, check full text signature if unclear]
+    Imaging Center: [from primary]
+    Referring Physician: [from primary]
 
-All Doctors Involved:
-• [list all extracted doctors with names and titles]
-━━━ ALL DOCTORS EXTRACTION ━━━
-- Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
-- Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
-- Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
-- Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
-- Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
-- If no doctors found, leave list empty [].
+    Author:
+    hint: check primary source first, then full text signature block (last pages) if unclear
+    • Signature: [extracted name/title if physical or electronic signature present; otherwise omit]
 
+    ## PATIENT INFORMATION
+    - **Name:** [check both sources, use most complete]
+    - **Date of Birth:** [check both sources, use most complete]
+    - **Claim Number:** [check full text headers first, then primary]
+    - **Date of Injury:** [from primary]
+    - **Employer:** [from primary]
 
-🎯 CLINICAL INDICATION
---------------------------------------------------
-Clinical Indication: [extracted]
-Clinical History: [extracted]
-Chief Complaint: [extracted]
-Specific Questions: [extracted]
+    ━━━ CLAIM NUMBER EXTRACTION ━━━
+    - Check FULL TEXT headers/footers FIRST for exact claim numbers
+    - Then check PRIMARY SOURCE if full text unclear
+    - Scan for patterns: "[Claim #XXXXXXXXX]", "Claim Number:", "WC Claim:"
 
-🔧 TECHNICAL DETAILS
---------------------------------------------------
-Study Type: {doc_type}
-Body Part Imaged: [extracted]
-Laterality: [extracted]
-Contrast Used: [extracted]
-Contrast Type: [extracted]
-Prior Studies Available: [extracted]
-Technical Quality: [extracted]
-Limitations: [extracted]
+    All Doctors Involved:
+    • [extract from BOTH sources, deduplicate, prefer primary source format]
 
-📊 KEY FINDINGS
---------------------------------------------------
-Primary Finding:
-  • Description: [extracted]
-  • Location: [extracted]
-  • Size: [extracted]
-  • Characteristics: [extracted]
-  • Acuity: [extracted]
-Secondary Findings:
-• [list up to 5 with locations and significance]
-Normal Findings:
-• [list up to 5]
+    ━━━ ALL DOCTORS EXTRACTION ━━━
+    - Extract from BOTH sources (primary + supplementary)
+    - Deduplicate: If same doctor in both, use PRIMARY SOURCE format
+    - Include: radiologist, referring doctor, ordering physician
 
-💡 IMPRESSION & CONCLUSION
---------------------------------------------------
-Overall Impression: [extracted]
-Primary Diagnosis: [extracted]
-Final Diagnostic Statement: [extracted]
-Differential Diagnoses:
-• [list up to 3]
-Clinical Correlation: [extracted]
+    🎯 CLINICAL INDICATION
+    --------------------------------------------------
+    [FROM PRIMARY SOURCE for clinical context]
 
-📋 RECOMMENDATIONS & FOLLOW-UP
---------------------------------------------------
-Follow-up Recommended: [extracted]
-Follow-up Modality: [extracted]
-Follow-up Timing: [extracted]
-Clinical Correlation Needed: [extracted]
-Specialist Consultation: [extracted]
+    Clinical Indication: [primary source]
+    Clinical History: [primary source]
+    Chief Complaint: [primary source]
+    Specific Questions: [primary source]
 
-⚠️ MANDATORY EXTRACTION RULES (donot include in output, for LLM use only):
-1. Field 1: Extract EXACT dates and names from report
-2. Field 2: Use EXACT clinical indication wording from report
-3. Field 3: Contrast status must be EXPLICIT (with/without/not stated)
-4. Field 4: Size/measurements ONLY if explicitly stated in report
-5. Field 5: Use RADIOLOGIST'S EXACT impression language
-6. Field 6: Include recommendations ONLY if explicitly stated
-7. EMPTY FIELDS ARE ACCEPTABLE - Better than guessed information
-8. NO assumptions, NO additions, NO upgrades of severity
-""")
-        
+    🔧 TECHNICAL DETAILS
+    --------------------------------------------------
+    [FROM PRIMARY SOURCE for technique context]
+    [Supplement specific parameters from FULL TEXT if missing]
+
+    Study Type: {doc_type}
+    Body Part Imaged: [primary, supplement from full text if more specific]
+    Laterality: [primary, supplement if needed]
+    Contrast Used: [check both sources, use clearest]
+    Contrast Type: [primary, supplement if needed]
+    Prior Studies Available: [primary]
+    Technical Quality: [primary]
+    Limitations: [primary]
+
+    📊 KEY FINDINGS
+    --------------------------------------------------
+    [FROM PRIMARY SOURCE for radiological significance]
+    [Supplement with exact measurements from FULL TEXT if missing]
+
+    Primary Finding:
+    • Description: [primary for context, full text for exact measurements]
+    • Location: [primary for context, full text for precision]
+    • Size: [primary if stated, full text for exact dimensions]
+    • Characteristics: [from primary source]
+    • Acuity: [from primary source]
+
+    Secondary Findings:
+    • [from primary source, supplement measurements from full text]
+
+    Normal Findings:
+    • [from primary source, list up to 5]
+
+    💡 IMPRESSION & CONCLUSION
+    --------------------------------------------------
+    [ALL FROM PRIMARY SOURCE for accurate radiological interpretation]
+
+    Overall Impression: [primary source - radiologist's exact language]
+    Primary Diagnosis: [primary source]
+    Final Diagnostic Statement: [primary source]
+
+    Differential Diagnoses:
+    • [from primary source, list up to 3]
+
+    Clinical Correlation: [primary source]
+
+    📋 RECOMMENDATIONS & FOLLOW-UP
+    --------------------------------------------------
+    [FROM PRIMARY SOURCE for recommendations context]
+
+    Follow-up Recommended: [primary source]
+    Follow-up Modality: [primary source]
+    Follow-up Timing: [primary source]
+    Clinical Correlation Needed: [primary source]
+    Specialist Consultation: [primary source]
+
+    ⚠️ MANDATORY EXTRACTION RULES:
+    1. PRIMARY SOURCE is your MAIN reference for radiological interpretations
+    2. Use FULL TEXT only for exact measurements, demographics, technical parameters if missing
+    3. NEVER override primary source radiological context with full text
+    4. EMPTY FIELDS ARE ACCEPTABLE - Better than guessed information
+    """)
+
         # Create prompt template
         prompt = ChatPromptTemplate.from_messages([
             system_prompt,
             user_prompt
         ])
         
-        logger.info(f"📄 Document size: {len(text):,} chars (~{len(text) // 4:,} tokens)")
-        logger.info("🔍 Processing ENTIRE imaging report in single context window with 6-field focus...")
-        logger.info("🤖 Invoking LLM for direct full-context imaging long summary generation...")
+        logger.info(f"📄 PRIMARY SOURCE size: {len(raw_text):,} chars")
+        logger.info(f"📄 SUPPLEMENTARY size: {len(text):,} chars")
+        logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach...")
         
-        # Invoke LLM
+        # Invoke LLM with both sources
         try:
             chain = prompt | self.llm
             result = chain.invoke({
-                "full_document_text": text,
+                "document_actual_context": raw_text,  # PRIMARY: Accurate summarized context
+                "full_document_text": text,           # SUPPLEMENTARY: Full OCR extraction
                 "doc_type": doc_type,
                 "fallback_date": fallback_date
             })
             
             long_summary = result.content.strip()
             
-            logger.info("✅ Generated imaging long summary from complete document")
+            logger.info("✅ Generated imaging long summary with DUAL-CONTEXT PRIORITY")
+            logger.info("✅ Context priority maintained: PRIMARY source used for radiological findings")
+            
             return long_summary
-        
+            
         except Exception as e:
             logger.error(f"❌ Direct LLM generation failed: {str(e)}")
             return self._get_fallback_long_summary(fallback_date, doc_type)

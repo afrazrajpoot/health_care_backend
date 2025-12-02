@@ -156,9 +156,11 @@ class DocumentExtractorService:
                     processing_path
                 )
             
-            # Build ExtractionResult (unchanged)
+            # Build ExtractionResult - include all fields from document_result
             result = ExtractionResult(
                 text=document_result.text,
+                raw_text=document_result.raw_text if hasattr(document_result, 'raw_text') else None,
+                llm_text=document_result.llm_text if hasattr(document_result, 'llm_text') else None,
                 pages=document_result.pages,
                 page_zones=document_result.page_zones if hasattr(document_result, 'page_zones') else None,
                 entities=document_result.entities,
@@ -218,16 +220,22 @@ class DocumentExtractorService:
                 "mode": mode
             }
             
-            # Debug: Check if page_zones and llm_text are in the payload
+            # Debug: Check if page_zones, llm_text, and raw_text are in the payload
             result_data = webhook_payload["result"]
             logger.info(f"🔍 result_data keys: {list(result_data.keys())}")
             has_page_zones = "page_zones" in result_data and result_data["page_zones"] is not None
             has_llm_text = "llm_text" in result_data and result_data["llm_text"] is not None
-            logger.info(f"📦 Webhook payload prepared - page_zones: {has_page_zones}, llm_text: {has_llm_text}")
+            has_raw_text = "raw_text" in result_data and result_data["raw_text"]
+            logger.info(f"📦 Webhook payload prepared - page_zones: {has_page_zones}, llm_text: {has_llm_text}, raw_text: {has_raw_text}")
             if has_page_zones:
                 logger.info(f"📄 page_zones has {len(result_data['page_zones'])} pages")
             else:
                 logger.warning(f"⚠️ page_zones NOT in result_data after serialization!")
+            
+            if has_raw_text:
+                logger.info(f"📝 raw_text present: {len(result_data['raw_text'])} characters")
+            else:
+                logger.warning(f"⚠️ raw_text NOT in result_data or is empty!")
             
             return {
                 "success": True,

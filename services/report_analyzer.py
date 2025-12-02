@@ -128,7 +128,8 @@ class ReportAnalyzer:
         """
         try:
             # extract_document returns dict with both summaries
-            result_dict = self.extract_document(current_raw_text)
+            # Pass current_raw_text as both parameters (Document AI summarizer output as primary)
+            result_dict = self.extract_document(text=current_raw_text, raw_text=current_raw_text)
             # Return the dictionary directly (no bullet points)
             return result_dict
         except Exception as e:
@@ -140,7 +141,7 @@ class ReportAnalyzer:
                 "short_summary": error_msg
             }
 
-    def extract_document(self, text: str) -> Dict[str, str]:
+    def extract_document(self, text: str, raw_text: str) -> Dict[str, str]:
         """
         Optimized pipeline - returns dictionary with both summaries.
         """
@@ -157,12 +158,15 @@ class ReportAnalyzer:
             # Safely get other fields if they exist, defaulting if not
             is_standard_type = detection_result.get("is_standard_type", False)
             confidence = detection_result.get("confidence", 0.0)
+
+            logger.info(f"🔍 Document type1111111111 raw_text: {raw_text}")
             
             logger.info(f"📄 Document type detected: {doc_type_str} (Conf: {confidence})")
             
             # Stage 2: Direct extraction - get dictionary with both summaries
             result_dict = self._route_to_extractor(
                 text=text,
+                raw_text=raw_text,
                 doc_type_str=doc_type_str,
                 is_standard_type=is_standard_type,
                 fallback_date=fallback_date
@@ -185,6 +189,7 @@ class ReportAnalyzer:
     def _route_to_extractor(
         self,
         text: str,
+        raw_text: str,
         doc_type_str: str,
         is_standard_type: bool,
         fallback_date: str
@@ -201,7 +206,7 @@ class ReportAnalyzer:
         if any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["qme_evaluations"]):
             logger.info(f"🎯 Routing to QME extractor for {doc_type_str}")
             return self._safe_extract(
-                self.qme_extractor.extract, text, doc_type_str, fallback_date,
+                self.qme_extractor.extract, text, raw_text, doc_type_str, fallback_date,
                 f"{fallback_date}: QME report processed"
             )
             
@@ -209,7 +214,7 @@ class ReportAnalyzer:
         elif any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["progress_reports"]):
             logger.info(f"🎯 Routing to PR-2 extractor for {doc_type_str}")
             return self._safe_extract(
-                self.pr2_extractor.extract, text, doc_type_str, fallback_date,
+                self.pr2_extractor.extract, text, raw_text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} progress report"
             )
             
@@ -217,7 +222,7 @@ class ReportAnalyzer:
         elif any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["imaging_reports"]):
             logger.info(f"🎯 Routing to Imaging extractor for {doc_type_str}")
             return self._safe_extract(
-                self.imaging_extractor.extract, text, doc_type_str, fallback_date,
+                self.imaging_extractor.extract, text, raw_text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} imaging report"
             )
             
@@ -225,7 +230,7 @@ class ReportAnalyzer:
         elif any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["consultations"]):
             logger.info(f"🎯 Routing to Consult extractor for {doc_type_str}")
             return self._safe_extract(
-                self.consult_extractor.extract, text, doc_type_str, fallback_date,
+                self.consult_extractor.extract, text, raw_text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} consultation"
             )
             
@@ -233,7 +238,7 @@ class ReportAnalyzer:
         elif any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["decision_documents"]):
             logger.info(f"🎯 Routing to Decision Document extractor for {doc_type_str}")
             return self._safe_extract(
-                self.decision_extractor.extract, text, doc_type_str, fallback_date,
+                self.decision_extractor.extract, text, raw_text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} decision processed"
             )
             
@@ -241,7 +246,7 @@ class ReportAnalyzer:
         elif any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["formal_medical_reports"]):
             logger.info(f"🎯 Routing to Formal Medical Report extractor for {doc_type_str}")
             return self._safe_extract(
-                self.formal_medical_extractor.extract, text, doc_type_str, fallback_date,
+                self.formal_medical_extractor.extract, text, raw_text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} report processed"
             )
             
@@ -249,7 +254,7 @@ class ReportAnalyzer:
         elif any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["clinical_notes"]):
             logger.info(f"🎯 Routing to Clinical Note extractor for {doc_type_str}")
             return self._safe_extract(
-                self.clinical_note_extractor.extract, text, doc_type_str, fallback_date,
+                self.clinical_note_extractor.extract, text, raw_text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} note processed"
             )
             
@@ -257,7 +262,7 @@ class ReportAnalyzer:
         elif any(key in normalized_doc_type for key in self.DOCUMENT_CATEGORIES["administrative_documents"]):
             logger.info(f"🎯 Routing to Administrative extractor for {doc_type_str}")
             return self._safe_extract(
-                self.administrative_extractor.extract, text, doc_type_str, fallback_date,
+                self.administrative_extractor.extract, text, raw_text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} document processed"
             )
             
@@ -265,17 +270,18 @@ class ReportAnalyzer:
         else:
             logger.info(f"🎯 Routing to Simple extractor for custom type: {doc_type_str}")
             return self._safe_extract(
-                self.simple_extractor.extract, text, doc_type_str, fallback_date,
+                self.simple_extractor.extract, text, raw_text, doc_type_str, fallback_date,
                 f"{fallback_date}: {doc_type_str} processed"
             )
 
-    def _safe_extract(self, extractor_func, text: str, doc_type: str, fallback_date: str, fallback_short: str) -> Dict[str, str]:
+    def _safe_extract(self, extractor_func, text: str, raw_text: str, doc_type: str, fallback_date: str, fallback_short: str) -> Dict[str, str]:
         """
         Safely call extractor function and handle different return types.
         """
         try:
             result = extractor_func(
                 text=text,
+                raw_text=raw_text,
                 doc_type=doc_type,
                 fallback_date=fallback_date,
             )
@@ -388,7 +394,7 @@ Be brief and focus on key medical-legal points."""
                 is_standard_type = getattr(detection_result, "is_standard_type", False)
 
             # Get both summaries
-            summaries_dict = self.extract_document(text)
+            summaries_dict = self.extract_document(text=text, raw_text=text)
 
             return {
                 "document_type": doc_type_str,

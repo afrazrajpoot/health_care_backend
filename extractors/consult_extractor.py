@@ -36,36 +36,50 @@ class ConsultExtractorChained:
         self.parser = JsonOutputParser()
         self.verifier = ExtractionVerifier(llm)
 
-    def extract(self, text: str, doc_type: str, fallback_date: str) -> Dict:
+    # consult_extractor.py - UPDATED with dual-context priority
+
+    def extract(self, text: str, raw_text: str, doc_type: str, fallback_date: str) -> Dict:
         """
-        Extract specialist consult report with full context processing. 
+        Extract specialist consult report with full context processing.
+        
+        Args:
+            text: Complete document text (full OCR extraction)
+            raw_text: Accurate summarized context from Document AI Summarizer (PRIMARY SOURCE)
+            doc_type: Document type
+            fallback_date: Fallback date if not found
+        
         Returns dictionary with long_summary and short_summary like QME extractor.
         """
         logger.info("=" * 80)
-        logger.info("👨‍⚕️ STARTING CONSULT EXTRACTION (FULL CONTEXT)")
+        logger.info("👨‍⚕️ STARTING CONSULT EXTRACTION (DUAL-CONTEXT PRIORITY)")
         logger.info("=" * 80)
+        
         start_time = time.time()
         
         try:
-            # Step 1: Directly generate long summary with full context (no intermediate extraction)
-            long_summary = self._generate_long_summary_direct(text, doc_type, fallback_date)
-
+            # Step 1: Directly generate long summary with DUAL-CONTEXT (raw_text PRIMARY + text SUPPLEMENTARY)
+            long_summary = self._generate_long_summary_direct(
+                text=text,
+                raw_text=raw_text,
+                doc_type=doc_type,
+                fallback_date=fallback_date
+            )
+            
             # Step 2: Generate short summary from long summary (like QME extractor)
             short_summary = self._generate_short_summary_from_long_summary(long_summary)
-
+            
             elapsed_time = time.time() - start_time
             logger.info(f"⚡ Full-context consultation extraction completed in {elapsed_time:.2f}s")
-            logger.info(f"✅ Extracted consultation data from complete {len(text):,} char document")
             logger.info("=" * 80)
-            logger.info("✅ CONSULT EXTRACTION COMPLETE (FULL CONTEXT)")
+            logger.info("✅ CONSULT EXTRACTION COMPLETE (DUAL-CONTEXT)")
             logger.info("=" * 80)
-
+            
             # Return dictionary with both summaries like QME extractor
             return {
                 "long_summary": long_summary,
                 "short_summary": short_summary
             }
-
+            
         except Exception as e:
             logger.error(f"❌ Extraction failed: {str(e)}")
             # Return fallback result structure
@@ -74,232 +88,320 @@ class ConsultExtractorChained:
                 "short_summary": "Consultation summary not available"
             }
 
-    def _generate_long_summary_direct(self, text: str, doc_type: str, fallback_date: str) -> str:
+    def _generate_long_summary_direct(
+        self, 
+        text: str, 
+        raw_text: str,
+        doc_type: str, 
+        fallback_date: str
+    ) -> str:
         """
-        Directly generate comprehensive long summary with full document context using LLM.
-        Adapted from original extraction prompt to output structured summary directly.
-        """
-        logger.info("🔍 Processing ENTIRE consultation report in single context window for direct long summary...")
+        Directly generate comprehensive long summary with DUAL-CONTEXT PRIORITY.
         
-        # Adapted System Prompt for Direct Long Summary Generation
-        # Reuses core anti-hallucination rules and consultation focus from original extraction prompt
+        PRIMARY SOURCE: raw_text (accurate Document AI summarized context)
+        SUPPLEMENTARY: text (full OCR extraction for missing details only)
+        """
+        logger.info("🔍 Processing consultation report with DUAL-CONTEXT approach...")
+        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
+        logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        
+        # Updated System Prompt with DUAL-CONTEXT PRIORITY
         system_prompt = SystemMessagePromptTemplate.from_template("""
-You are an expert Workers' Compensation consultation report specialist analyzing a COMPLETE Specialist Consultation Report.
+    You are an expert Workers' Compensation consultation report specialist analyzing a COMPLETE Specialist Consultation Report.
 
-PRIMARY PURPOSE: Generate a comprehensive, structured long summary of the 8 critical fields that define current medical status, diagnostic findings, and treatment plan changes for claims administration.
+    🎯 CRITICAL CONTEXT HIERARCHY (HIGHEST PRIORITY):
 
-CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
-You are seeing the ENTIRE consultation report at once, allowing you to:
-- Understand complete referral context and clinical questions
-- Correlate subjective complaints with objective examination findings
-- Assess specialist's diagnostic reasoning and treatment justifications
-- Identify ALL treatment recommendations with medical necessity rationale
-- Extract complete work capacity and restriction changes
+    You are provided with TWO versions of the document:
 
-⚠️ CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY) (donot include in output, for LLM use only):
+    1. **PRIMARY SOURCE - "ACCURATE CONTEXT" (raw_text)**:
+    - This is the MOST ACCURATE, context-aware summary from Google's Document AI foundation model
+    - It preserves CRITICAL CONSULTATION CONTEXT with accurate clinical interpretations
+    - **USE THIS AS YOUR PRIMARY SOURCE OF TRUTH**
+    - Contains CORRECT diagnostic conclusions, accurate specialist assessments, proper treatment justifications
+    - **ALWAYS PRIORITIZE information from this source**
 
-1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
-   - If NOT explicitly mentioned, return EMPTY string "" or empty list []
-   - DO NOT infer, assume, extrapolate, or use medical knowledge to fill gaps
-   - DO NOT add typical findings, standard recommendations, or common restrictions
+    2. **SUPPLEMENTARY SOURCE - "FULL TEXT EXTRACTION" (text)**:
+    - Complete OCR text extraction (may have formatting noise, OCR artifacts)
+    - Use ONLY to fill in SPECIFIC DETAILS missing from the accurate context
+    - Examples of acceptable supplementary use:
+        * Exact medication dosages if not in primary source
+        * Specific claim numbers or identifiers in headers/footers
+        * Additional doctor names mentioned
+        * Precise ROM measurements or lab values
+        * Exact work restriction wording if more specific in full text
+    - **DO NOT let this override the clinical context from the primary source**
 
-2. **DIAGNOSES - INCLUDE ALL WITH EXACT TERMINOLOGY**
-   - Extract PRIMARY diagnosis with ICD-10 code if stated
-   - Extract ALL SECONDARY diagnoses - DO NOT miss any
-   - Include diagnostic certainty: "probable", "confirmed", "consistent with", "rule out"
-   - Include causation statements if explicitly stated
+    ⚠️ ANTI-HALLUCINATION RULES FOR DUAL-CONTEXT:
 
-3. **WORK RESTRICTIONS - EXACT WORDING ONLY**
-   - Use EXACT phrases from document
-   - If "no overhead work" stated, extract "no overhead work" (NOT "no overhead reaching")
-   - If "lifting restrictions" stated WITHOUT specifics, extract "lifting restrictions" (NOT "no lifting >10 lbs")
+    1. **CONTEXT PRIORITY ENFORCEMENT**:
+    - When both sources provide information about the SAME clinical finding:
+        ✅ ALWAYS use interpretation from PRIMARY SOURCE (accurate context)
+        ❌ NEVER override with potentially inaccurate full text version
+    
+    2. **DIAGNOSIS PRIORITY**:
+    - PRIMARY SOURCE provides accurate diagnostic context
+    - Use FULL TEXT only to add ICD-10 codes or body part specifics if missing
+    - NEVER change diagnosis interpretation based on full text alone
 
-4. **RECOMMENDATIONS - ZERO TOLERANCE FOR ASSUMPTIONS**
-   - Extract ONLY recommendations explicitly stated in Assessment/Plan sections
-   - DO NOT extract treatments "considered but not recommended"
-   - Include ALL explicitly recommended procedures, injections, medications, therapy
-   - DO NOT add standard care not mentioned
+    3. **RECOMMENDATIONS PRIORITY** (MOST CRITICAL FOR AUTHORIZATION):
+    - PRIMARY SOURCE contains accurate, contextually appropriate recommendations
+    - Use FULL TEXT only for specific procedure details (CPT codes, exact injection locations) if missing
+    - DO NOT add recommendations from full text if they contradict primary source
 
-5. **EMPTY FIELDS ARE BETTER THAN GUESSED FIELDS**
-   - Leave fields empty if information not found
-   - DO NOT use "Not mentioned", "Not stated", "Unknown" - just return ""
+    4. **WORK RESTRICTIONS**:
+    - PRIMARY SOURCE provides accurate work capacity assessment
+    - Use FULL TEXT for exact restriction wording only if more specific
+    - NEVER add restrictions from full text not present in primary source
 
-6. **CONSULTING PHYSICIAN/AUTHOR DETECTION**:
-   - Identify the author who signed the report as the "consulting_physician" name (e.g., from signature block, "Dictated by:", or closing statement).
-   - It is NOT mandatory that this author is a qualified doctor; extract the name as explicitly signed, regardless of credentials.
-   - Extract specialty, credentials, and facility only if explicitly stated near the signature.
-   - If no clear signer is found, leave "name" empty.
+    5. **OBJECTIVE FINDINGS**:
+    - PRIMARY SOURCE contains clinically significant findings
+    - Use FULL TEXT only for specific measurements (ROM degrees, strength scores) if missing
+    - DO NOT add normal findings from full text if primary source focuses on abnormalities
 
-CONSULTATION EXTRACTION FOCUS - 8 CRITICAL FIELDS FOR CLAIMS ADMINISTRATION:
+    6. **CLAIM NUMBERS & IDENTIFIERS**:
+    - These are often in headers/footers (better in FULL TEXT)
+    - Check FULL TEXT first for exact claim numbers
+    - Use PRIMARY SOURCE if full text is unclear
 
-FIELD 1: HEADER & CONTEXT - Report Identity & Authority
-FIELD 2: CHIEF COMPLAINT - Patient's Primary Issue
-FIELD 3: DIAGNOSIS & ASSESSMENT - Medical Conclusion (HIGHEST PRIORITY)
-FIELD 4: HISTORY OF PRESENT ILLNESS - Symptoms & Severity Context
-FIELD 5: PRIOR TREATMENT & EFFICACY - Failure of Conservative Care
-FIELD 6: OBJECTIVE FINDINGS - Verifiable Evidence (Exam & Imaging)
-FIELD 7: PLAN - RECOMMENDED TREATMENTS (MOST CRITICAL FOR AUTHORIZATION)
-FIELD 8: WORK STATUS & IMPAIRMENT - Legal/Administrative Status
+    🔍 EXTRACTION WORKFLOW:
 
-Now analyze this COMPLETE specialist consultation report and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
-""")
-        
-        # Adapted User Prompt for Direct Long Summary - Outputs the structured summary directly
+    Step 1: Read PRIMARY SOURCE (accurate context) thoroughly for clinical understanding
+    Step 2: Extract ALL consultation findings, diagnoses, recommendations from PRIMARY SOURCE
+    Step 3: Check SUPPLEMENTARY SOURCE (full text) ONLY for:
+    - Specific details missing from primary (exact dosages, measurements, codes)
+    - Administrative info (claim numbers, exact dates in headers)
+    - Additional doctor names
+    Step 4: Verify no contradictions between sources (if conflict, PRIMARY wins)
+
+    ⚠️ CRITICAL ANTI-HALLUCINATION RULES (ABSOLUTE PRIORITY) (donot include in output, for LLM use only):
+
+    1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
+    - If NOT explicitly mentioned in PRIMARY SOURCE, check SUPPLEMENTARY
+    - If still not found, return EMPTY string "" or empty list []
+    - DO NOT infer, assume, extrapolate, or use medical knowledge to fill gaps
+
+    2. **DIAGNOSES - INCLUDE ALL WITH EXACT TERMINOLOGY**
+    - Extract PRIMARY diagnosis from PRIMARY SOURCE
+    - Supplement with ICD-10 codes from FULL TEXT if not in primary
+    - Include ALL SECONDARY diagnoses from PRIMARY SOURCE
+
+    3. **WORK RESTRICTIONS - EXACT WORDING ONLY**
+    - Use PRIMARY SOURCE for restriction context
+    - Use FULL TEXT for exact wording only if more specific
+    - If "no overhead work" stated in primary, extract "no overhead work" (NOT "no overhead reaching")
+
+    4. **RECOMMENDATIONS - ZERO TOLERANCE FOR ASSUMPTIONS**
+    - Extract ONLY recommendations explicitly stated in PRIMARY SOURCE
+    - Supplement with procedure details from FULL TEXT only if missing
+    - DO NOT extract treatments "considered but not recommended"
+
+    5. **EMPTY FIELDS ARE BETTER THAN GUESSED FIELDS**
+    - Leave fields empty if information not found in PRIMARY SOURCE
+    - DO NOT use "Not mentioned", "Not stated", "Unknown" - just return ""
+
+    6. **CONSULTING PHYSICIAN/AUTHOR DETECTION**:
+    - Check PRIMARY SOURCE first for author/signing physician
+    - If not clear, scan FULL TEXT signature blocks (usually last pages)
+    - Extract name as explicitly signed, regardless of credentials
+
+    7. **ALL DOCTORS EXTRACTION**:
+    - Extract from BOTH sources (primary + supplementary)
+    - Deduplicate: If same doctor in both, use primary source version
+    - Include all physicians with credentials
+
+    CONSULTATION EXTRACTION FOCUS - 8 CRITICAL FIELDS FOR CLAIMS ADMINISTRATION:
+
+    FIELD 1: HEADER & CONTEXT - Report Identity & Authority
+    FIELD 2: CHIEF COMPLAINT - Patient's Primary Issue
+    FIELD 3: DIAGNOSIS & ASSESSMENT - Medical Conclusion (HIGHEST PRIORITY)
+    FIELD 4: HISTORY OF PRESENT ILLNESS - Symptoms & Severity Context
+    FIELD 5: PRIOR TREATMENT & EFFICACY - Failure of Conservative Care
+    FIELD 6: OBJECTIVE FINDINGS - Verifiable Evidence (Exam & Imaging)
+    FIELD 7: PLAN - RECOMMENDED TREATMENTS (MOST CRITICAL FOR AUTHORIZATION)
+    FIELD 8: WORK STATUS & IMPAIRMENT - Legal/Administrative Status
+
+    Now analyze this COMPLETE specialist consultation report using the DUAL-CONTEXT PRIORITY approach and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
+    """)
+
+        # Updated User Prompt with clear source separation
         user_prompt = HumanMessagePromptTemplate.from_template("""
-COMPLETE SPECIALIST CONSULTATION REPORT TEXT:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    📌 PRIMARY SOURCE - ACCURATE CONTEXT (Use this as your MAIN reference):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-{full_document_text}
+    {document_actual_context}
 
-Generate the long summary in this EXACT STRUCTURED FORMAT (use the fallback date {fallback_date} if no consultation date found):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    📄 SUPPLEMENTARY SOURCE - FULL TEXT EXTRACTION (Use ONLY for missing details):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-📋 CONSULTATION OVERVIEW
---------------------------------------------------
-Document Type: {doc_type}
-Consultation Date: [extracted or {fallback_date}]
-Consulting Physician: [name]
-Specialty: [extracted]
-Referring Physician: [extracted]
+    {full_document_text}
 
-👤 PATIENT INFORMATION
---------------------------------------------------
-Name: [extracted]
-Date of Birth: [extracted]
-Date of Injury: [extracted]
-Claim Number: [extracted]
-                                                               
-All Doctors Involved:
-• [list all extracted doctors with names and titles]
-━━━ ALL DOCTORS EXTRACTION ━━━
-- Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
-- Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
-- Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
-- Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
-- Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
-- If no doctors found, leave list empty [].
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-🎯 CHIEF COMPLAINT
---------------------------------------------------
-Primary Complaint: [extracted]
-Location: [extracted]
-Duration: [extracted]
-Radiation Pattern: [extracted]
-Author:
-hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
+    Document Type: {doc_type}
+    Report Date: {fallback_date}
 
+    Generate the long summary in this EXACT STRUCTURED FORMAT using the DUAL-CONTEXT PRIORITY rules:
 
-🏥 DIAGNOSIS & ASSESSMENT
---------------------------------------------------
-Primary Diagnosis: [extracted with ICD-10 if available] ([certainty])
-Secondary Diagnoses:
-• [list up to 5]
-Causation: [extracted]
+    📋 CONSULTATION OVERVIEW
+    --------------------------------------------------
+    Document Type: {doc_type}
+    Consultation Date: [extracted or {fallback_date}]
+    Consulting Physician: [from primary source, check full text signature if unclear]
+    Specialty: [from primary source]
+    Referring Physician: [from primary source]
 
-🔬 CLINICAL HISTORY & SYMPTOMS
---------------------------------------------------
-Pain Quality: [extracted]
-Pain Location: [extracted]
-Radiation: [extracted]
-Aggravating Factors:
-• [list up to 5, exact wording]
-Alleviating Factors:
-• [list up to 5, exact wording]
+    👤 PATIENT INFORMATION
+    --------------------------------------------------
+    Name: [from primary source, supplement if needed]
+    Date of Birth: [from primary source, supplement if needed]
+    Date of Injury: [from primary source]
+    Claim Number: [from full text headers/footers first]
 
-💊 PRIOR TREATMENT & EFFICACY
---------------------------------------------------
-Prior Treatments Received:
-• [list up to 8 with durations if stated]
-Level of Relief:
-• [physical_therapy: extracted]
-• [medications: extracted]
-• [injections: extracted]
-• [chiropractic: extracted]
-Treatment Failure Statement: [extracted]
+    All Doctors Involved:
+    • [extract from BOTH sources, deduplicate, prefer primary source format]
 
-📊 OBJECTIVE FINDINGS
---------------------------------------------------
-Physical Examination:
-• [ROM measurements: extracted]
-• [Strength Testing: extracted]
-• [Special Tests Positive: list up to 5]
-• [Palpation Findings: extracted]
-• [Inspection Findings: extracted]
-Imaging Review:
-• [MRI Findings: extracted]
-• [X-ray Findings: extracted]
-• [CT Findings: extracted]
-• [Correlation with Symptoms: extracted]
+    ━━━ ALL DOCTORS EXTRACTION ━━━
+    - Extract ALL physician/doctor names from BOTH sources
+    - Deduplicate: If same doctor appears in both, use PRIMARY SOURCE format
+    - Include: consulting doctor, referring doctor, ordering physician, treating physician, etc.
+    - Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor)
+    - Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles
+    - Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO")
+    - If no doctors found, leave list empty []
 
-🎯 TREATMENT RECOMMENDATIONS
---------------------------------------------------
-Injections Requested:
-• [list up to 5 with locations]
-Procedures Requested:
-• [list up to 5 with reasons]
-Surgery Recommended:
-• [list up to 3 with urgency]
-Diagnostics Ordered:
-• [list up to 5 with reasons]
-Medication Changes:
-  New Medications:
-    • [list up to 5 with doses]
-  Dosage Adjustments:
-    • [list up to 3]
-Therapy Recommendations:
-• [therapy_type - frequency for duration]
-  Focus Areas:
-    • [list up to 3]
+    🎯 CHIEF COMPLAINT
+    --------------------------------------------------
+    Primary Complaint: [from primary source]
+    Location: [from primary source]
+    Duration: [from primary source]
+    Radiation Pattern: [from primary source]
 
-💼 WORK STATUS & IMPAIRMENT
---------------------------------------------------
-Current Work Status: [extracted]
-Work Restrictions:
-• [list up to 10, exact wording with durations if stated]
-Restriction Duration: [extracted]
-Return to Work Plan: [extracted]
+    Author:
+    hint: check primary source first, then full text signature block (last pages) if unclear
+    • Signature: [extracted name/title; should not be business name or generic title]
 
-🚨 CRITICAL FINDINGS
---------------------------------------------------
-• [list up to 8 most actionable items for claims administration]
+    🏥 DIAGNOSIS & ASSESSMENT
+    --------------------------------------------------
+    Primary Diagnosis: [from PRIMARY SOURCE - accurate diagnostic context]
+    - ICD-10: [supplement from full text if not in primary]
+    - Certainty: [from primary source]
 
-⚠️ MANDATORY EXTRACTION RULES (donot include in output, for LLM use only):
-1. Field 3 (Diagnosis): Use EXACT diagnostic terminology, include ALL secondary diagnoses
-2. Field 5 (Prior Treatment): Include quantified relief ("50% improvement", "no relief")
-3. Field 6 (Objective): Extract EXACT measurements and imaging findings with anatomical specificity
-4. Field 7 (Plan): Extract ONLY explicitly recommended treatments - THE MOST CRITICAL
-5. Field 8 (Work Restrictions): Use EXACT wording (don't add weight/time limits not stated)
-6. Empty fields are acceptable if not stated in report - use "Not specified" only if truly empty
-""")
-        
+    Secondary Diagnoses:
+    • [from PRIMARY SOURCE - list up to 5]
+
+    Causation: [from primary source interpretation]
+
+    🔬 CLINICAL HISTORY & SYMPTOMS
+    --------------------------------------------------
+    [All from PRIMARY SOURCE for accurate clinical context]
+
+    Pain Quality: [from primary]
+    Pain Location: [from primary]
+    Radiation: [from primary]
+
+    Aggravating Factors:
+    • [from primary source, list up to 5, exact wording]
+
+    Alleviating Factors:
+    • [from primary source, list up to 5, exact wording]
+
+    💊 PRIOR TREATMENT & EFFICACY
+    --------------------------------------------------
+    Prior Treatments Received:
+    • [from PRIMARY SOURCE for treatment efficacy context, supplement durations from full text if missing]
+
+    Level of Relief:
+    • [from primary source - accurate efficacy assessment]
+
+    Treatment Failure Statement: [from primary source]
+
+    📊 OBJECTIVE FINDINGS
+    --------------------------------------------------
+    Physical Examination:
+    • [FROM PRIMARY SOURCE for clinically significant findings]
+    • [Supplement with specific measurements from full text if missing: ROM degrees, strength scores]
+
+    Imaging Review:
+    • [FROM PRIMARY SOURCE for imaging interpretation]
+    • [Supplement with specific measurements from full text if missing]
+
+    🎯 TREATMENT RECOMMENDATIONS (⚠️ MOST CRITICAL - PRIMARY SOURCE PRIORITY)
+    --------------------------------------------------
+    Injections Requested:
+    • [FROM PRIMARY SOURCE - accurate treatment justification]
+    • [Supplement with exact injection sites/CPT codes from full text if missing]
+
+    Procedures Requested:
+    • [FROM PRIMARY SOURCE - list up to 5 with reasons]
+
+    Surgery Recommended:
+    • [FROM PRIMARY SOURCE - list up to 3 with urgency]
+
+    Diagnostics Ordered:
+    • [FROM PRIMARY SOURCE - list up to 5 with reasons]
+
+    Medication Changes:
+    • [FROM PRIMARY SOURCE - supplement exact dosages from full text if missing]
+
+    Therapy Recommendations:
+    • [FROM PRIMARY SOURCE - supplement frequency details from full text if missing]
+
+    💼 WORK STATUS & IMPAIRMENT
+    --------------------------------------------------
+    Current Work Status: [from PRIMARY SOURCE]
+
+    Work Restrictions:
+    • [FROM PRIMARY SOURCE for restriction context]
+    • [Use full text for exact wording only if more specific]
+
+    Restriction Duration: [from primary source]
+    Return to Work Plan: [from primary source]
+
+    🚨 CRITICAL FINDINGS
+    --------------------------------------------------
+    • [list up to 8 most actionable items from PRIMARY SOURCE]
+
+    REMEMBER: 
+    1. PRIMARY SOURCE (accurate context) is your MAIN reference for clinical interpretations
+    2. Use FULL TEXT only to supplement specific missing details (measurements, codes, exact dates)
+    3. NEVER override primary source clinical context with full text
+    """)
+
         # Create prompt template
         prompt = ChatPromptTemplate.from_messages([
             system_prompt,
             user_prompt
         ])
         
-        logger.info(f"📄 Document size: {len(text):,} chars (~{len(text) // 4:,} tokens)")
-        logger.info("🔍 Processing ENTIRE consultation report in single context window...")
-        logger.info("🤖 Invoking LLM for direct full-context consultation long summary generation...")
+        logger.info(f"📄 PRIMARY SOURCE size: {len(raw_text):,} chars")
+        logger.info(f"📄 SUPPLEMENTARY size: {len(text):,} chars")
+        logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach...")
         
-        # Invoke LLM
+        # Invoke LLM with both sources
         try:
             chain = prompt | self.llm
             result = chain.invoke({
-                "full_document_text": text,
+                "document_actual_context": raw_text,  # PRIMARY: Accurate summarized context
+                "full_document_text": text,           # SUPPLEMENTARY: Full OCR extraction
                 "fallback_date": fallback_date,
                 "doc_type": doc_type
             })
             
             long_summary = result.content.strip()
             
-            logger.info("✅ Generated consultation long summary from complete document")
+            logger.info("✅ Generated consultation long summary with DUAL-CONTEXT PRIORITY")
+            logger.info("✅ Context priority maintained: PRIMARY source used for clinical findings")
+            
             return long_summary
-        
+            
         except Exception as e:
             logger.error(f"❌ Direct LLM generation failed: {str(e)}")
             # Fallback: Generate a minimal summary
             return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
-    
+
+
     def _clean_pipes_from_summary(self, short_summary: str) -> str:
         """
         Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.

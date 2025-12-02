@@ -73,27 +73,29 @@ class ClinicalNoteExtractor:
         
         logger.info("✅ ClinicalNoteExtractor v1.3 initialized (Full Context + Strict Anti-Hallucination for Signatures)")
 
+    # clinical_extractor.py - UPDATED with dual-context priority
+
     def extract(
         self,
         text: str,
+        raw_text: str,
         doc_type: str,
         fallback_date: str,
-     
     ) -> Dict:
         """
         Extract Clinical Note data with FULL CONTEXT.
         
         Args:
-            text: Complete document text (layout-preserved)
+            text: Complete document text (full OCR extraction)
+            raw_text: Accurate summarized context from Document AI Summarizer (PRIMARY SOURCE)
             doc_type: Document type (Progress Note, PT, OT, Chiro, Acupuncture, Pain Management, Psychiatry, Nursing)
             fallback_date: Fallback date if not found
-            raw_text: Original flat text (optional)
-            
+        
         Returns:
             Dict with long_summary and short_summary
         """
         logger.info("=" * 80)
-        logger.info("🏥 STARTING CLINICAL NOTE EXTRACTION (FULL CONTEXT)")
+        logger.info("🏥 STARTING CLINICAL NOTE EXTRACTION (DUAL-CONTEXT PRIORITY)")
         logger.info("=" * 80)
         
         # Auto-detect specific note type if not specified
@@ -101,33 +103,374 @@ class ClinicalNoteExtractor:
         logger.info(f"📋 Clinical Note Type: {detected_type} (original: {doc_type})")
         
         # Check document size
-        text_length = len(text)
+        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
+        logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        
+        text_length = len(raw_text)
         token_estimate = text_length // 4
-        logger.info(f"📄 Document size: {text_length:,} chars (~{token_estimate:,} tokens)")
+        logger.info(f"📄 PRIMARY source size: {text_length:,} chars (~{token_estimate:,} tokens)")
         
         if token_estimate > 120000:
             logger.warning(f"⚠️ Document very large ({token_estimate:,} tokens)")
             logger.warning("⚠️ May exceed GPT-4o context window (128K tokens)")
         
-        # Stage 1: Directly generate long summary with FULL CONTEXT (no intermediate extraction)
+        # Stage 1: Directly generate long summary with DUAL-CONTEXT (raw_text PRIMARY + text SUPPLEMENTARY)
         long_summary = self._generate_long_summary_direct(
             text=text,
+            raw_text=raw_text,
             doc_type=detected_type,
             fallback_date=fallback_date
         )
-
+        
         # Stage 2: Generate short summary from long summary
         short_summary = self._generate_short_summary_from_long_summary(long_summary, detected_type)
-
+        
         logger.info("=" * 80)
-        logger.info("✅ CLINICAL NOTE EXTRACTION COMPLETE (FULL CONTEXT)")
+        logger.info("✅ CLINICAL NOTE EXTRACTION COMPLETE (DUAL-CONTEXT)")
         logger.info("=" * 80)
-
+        
         # Return dictionary with both summaries
         return {
             "long_summary": long_summary,
             "short_summary": short_summary
         }
+
+    def _generate_long_summary_direct(
+        self,
+        text: str,
+        raw_text: str,
+        doc_type: str,
+        fallback_date: str
+    ) -> str:
+        """
+        Directly generate comprehensive long summary with DUAL-CONTEXT PRIORITY.
+        
+        PRIMARY SOURCE: raw_text (accurate Document AI summarized context)
+        SUPPLEMENTARY: text (full OCR extraction for missing details only)
+        """
+        logger.info("🔍 Processing clinical note with DUAL-CONTEXT approach...")
+        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
+        logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        
+        # Enhanced System Prompt with DUAL-CONTEXT PRIORITY
+        system_prompt = SystemMessagePromptTemplate.from_template("""
+    You are an expert clinical documentation specialist analyzing a COMPLETE {doc_type}.
+
+    🎯 CRITICAL CONTEXT HIERARCHY (HIGHEST PRIORITY):
+
+    You are provided with TWO versions of the document:
+
+    1. **PRIMARY SOURCE - "ACCURATE CONTEXT" (raw_text)**:
+    - This is the MOST ACCURATE, context-aware summary from Google's Document AI foundation model
+    - It preserves CRITICAL CLINICAL CONTEXT with accurate interpretations
+    - **USE THIS AS YOUR PRIMARY SOURCE OF TRUTH**
+    - Contains CORRECT clinical assessments, accurate treatment context, proper interpretations
+    - **ALWAYS PRIORITIZE information from this source**
+
+    2. **SUPPLEMENTARY SOURCE - "FULL TEXT EXTRACTION" (text)**:
+    - Complete OCR text extraction (may have formatting noise, OCR artifacts)
+    - Use ONLY to fill in SPECIFIC DETAILS missing from the accurate context
+    - Examples of acceptable supplementary use:
+        * Exact ROM measurements (specific degrees) if not in primary
+        * Specific CPT codes or procedure codes
+        * Exact medication dosages if not in primary
+        * Patient demographics in headers if not in primary
+        * Exact pain scores if not in primary
+    - **DO NOT let this override the clinical context from the primary source**
+
+    ⚠️ ANTI-HALLUCINATION RULES FOR DUAL-CONTEXT:
+
+    1. **CONTEXT PRIORITY ENFORCEMENT**:
+    - When both sources provide information about the SAME clinical finding:
+        ✅ ALWAYS use interpretation from PRIMARY SOURCE (accurate context)
+        ❌ NEVER override with potentially inaccurate full text version
+    
+    2. **CLINICAL ASSESSMENT PRIORITY**:
+    - PRIMARY SOURCE provides accurate clinical interpretations and assessments
+    - Use FULL TEXT only for specific measurements if missing
+    - NEVER change clinical interpretation based on full text alone
+
+    3. **TREATMENT & MODALITIES**:
+    - PRIMARY SOURCE contains accurate treatment context
+    - Use FULL TEXT for specific parameters (durations, frequencies, CPT codes) if missing
+    - DO NOT add treatments from full text if they contradict primary source
+
+    4. **OBJECTIVE FINDINGS**:
+    - PRIMARY SOURCE for clinically significant findings and context
+    - Use FULL TEXT only for specific measurements (ROM degrees, strength grades) if missing
+    - DO NOT add normal findings from full text if primary focuses on abnormalities
+
+    5. **PATIENT DEMOGRAPHICS**:
+    - Check both sources for patient name, DOB, ID
+    - PRIMARY SOURCE preferred, but FULL TEXT headers often better for exact demographics
+    - Use most complete/accurate version
+
+    6. **SIGNATURE/AUTHOR**:
+    - Check PRIMARY SOURCE first for signing provider
+    - If not clear, scan FULL TEXT signature blocks (usually last pages)
+    - Extract ONLY from explicit sign blocks with signing language
+
+    🔍 EXTRACTION WORKFLOW:
+
+    Step 1: Read PRIMARY SOURCE (accurate context) thoroughly for clinical understanding
+    Step 2: Extract ALL clinical findings, assessments, treatments from PRIMARY SOURCE
+    Step 3: Check SUPPLEMENTARY SOURCE (full text) ONLY for:
+    - Specific measurements missing from primary (ROM degrees, pain scores)
+    - Patient demographics in headers
+    - CPT codes or procedure codes
+    - Additional details not in primary
+    Step 4: Verify no contradictions between sources (if conflict, PRIMARY wins)
+
+    ⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY - ABSOLUTE FOR SIGNATURES) (donot include in output, for LLM use only):
+
+    1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
+    - If NOT explicitly mentioned in PRIMARY SOURCE, check SUPPLEMENTARY
+    - If still not found, return EMPTY string "" or empty list []
+    - DO NOT infer, assume, or extrapolate clinical information
+
+    2. **SUBJECTIVE COMPLAINTS - PATIENT'S EXACT WORDS**
+    - Extract from PRIMARY SOURCE for accurate context
+    - Use FULL TEXT only for exact patient quotes if more complete
+    - DO NOT interpret or rephrase
+
+    3. **OBJECTIVE FINDINGS - MEASURED VALUES ONLY**
+    - PRIMARY SOURCE for clinical significance
+    - Supplement with exact measurements from FULL TEXT if missing
+    - DO NOT calculate or estimate ranges
+
+    4. **TREATMENTS & MODALITIES - SPECIFIC DETAILS ONLY**
+    - PRIMARY SOURCE for treatment context
+    - FULL TEXT for specific parameters if missing
+    - DO NOT add typical treatment protocols
+
+    5. **ASSESSMENT & PLAN - CLINICIAN'S EXACT WORDING**
+    - PRIMARY SOURCE for clinical reasoning
+    - FULL TEXT for exact wording only if more specific
+    - DO NOT interpret clinical reasoning
+
+    6. **PATIENT DETAILS - FROM BOTH SOURCES**:
+    - Check PRIMARY SOURCE first
+    - Use FULL TEXT headers/demographics sections if more complete
+    - Use exact formatting from clearest source
+
+    7. **SIGNATURE AUTHOR - STRICTLY FROM SIGN BLOCK ONLY (PHYSICAL/ELECTRONIC) - NO HALLUCINATIONS**
+    - Check PRIMARY SOURCE first for author
+    - If not clear, scan FULL TEXT signature blocks (last pages)
+    - MUST have explicit signing language
+    - OMIT if no explicit sign block found
+
+    EXTRACTION FOCUS - 10 CRITICAL CLINICAL NOTE CATEGORIES:
+
+    I. NOTE IDENTITY & ENCOUNTER CONTEXT
+    II. PATIENT INFORMATION
+    III. SUBJECTIVE FINDINGS (PATIENT'S PERSPECTIVE)
+    IV. OBJECTIVE EXAMINATION FINDINGS (CLINICIAN'S OBSERVATIONS)
+    V. TREATMENT PROVIDED (SESSION-SPECIFIC)
+    VI. ASSESSMENT & CLINICAL IMPRESSION
+    VII. TREATMENT PLAN & GOALS
+    VIII. WORK STATUS & FUNCTIONAL CAPACITY
+    IX. SIGNATURE & AUTHOR (STRICT PHYSICAL/ELECTRONIC - NO ASSUMPTIONS)
+    X. OUTCOME MEASURES & PROGRESS TRACKING
+
+    ⚠️ FINAL REMINDER (donot include in output, for LLM use only):
+    - PRIMARY SOURCE is your MAIN reference for clinical context
+    - Use FULL TEXT only for specific missing details (measurements, codes, exact demographics)
+    - NEVER override primary source clinical interpretations with full text
+    - SIGNATURE: ONLY from explicit sign block; OMIT if no explicit signing phrase
+
+    Now analyze this COMPLETE {doc_type} using the DUAL-CONTEXT PRIORITY approach and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
+    """)
+
+        # Updated User Prompt with clear source separation
+        user_prompt = HumanMessagePromptTemplate.from_template("""
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    📌 PRIMARY SOURCE - ACCURATE CONTEXT (Use this as your MAIN reference):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    {document_actual_context}
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    📄 SUPPLEMENTARY SOURCE - FULL TEXT EXTRACTION (Use ONLY for missing details):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    {full_document_text}
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    Document Type: {doc_type}
+    Report Date: {fallback_date}
+
+    Generate the long summary in this EXACT STRUCTURED FORMAT using the DUAL-CONTEXT PRIORITY rules:
+
+    👤 PATIENT INFORMATION
+    --------------------------------------------------
+    [Check PRIMARY SOURCE first, use FULL TEXT headers if more complete]
+
+    Name: [from primary, supplement from full text headers if needed]
+    DOB: [from primary, supplement from full text headers if needed]
+    Other Details: [claim number - check full text headers first, then primary]
+
+    📋 CLINICAL ENCOUNTER OVERVIEW
+    --------------------------------------------------
+    Note Type: {doc_type}
+    Visit Date: [from primary source, supplement if needed]
+    Visit Type: [from primary]
+    Duration: [from primary]
+    Facility: [from primary]
+
+    👨‍⚕️ PROVIDER INFORMATION
+    --------------------------------------------------
+    Treating Provider: [from primary source]
+    Credentials: [from primary]
+    Specialty: [from primary]
+
+    ━━━ CLAIM NUMBER EXTRACTION ━━━
+    - Check FULL TEXT headers/footers FIRST for exact claim numbers
+    - Then check PRIMARY SOURCE if full text unclear
+    - Scan for patterns: "[Claim #XXXXXXXXX]", "Claim Number:", "WC Claim:"
+
+    All Doctors Involved:
+    • [extract from BOTH sources, deduplicate, prefer primary source format]
+
+    ━━━ ALL DOCTORS EXTRACTION ━━━
+    - Extract from BOTH sources (primary + supplementary)
+    - Deduplicate: If same doctor in both, use PRIMARY SOURCE format
+    - Include: treating physician, referring doctor, etc.
+
+    🗣️ SUBJECTIVE FINDINGS
+    --------------------------------------------------
+    [FROM PRIMARY SOURCE for accurate clinical context]
+    [Supplement with exact patient quotes from FULL TEXT if more complete]
+
+    Chief Complaint: [primary source]
+    Pain: [primary source, supplement exact scores from full text]
+
+    Functional Limitations:
+    • [from primary source, list up to 5, exact wording]
+
+    🔍 OBJECTIVE EXAMINATION
+    --------------------------------------------------
+    [FROM PRIMARY SOURCE for clinically significant findings]
+    [Supplement with exact measurements from FULL TEXT if missing]
+
+    Range of Motion:
+    • [primary for clinical significance, full text for exact degrees if missing]
+
+    Manual Muscle Testing:
+    • [primary for findings, full text for exact grades if missing]
+
+    Special Tests:
+    • [from primary source, list up to 3, with results]
+
+    💆 TREATMENT PROVIDED
+    --------------------------------------------------
+    [FROM PRIMARY SOURCE for treatment context]
+    [Supplement with specific parameters from FULL TEXT if missing]
+
+    Treatment Techniques:
+    • [primary source, supplement CPT codes from full text if missing]
+
+    Therapeutic Exercises:
+    • [from primary source, list up to 5]
+
+    Modalities Used:
+    • [primary source, supplement parameters from full text if missing]
+
+    🏥 CLINICAL ASSESSMENT
+    --------------------------------------------------
+    [ALL FROM PRIMARY SOURCE for accurate clinical reasoning]
+
+    Assessment: [primary source]
+    Progress: [primary source]
+    Clinical Impression: [primary source]
+    Prognosis: [primary source]
+
+    🎯 TREATMENT PLAN
+    --------------------------------------------------
+    [FROM PRIMARY SOURCE for treatment planning context]
+
+    Short-term Goals:
+    • [from primary source, list up to 3]
+
+    Home Exercise Program:
+    • [from primary source, list up to 3]
+
+    Frequency/Duration: [primary source]
+    Next Appointment: [primary source]
+
+    💼 WORK STATUS
+    --------------------------------------------------
+    Current Status: [primary source]
+
+    Work Restrictions:
+    • [from primary source, list up to 5, exact wording]
+
+    Functional Capacity: [primary source]
+
+    📊 OUTCOME MEASURES
+    --------------------------------------------------
+    Pain Scale: [primary source, supplement exact number from full text if missing]
+
+    Functional Scores:
+    • [from primary source, list up to 3]
+
+    ✍️ SIGNATURE & AUTHOR
+    --------------------------------------------------
+    [Check PRIMARY SOURCE first, then FULL TEXT signature blocks if unclear]
+
+    Author:
+    hint: check primary source first, then full text signature block (last pages) if unclear
+    • Signature: [extracted name/title if physical or electronic signature present; otherwise omit]
+
+    🚨 CRITICAL CLINICAL FINDINGS
+    --------------------------------------------------
+    • [from PRIMARY SOURCE - list up to 8 most significant items]
+
+    REMEMBER: 
+    1. PRIMARY SOURCE (accurate context) is your MAIN reference for clinical interpretations
+    2. Use FULL TEXT only to supplement specific missing details (measurements, codes, exact demographics)
+    3. NEVER override primary source clinical context with full text
+    """)
+
+        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
+        
+        logger.info(f"📄 PRIMARY SOURCE size: {len(raw_text):,} chars")
+        logger.info(f"📄 SUPPLEMENTARY size: {len(text):,} chars")
+        logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach...")
+        
+        try:
+            start_time = time.time()
+            
+            # Single LLM call with both sources
+            chain = chat_prompt | self.llm
+            result = chain.invoke({
+                "doc_type": doc_type,
+                "document_actual_context": raw_text,  # PRIMARY: Accurate summarized context
+                "full_document_text": text,           # SUPPLEMENTARY: Full OCR extraction
+                "fallback_date": fallback_date
+            })
+            
+            long_summary = result.content.strip()
+            
+            end_time = time.time()
+            processing_time = end_time - start_time
+            
+            logger.info(f"⚡ Clinical long summary generated in {processing_time:.2f}s")
+            logger.info(f"✅ Generated long summary: {len(long_summary):,} chars")
+            logger.info("✅ Context priority maintained: PRIMARY source used for clinical findings")
+            
+            return long_summary
+            
+        except Exception as e:
+            logger.error(f"❌ Direct clinical note long summary generation failed: {e}", exc_info=True)
+            
+            # Check if context length exceeded
+            if "context_length_exceeded" in str(e).lower() or "maximum context" in str(e).lower():
+                logger.error("❌ Clinical note exceeds GPT-4o 128K context window")
+                logger.error("❌ Consider implementing chunked fallback for very large notes")
+            
+            # Fallback: Generate a minimal summary
+            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
 
     def _detect_note_type(self, text: str, original_type: str) -> str:
         """
@@ -163,337 +506,6 @@ class ClinicalNoteExtractor:
         logger.info(f"🔍 Could not auto-detect note type, using: {original_type}")
         return original_type or "Clinical Note"
 
-    def _generate_long_summary_direct(
-        self,
-        text: str,
-        doc_type: str,
-        fallback_date: str
-    ) -> str:
-        """
-        Directly generate comprehensive long summary with FULL document context using LLM.
-        Enhanced for strict extraction of physical/electronic signature author only from explicit sign blocks.
-        """
-        logger.info("🔍 Processing ENTIRE clinical note in single context window for direct long summary...")
-        
-        # Enhanced System Prompt with stricter rules for signature extraction (physical/electronic) - Anti-Hallucination Focus
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are an expert clinical documentation specialist analyzing a COMPLETE {doc_type}.
-
-CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
-You are seeing the ENTIRE clinical note at once, allowing you to:
-- Understand the complete clinical encounter from subjective complaints to treatment plan
-- Track progress across multiple visits and treatment sessions
-- Identify patterns in symptoms, functional limitations, and treatment response
-- Provide comprehensive extraction without information loss
-- Extract patient details from demographics/header sections
-- Extract signature author STRICTLY from explicit sign block/signature section at the end (e.g., "Electronically signed by", "Signature:", "Attested by"). Distinguish physical (handwritten/wet) vs electronic (e-signature/digital).
-
-⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY - ABSOLUTE FOR SIGNATURES) (donot include in output, for LLM use only):
-
-1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
-   - If a field/value is NOT explicitly mentioned in the note, return EMPTY string "" or empty list []
-   - DO NOT infer, assume, or extrapolate clinical information
-   - DO NOT fill in "typical" or "common" clinical values
-   - DO NOT use clinical knowledge to "complete" incomplete information
-   
-2. **SUBJECTIVE COMPLAINTS - PATIENT'S EXACT WORDS**
-   - Extract patient complaints using EXACT wording from note
-   - DO NOT interpret or rephrase patient statements
-   - Include pain descriptions, functional limitations, and concerns verbatim
-   
-3. **OBJECTIVE FINDINGS - MEASURED VALUES ONLY**
-   - Extract ROM measurements, strength grades, pain scales ONLY if explicitly stated
-   - Include units and specific values EXACTLY as written
-   - DO NOT calculate or estimate ranges
-   
-4. **TREATMENTS & MODALITIES - SPECIFIC DETAILS ONLY**
-   - Extract treatment techniques, modalities, exercises ONLY if explicitly listed
-   - Include durations, frequencies, parameters ONLY if specified
-   - DO NOT add typical treatment protocols
-   
-5. **ASSESSMENT & PLAN - CLINICIAN'S EXACT WORDING**
-   - Extract clinical assessment using EXACT phrasing from note
-   - Include treatment plan details verbatim
-   - DO NOT interpret clinical reasoning
-
-6. **PATIENT DETAILS - FROM DEMOGRAPHICS/HEADER**
-   - Extract patient name, DOB, ID ONLY if explicitly stated in patient info section (e.g., "## PATIENT INFORMATION")
-   - Use exact formatting from note
-   - Do NOT extract from narrative text
-
-7. **SIGNATURE AUTHOR - STRICTLY FROM SIGN BLOCK ONLY (PHYSICAL/ELECTRONIC) - NO HALLUCINATIONS**
-    Author:
-    hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-    • Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
-   - List separately if both present; use exact names/titles from the document.
-   - CRITICAL: DO NOT extract ANY name as signer if there is NO explicit signing phrase. Provider names, treating physicians, or mentioned authors are NOT signers unless the sign block explicitly says they signed.
-   - Examples of INVALID extraction (DO NOT DO THIS):
-     - If note says "Provider: Joshua T. Ritter, D.C." but no "signed by" -> OMIT entirely, do not assume electronic.
-     - If only "Dictated by Joshua" but no signature block -> OMIT.
-     - If "Report prepared by Joshua" without signing language -> OMIT.
-   - If no explicit sign block with signing language found, leave COMPLETELY EMPTY (no "Not explicitly signed" - just omit the bullets).
-   - Scan the ENTIRE document, but prioritize the end for sign blocks.
-
-EXTRACTION FOCUS - 10 CRITICAL CLINICAL NOTE CATEGORIES:
-
-I. NOTE IDENTITY & ENCOUNTER CONTEXT
-- Note type, dates, encounter information
-- Provider details and credentials (treating/radiologist/referring)
-
-II. PATIENT INFORMATION
-- Patient name, DOB, other demographics from explicit header sections
-
-III. SUBJECTIVE FINDINGS (PATIENT'S PERSPECTIVE)
-- Chief complaint and history of present illness
-- Pain characteristics: location, intensity, quality, timing
-- Functional limitations and impact on daily activities
-- Patient's goals and expectations
-- Relevant medical and social history
-
-IV. OBJECTIVE EXAMINATION FINDINGS (CLINICIAN'S OBSERVATIONS)
-- Vital signs and general appearance
-- Physical examination findings:
-  * Range of motion (ROM) measurements with specific degrees
-  * Manual muscle testing grades (0-5)
-  * Palpation findings and tender points
-  * Special tests and orthopedic assessments
-  * Neurological examination findings
-- Functional capacity assessments
-- Observation of movement patterns and gait
-
-V. TREATMENT PROVIDED (SESSION-SPECIFIC)
-- Specific techniques and modalities used:
-  * Manual therapy techniques
-  * Therapeutic exercises prescribed
-  * Modalities applied (heat, ice, electrical stimulation, etc.)
-  * Acupuncture points or chiropractic adjustments
-- Treatment parameters: duration, intensity, frequency
-- Patient response to treatment
-- Any adverse reactions or complications
-
-VI. ASSESSMENT & CLINICAL IMPRESSION
-- Clinical assessment and diagnosis
-- Progress since last visit
-- Changes in functional status
-- Barriers to recovery
-- Prognosis and expected outcomes
-
-VII. TREATMENT PLAN & GOALS
-- Short-term and long-term goals
-- Specific plan for next visit
-- Home exercise program details
-- Frequency and duration of continued care
-- Referrals or consultations needed
-
-VIII. WORK STATUS & FUNCTIONAL CAPACITY
-- Current work restrictions
-- Functional limitations
-- Ability to perform job duties
-- Expected return to work timeline
-
-IX. SIGNATURE & AUTHOR (STRICT PHYSICAL/ELECTRONIC - NO ASSUMPTIONS)
-- Signed by author from explicit sign block only, distinguishing physical/electronic - OMIT if not explicit
-
-X. OUTCOME MEASURES & PROGRESS TRACKING
-- Standardized outcome measures (ODI, NDI, DASH, etc.)
-- Pain scale ratings (0-10)
-- Functional improvement metrics
-- Patient satisfaction measures
-
-⚠️ FINAL REMINDER (donot include in output, for LLM use only):
-- If information is NOT in the note, return EMPTY ("" or [])
-- NEVER assume, infer, or extrapolate clinical information - ESPECIALLY FOR SIGNATURES
-- PAIN SCALES: Extract exact numbers (e.g., "6/10") not descriptions
-- ROM MEASUREMENTS: Extract exact degrees, not ranges
-- SIGNATURE: ONLY from explicit sign block with signing language; distinguish physical vs electronic; OMIT if no explicit signing phrase; provider names are NOT signers unless specified with "signed by"
-- It is BETTER to have empty fields than incorrect clinical information - EMPTY SIGNATURE > WRONG SIGNER
-
-Now analyze this COMPLETE {doc_type} and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
-""")
-
-        # User Prompt updated for physical/electronic distinction
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-COMPLETE {doc_type} TEXT:
-
-{full_document_text}
-
-Generate the long summary in this EXACT STRUCTURED FORMAT (use the fallback date {fallback_date} if no visit date found):
-
-👤 PATIENT INFORMATION
---------------------------------------------------
-Name: [extracted from explicit demographics/header, e.g., "## PATIENT INFORMATION"]
-DOB: [extracted]
-Other Details: [extracted, e.g., ID, gender, claim number, DOI]
-
-📋 CLINICAL ENCOUNTER OVERVIEW
---------------------------------------------------
-Note Type: {doc_type}
-Visit Date: [extracted or {fallback_date}]
-Visit Type: [extracted]
-Duration: [extracted]
-Facility: [extracted]
-
-👨‍⚕️ PROVIDER INFORMATION
---------------------------------------------------
-Treating Provider: [name, e.g., Radiologist or Referring]
-  Credentials: [extracted]
-  Specialty: [extracted]
-
-━━━ CLAIM NUMBER EXTRACTION PATTERNS ━━━
-CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
-
-Common claim number patterns (case-insensitive) and make sure to extract EXACTLY as written and must be claim number not just random numbers (like chart numbers, or id numbers) that look similar:
-- "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
-- "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
-- "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
-- "WC Claim: XXXXXXXXX" or "Workers Comp Claim: XXXXXXXXX"
-- "Policy/Claim: XXXXXXXXX"
-- In "cc:" lines: "Broadspire [Claim #XXXXXXXXX]"
-- In subject lines or reference fields: "Claim #XXXXXXX"
-
-All Doctors Involved:
-• [list all extracted doctors with names and titles]
-━━━ ALL DOCTORS EXTRACTION ━━━
-- Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
-- Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
-- Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
-- Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
-- Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
-- If no doctors found, leave list empty [].
-
-🗣️ SUBJECTIVE FINDINGS
---------------------------------------------------
-Chief Complaint: [extracted]
-Pain: [location, intensity, quality]
-Functional Limitations:
-• [list up to 5, exact wording]
-
-🔍 OBJECTIVE EXAMINATION
---------------------------------------------------
-Range of Motion:
-• [list up to 5, with body part, motion, degrees or qualitative if no degrees]
-Manual Muscle Testing:
-• [list up to 3, with muscle and grade/5]
-Special Tests:
-• [list up to 3, with results]
-
-💆 TREATMENT PROVIDED
---------------------------------------------------
-Treatment Techniques:
-• [list up to 5]
-Therapeutic Exercises:
-• [list up to 5]
-Modalities Used:
-• [list up to 3]
-
-🏥 CLINICAL ASSESSMENT
---------------------------------------------------
-Assessment: [extracted]
-Progress: [extracted]
-Clinical Impression: [extracted]
-Prognosis: [extracted]
-
-🎯 TREATMENT PLAN
---------------------------------------------------
-Short-term Goals:
-• [list up to 3]
-Home Exercise Program:
-• [list up to 3]
-Frequency/Duration: [extracted]
-Next Appointment: [extracted]
-
-💼 WORK STATUS
---------------------------------------------------
-Current Status: [extracted]
-Work Restrictions:
-• [list up to 5, exact wording]
-Functional Capacity: [extracted]
-
-📊 OUTCOME MEASURES
---------------------------------------------------
-Pain Scale: [extracted, e.g., 6/10]
-Functional Scores:
-• [list up to 3, with measure and value]
-
-✍️ SIGNATURE & AUTHOR
---------------------------------------------------
-
-Author:
-hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
-
-🚨 CRITICAL CLINICAL FINDINGS
---------------------------------------------------
-• [list up to 8 most significant items]
-
-⚠️ CRITICAL CLINICAL REMINDERS (donot include in output, for LLM use only):
-1. For "range_of_motion": Extract EXACT measurements with degrees; use qualitative (e.g., "mildly reduced") if no numbers
-   - Include body part, motion, and specific degrees/qualitative
-   - Example: "Cervical flexion: mildly reduced with pain"
-
-2. For "pain_scale": Extract EXACT numerical values (0-10 scale)
-   - Example: "6/10" not "moderate pain"
-   - Include location if specified
-
-3. For "treatment_techniques": Extract SPECIFIC techniques used
-   - Include parameters if specified (e.g., "US 1.5 W/cm² for 8 minutes")
-   - Do not include techniques mentioned as options or for future use
-
-4. For "work_restrictions": Extract EXACT limitations stated
-   - Include weight limits, positional restrictions, duration
-   - Example: "no lifting >10 lbs" not "light duty"
-
-5. For "critical_clinical_findings": Include clinically significant changes
-   - Worsening symptoms or functional decline
-   - New neurological findings
-   - Significant progress or setbacks
-   - Compliance issues affecting treatment
-
-6. For patient details: Extract ONLY from explicit demographics sections (e.g., "## PATIENT INFORMATION")
-   - Do not infer from narrative or provider sections
-
-7. For signature author: Extract STRICTLY from sign block/signature section (usually at end), distinguishing physical vs electronic
-   - MUST have explicit signing language (e.g., "Electronically signed by [Name]", "Handwritten by [Name]")
-   - Radiologist/Referring Physician is NOT a signer unless in sign block with signing phrase
-   - If absent or no signing language, OMIT the entire Signer/Author section - do not add "Not explicitly signed"
-""")
-
-        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-        
-        try:
-            start_time = time.time()
-            
-            logger.info("🤖 Invoking LLM for direct full-context clinical note long summary generation...")
-            
-            # Single LLM call with FULL document context to generate long summary directly
-            chain = chat_prompt | self.llm
-            result = chain.invoke({
-                "doc_type": doc_type,
-                "full_document_text": text,
-                "fallback_date": fallback_date
-            })
-            
-            long_summary = result.content.strip()
-            
-            end_time = time.time()
-            processing_time = end_time - start_time
-            
-            logger.info(f"⚡ Direct clinical note long summary generation completed in {processing_time:.2f}s")
-            logger.info(f"✅ Generated long summary from complete {len(text):,} char clinical note")
-            
-            return long_summary
-            
-        except Exception as e:
-            logger.error(f"❌ Direct clinical note long summary generation failed: {e}", exc_info=True)
-            
-            # Check if context length exceeded
-            if "context_length_exceeded" in str(e).lower() or "maximum context" in str(e).lower():
-                logger.error("❌ Clinical note exceeds GPT-4o 128K context window")
-                logger.error("❌ Consider implementing chunked fallback for very large notes")
-            
-            # Fallback: Generate a minimal summary
-            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
-    
     def _clean_pipes_from_summary(self, short_summary: str) -> str:
         """
         Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.

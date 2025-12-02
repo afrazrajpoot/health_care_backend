@@ -11,7 +11,6 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import AzureChatOpenAI
 from config.settings import CONFIG
-from utils.document_context_analyzer import DocumentContextAnalyzer
 
 # Setup logger
 logger = logging.getLogger(__name__)

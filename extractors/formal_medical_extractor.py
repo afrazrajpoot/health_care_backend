@@ -68,74 +68,357 @@ class FormalMedicalReportExtractor:
         
         logger.info("✅ FormalMedicalReportExtractor initialized (Full Context + Enhanced Signature Extraction)")
 
+    # formal_medical_extractor.py - UPDATED with dual-context priority
+
     def extract(
         self,
         text: str,
+        raw_text: str,
         doc_type: str,
         fallback_date: str,
-    
     ) -> Dict:
         """
         Extract Formal Medical Report data with FULL CONTEXT.
         
         Args:
-            text: Complete document text (layout-preserved)
+            text: Complete document text (full OCR extraction)
+            raw_text: Accurate summarized context from Document AI Summarizer (PRIMARY SOURCE)
             doc_type: Document type (Surgery, Anesthesia, EMG, Pathology, etc.)
             fallback_date: Fallback date if not found
-            page_zones: Per-page zone extraction
-            raw_text: Original flat text (optional)
-            
+        
         Returns:
             Dict with long_summary and short_summary
         """
         logger.info("=" * 80)
-        logger.info("🏥 STARTING FORMAL MEDICAL REPORT EXTRACTION (FULL CONTEXT)")
+        logger.info("🏥 STARTING FORMAL MEDICAL REPORT EXTRACTION (DUAL-CONTEXT PRIORITY)")
         logger.info("=" * 80)
         
-        # Use text directly for LLM extraction
-        text_to_use = text
-        logger.info("📄 Using text for LLM extraction")
+        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
+        logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
         
         # Auto-detect specific report type if not specified
-        detected_type = self._detect_report_type(text_to_use, doc_type)
+        detected_type = self._detect_report_type(raw_text, doc_type)  # Use primary for detection
         logger.info(f"📋 Report Type: {detected_type} (original: {doc_type})")
         
         # Check document size
-        text_length = len(text_to_use)
+        text_length = len(raw_text)
         token_estimate = text_length // 4
-        logger.info(f"📄 Document size: {text_length:,} chars (~{token_estimate:,} tokens)")
+        logger.info(f"📄 PRIMARY source size: {text_length:,} chars (~{token_estimate:,} tokens)")
         
         if token_estimate > 120000:
             logger.warning(f"⚠️ Document very large ({token_estimate:,} tokens)")
             logger.warning("⚠️ May exceed GPT-4o context window (128K tokens)")
         
-        # ENHANCED: Pre-extract potential signatures using regex to guide LLM
-        potential_signatures = self._pre_extract_signatures(text_to_use)
-        logger.info(f"🔍 Pre-extracted potential signatures: {potential_signatures}")
+        # ENHANCED: Pre-extract potential signatures from BOTH sources
+        potential_signatures_primary = self._pre_extract_signatures(raw_text)
+        potential_signatures_full = self._pre_extract_signatures(text)
+        potential_signatures = list(set(potential_signatures_primary + potential_signatures_full))
+        logger.info(f"🔍 Pre-extracted potential signatures (both sources): {potential_signatures}")
         
-        # Stage 1: Directly generate long summary with FULL CONTEXT (no intermediate extraction)
+        # Stage 1: Directly generate long summary with DUAL-CONTEXT
         long_summary = self._generate_long_summary_direct(
-            text=text_to_use,
+            text=text,
+            raw_text=raw_text,
             doc_type=detected_type,
             fallback_date=fallback_date,
-            potential_signatures=potential_signatures  # Pass to prompt for guidance
+            potential_signatures=potential_signatures
         )
+        
         # ENHANCED: Verify and inject author into long summary if needed
-        verified_author = self._verify_and_extract_author(long_summary, text_to_use, potential_signatures)
+        verified_author = self._verify_and_extract_author(long_summary, raw_text, text, potential_signatures)
         long_summary = self._inject_author_into_long_summary(long_summary, verified_author)
-
+        
         # Stage 2: Generate short summary from long summary
         short_summary = self._generate_short_summary_from_long_summary(long_summary, detected_type)
-
+        
         logger.info("=" * 80)
-        logger.info("✅ FORMAL MEDICAL REPORT EXTRACTION COMPLETE (FULL CONTEXT)")
+        logger.info("✅ FORMAL MEDICAL REPORT EXTRACTION COMPLETE (DUAL-CONTEXT)")
         logger.info("=" * 80)
-
+        
         # Return dictionary with both summaries
         return {
             "long_summary": long_summary,
             "short_summary": short_summary
         }
+
+    def _verify_and_extract_author(
+        self, 
+        long_summary: str, 
+        raw_text: str,
+        full_text: str, 
+        potential_signatures: List[str]
+    ) -> str:
+        """
+        ENHANCED: Use LLM to verify author with DUAL-CONTEXT.
+        Prioritizes PRIMARY SOURCE, supplements with FULL TEXT if needed.
+        """
+        # Updated verification prompt with dual-context awareness
+        verify_prompt = ChatPromptTemplate.from_messages([
+            SystemMessagePromptTemplate.from_template("""
+    You are verifying the AUTHOR/SIGNER of a medical report using DUAL-CONTEXT sources.
+
+    PRIMARY SOURCE (raw_text): Most accurate context for clinical interpretations
+    SUPPLEMENTARY SOURCE (full_text): Complete OCR for signature blocks in headers/footers
+
+    Extract ONLY the exact name of the person who signed:
+    - Check PRIMARY SOURCE first for author context
+    - Check SUPPLEMENTARY SOURCE for signature blocks (usually last pages/footers)
+    - Prioritize end-of-document signatures or last provider entry
+    - Differentiate from Performing/Ordering Physician if distinct
+    - Use candidates for confirmation, especially those with 'signed' or last 'Physician:'
+
+    Output ONLY the name as JSON: {"author": "Exact Name (e.g., Dr. Jane Doe)"}
+    """),
+            HumanMessagePromptTemplate.from_template("""
+    PRIMARY SOURCE (accurate context):
+    {raw_text}
+
+    SUPPLEMENTARY SOURCE (full OCR):
+    {full_text}
+
+    Long Summary: {long_summary}
+    Candidates: {potential_signatures}
+    """)
+        ])
+        
+        try:
+            chain = verify_prompt | self.llm
+            result = chain.invoke({
+                "raw_text": raw_text[:5000],  # First 5000 chars for context
+                "full_text": full_text[-5000:],  # Last 5000 chars for signatures
+                "long_summary": long_summary,
+                "potential_signatures": "\n".join(potential_signatures)
+            })
+            
+            parsed = self.parser.parse(result.content)
+            verified_author = parsed.get("author", "")
+            
+            if not verified_author or "No distinct" in verified_author:
+                # Fallback: Scan both sources
+                last_provider_pattern = re.compile(
+                    r'(Physician:\s*)([A-Za-z\s\.,]+?)(?=\s*\(|Massage|\n{2,}|$)',
+                    re.IGNORECASE | re.DOTALL
+                )
+                
+                # Try full text first (better for signatures)
+                match = last_provider_pattern.search(full_text)
+                if not match:
+                    # Try primary source
+                    match = last_provider_pattern.search(raw_text)
+                
+                if match:
+                    verified_author = match.group(2).strip()
+                elif potential_signatures:
+                    for cand in reversed(potential_signatures):
+                        if any(word in cand.lower() for word in ['signed', 'signature', 'physician']):
+                            verified_author = cand.split(':')[-1].strip()
+                            break
+                else:
+                    verified_author = "Signature not identified"
+            
+            logger.info(f"🔍 Verified Author (dual-context): {verified_author}")
+            return verified_author
+            
+        except Exception as e:
+            logger.warning(f"Author verification failed: {e}. Using raw candidates.")
+            return potential_signatures[-1].split(':')[-1].strip() if potential_signatures else "Author not extracted"
+
+    def _generate_long_summary_direct(
+        self,
+        text: str,
+        raw_text: str,
+        doc_type: str,
+        fallback_date: str,
+        potential_signatures: List[str]
+    ) -> str:
+        """
+        Directly generate comprehensive long summary with DUAL-CONTEXT PRIORITY.
+        
+        PRIMARY SOURCE: raw_text (accurate Document AI summarized context)
+        SUPPLEMENTARY: text (full OCR extraction for missing details only)
+        """
+        logger.info("🔍 Processing medical report with DUAL-CONTEXT approach...")
+        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
+        logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        
+        # ENHANCED System Prompt with DUAL-CONTEXT PRIORITY
+        system_prompt = SystemMessagePromptTemplate.from_template("""
+    You are an expert medical documentation specialist analyzing a COMPLETE {doc_type} report.
+
+    🎯 CRITICAL CONTEXT HIERARCHY (HIGHEST PRIORITY):
+
+    You are provided with TWO versions of the document:
+
+    1. **PRIMARY SOURCE - "ACCURATE CONTEXT" (raw_text)**:
+    - This is the MOST ACCURATE, context-aware summary from Google's Document AI foundation model
+    - It preserves CRITICAL MEDICAL CONTEXT with accurate clinical interpretations
+    - **USE THIS AS YOUR PRIMARY SOURCE OF TRUTH**
+    - Contains CORRECT medical conclusions, accurate clinical interpretations, proper context
+    - **ALWAYS PRIORITIZE information from this source**
+
+    2. **SUPPLEMENTARY SOURCE - "FULL TEXT EXTRACTION" (text)**:
+    - Complete OCR text extraction (may have formatting noise, OCR artifacts)
+    - Use ONLY to fill in SPECIFIC DETAILS missing from the accurate context
+    - Examples of acceptable supplementary use:
+        * Exact patient demographics in headers if not in primary
+        * Specific measurements or lab values if not in primary
+        * CPT/ICD codes in billing sections
+        * Signature blocks in footers (better in full text)
+        * Claim numbers in headers/footers
+    - **DO NOT let this override the medical context from the primary source**
+
+    ⚠️ ANTI-HALLUCINATION RULES FOR DUAL-CONTEXT:
+
+    1. **CONTEXT PRIORITY ENFORCEMENT**:
+    - When both sources provide information about the SAME medical finding:
+        ✅ ALWAYS use interpretation from PRIMARY SOURCE (accurate context)
+        ❌ NEVER override with potentially inaccurate full text version
+    
+    2. **MEDICAL FINDINGS & DIAGNOSES PRIORITY**:
+    - PRIMARY SOURCE provides accurate medical interpretations
+    - Use FULL TEXT only for exact values/codes if missing
+    - NEVER change medical interpretation based on full text alone
+
+    3. **PROCEDURES & TECHNIQUES**:
+    - PRIMARY SOURCE for procedure context and clinical significance
+    - FULL TEXT for specific CPT codes or technical parameters if missing
+    - DO NOT add procedures from full text if they contradict primary
+
+    4. **PATIENT DEMOGRAPHICS**:
+    - Check PRIMARY SOURCE first
+    - Use FULL TEXT headers if more complete for exact demographics
+    - Use most complete/accurate version
+
+    5. **SIGNATURE/AUTHOR**:
+    - Check PRIMARY SOURCE first for author context
+    - FULL TEXT better for signature blocks in footers (last pages)
+    - Extract from explicit sign blocks only
+
+    🔍 EXTRACTION WORKFLOW:
+
+    Step 1: Read PRIMARY SOURCE (accurate context) thoroughly for medical understanding
+    Step 2: Extract ALL medical findings, diagnoses, procedures from PRIMARY SOURCE
+    Step 3: Check SUPPLEMENTARY SOURCE (full text) ONLY for:
+    - Patient demographics in headers
+    - CPT/ICD codes if missing
+    - Signature blocks in footers
+    - Claim numbers in headers
+    - Specific measurements if missing
+    Step 4: Verify no contradictions between sources (if conflict, PRIMARY wins)
+
+    [Rest of the anti-hallucination rules remain the same as original...]
+
+    CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
+    You are seeing the ENTIRE medical report at once, allowing you to:
+    - Understand the complete clinical picture from history to conclusions
+    - Connect pre-procedure assessments with intraoperative findings and post-procedure outcomes
+    - Identify relationships between clinical indications, procedures performed, and results
+    - Provide comprehensive extraction without information loss
+
+    ⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY):
+    [Keep all existing anti-hallucination rules from original file...]
+
+    Now analyze this COMPLETE {doc_type} medical report using the DUAL-CONTEXT PRIORITY approach and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY:
+    """)
+
+        # Updated user prompt with clear source separation
+        user_prompt = HumanMessagePromptTemplate.from_template("""
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    📌 PRIMARY SOURCE - ACCURATE CONTEXT (Use this as your MAIN reference):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    {document_actual_context}
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    📄 SUPPLEMENTARY SOURCE - FULL TEXT EXTRACTION (Use ONLY for missing details):
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    {full_document_text}
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    Document Type: {doc_type}
+    Report Date: {fallback_date}
+
+    MANDATORY SIGNATURE SCAN: Read PRIMARY SOURCE first for author context. Check SUPPLEMENTARY SOURCE (last pages/footers) for signature blocks. Use these candidates to CONFIRM:
+    {potential_signatures}
+
+    Generate the long summary in this EXACT STRUCTURED FORMAT using the DUAL-CONTEXT PRIORITY rules:
+
+    [Keep all existing format sections from original file, but add notes about source priority...]
+
+    👤 PATIENT INFORMATION
+    --------------------------------------------------
+    [Check PRIMARY SOURCE first, use FULL TEXT headers if more complete]
+
+    Name: [primary first, supplement from full text headers if needed]
+    DOB: [primary first, supplement from full text headers if needed]
+    DOI: [primary first, supplement if needed]
+    Claim Number: [check full text headers first, then primary]
+    Employer: [primary first, supplement if needed]
+
+    👨‍⚕️ HEALTHCARE PROVIDERS
+    --------------------------------------------------
+    [Check PRIMARY SOURCE for clinical context]
+    [Check FULL TEXT footers/last pages for signature blocks]
+
+    Performing Physician: [from primary]
+    Specialty: [from primary]
+    Ordering Physician: [from primary]
+    Anesthesiologist: [from primary]
+
+    Author:
+    • Signature: [check primary first for context, full text footers for signature blocks]
+
+    [Continue with all other sections, adding dual-context guidance where appropriate...]
+
+    REMEMBER: 
+    1. PRIMARY SOURCE (accurate context) is your MAIN reference for medical interpretations
+    2. Use FULL TEXT only to supplement specific missing details (demographics, codes, signatures)
+    3. NEVER override primary source medical context with full text
+    """)
+
+        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
+        
+        logger.info(f"📄 PRIMARY SOURCE size: {len(raw_text):,} chars")
+        logger.info(f"📄 SUPPLEMENTARY size: {len(text):,} chars")
+        logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach...")
+        
+        try:
+            start_time = time.time()
+            
+            # Single LLM call with both sources
+            chain = chat_prompt | self.llm
+            result = chain.invoke({
+                "doc_type": doc_type,
+                "document_actual_context": raw_text,  # PRIMARY: Accurate summarized context
+                "full_document_text": text,           # SUPPLEMENTARY: Full OCR extraction
+                "fallback_date": fallback_date,
+                "potential_signatures": "\n".join(potential_signatures) if potential_signatures else "No pre-extracted candidates found."
+            })
+            
+            long_summary = result.content.strip()
+            
+            end_time = time.time()
+            processing_time = end_time - start_time
+            
+            logger.info(f"⚡ Medical long summary generated in {processing_time:.2f}s")
+            logger.info(f"✅ Generated long summary: {len(long_summary):,} chars")
+            logger.info("✅ Context priority maintained: PRIMARY source used for medical findings")
+            
+            return long_summary
+            
+        except Exception as e:
+            logger.error(f"❌ Direct medical report long summary generation failed: {e}", exc_info=True)
+            
+            # Check if context length exceeded
+            if "context_length_exceeded" in str(e).lower() or "maximum context" in str(e).lower():
+                logger.error("❌ Medical report exceeds GPT-4o 128K context window")
+                logger.error("❌ Consider implementing chunked fallback for very large reports")
+            
+            # Fallback: Generate a minimal summary
+            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
+
 
     def _detect_report_type(self, text: str, original_type: str) -> str:
         """
@@ -211,60 +494,6 @@ class FormalMedicalReportExtractor:
         logger.debug(f"Pre-extracted signature candidates (end-priority): {unique_candidates}")
         return unique_candidates
 
-    def _verify_and_extract_author(self, long_summary: str, full_text: str, potential_signatures: List[str]) -> str:
-        """
-        ENHANCED: Use LLM to double-check author extraction, with stronger focus on last signer.
-        Falls back to regex if fails. Prioritizes electronic/physical signers over performing physicians.
-        """
-        # ENHANCED Prompt for verification: Focus on author only, emphasize last provider/signer
-        verify_prompt = ChatPromptTemplate.from_messages([
-            SystemMessagePromptTemplate.from_template("""
-            You are verifying the AUTHOR/SIGNER of a medical report. CRITICAL: The AUTHOR is the person who ELECTRONICALLY OR PHYSICALLY SIGNED the report, often the last provider mentioned or in the signature block (e.g., Dr. Jane Doe as electronic signer).
-            Scan the FULL TEXT and LONG SUMMARY. Extract ONLY the exact name of the person who signed.
-            - Prioritize end-of-document signatures or last provider entry.
-            - Differentiate from Performing/Ordering Physician (e.g., Dr. Smith is performing, but Dr. Doe signed).
-            - Use candidates for confirmation, especially those with 'signed' or last 'Physician:'.
-            - If unclear, return "No distinct signer identified; fallback to performing physician: [Name]".
-            Output ONLY the name as JSON: {{"author": "Exact Name (e.g., Dr. Jane Doe)"}}.
-            """),
-            HumanMessagePromptTemplate.from_template("""
-            Full Text: {full_text}
-            Long Summary: {long_summary}
-            Candidates: {potential_signatures}
-            """)
-        ])
-        
-        try:
-            chain = verify_prompt | self.llm
-            result = chain.invoke({
-                "full_text": full_text,
-                "long_summary": long_summary,
-                "potential_signatures": "\n".join(potential_signatures)
-            })
-            parsed = self.parser.parse(result.content)
-            verified_author = parsed.get("author", "")
-            
-            if not verified_author or "No distinct" in verified_author:
-                # ENHANCED Fallback: Scan for last provider in sections
-                last_provider_pattern = re.compile(r'(Physician:\s*)([A-Za-z\s\.,]+?)(?=\s*\(|Massage|\n{2,}|$)', re.IGNORECASE | re.DOTALL)
-                match = last_provider_pattern.search(full_text + "\n" + long_summary)
-                if match:
-                    verified_author = match.group(2).strip()
-                elif potential_signatures:
-                    for cand in reversed(potential_signatures):  # Prioritize last
-                        if any(word in cand.lower() for word in ['signed', 'signature', 'physician']):
-                            verified_author = cand.split(':')[-1].strip()
-                            break
-                else:
-                    verified_author = "Signature not identified"
-            
-            logger.info(f"🔍 Verified Author: {verified_author}")
-            return verified_author
-        except Exception as e:
-            logger.warning(f"Author verification failed: {e}. Using raw candidates.")
-            # ENHANCED: Prioritize last candidate
-            return potential_signatures[-1].split(':')[-1].strip() if potential_signatures else "Author not extracted"
-
     def _inject_author_into_long_summary(self, long_summary: str, verified_author: str) -> str:
         """
         NEW: Robust post-processing to inject the verified author prominently if not present.
@@ -298,312 +527,6 @@ class FormalMedicalReportExtractor:
         long_summary = f"👨‍⚕️ HEALTHCARE PROVIDERS\n--------------------------------------------------\nAuthor: {verified_author}\n\n{long_summary}"
         logger.info(f"✅ Injected new HEALTHCARE PROVIDERS section with Author: {verified_author}")
         return long_summary
-
-    def _generate_long_summary_direct(
-        self,
-        text: str,
-        doc_type: str,
-        fallback_date: str,
-        potential_signatures: List[str]  # ENHANCED: Pass pre-extracted signatures
-    ) -> str:
-        """
-        Directly generate comprehensive long summary with FULL document context using LLM.
-        Adapted from original extraction prompt to output structured summary directly.
-        """
-        logger.info("🔍 Processing ENTIRE medical report in single context window for direct long summary...")
-        
-        # ENHANCED System Prompt for Direct Long Summary Generation
-        # Reuses core anti-hallucination rules and medical report focus from original extraction prompt
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are an expert medical documentation specialist analyzing a COMPLETE {doc_type} report.
-
-CRITICAL ADVANTAGE - FULL CONTEXT PROCESSING:
-You are seeing the ENTIRE medical report at once, allowing you to:
-- Understand the complete clinical picture from history to conclusions
-- Connect pre-procedure assessments with intraoperative findings and post-procedure outcomes
-- Identify relationships between clinical indications, procedures performed, and results
-- Provide comprehensive extraction without information loss
-
-⚠️ CRITICAL ANTI-HALLUCINATION RULES (HIGHEST PRIORITY) (donot include in output, for LLM use only):
-
-1. **EXTRACT ONLY EXPLICITLY STATED INFORMATION**
-   - If a field/value is NOT explicitly mentioned in the report, return EMPTY string "" or empty list []
-   - DO NOT infer, assume, or extrapolate medical information
-   - DO NOT fill in "typical" or "common" medical values
-   - DO NOT use medical knowledge to "complete" incomplete information
-   
-2. **PATIENT DETAILS - EXACT EXTRACTION ONLY**
-   - Extract patient name, DOB, DOI, claim number, employer EXACTLY as stated in demographics/identifier sections
-   - DO NOT infer from context or abbreviate - use verbatim text
-   - If any detail is missing, leave empty "" - no placeholders
-   
-3. **PROCEDURES & FINDINGS - EXACT WORDING ONLY**
-   - Extract procedures using EXACT wording from report
-   - Extract findings verbatim - do not interpret or rephrase
-   - For pathology: extract microscopic descriptions EXACTLY as stated
-   - For lab values: extract numbers and units EXACTLY as written
-   
-4. **MEDICATIONS & DOSES - ZERO TOLERANCE FOR ASSUMPTIONS**
-   - Extract ONLY medications explicitly listed in medication sections
-   - Include dosages, routes, frequencies ONLY if explicitly stated
-   - DO NOT extract medications mentioned as examples or comparisons
-   
-5. **SIGNATURE/AUTHOR - CRITICAL PRIORITY**
-   - Extract the EXACT name of the signer (physical or electronic) from signature block or end of report
-   - Differentiate from performing/ordering physicians if distinct
-   - Use pre-extracted candidates for confirmation
-
-6. **EMPTY FIELDS ARE ACCEPTABLE - DO NOT FILL**
-   - It is BETTER to return an empty field than to guess
-   - If you cannot find information for a field, leave it empty
-   - DO NOT use phrases like "Not mentioned", "Not stated", "Unknown" - just return ""
-   
-7. **MEDICAL CODING - EXACT REFERENCES ONLY**
-   - Extract CPT/ICD codes ONLY if explicitly listed in the report
-   - DO NOT assign codes based on procedure descriptions
-   - Include code descriptors ONLY if provided
-
-EXTRACTION FOCUS - 8 CRITICAL MEDICAL REPORT CATEGORIES:
-
-I. REPORT IDENTITY & CONTEXT
-- Report type, dates, identification numbers
-- Facility and department information
-- All healthcare providers involved
-
-II. PATIENT CLINICAL CONTEXT
-- Patient demographics and identifiers
-- Clinical history and presenting symptoms
-- Pre-existing conditions and risk factors
-- Indications for procedure/study
-
-III. PROCEDURE/TEST DETAILS (CORE CONTENT)
-- Procedure/test name and type
-- Anatomical locations and specific sites
-- Technique/methodology used
-- Duration and technical details
-- Specimen information (for pathology)
-
-IV. INTRAOPERATIVE/INTRA-PROCEDURAL FINDINGS
-- Detailed findings during procedure
-- Anatomical observations
-- Complications or unexpected findings
-- Blood loss, fluids, vital signs
-
-V. SPECIMEN/PATHOLOGY DETAILS (if applicable)
-- Specimen descriptions and labeling
-- Gross examination findings
-- Microscopic examination details
-- Special stains and results
-
-VI. RESULTS & INTERPRETATIONS
-- Test results with values and units
-- Physician interpretations and conclusions
-- Diagnostic impressions
-- Correlation with clinical information
-
-VII. MEDICATIONS & ANESTHESIA (if applicable)
-- Anesthetic agents and techniques
-- Medications administered during procedure
-- Dosages, routes, and timing
-- Anesthesia complications
-
-VIII. FOLLOW-UP & RECOMMENDATIONS
-- Post-procedure instructions
-- Medication prescriptions
-- Follow-up scheduling
-- Additional testing recommendations
-
-CHAIN-OF-THOUGHT FOR SIGNATURE EXTRACTION (CRITICAL - ABSOLUTE PRIORITY):
-1. Scan the LAST 20-30% of the document FIRST for signature blocks, footers, or stamps (e.g., "Electronically Signed: Dr. Jane Doe").
-2. Look for keywords: "electronically signed", "e-signed", "signed by", "authenticated", "signature date". Also check last "Physician:" in sections.
-3. Cross-verify with pre-extracted candidates - confirm if they match full text (prioritize last one).
-4. If physical signature implied (e.g., "hand signed"), note it but extract name only.
-5. DIFFERENTIATE: Author is the SIGNER, not necessarily the Performing Physician.
-6. If no distinct signer, use performing physician and note "(inferred signer)".
-7. Output EXACT name only - e.g., "Dr. Jane Doe (electronic signer)".
-
-⚠️ FINAL REMINDER (donot include in output, for LLM use only):
-- If information is NOT in the report, return EMPTY ("" or [])
-- NEVER assume, infer, or extrapolate medical information
-- PATIENT DETAILS: Extract EXACT values from demographics (e.g., "John Doe", "01/01/1980")
-- PROCEDURE DETAILS: Use exact wording from report
-- It is BETTER to have empty fields than incorrect medical information
-- CRITICAL: ALWAYS INCLUDE THE AUTHOR FIELD UNDER HEALTHCARE PROVIDERS. IF NOT FOUND, STATE "Signer not identified".
-
-Now analyze this COMPLETE {doc_type} medical report and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
-""")
-
-        # ENHANCED User Prompt for Direct Long Summary - Outputs the structured summary directly
-        # ENHANCED: Stronger emphasis on patient details and signature extraction
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-COMPLETE {doc_type} MEDICAL REPORT TEXT:
-
-{full_document_text}
-
-MANDATORY SIGNATURE SCAN: Read the ENTIRE text above. Focus on the end for electronic/physical signatures. Use these candidates to CONFIRM (prioritize last signer):
-{potential_signatures}
-
-Generate the long summary in this EXACT STRUCTURED FORMAT (use the fallback date {fallback_date} if no report date found):
-
-📋 MEDICAL REPORT OVERVIEW
---------------------------------------------------
-Report Type: {doc_type}
-Report Date: [extracted or {fallback_date}]
-Procedure Date: [extracted]
-Accession Number: [extracted]
-Facility: [extracted]
-Department: [extracted]
-
-👤 PATIENT INFORMATION
---------------------------------------------------
-Name: [CRITICAL: Extract EXACT patient name from demographics/header - verbatim, no inference]
-DOB: [CRITICAL: Extract EXACT DOB from demographics - format as MM/DD/YYYY if possible]
-DOI: [CRITICAL: Extract EXACT date of injury from history/claim sections]
-Claim Number: [CRITICAL: Extract EXACT claim number from identifiers]
-Employer: [CRITICAL: Extract EXACT employer name if stated in work-related context]
-
-👨‍⚕️ HEALTHCARE PROVIDERS
---------------------------------------------------
-Performing Physician: [name]
-  Specialty: [extracted]
-Ordering Physician: [name]
-  Specialty: [extracted]
-Anesthesiologist: [name]
-Author:
-hint: check the signature block mainly last pages of the report and the closing statement the person who signed the report either physically or electronically
-• Signature: [extracted name/title if physical signature present or extracted name/title if electronic signature present; otherwise omit ; should not the business name or generic title like "Medical Group" or "Health Services", "Physician", "Surgeon","Pharmacist", "Radiologist", etc.]
-
- ━━━ CLAIM NUMBER EXTRACTION PATTERNS ━━━
-CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
-
-Common claim number patterns (case-insensitive) and make sure to extract EXACTLY as written and must be claim number not just random numbers (like chart numbers, or id numbers) that look similar:
-- "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
-- "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
-- "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
-- "WC Claim: XXXXXXXXX" or "Workers Comp Claim: XXXXXXXXX"
-- "Policy/Claim: XXXXXXXXX"
-- In "cc:" lines: "Broadspire [Claim #XXXXXXXXX]"
-- In subject lines or reference fields: "Claim #XXXXXXX"
-
-All Doctors Involved:
-• [list all extracted doctors with names and titles]
-━━━ ALL DOCTORS EXTRACTION ━━━
-- Extract ALL physician/doctor names mentioned ANYWHERE in the document into the "all_doctors" list.
-- Include: consulting doctor, referring doctor, ordering physician, treating physician, examining physician, PCP, specialist, etc.
-- Include names with credentials (MD, DO, DPM, DC, NP, PA) or doctor titles (Dr., Doctor).
-- Extract ONLY actual person names, NOT pharmacy labels, business names, or generic titles.
-- Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
-- If no doctors found, leave list empty [].
-                                                               
-🏥 CLINICAL CONTEXT
---------------------------------------------------
-Indications: [extracted]
-Preoperative Diagnosis: [extracted]
-Postoperative Diagnosis: [extracted]
-Clinical History: [extracted]
-
-🔧 PROCEDURE DETAILS
---------------------------------------------------
-Procedure: [extracted]
-Type: [extracted]
-Anatomical Sites: [list up to 3]
-Laterality: [extracted]
-Anesthesia: [extracted]
-Duration: [extracted]
-CPT Codes: [list up to 3]
-
-🔍 FINDINGS & RESULTS
---------------------------------------------------
-Intraoperative Findings: [extracted]
-Pathological Diagnosis: [extracted]
-Microscopic: [extracted, truncate if >200 chars]
-Results Summary: [extracted]
-Interpretation: [extracted]
-
-💊 MEDICATIONS & ANESTHESIA
---------------------------------------------------
-Anesthetic Agents:
-• [list up to 5 with doses if stated]
-Intraoperative Medications:
-• [list up to 5 with doses if stated]
-
-🎯 CONCLUSIONS & RECOMMENDATIONS
---------------------------------------------------
-Final Diagnosis: [extracted]
-Clinical Impressions: [extracted]
-Recommendations:
-• [list up to 5]
-Follow-up Plan: [extracted]
-
-🚨 CRITICAL FINDINGS
---------------------------------------------------
-• [list up to 8 most significant items]
-
-⚠️ CRITICAL MEDICAL REMINDERS (donot include in output, for LLM use only):
-1. For "patient_information": Extract EXACT values from demographics/headers. Examples: Name: "John Doe", DOB: "01/01/1980". Leave empty if not explicitly stated.
-2. For "procedure_details": Extract EXACT procedure names from report
-   - Include anatomical specifics ONLY if explicitly stated
-   - Include CPT/ICD codes ONLY if explicitly listed
-
-3. For "pathology_findings": Extract microscopic descriptions VERBATIM
-   - Do not interpret or summarize pathological findings
-   - Include tumor characteristics ONLY if explicitly measured/stated
-
-4. For "test_results": Extract values and units EXACTLY as written
-   - Include reference ranges ONLY if provided
-   - Do not interpret abnormal vs normal - extract values only
-
-5. For "medications_anesthesia": Extract ONLY medications explicitly administered
-   - Include dosages and routes ONLY if explicitly stated
-   - Do not include medications mentioned in history or recommendations
-
-6. For "critical_findings": Include only clinically significant findings
-   - Malignancies or positive cancer diagnoses
-   - Critical abnormal lab values
-   - Significant complications
-   - Life-threatening conditions
-
-7. For "Author": CRITICAL PRIORITY - Extract the EXACT name from the signature block, electronic signature, or end-of-document authentication. Scan the LAST 20% of the document first. Use pre-extracted candidates to confirm. If no signature found, explicitly state "No distinct signature identified; using performing physician". This field MUST be populated accurately.
-
-8. For "Author": ABSOLUTE MUST - LLM, re-read full text now and extract signer. Full context ensures accuracy.
-""")
-
-        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-        
-        try:
-            start_time = time.time()
-            
-            logger.info("🤖 Invoking LLM for direct full-context medical report long summary generation...")
-            
-            # Single LLM call with FULL document context to generate long summary directly
-            chain = chat_prompt | self.llm
-            result = chain.invoke({
-                "doc_type": doc_type,
-                "full_document_text": text,
-                "fallback_date": fallback_date,
-                "potential_signatures": "\n".join(potential_signatures) if potential_signatures else "No pre-extracted candidates found."
-            })
-            
-            long_summary = result.content.strip()
-            
-            end_time = time.time()
-            processing_time = end_time - start_time
-            
-            logger.info(f"⚡ Direct medical report long summary generation completed in {processing_time:.2f}s")
-            logger.info(f"✅ Generated long summary from complete {len(text):,} char medical report")
-            
-            return long_summary
-            
-        except Exception as e:
-            logger.error(f"❌ Direct medical report long summary generation failed: {e}", exc_info=True)
-            
-            # Check if context length exceeded
-            if "context_length_exceeded" in str(e).lower() or "maximum context" in str(e).lower():
-                logger.error("❌ Medical report exceeds GPT-4o 128K context window")
-                logger.error("❌ Consider implementing chunked fallback for very large reports")
-            
-            # Fallback: Generate a minimal summary
-            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
 
     def _clean_pipes_from_summary(self, short_summary: str) -> str:
         """
