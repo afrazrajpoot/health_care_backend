@@ -347,7 +347,7 @@ class EnhancedReportAnalyzer:
             mode: "wc" for workers comp or "gm" for general medicine
 
         Returns:
-            Formatted bullet-point summary
+            Formatted bullet-point summary (plain text)
         """
 
         logger.info(f"🔍 Generating structured summary from Document AI Summarizer output ({mode.upper()} mode)...")
@@ -380,6 +380,7 @@ class EnhancedReportAnalyzer:
     - Never infer, assume, or add information not present in the source
     - Maintain clinical accuracy and completeness
     - Output MUST be in structured bullet-point format with clear headings
+    - Return ONLY the formatted bullet points, NO JSON, NO extra formatting
     """
 
             # ===========================================================
@@ -421,7 +422,7 @@ class EnhancedReportAnalyzer:
     - **Work Status** (WC only)
     - **Key Dates**
 
-    {{format_instructions}}
+    Return ONLY the formatted bullet-point text. NO JSON.
     """
                 )
 
@@ -457,20 +458,24 @@ class EnhancedReportAnalyzer:
 
     CURRENT DATE: {{current_date}}
 
-    {{format_instructions}}
+    Return ONLY the formatted bullet-point text. NO JSON.
     """
                 )
 
             summary_prompt = ChatPromptTemplate.from_messages([system_prompt, human_prompt])
-            chain = summary_prompt | self.llm | self.brief_summary_parser
+            # CHANGED: Remove parser, use LLM directly
+            chain = summary_prompt | self.llm
 
             result = chain.invoke({
                 "summarizer_output": summarizer_output,
-                "current_date": current_date,
-                "format_instructions": self.brief_summary_parser.get_format_instructions()
+                "current_date": current_date
             })
 
-            brief_summary = result.get("brief_summary", "Not specified")
+            # CHANGED: Extract text content directly from LLM response
+            if hasattr(result, 'content'):
+                brief_summary = result.content
+            else:
+                brief_summary = str(result)
 
             # ===========================================================
             # SAFETY CHECK: Prevent accidental summarization when not allowed
@@ -493,7 +498,7 @@ class EnhancedReportAnalyzer:
             logger.error(f"❌ {mode.upper()} structured summary generation failed: {str(e)}")
             logger.exception("Full error traceback:")
             return f"**{mode.upper()} Summary Unavailable**\n• Error occurred during summary generation\n• Please review source document directly"
-
+        
     def create_fallback_analysis(self, mode: str = "wc") -> DocumentAnalysis:
         """Create mode-aware fallback analysis when extraction fails"""
         timestamp = datetime.now().strftime("%Y-%m-%d")
