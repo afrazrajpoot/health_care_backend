@@ -7,6 +7,8 @@ import os
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from typing import Optional
+import uuid  # Added missing import
+import re    # Added for password validation
 
 router = APIRouter()
 
@@ -32,6 +34,14 @@ class SyncLoginRequest(BaseModel):
     user_email: str
     sync_token: str
 
+class UserSignUp(BaseModel):
+    email: EmailStr
+    password: str
+    firstName: Optional[str] = None
+    lastName: Optional[str] = None
+    phoneNumber: Optional[str] = None
+    role: Optional[str] = "patient"  # Default role
+
 class UserResponse(BaseModel):
     id: str
     email: Optional[EmailStr] = None
@@ -40,6 +50,8 @@ class UserResponse(BaseModel):
     phoneNumber: Optional[str] = None
     role: Optional[str] = None
     physicianId: Optional[str] = None
+    emailVerified: Optional[datetime] = None
+    image: Optional[str] = None
     createdAt: datetime
     updatedAt: datetime
 
@@ -65,7 +77,37 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-# ✅ Pure async function for token verification (no Depends)
+# Password complexity validation function
+def validate_password_complexity(password: str) -> tuple[bool, str]:
+    """Validate password complexity"""
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters long"
+    
+    if not re.search(r"[A-Z]", password):
+        return False, "Password must contain at least one uppercase letter"
+    
+    if not re.search(r"[a-z]", password):
+        return False, "Password must contain at least one lowercase letter"
+    
+    if not re.search(r"\d", password):
+        return False, "Password must contain at least one number"
+    
+    if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password):
+        return False, "Password must contain at least one special character"
+    
+    return True, "Password is valid"
+
+# Database dependency
+async def get_db():
+    """Database connection dependency"""
+    db = Prisma()
+    await db.connect()
+    try:
+        yield db
+    finally:
+        await db.disconnect()
+
+# Pure async function for token verification (no Depends)
 async def verify_token(token: str, db: Prisma) -> UserResponse:
     """Verify JWT token and return user - for manual calls"""
     credentials_exception = HTTPException(
@@ -96,13 +138,15 @@ async def verify_token(token: str, db: Prisma) -> UserResponse:
         phoneNumber=user.phoneNumber,
         role=user.role,
         physicianId=user.physicianId,
+        emailVerified=user.emailVerified,
+        image=user.image,
         createdAt=user.createdAt,
         updatedAt=user.updatedAt
     )
 
 async def get_current_user(
     token: str = Depends(oauth2_scheme), 
-    db: Prisma = Depends(lambda: Prisma())
+    db: Prisma = Depends(get_db)  # Fixed: using proper dependency
 ) -> UserResponse:
     """Dependency version - for route dependencies"""
     return await verify_token(token, db)
@@ -181,6 +225,8 @@ async def sync_login(login_data: SyncLoginRequest):
                     phoneNumber=user.phoneNumber,
                     role=user.role,
                     physicianId=user.physicianId,
+                    emailVerified=user.emailVerified,
+                    image=user.image,
                     createdAt=user.createdAt,
                     updatedAt=user.updatedAt
                 )
@@ -257,6 +303,8 @@ async def login(login_data: UserLogin):
                 phoneNumber=user.phoneNumber,
                 role=user.role,
                 physicianId=user.physicianId,
+                emailVerified=user.emailVerified,
+                image=user.image,
                 createdAt=user.createdAt,
                 updatedAt=user.updatedAt
             )
@@ -267,6 +315,103 @@ async def login(login_data: UserLogin):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Login failed: {str(e)}"
+        )
+    finally:
+        await db.disconnect()
+
+# Update the signup endpoint
+@router.post("/signup", response_model=Token)
+async def sign_up(signup_data: UserSignUp):
+    """Register a new user - compatible with NextAuth schema"""
+    db = Prisma()
+    await db.connect()
+    
+    try:
+        # Check if user already exists
+        existing_user = await db.user.find_unique(where={"email": signup_data.email})
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User with this email already exists"
+            )
+        
+        # Validate password complexity
+        is_valid, message = validate_password_complexity(signup_data.password)
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=message
+            )
+        
+        # Hash password
+        hashed_password = pwd_context.hash(signup_data.password)
+        
+        # Validate role
+        valid_roles = [ "Physician", "Staff"]
+        user_role = signup_data.role if signup_data.role in valid_roles else "patient"
+        
+        # Create user with proper NextAuth schema fields
+        user = await db.user.create(
+            data={
+                "id": str(uuid.uuid4()),  # Generate UUID
+                "email": signup_data.email,
+                "password": hashed_password,
+                "firstName": signup_data.firstName,
+                "lastName": signup_data.lastName,
+                "phoneNumber": signup_data.phoneNumber,
+                "role": user_role,
+                "emailVerified": None,  # Will be set when email is verified
+                "image": None,  # Can be updated later
+                "physicianId": None,  # Will be set for physician users
+                "createdAt": datetime.utcnow(),
+                "updatedAt": datetime.utcnow(),
+            }
+        )
+        
+        # ✅ PRINT USER DETAILS ON SIGNUP
+        print("=" * 50)
+        print("🎉 USER SIGNUP SUCCESSFUL (NextAuth Schema):")
+        print(f"   👤 User ID: {user.id}")
+        print(f"   📧 Email: {user.email}")
+        print(f"   🏥 Physician ID: {user.physicianId}")
+        print(f"   👨‍⚕️ Name: {user.firstName} {user.lastName}")
+        print(f"   📞 Phone: {user.phoneNumber}")
+        print(f"   🎯 Role: {user.role}")
+        print(f"   📅 Email Verified: {user.emailVerified}")
+        print(f"   🖼️ Image: {user.image}")
+        print(f"   📅 Created: {user.createdAt}")
+        print("=" * 50)
+        
+        # Create access token
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": user.id}, expires_delta=access_token_expires
+        )
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": UserResponse(
+                id=user.id,
+                email=user.email,
+                firstName=user.firstName,
+                lastName=user.lastName,
+                phoneNumber=user.phoneNumber,
+                role=user.role,
+                physicianId=user.physicianId,
+                emailVerified=user.emailVerified,
+                image=user.image,
+                createdAt=user.createdAt,
+                updatedAt=user.updatedAt
+            )
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Signup failed: {str(e)}"
         )
     finally:
         await db.disconnect()
