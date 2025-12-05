@@ -232,7 +232,7 @@ class DocumentAnalysis(BaseModel):
     key_concern: str = Field(..., description="Main clinical concern in 2-3 words")
     extracted_recommendation: str = Field(..., description="Extracted key recommendation keywords/phrases")
     extracted_decision: str = Field(..., description="Extracted key decision/judgment keywords/phrases")
-    ur_decision: str = Field(..., description="Extracted UR decision keywords/phrases")
+    ur_decision: str = Field('', description="Extracted UR decision keywords/phrases")
     ur_denial_reason: Optional[str] = Field(None, description="UR denial reason if applicable")
     adls_affected: str = Field(..., description="Activities affected in 2-3 words")
     work_restrictions: str = Field(..., description="Work restrictions in 2-3 words")
