@@ -19,6 +19,7 @@ from services.file_service import FileService
 from services.database_service import get_database_service
 from services.document_ai_service import get_document_ai_processor
 from services.document_converter import DocumentConverter
+from services.database_service import DatabaseService
 from models.schemas import ExtractionResult
 from utils.celery_task import process_batch_documents
 from services.progress_service import progress_service
@@ -91,7 +92,23 @@ class DocumentExtractorService:
             logger.info(f"📁 Processing: {document.filename}")
             logger.info(f"📏 Size: {file_size/(1024*1024):.2f} MB | MIME: {document.content_type}")
             
-            # REMOVED: Early duplicate check - files are always processed
+            # Step 1.5: Check for duplicate file by hash (prevents processing renamed files)
+            file_hash = self._compute_file_hash(content)
+            db_service = DatabaseService()
+            await db_service.connect()
+            existing_doc = await db_service.check_duplicate_by_hash(file_hash, physician_id)
+            
+            if existing_doc:
+                logger.warning(f"⚠️ DUPLICATE FILE DETECTED: {document.filename}")
+                logger.info(f"   Matches existing file: {existing_doc['fileName']}")
+                logger.info(f"   Document ID: {existing_doc['id']}")
+                return {
+                    "success": False,
+                    "error": "duplicate_file",
+                    "message": f"This file was already uploaded as '{existing_doc['fileName']}'.",
+                    "existing_document": existing_doc,
+                    "filename": document.filename
+                }
             
             # Step 2: Save to temp (unchanged)
             temp_path = self.file_service.save_temp_file(content, document.filename)
@@ -213,7 +230,7 @@ class DocumentExtractorService:
                 "processing_time_ms": int(processing_time),
                 "gcs_url": gcs_url,
                 "blob_path": blob_path,
-                "file_hash": self._compute_file_hash(content),
+                "file_hash": file_hash,
                 "document_id": result.document_id,
                 "physician_id": physician_id,
                 "user_id": user_id,
@@ -333,10 +350,19 @@ class DocumentExtractorService:
                 elif result["success"]:
                     all_payloads.append(result["payload"])
                 else:
-                    all_ignored.append({
-                        "filename": result["filename"],
-                        "reason": result["reason"]
-                    })
+                    # Handle duplicate files specially
+                    if result.get("error") == "duplicate_file":
+                        all_ignored.append({
+                            "filename": result["filename"],
+                            "reason": result.get("message", "Duplicate file"),
+                            "existing_file": result.get("existing_document", {}).get("fileName"),
+                            "document_id": result.get("existing_document", {}).get("id")
+                        })
+                    else:
+                        all_ignored.append({
+                            "filename": result["filename"],
+                            "reason": result.get("error", "Unknown error")
+                        })
         
         preprocess_msg = f"✅ OPTIMIZED batch complete: {len(all_payloads)} ready, {len(all_ignored)} ignored"
         logger.info(preprocess_msg)

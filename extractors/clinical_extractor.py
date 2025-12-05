@@ -10,7 +10,7 @@ from typing import Dict, Optional, List
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
-
+from utils.summary_helpers import ensure_date_and_author
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
 
@@ -325,6 +325,7 @@ class ClinicalNoteExtractor:
     Specialty: [from primary]
 
     ━━━ CLAIM NUMBER EXTRACTION ━━━
+    - if in the structured raw_text like json formatted dat, if the fileds are first and values then handle the same way to extract the claim number of accurate filed, but most of the time the fields are first and values are second then the claim number will be in the second field
     - Check FULL TEXT headers/footers FIRST for exact claim numbers
     - Then check PRIMARY SOURCE if full text unclear
     - Scan for patterns: "[Claim #XXXXXXXXX]", "Claim Number:", "WC Claim:"
@@ -564,14 +565,15 @@ KEY RULES (VERY IMPORTANT):
 - **ONLY include, critical, or clinically significant findings**.
 - **If a value is missing or cannot be extracted, omit the ENTIRE key-value pair.**
 - **Do NOT output empty fields, empty values, or placeholder text.**
+ - For Author never use "Dr." with it
 - **Do NOT output double pipes (`||`).**
 - NO hallucination. NO invented findings, meds, or follow-up.
 - MUST be **one single line**, pipe-delimited, no line breaks.
 
 FIELD DEFINITIONS:
 - Report Title: Always include this field first → `: {doc_type}`
-- Author: Only if explicitly signed with signature type  
-  ("Signature: Dr. Smith" → "Author: Dr. Smith")  
+- Author: Only if explicitly signed with signature type
+  ("Signature: Smith" → "Author: Smith")  
   If there is no signature text, omit the entire field.
 - Critical Findings: Significant clinical findings, worsening conditions, flagged issues.
 - Abnormal Actions: Any abnormal interventions, adverse reactions, therapy responses, compliance issues.
@@ -596,6 +598,7 @@ ABSOLUTELY FORBIDDEN:
 - Normal findings for physical exam and vital signs (ignore these fields if all normal)
 - Patient details (name, DOB, demographics)
 - Using provider names as author without explicit signature
+- For Author never use "Dr." with it
 - Assumptions, interpretations, or inferred issues
 - Narrative writing
 - Placeholder text (e.g., “None”, “Not provided”)
@@ -625,6 +628,8 @@ Your final output MUST be between 30–60 words, follow the exact pipe-delimited
 
             # Normalize whitespace only - no pipe cleaning
             summary = re.sub(r"\s+", " ", summary).strip()
+            # Programmatically add missing Date or Author if LLM missed them
+            summary = ensure_date_and_author(summary, long_summary)
 
             # Validate word count
             wc = len(summary.split())
@@ -644,6 +649,8 @@ Your final output MUST be between 30–60 words, follow the exact pipe-delimited
                 fixed = chain2.invoke({})
                 summary = re.sub(r"\s+", " ", fixed.content.strip())
                 # No pipe cleaning after auto-fix
+                # Programmatically add missing Date or Author if LLM missed them
+                summary = ensure_date_and_author(summary, long_summary)
 
             logger.info(f"✅ Clinical summary generated: {len(summary.split())} words")
             return self._clean_pipes_from_summary(summary)

@@ -79,6 +79,12 @@ For administrative documents (authorizations, EOBs, denials, referrals, credenti
 | **External Referral (Outgoing)** | Follow up with specialist to confirm appointment booked and kept | Coordination: Track continuity of care |
 | **Credentialing/Contracting Renewals** | Renew payer contract by [date] or update provider credentials | Compliance: Ensure continued payment eligibility |
 
+
+Breakdown of Generated Approval Tasks | UR Approval Task Generation
+Scheduling/Confirmation Task (T-UR-1A/3A): This is the most critical staff-first action for an approval. It tells the staff to immediately schedule the approved service (like the orthosis fitting or confirming the medication was sent).
+Patient Notification Task (T-UR-1B/3B): This task ensures the patient is informed of the approval, which is a required administrative step.
+Document Upload Task: This is the common final step for all documents, ensuring the approval is filed in the EMR.
+
 **Administrative Task Characteristics:**
 - Focus on billing, scheduling, compliance workflows
 - Include specific action items (appeal, bill, schedule, follow-up)
@@ -214,52 +220,66 @@ Base due dates on document content analysis:
 
 **CRITICAL PRINCIPLES:**
 1. **GENERATE AS MANY AS NEEDED** - One task per distinct action
-2. **SPECIFIC & ACTIONABLE** - Staff must know exactly what to do
+2. **SIMPLE & CLEAR** - Use plain language anyone can understand
 3. **DOCUMENT-DRIVEN** - Based only on actual content, no assumptions
-4. **CONCISE DESCRIPTION** - 5-10 words maximum
-5. **CONTEXT IN DETAILS** - Why this task matters (quick_notes.details)
+4. **CONCISE DESCRIPTION** - 5-8 words maximum, avoid jargon
+5. **CONTEXT IN DETAILS** - Technical details go in quick_notes.details
 
 **Task Description Formula:**
-[Action Verb] + [Specific Item from Document] + [Critical Context]
+[Simple Action] + [What/Who] + [Key Detail if critical]
 
-**Examples:**
-- ❌ Bad: "Review document"
-- ✅ Good: "Review elevated ALT (150) from 1/15 labs"
+**Plain Language Guidelines:**
+- Use everyday words: "Review" not "Evaluate", "Schedule" not "Coordinate"
+- Avoid medical codes and abbreviations in description
+- Keep it conversational and direct
+- Technical details → quick_notes.details (not description)
 
-- ❌ Bad: "Schedule appointment"
-- ✅ Good: "Schedule authorized orthopedic consult within 7 days"
+**Examples - Before & After:**
 
-- ❌ Bad: "Handle denial"
-- ✅ Good: "Prepare IMR appeal for denied PT authorization"
+**Clinical Tasks:**
+- ❌ Complex: "Review elevated ALT (150) from 1/15 labs"
+- ✅ Simple: "Review abnormal liver test for [Patient Name]"
 
-- ❌ Bad: "Process legal letter"
-- ✅ Good: "Review attorney deposition request by 1/20"
+- ❌ Complex: "Assess FCE functional capacity recommendations"
+- ✅ Simple: "Review work capacity report for [Patient Name]"
 
-**Administrative Document Examples:**
-- ❌ Bad: "Handle PA approval"
-- ✅ Good: "Schedule approved lumbar MRI and attach PA #12345 to claim"
+**Scheduling Tasks:**
+- ❌ Complex: "Schedule authorized orthopedic consult within 7 days"
+- ✅ Simple: "Schedule orthopedic appointment for [Patient Name]"
 
-- ❌ Bad: "Process EOB"
-- ✅ Good: "File timely filing appeal for CARC 29 denial by 1/25"
+- ❌ Complex: "Schedule approved lumbar MRI and attach PA #12345"
+- ✅ Simple: "Schedule MRI for [Patient Name]"
 
-- ❌ Bad: "Follow up on referral"
-- ✅ Good: "Confirm orthopedic specialist appointment kept on 2/10"
+**Authorization Tasks:**
+- ❌ Complex: "Prepare IMR appeal for denied PT authorization"
+- ✅ Simple: "Appeal denied physical therapy for [Patient Name]"
 
-- ❌ Bad: "Handle credentialing"
-- ✅ Good: "Renew Blue Shield contract by 2/15 to prevent payment lapse"
+- ❌ Complex: "Submit RFA for cervical epidural injections"
+- ✅ Simple: "Request authorization for injections - [Patient Name]"
+
+**Administrative Tasks:**
+- ❌ Complex: "Review attorney deposition request by 1/20"
+- ✅ Simple: "Respond to attorney letter for [Patient Name]"
+
+- ❌ Complex: "File timely filing appeal for CARC 29 denial by 1/25"
+- ✅ Simple: "Appeal late filing denial for [Patient Name]"
+
+- ❌ Complex: "Confirm orthopedic specialist appointment kept on 2/10"
+- ✅ Simple: "Confirm specialist visit for [Patient Name]"
 
 **Multi-Task Example:**
 Authorization report approves MRI, PT, and orthopedic consult:
-Task 1: "Schedule authorized lumbar MRI within 7 days" → Scheduling
-Task 2: "Schedule approved physical therapy sessions" → Scheduling
-Task 3: "Schedule orthopedic specialist consultation" → Scheduling
+- Task 1: "Schedule MRI for [Patient Name]" → Scheduling
+- Task 2: "Schedule physical therapy for [Patient Name]" → Scheduling
+- Task 3: "Schedule orthopedic visit for [Patient Name]" → Scheduling
 
 **EOB with Multiple Denials Example:**
-EOB shows CARC 29 (timely filing), PR-1 (patient responsibility), CARC 97 (invalid code):
-Task 1: "File timely filing appeal for $500 claim by 1/30" → Authorizations & Denials (High Priority)
-Task 2: "Bill patient $150 balance after adjustment" → Administrative/Compliance (Medium Priority)
-Task 3: "Recode procedure 99213→99214 and resubmit" → Administrative/Compliance (Medium Priority)
+- Task 1: "Appeal late filing denial for [Patient Name]" → Authorizations & Denials (High Priority)
+- Task 2: "Bill patient for service - [Patient Name]" → Administrative/Compliance (Medium Priority)
+- Task 3: "Resubmit corrected claim for [Patient Name]" → Administrative/Compliance (Medium Priority)
 
+**Key Principle:** 
+The description should be understandable by office staff, patients, or anyone without medical training. Save the technical details (codes, values, specific dates) for quick_notes.details.
 ---
 
 ## 🚫 ANTI-HALLUCINATION RULES

@@ -336,169 +336,73 @@ class EnhancedReportAnalyzer:
         except Exception as e:
             logger.error(f"❌ {mode.upper()} mode extraction failed: {str(e)}")
             return self.create_fallback_analysis(mode)
+        
     def generate_brief_summary(self, summarizer_output: str, mode: str = "wc") -> str:
         """
-        Generate a comprehensive formatted bullet-point summary from Document AI Summarizer output.
-        - If output <= 2000 chars: Convert to structured bullet points without losing details
-        - If output > 2000 chars: Summarize but ensure output stays < 2000 chars
-
-        Args:
-            summarizer_output: Document AI Summarizer output (raw text)
-            mode: "wc" for workers comp or "gm" for general medicine
-
-        Returns:
-            Formatted bullet-point summary (plain text)
+        Generate a brief summary of the medical document with detailed clinical specifics.
         """
-
-        logger.info(f"🔍 Generating structured summary from Document AI Summarizer output ({mode.upper()} mode)...")
-        logger.info(f"📄 Summarizer output length: {len(summarizer_output)} characters")
-
+        logger.info(f"🔍 Generating summary for {mode.upper()} mode...")
         try:
             current_date = datetime.now().strftime("%Y-%m-%d")
-            output_length = len(summarizer_output)
 
-            # HARD RULE: If <= 2000 chars, DO NOT SUMMARIZE — EVER
-            needs_summarization = output_length > 2000
-            if output_length <= 2000:
-                needs_summarization = False
-
-            processing_mode = "SUMMARIZE" if needs_summarization else "RESTRUCTURE"
-            logger.info(f"📊 Processing mode: {processing_mode} (length: {output_length} chars)")
-
-            # Mode-specific focus
+            # Mode-specific summary guidance
             mode_focus = "workers compensation injury" if mode == "wc" else "general medical condition"
-
-            # Base system prompt
-            base_system_prompt = f"""You are a medical summarization expert specializing in {mode_focus} documentation.
-
-    INPUT SOURCE: You are receiving the COMPLETE Document AI Summarizer output.
-
+            
+            system_prompt = SystemMessagePromptTemplate.from_template(
+                f"""You are a medical summarization expert. Generate concise 2-3 sentence professional summaries with {mode_focus} focus.
+                
     CRITICAL RULES:
+    - Extract ONLY information explicitly stated in the document
+    - Include specific names: medications (with dosages if mentioned), procedures, therapies, diagnoses
     - Use exact medical terminology from the document
-    - Include ALL specific names: medications (with dosages), procedures, therapies, diagnoses
-    - Preserve all dates, body parts, anatomical locations, and clinical values
-    - Never infer, assume, or add information not present in the source
-    - Maintain clinical accuracy and completeness
-    - Output MUST be in structured bullet-point format with clear headings
-    - Return ONLY the formatted bullet points, NO JSON, NO extra formatting
-    """
+    - Never infer, assume, or add information not present
+    - If specific details are absent, do not fabricate them"""
+            )
 
-            # ===========================================================
-            #  SUMMARIZATION MODE (output > 2000 chars)
-            # ===========================================================
-            if needs_summarization:
-                system_prompt = SystemMessagePromptTemplate.from_template(
-                    base_system_prompt
-                    + """
-    PROCESSING MODE: INTELLIGENT SUMMARIZATION (Output > 2000 characters)
-    - Produce a structured summary LESS THAN 2000 characters
-    - Condense responsibly: do NOT remove critical findings
-    - Prioritize RECENT and CURRENT clinical information
-    - Do not exceed 2000 characters under any circumstance
-    """
-                )
+            human_prompt = HumanMessagePromptTemplate.from_template(
+                f"""Analyze the following medical document for {mode.upper()} mode and create a detailed yet concise summary.
 
-                human_prompt = HumanMessagePromptTemplate.from_template(
-                    f"""The following Document AI Summarizer output is long ({output_length} chars).
-    Summarize it into bullet points, but the FINAL OUTPUT MUST remain under **2000 characters**.
-
-    DOCUMENT AI SUMMARIZER OUTPUT:
+    DOCUMENT TEXT:
     {{summarizer_output}}
 
     CURRENT DATE: {{current_date}}
 
-    SUMMARIZATION RULES:
-    1. PRIORITIZE recent visits, findings, test results, and treatments.
-    2. INCLUDE all important diagnoses, treatments, procedures, medications.
-    3. PRESERVE critical findings from any time period.
-    4. Condense historical data when needed.
-    5. NEVER exceed 2000 characters.
+    SUMMARY REQUIREMENTS:
+    1. Include the specific diagnosis/condition (use exact terms from document)
+    2. List key findings or test results (with specific values if mentioned)
+    3. Mention specific treatments:
+    - Medication names (include dosages if stated: e.g., "ibuprofen 600mg")
+    - Therapy types (e.g., "physical therapy", "cognitive behavioral therapy")
+    - Procedures performed or recommended (e.g., "MRI of lumbar spine", "arthroscopic surgery")
+    4. Include actionable recommendations (e.g., "follow-up in 2 weeks", "continue current regimen")
+    5. For {mode_focus}: emphasize work-relatedness, restrictions, or return-to-work status if mentioned
 
-    REQUIRED STRUCTURE:
-    - **Diagnosis/Condition**
-    - **Recent Clinical Findings**
-    - **Current Treatments**
-    - **Recommendations & Plan**
-    - **Work Status** (WC only)
-    - **Key Dates**
+    OUTPUT FORMAT:
+    - 2-3 clear, information-dense sentences
+    - Clinical terminology appropriate for physician review
+    - ONLY use information explicitly present in the document
+    - If a detail category (medication/therapy/procedure) is not mentioned, omit it entirely
 
-    Return ONLY the formatted bullet-point text. NO JSON.
-    """
-                )
-
-            # ===========================================================
-            #  RESTRUCTURE MODE (output ≤ 2000 chars)
-            # ===========================================================
-            else:
-                system_prompt = SystemMessagePromptTemplate.from_template(
-                    base_system_prompt
-                    + """
-    PROCESSING MODE: RESTRUCTURE ONLY (Output <= 2000 characters)
-    ⚠️ DO NOT SUMMARIZE OR SHORTEN ANYTHING.
-    - Do NOT remove details
-    - Do NOT condense text
-    - Do NOT merge or simplify sentences
-    - Maintain 100% of the original content
-    - Output must be roughly the same length as the input (at least 90% of characters)
-    Just convert into bullet points with headings.
-    """
-                )
-
-                human_prompt = HumanMessagePromptTemplate.from_template(
-                    f"""The following Document AI Summarizer output is short ({output_length} chars).
-    DO NOT SUMMARIZE. DO NOT SHORTEN ANYTHING.
-
-    Simply RESTRUCTURE the text:
-    - Preserve 100% of the details
-    - Split into bullet points under headings
-    - Maintain similar character count (≥ 90% of input)
-
-    DOCUMENT AI SUMMARIZER OUTPUT:
-    {{summarizer_output}}
-
-    CURRENT DATE: {{current_date}}
-
-    Return ONLY the formatted bullet-point text. NO JSON.
-    """
-                )
+    {{format_instructions}}"""
+            )
 
             summary_prompt = ChatPromptTemplate.from_messages([system_prompt, human_prompt])
-            # CHANGED: Remove parser, use LLM directly
-            chain = summary_prompt | self.llm
-
+            chain = summary_prompt | self.llm | self.brief_summary_parser
             result = chain.invoke({
                 "summarizer_output": summarizer_output,
-                "current_date": current_date
+                "current_date": current_date,
+                "format_instructions": self.brief_summary_parser.get_format_instructions()
             })
 
-            # CHANGED: Extract text content directly from LLM response
-            if hasattr(result, 'content'):
-                brief_summary = result.content
-            else:
-                brief_summary = str(result)
-
-            # ===========================================================
-            # SAFETY CHECK: Prevent accidental summarization when not allowed
-            # ===========================================================
-            if output_length <= 2000 and len(brief_summary) < output_length * 0.9:
-                logger.warning("⚠️ Output too short — LLM attempted to summarize. Falling back to raw content.")
-                return summarizer_output  # fallback to avoid data loss
-
-            # SAFETY CHECK 2: Ensure summarization stays < 2000 chars
-            if needs_summarization and len(brief_summary) > 2000:
-                logger.warning("⚠️ Summary exceeded 2000 chars — truncating safely.")
-                brief_summary = brief_summary[:1990] + "…"
-
-            logger.info(f"✅ Generated structured {mode.upper()} summary with {len(brief_summary)} characters")
-            logger.info(f"📋 Processing: {processing_mode} | Input: {output_length} → Output: {len(brief_summary)} chars")
-
+            brief_summary = result.get('brief_summary', 'Not specified')
+            logger.info(f"✅ Generated {mode.upper()} summary: {brief_summary}")
             return brief_summary
 
         except Exception as e:
-            logger.error(f"❌ {mode.upper()} structured summary generation failed: {str(e)}")
-            logger.exception("Full error traceback:")
-            return f"**{mode.upper()} Summary Unavailable**\n• Error occurred during summary generation\n• Please review source document directly"
-        
+            logger.error(f"❌ {mode.upper()} summary generation failed: {str(e)}")
+            return f"{mode.upper()} brief summary unavailable"
+
+
     def create_fallback_analysis(self, mode: str = "wc") -> DocumentAnalysis:
         """Create mode-aware fallback analysis when extraction fails"""
         timestamp = datetime.now().strftime("%Y-%m-%d")

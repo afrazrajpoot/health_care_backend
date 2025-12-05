@@ -15,6 +15,7 @@ from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
+from utils.summary_helpers import ensure_date_and_author
 
 logger = logging.getLogger("document_ai")
 
@@ -159,6 +160,7 @@ class ConsultExtractorChained:
     - DO NOT add normal findings from full text if primary source focuses on abnormalities
 
     6. **CLAIM NUMBERS & IDENTIFIERS**:
+    - if in the structured raw_text like json formatted dat, if the fileds are first and values then handle the same way to extract the claim number of accurate filed, but most of the time the fields are first and values are second then the claim number will be in the second field
     - These are often in headers/footers (better in FULL TEXT)
     - Check FULL TEXT first for exact claim numbers
     - Use PRIMARY SOURCE if full text is unclear
@@ -455,6 +457,7 @@ STRICT REQUIREMENTS:
 
 KEY RULES:
 - ONLY include abnormal or critical findings for these fields (physical exam, vital signs).
+- For Author never use "Dr." with it
 - If a value is missing or not extractable, omit the ENTIRE key-value pair.
 - NEVER output empty fields or placeholder text.
 - NEVER fabricate dates, meds, findings, or recommendations.
@@ -482,6 +485,7 @@ CONTENT PRIORITY (only if critical and provided):
 
 ABSOLUTELY FORBIDDEN:
 - Normal findings (ignore entirely for physical exam and vital signs)
+- For Author never use "Dr." with it
 - Assumptions, interpretations, inferred diagnoses
 - Patient details (name, DOB, claim, MRN, etc.)
 - Narrative writing
@@ -510,6 +514,9 @@ Your final output MUST be between 30–60 words, single-line, pipe-delimited, an
 
             # Normalize whitespace only - no pipe cleaning
             summary = re.sub(r"\s+", " ", summary).strip()
+            
+            # Programmatically add missing Date or Author if LLM missed them
+            summary = ensure_date_and_author(summary, long_summary)
 
             # Validate word count
             wc = len(summary.split())
@@ -527,7 +534,8 @@ Your final output MUST be between 30–60 words, single-line, pipe-delimited, an
                 chain2 = fix_prompt | self.llm
                 fixed = chain2.invoke({})
                 summary = re.sub(r"\s+", " ", fixed.content.strip())
-                # No pipe cleaning after fix
+                # Re-ensure date and author after correction
+                summary = ensure_date_and_author(summary, long_summary)
 
             logger.info(f"✅ Consultation summary generated: {len(summary.split())} words")
             return summary

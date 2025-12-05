@@ -9,11 +9,13 @@ import os
 import base64
 import tempfile
 import json
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from google.cloud import documentai_v1 as documentai
 from google.cloud.documentai_v1 import DocumentProcessorServiceClient, types
+from google.api_core import exceptions as google_exceptions
 import logging
 from PyPDF2 import PdfReader, PdfWriter
 from models.schemas import ExtractionResult, FileInfo
@@ -147,6 +149,7 @@ class DocumentAIProcessor:
     def __init__(self):
         self.client: Optional[DocumentProcessorServiceClient] = None
         self.summarizer_processor_path: Optional[str] = None
+        self.layout_parser_processor_path: Optional[str] = None  # NEW: Layout parser
         self.pdf_splitter = PDFSplitter(max_pages_per_chunk=10)
         self.layout_extractor = LayoutPreservingTextExtractor()
         self._initialize_client()
@@ -175,6 +178,16 @@ class DocumentAIProcessor:
             logger.info(f"✅ Document AI Summarizer initialized: {summarizer_id}")
             logger.info("📝 Using Document AI Summarizer (pretrained-foundation-model-v1.0-2023-08-22)")
             
+            # NEW: Initialize Layout Parser processor
+            layout_parser_id = CONFIG.get("layout_parser_processor_id")
+            if layout_parser_id:
+                self.layout_parser_processor_path = self.client.processor_path(
+                    CONFIG["project_id"], CONFIG["location"], layout_parser_id
+                )
+                logger.info(f"✅ Document AI Layout Parser initialized: {layout_parser_id}")
+            else:
+                logger.warning("⚠️ Layout Parser processor ID not configured, layout parsing will be skipped")
+            
         except Exception as e:
             logger.error(f"❌ Failed to initialize Document AI Client: {str(e)}")
             raise
@@ -194,6 +207,186 @@ class DocumentAIProcessor:
         }
         file_ext = Path(filepath).suffix.lower()
         return mime_mapping.get(file_ext, "application/octet-stream")
+    
+    def _process_with_layout_parser(self, filepath: str, page_numbers: List[int]) -> Dict[str, Any]:
+        """
+        Process specific pages with Layout Parser to preserve structure.
+        Used for first 3 and last 3 pages to extract patient details and signatures.
+        
+        Args:
+            filepath: Path to the document
+            page_numbers: List of page numbers to process (1-indexed)
+        
+        Returns:
+            Dictionary with structured layout data including blocks with nearest neighbor info
+        """
+        if not self.layout_parser_processor_path:
+            logger.warning("⚠️ Layout Parser not configured, skipping layout extraction")
+            return {"blocks": [], "text": ""}
+        
+        try:
+            # Create PDF with only requested pages
+            temp_pdf_path = None
+            if len(page_numbers) > 0:
+                with open(filepath, "rb") as file:
+                    pdf_reader = PdfReader(file)
+                    total_pages = len(pdf_reader.pages)
+                    
+                    # Filter valid page numbers
+                    valid_pages = [p for p in page_numbers if 0 < p <= total_pages]
+                    
+                    if not valid_pages:
+                        return {"blocks": [], "text": ""}
+                    
+                    # Create temporary PDF with selected pages
+                    pdf_writer = PdfWriter()
+                    for page_num in valid_pages:
+                        pdf_writer.add_page(pdf_reader.pages[page_num - 1])
+                    
+                    temp_pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf').name
+                    with open(temp_pdf_path, 'wb') as output_file:
+                        pdf_writer.write(output_file)
+                
+                file_to_process = temp_pdf_path
+            else:
+                file_to_process = filepath
+            
+            # Read file content
+            with open(file_to_process, "rb") as file:
+                file_content = file.read()
+            
+            mime_type = self.get_mime_type(file_to_process)
+            
+            # Create raw document
+            raw_document = documentai.RawDocument(
+                content=file_content,
+                mime_type=mime_type
+            )
+            
+            # Create process request for layout parser
+            request = documentai.ProcessRequest(
+                name=self.layout_parser_processor_path,
+                raw_document=raw_document
+            )
+            
+            logger.info(f"📤 Sending {len(page_numbers)} pages to Layout Parser...")
+            
+            # Process with retry logic
+            max_retries = 3
+            retry_delay = 1
+            
+            for attempt in range(max_retries):
+                try:
+                    response = self.client.process_document(request=request)
+                    break
+                except google_exceptions.Unknown as e:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"⚠️ Layout parser error (attempt {attempt + 1}/{max_retries}): {e}")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                    else:
+                        raise
+            
+            processed_document = response.document
+            
+            # Convert the entire Document object to dictionary using Google's built-in method
+            document_dict = types.Document.to_dict(processed_document)
+            
+            # Build formatted text with field-value detection from document_layout blocks
+            formatted_text = ""
+            blocks = []
+            
+            if document_dict.get('document_layout') and document_dict['document_layout'].get('blocks'):
+                blocks = document_dict['document_layout']['blocks']
+                formatted_text = self._extract_fields_from_blocks(blocks)
+            
+            # Clean up temp file
+            if temp_pdf_path and os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
+            
+            logger.info(f"✅ Layout Parser extracted {len(blocks)} blocks")
+            
+            return {
+                "document_dict": document_dict,  # Full structured output from Google
+                "blocks": blocks,
+                "formatted_text": formatted_text,
+                "full_text": document_dict.get('text', '')
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Layout Parser error: {e}")
+            if temp_pdf_path and os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
+            return {"document_dict": {}, "blocks": [], "formatted_text": ""}
+    
+    def _extract_fields_from_blocks(self, blocks: List[Dict]) -> str:
+        """
+        Extract field-value pairs from blocks using nearest neighbor logic.
+        Handles both 'field: value' and 'value field' patterns.
+        """
+        # Common field keywords for medical documents
+        field_keywords = [
+            "claim", "claim number", "claim no", "claim#", "cl", "claim #", ""
+            "dob", "date of birth", "birth date", "dob"
+            "doi", "date of injury", "injury date", "doi"
+            "patient", "applicant", "name",
+            "ssn", "social security",
+            "panel", "panel no",
+            "employer",
+            "signed", "signature", "author"
+        ]
+        
+        formatted_lines = []
+        i = 0
+        
+        while i < len(blocks):
+            current_block = blocks[i]
+            current_text = current_block.get("text", "").strip()
+            
+            if not current_text:
+                i += 1
+                continue
+            
+            # Check if current block is a field keyword
+            is_field = any(keyword in current_text.lower() for keyword in field_keywords)
+            
+            if is_field:
+                # Look for value in next block (field: value pattern)
+                if i + 1 < len(blocks):
+                    next_block = blocks[i + 1]
+                    next_text = next_block.get("text", "").strip()
+                    
+                    # Check if they're on same page and close by block ID
+                    current_page = current_block.get("pageSpan", {}).get("pageStart", 0)
+                    next_page = next_block.get("pageSpan", {}).get("pageStart", 0)
+                    
+                    if current_page == next_page and next_text:
+                        formatted_lines.append(f"{current_text}: {next_text}")
+                        i += 2  # Skip next block as it's been processed
+                        continue
+                
+                formatted_lines.append(current_text)
+            else:
+                # Check if next block is a field keyword (value field pattern)
+                if i + 1 < len(blocks):
+                    next_block = blocks[i + 1]
+                    next_text = next_block.get("text", "").strip()
+                    next_is_field = any(keyword in next_text.lower() for keyword in field_keywords)
+                    
+                    if next_is_field:
+                        current_page = current_block.get("pageSpan", {}).get("pageStart", 0)
+                        next_page = next_block.get("pageSpan", {}).get("pageStart", 0)
+                        
+                        if current_page == next_page:
+                            formatted_lines.append(f"{next_text}: {current_text}")
+                            i += 2
+                            continue
+                
+                formatted_lines.append(current_text)
+            
+            i += 1
+        
+        return "\n".join(formatted_lines)
     
     def _process_document_direct(self, filepath: str) -> ExtractionResult:
         """
@@ -230,11 +423,38 @@ class DocumentAIProcessor:
             logger.info("📤 Sending request to Document AI Summarizer...")
             logger.info("   Using processor default settings (Length: MODERATE, Format: PARAGRAPH)")
             
-            # Process document with summarizer
-            response = self.client.process_document(request=request)
-            result = response.document
+            # Process document with retry logic for transient errors
+            max_retries = 3
+            retry_delay = 1  # Start with 1 second
             
-            logger.info("✅ Document AI Summarizer processed successfully!")
+            for attempt in range(max_retries):
+                try:
+                    response = self.client.process_document(request=request)
+                    result = response.document
+                    logger.info("✅ Document AI Summarizer processed successfully!")
+                    break  # Success, exit retry loop
+                    
+                except google_exceptions.Unknown as e:
+                    # Transient network/SSL errors
+                    if attempt < max_retries - 1:
+                        logger.warning(f"⚠️ Transient error (attempt {attempt + 1}/{max_retries}): {e}")
+                        logger.info(f"🔄 Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        logger.error(f"❌ Failed after {max_retries} attempts")
+                        raise
+                        
+                except (google_exceptions.DeadlineExceeded, google_exceptions.ServiceUnavailable) as e:
+                    # Timeout or service unavailable
+                    if attempt < max_retries - 1:
+                        logger.warning(f"⚠️ Service error (attempt {attempt + 1}/{max_retries}): {e}")
+                        logger.info(f"🔄 Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                    else:
+                        logger.error(f"❌ Failed after {max_retries} attempts")
+                        raise
             
             # FIXED: Extract the SUMMARY field, not the full text
             summary_text = ""
@@ -307,6 +527,38 @@ class DocumentAIProcessor:
             logger.info(f"   - Summary text: {len(summary_text)} chars")
             logger.info(f"   - Pages analyzed: {layout_data['structured_document']['document_structure']['total_pages']}")
             
+            # NEW: Extract first 3 and last 3 pages with Layout Parser
+            layout_extracted_text = ""
+            total_pages = len(result.pages) if result.pages else 0
+            
+            if total_pages > 0:
+                # Determine which pages to extract
+                if total_pages <= 2:
+                    # Process all pages if only 2 or fewer
+                    pages_to_extract = list(range(1, total_pages + 1))
+                else:
+                    # First 3 and last 3 pages
+                    first_pages = list(range(1, min(4, total_pages + 1)))
+                    last_pages = list(range(max(total_pages - 2, 4), total_pages + 1))
+                    pages_to_extract = sorted(set(first_pages + last_pages))
+                
+                logger.info(f"📄 Extracting layout from pages: {pages_to_extract}")
+                layout_result = self._process_with_layout_parser(filepath, pages_to_extract)
+                
+                # Get full structured JSON from layout parser
+                document_dict = layout_result.get("document_dict", {})
+                formatted_text = layout_result.get("formatted_text", "")
+                
+                if document_dict:
+                    logger.info(f"✅ Layout Parser extracted {len(layout_result.get('blocks', []))} blocks")
+                    # Append both formatted text and full JSON to raw_text
+                    json_output = json.dumps(document_dict, indent=2, ensure_ascii=False)
+                    layout_data["raw_text"] = (
+                        summary_text + 
+                        "\n\n--- STRUCTURED LAYOUT (Formatted) ---\n\n" + formatted_text +
+                        "\n\n--- STRUCTURED LAYOUT (Full JSON) ---\n\n" + json_output
+                    )
+            
             # Build LLM-friendly JSON
             llm_json = build_llm_friendly_json(layout_data['structured_document'])
             llm_json["content"]["summary"] = summary_text
@@ -314,10 +566,10 @@ class DocumentAIProcessor:
 
             logger.info(f'summary text----------------- : {summary_text}')
             
-            # Create extraction result
+            # Create extraction result with merged raw_text
             processed_result = ExtractionResult(
                 text=result.text,  #full OCR text
-                raw_text=summary_text,
+                raw_text=layout_data["raw_text"],  # Summary + Layout Parser structured text
                 llm_text=llm_text,
                 page_zones=layout_data["page_zones"],
                 pages=len(result.pages) if result.pages else 0,
@@ -331,6 +583,7 @@ class DocumentAIProcessor:
             
             logger.info("📊 Extraction summary:")
             logger.info(f"   - Summary characters: {len(processed_result.text)}")
+            logger.info(f"   - Raw text (with layout): {len(processed_result.raw_text)} chars")
             logger.info(f"   - Pages: {processed_result.pages}")
             logger.info(f"   - Confidence: 100% (foundation model)")
             

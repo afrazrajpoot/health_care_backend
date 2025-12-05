@@ -582,9 +582,11 @@ async def get_workflow_stats(
 
 
 @router.get("/office-pulse")
-async def get_tasks_pulse():
+async def get_tasks_pulse(
+    physicianId: str = Query(..., description="Physician ID to filter tasks")
+):
     """
-    Fetch all tasks with department statistics (pulse).
+    Fetch all tasks with department statistics (pulse) for a specific physician.
     Returns tasks list and aggregated department stats (open, overdue, unclaimed).
     Matches Next.js /api/tasks functionality.
     """
@@ -597,8 +599,9 @@ async def get_tasks_pulse():
         # Use timezone-aware datetime for comparison
         now = datetime.now(timezone.utc)
         
-        # Fetch all tasks with document relation
+        # Fetch all tasks with document relation filtered by physicianId
         tasks = await db_service.prisma.task.find_many(
+            where={"physicianId": physicianId},
             include={"document": True},
             order={"createdAt": "desc"}
         )

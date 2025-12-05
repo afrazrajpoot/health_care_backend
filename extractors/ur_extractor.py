@@ -12,6 +12,7 @@ from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
+from utils.summary_helpers import ensure_date_and_author
 
 logger = logging.getLogger("document_ai")
 
@@ -452,6 +453,7 @@ All Doctors Involved:
 CRITICAL: Scan BOTH SOURCES (header, footer, cc: lines, letterhead) for claim numbers.
 
 Common claim number patterns (case-insensitive):
+- if in the structured raw_text like json formatted dat, if the fileds are first and values then handle the same way to extract the claim number of accurate filed, but most of the time the fields are first and values are second then the claim number will be in the second field
 - "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
 - "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
 - "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
@@ -582,7 +584,7 @@ TASK:
 Generate a concise, highly actionable summary from a VERIFIED long medical summary. 
 
 MANDATORY FORMAT - EXACTLY THIS STRUCTURE:
-[Document Type] | [Author] | [Date : value] | [Body Parts] | Decision:[value] | [Recommendations: value]
+[Document Type] | [Author] | [Date : value] | [Body Parts] | Decision:[value]
 
 STRICT REQUIREMENTS:
 1. Word count MUST be between **20 and 50 words** (count carefully).
@@ -594,15 +596,13 @@ STRICT REQUIREMENTS:
 
 FIELD EXTRACTION RULES:
 - **Document Type**: Extract exact type (e.g., "UR Decision", "IMR Appeal", "Authorization")
-- **Author**: Extract VERIFIED signer name from PARTIES section (e.g., "Dr. Jane Doe")
+- **Author**: Extract VERIFIED signer name from PARTIES section (e.g., "Jane Doe") but never use Dr. with it
   * If no distinct author found, OMIT this field entirely
   * Do NOT use generic titles or business names
 - **Date**: Extract decision/document date with key (e.g., "Date : 01/15/2025")
 - **Body Parts**: List affected body parts if mentioned (e.g., "Body Parts : Lumbar Spine, Right Knee")
   * If no body parts mentioned, OMIT this field
-- **Decision**: Extract decision outcome (e.g., "Decision: APPROVED", "Decision: DENIED", "Decision: PARTIAL")
-- **Recommendations**: Extract key recommendations if present (e.g., "Recommendations: File appeal by 02/01")
-  * If no recommendations, OMIT this field
+- **Decision**: Extract decision outcome (e.g., "Decision: APPROVED", "Decision: DENIED", "Decision: PENDING", "Decision: MODIFIED", "Decision: PARTIALLY APPROVED/DENIED (with breakdown or details if available)")
 
 ABSOLUTELY FORBIDDEN:
 - Patient personal details (name, DOB, Member ID, DOI)
@@ -613,7 +613,7 @@ ABSOLUTELY FORBIDDEN:
 - Word count outside 20-50 range
 
 EXAMPLES:
-✅ GOOD: "UR Decision | Dr. Smith | Date : 01/15/2025 | Body Parts : Lumbar Spine | Decision: DENIED | Recommendations: File IMR appeal by 02/01"
+✅ GOOD: "UR Decision | Smith | Date : 01/15/2025 | Body Parts : Lumbar Spine | Decision: DENIED | Recommendations: File IMR appeal by 02/01"
 
 ✅ GOOD (minimal): "IMR Appeal | Date : 01/20/2025 | Decision: APPROVED | Recommendations: Schedule MRI within 7 days"
 
@@ -629,7 +629,7 @@ LONG SUMMARY:
 {long_summary}
 
 Generate the summary in EXACTLY this format:
-[Document Type] | [Author] | [Date : value] | [Body Parts] | Decision:[value] | [Recommendations: value]
+[Document Type] | [Author] | [Date : value] | [Body Parts] | Decision:[value]
 
 Remember:
 - 20-50 words total
@@ -659,7 +659,8 @@ Remember:
                 
                 summary = response.content.strip()
                 end_time = time.time()
-                
+                # Programmatically add missing Date or Author if LLM missed them
+                summary = ensure_date_and_author(summary, long_summary)
                 # Clean whitespace and normalize pipes
                 summary = re.sub(r'\s+', ' ', summary).strip()
                 summary = re.sub(r'\s*\|\s*', ' | ', summary)  # Normalize pipe spacing

@@ -12,6 +12,7 @@ from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
+from utils.summary_helpers import ensure_date_and_author
 
 logger = logging.getLogger("document_ai")
 
@@ -265,6 +266,7 @@ class FormalMedicalReportExtractor:
         * CPT/ICD codes in billing sections
         * Signature blocks in footers (better in full text)
         * Claim numbers in headers/footers
+        - if in the structured raw_text like json formatted dat, if the fileds are first and values then handle the same way to extract the claim number of accurate filed, but most of the time the fields are first and values are second then the claim number will be in the second field
     - **DO NOT let this override the medical context from the primary source**
 
     ⚠️ ANTI-HALLUCINATION RULES FOR DUAL-CONTEXT:
@@ -584,6 +586,7 @@ STRICT REQUIREMENTS:
 
 KEY RULES:
 - ONLY include critical, or clinically significant findings .
+- For Author never use "Dr." with it
 - If a value is missing or not extractable, omit the ENTIRE key-value pair.
 - NEVER output empty fields or placeholder text.
 - NEVER fabricate dates, meds, restrictions, exam findings, or recommendations.
@@ -611,6 +614,7 @@ CONTENT PRIORITY (only if abnormal/critical and present):
 
 ABSOLUTELY FORBIDDEN:
 - Normal findings (ignore entirely for Physical Exam and Vital Signs)
+- For Author never use "Dr." with it
 - Assumptions, interpretations, inferred diagnoses
 - Narrative sentences
 - Patient personal details (Name, DOB, DOI, Claim, Employer)
@@ -641,7 +645,8 @@ Produce a 30–60 word structured medical summary following ALL rules.
 
             summary = response.content.strip()
             summary = re.sub(r"\s+", " ", summary).strip()
-            
+            # Programmatically add missing Date or Author if LLM missed them
+            summary = ensure_date_and_author(summary, long_summary)
             # Remove pipe cleaning to keep pipes as-is
             # summary = self._clean_pipes_from_summary(summary)
 
@@ -667,6 +672,8 @@ Produce a 30–60 word structured medical summary following ALL rules.
                 fixed = chain2.invoke({})
                 summary = re.sub(r"\s+", " ", fixed.content.strip())
                 # No pipe cleaning after regeneration
+                # Programmatically add missing Date or Author if LLM missed them
+                summary = ensure_date_and_author(summary, long_summary)
 
             logger.info(f"✅ Medical summary generated: {len(summary.split())} words")
             return summary

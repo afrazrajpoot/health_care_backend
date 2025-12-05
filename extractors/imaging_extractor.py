@@ -17,6 +17,7 @@ from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
+from utils.summary_helpers import ensure_date_and_author
 
 logger = logging.getLogger("document_ai")
 
@@ -289,7 +290,9 @@ class ImagingExtractorChained:
     - Check FULL TEXT headers/footers FIRST for exact claim numbers
     - Then check PRIMARY SOURCE if full text unclear
     - Scan for patterns: "[Claim #XXXXXXXXX]", "Claim Number:", "WC Claim:"
+    - if in the structured raw_text like json formatted dat, if the fileds are first and values then handle the same way to extract the claim number of accurate filed, but most of the time the fields are first and values are second then the claim number will be in the second field
 
+                                                            
     All Doctors Involved:
     • [extract from BOTH sources, deduplicate, prefer primary source format]
 
@@ -455,6 +458,7 @@ class ImagingExtractorChained:
     FORMAT & RULES:
     - MUST be **30–60 words**.
     - MUST be **ONE LINE**, pipe-delimited, no line breaks.
+    - For Author never use "Dr." with it
     - NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
     - NEVER fabricate: no invented dates, findings, or recommendations.
     - NO narrative sentences. Use short factual fragments ONLY.
@@ -477,6 +481,7 @@ class ImagingExtractorChained:
 
     ABSOLUTELY FORBIDDEN:
     - assumptions, interpretations, or invented findings
+    - For Author never use "Dr." with it
     - narrative writing
     - placeholder text or "Not provided"
     - duplicate pipes or empty pipe fields (e.g., "||")
@@ -502,6 +507,9 @@ class ImagingExtractorChained:
             summary = response.content.strip()
             summary = re.sub(r"\s+", " ", summary).strip()
             
+            # Programmatically add missing Date or Author if LLM missed them
+            summary = ensure_date_and_author(summary, long_summary)
+            
             # No pipe cleaning - keep pipes as generated
 
             # Validate 30–60 word requirement
@@ -519,7 +527,8 @@ class ImagingExtractorChained:
                 chain2 = fix_prompt | self.llm
                 fixed = chain2.invoke({})
                 summary = re.sub(r"\s+", " ", fixed.content.strip())
-                # No pipe cleaning after fix
+                # Re-ensure date and author after correction
+                summary = ensure_date_and_author(summary, long_summary)
 
             logger.info(f"✅ Imaging summary generated: {len(summary.split())} words")
             return summary

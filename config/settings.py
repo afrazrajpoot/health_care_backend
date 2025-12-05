@@ -9,7 +9,8 @@ class Settings:
         self.project_id = os.getenv("PROJECT_ID")
         self.location = os.getenv("LOCATION")
         self.processor_id = os.getenv("PROCESSOR_ID")
-        self.summarizer_processor_id = os.getenv("SUMMARIZER_PROCESSOR_ID", '3490f3724d94c062')  # New: Summarizer processor ID
+        self.summarizer_processor_id = os.getenv("SUMMARIZER_PROCESSOR_ID")  # New: Summarizer processor ID
+        self.layout_parser_processor_id = os.getenv("LAYOUT_PROCESSOR_ID")  # New: Layout Parser processor ID
         self.credentials_path = os.getenv("CREDENTIALS_PATH")
         self.max_file_size = int(os.getenv("MAX_FILE_SIZE", 40 * 1024 * 1024))  # Default 40MB
         self.upload_dir = os.getenv("UPLOAD_DIR")

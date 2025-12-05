@@ -998,38 +998,27 @@ class DatabaseService:
             """
             Save document analysis results to the database.
             FIXED: bodyPart is ALWAYS required in SummarySnapshot, even in GM mode
-            ADDED: Duplicate document check and deletion before saving
+            NOTE: Each document is saved as a NEW separate document (no duplicate checking)
             """
             try:
                 print(f"📊 Saving {len(summary_snapshots)} summary snapshots for document in {mode.upper()} mode")
 
-                # ✅ Step 1: Check for duplicate document
-                existing_document = await self._find_existing_document(
-                    patient_name=patient_name,
-                    claim_number=claim_number,
-                    dob=dob,
-                    doi=doi,
-                    report_date=rd,
-                    document_type=document_summary.get("type"),
-                    physician_id=physician_id
-                )
+                # ℹ️ NOTE: We do NOT check for duplicates or delete existing documents
+                # Real-world scenario: A patient may have multiple reports with same DOB/claim
+                # (e.g., X-ray, Left Foot MRI, Right Foot MRI - all separate documents for same patient)
+                # Each document is UNIQUE and should be saved separately
 
-                # ✅ Step 2: Delete existing document if found
-                if existing_document:
-                    await self._delete_existing_document(existing_document.id)
-                    logger.info(f"🗑️ Deleted existing duplicate document with ID: {existing_document.id}")
-
-                # ✅ Step 3: Ensure document_summary has 'date'
+                # ✅ Step 1: Ensure document_summary has 'date'
                 if "createdAt" in document_summary and "date" not in document_summary:
                     document_summary["date"] = document_summary["createdAt"]
 
-                # ✅ Step 4: Handle whatsNew as JSON string (for scalar Json field)
+                # ✅ Step 2: Handle whatsNew as JSON string (for scalar Json field)
                 whats_new_json = json.dumps(whats_new) if whats_new else None
 
-                # ✅ Step 5: Use the FIRST snapshot as primary summarySnapshot (for backward compatibility)
+                # ✅ Step 3: Use the FIRST snapshot as primary summarySnapshot (for backward compatibility)
                 primary_snapshot = summary_snapshots[0] if summary_snapshots else {}
                 
-                # ✅ Step 6: Create Document with nested relations including bodyPartSnapshots
+                # ✅ Step 4: Create Document with nested relations including bodyPartSnapshots
                 document_data = {
                     "patientName": patient_name,
                     "claimNumber": claim_number,
@@ -1049,7 +1038,7 @@ class DatabaseService:
                     **({"fileHash": file_hash} if file_hash else {}),
                 }
 
-                # ✅ Step 7: Primary summary snapshot (for backward compatibility)
+                # ✅ Step 5: Primary summary snapshot (for backward compatibility)
                 # 🚨 CRITICAL FIX: bodyPart is ALWAYS required in SummarySnapshot!
                 if summary_snapshots:
                     # For GM mode, use the condition as bodyPart, or fallback to "General"
@@ -1319,6 +1308,44 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"❌ Error deleting existing document {document_id}: {str(e)}")
             raise
+    async def check_duplicate_by_hash(self, file_hash: str, physician_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Check if a file with the same hash already exists for this physician.
+        Returns the existing document if found, None otherwise.
+        This prevents processing renamed versions of the same file.
+        """
+        try:
+            existing_doc = await self.prisma.document.find_first(
+                where={
+                    "fileHash": file_hash,
+                    "physicianId": physician_id
+                },
+                include={
+                    "summarySnapshot": True,
+                    "documentSummary": True
+                }
+            )
+            
+            if existing_doc:
+                logger.info(f"🔍 Duplicate file detected - Hash: {file_hash[:16]}... for physician: {physician_id}")
+                logger.info(f"   Original file: {existing_doc.fileName or 'unknown'}")
+                logger.info(f"   Upload date: {existing_doc.createdAt}")
+                return {
+                    "id": existing_doc.id,
+                    "fileName": existing_doc.fileName,
+                    "patientName": existing_doc.patientName,
+                    "claimNumber": existing_doc.claimNumber,
+                    "status": existing_doc.status,
+                    "createdAt": existing_doc.createdAt,
+                    "gcsFileLink": existing_doc.gcsFileLink
+                }
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking duplicate by hash: {str(e)}")
+            return None
+    
     async def check_duplicate_document(self, patient_name: str, doi: Optional[str], report_date: Optional[str], 
                                         document_type: Optional[str], physician_id: str, 
                                         patient_dob: Optional[str] = None, claim_number: Optional[str] = None) -> bool:

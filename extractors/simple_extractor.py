@@ -9,6 +9,8 @@ from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTempla
 from langchain_openai import AzureChatOpenAI
 from langchain_core.runnables import RunnableLambda, RunnableBranch
 
+from utils.summary_helpers import ensure_date_and_author
+
 
 
 
@@ -206,6 +208,7 @@ All Doctors Involved:
 CRITICAL: Scan BOTH SOURCES (header, footer, cc: lines, letterhead) for claim numbers.
 
 Common claim number patterns (case-insensitive):
+- if in the structured raw_text like json formatted dat, if the fileds are first and values then handle the same way to extract the claim number of accurate filed, but most of the time the fields are first and values are second then the claim number will be in the second field
 - "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
 - "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
 - "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
@@ -340,6 +343,8 @@ ABSOLUTE RULES - NO EXCEPTIONS:
 5. NEVER output empty strings, blank values, or null markers.
 6. If a field has no real value in the text, DO NOT include that field AT ALL.
 7. Skip the entire "Key: Value" segment if no value exists.
+- For Author never use "Dr." with it
+
 
 CRITICAL: If you see terms like "Decision: [empty]" or "Medical Necessity: [empty]" in your output - YOU ARE DOING IT WRONG. Simply don't include those keys.
 
@@ -382,7 +387,7 @@ Lab Report with complete data:
 "Lab Results | Jones Doe | Date: 10/22/2025 | Critical Finding: Elevated WBC 15.2 (H), Glucose 245 mg/dL (H) | Lab Results: Hemoglobin 12.1, Creatinine 1.2 | Recommendation: Repeat CBC in 1 week, endocrinology consult"
 
 Imaging Report:
-"MRI Report | Dr. Lee | Date: 09/15/2025 | Body Parts: L4-L5, L5-S1 | Imaging Findings: Moderate central stenosis L4-L5, broad-based disc herniation L5-S1 | Recommendation: Epidural steroid injection, neurosurgery consultation"
+"MRI Report | Lee | Date: 09/15/2025 | Body Parts: L4-L5, L5-S1 | Imaging Findings: Moderate central stenosis L4-L5, broad-based disc herniation L5-S1 | Recommendation: Epidural steroid injection, neurosurgery consultation"
 
 Clinical Note with limited data:
 "Follow-up Visit | Smith | Date: 08/20/2025 | Body Parts: Right knee | Diagnosis: Post-op ACL reconstruction | Work Status: Modified duty"
@@ -391,7 +396,7 @@ Notice: Only fields with actual values are included. No [empty] or placeholder f
 
 WHAT NOT TO DO:
 ❌ "Report | Dr. Smith | Decision: [empty] | Medical Necessity: [empty]"
-✅ "Report | Dr. Smith | Date: 04/13/2017 | Diagnosis: Meniscus tear"
+✅ "Report | Smith | Date: 04/13/2017 | Diagnosis: Meniscus tear"
 
 FINAL CHECKLIST BEFORE OUTPUT:
 - Does my output contain [empty], [unknown], or any placeholder? → REMOVE THOSE FIELDS
@@ -419,6 +424,7 @@ Short summary:
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
         
         try:
+            # Programmatically add missing Date or Author if LLM missed them
             chain = chat_prompt | self.llm
             response = chain.invoke({"long_summary": long_summary[:3000]})
             short_summary = response.content.strip()
@@ -428,14 +434,15 @@ Short summary:
             
             # Additional safety: Remove any segments with [empty] or similar placeholders
             short_summary = self._remove_empty_segments(short_summary)
-            
+            # Programmatically add missing Date or Author if LLM missed them
+            short_summary = ensure_date_and_author(short_summary, long_summary)
             word_count = len(short_summary.split())
             logger.info(f"✅ Short summary: {word_count} words")
             
             # Fallback if too long
-            if word_count > 80:
+            if word_count > 100:
                 words = short_summary.split()
-                short_summary = ' '.join(words[:60]) + "..."
+                short_summary = ' '.join(words[:100]) + "..."
             
             return short_summary
             

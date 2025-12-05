@@ -12,6 +12,7 @@ from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
+from utils.summary_helpers import ensure_date_and_author
 
 logger = logging.getLogger("document_ai")
 
@@ -226,6 +227,8 @@ class QMEExtractorChained:
     - Check FULL TEXT headers/footers first (claim numbers often here)
     - Scan for patterns: "[Claim #XXXXXXXXX]", "Claim Number:", "WC Claim:"
     - Verify claim number is actual claim (not chart number or other ID)
+    - if in the structured raw_text like json formatted dat, if the fileds are first and values then handle the same way to extract the claim number of accurate filed, but most of the time the fields are first and values are second then the claim number will be in the second field
+
 
     **NOW GENERATE A COMPREHENSIVE LONG SUMMARY IN MARKDOWN FORMAT**
 
@@ -377,6 +380,8 @@ class QMEExtractorChained:
     2. Format MUST be EXACTLY a single pipe-delimited line:
     - **ONLY include, critical, or clinically significant findings**.
     - **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
+    - For Author never use "Dr." with it
+
     
     Make sure to follow this EXACT format:
     [Report Title] | [Author] | Date:[value] | Body Parts:[value] | Diagnosis:[value] | Physical Examination:[value (only critical findings or abnormalities else skip)] | Vital Signs:[value (only critical vital signs else skip)] | Treatment Plan:[value] | Critical Finding:[value (only abnormalities) if applicable] | Follow-up:[value] | Recommendations:[value] | Work Status:[value] | MMI Status:[value] | WPI:[value] | Medications:[value]
@@ -395,6 +400,7 @@ class QMEExtractorChained:
 
     ABSOLUTELY FORBIDDEN:
 - Normal findings (ignore them entirely)
+- For Author never use "Dr." with it
 - assumptions, interpretations, invented medications, or inferred diagnoses
 - placeholder text or "Not provided"
 - narrative writing
@@ -437,6 +443,9 @@ class QMEExtractorChained:
                 cleaned_segments.append(seg)
 
             summary = " | ".join(cleaned_segments).strip()
+            
+            # Programmatically add missing Date or Author if LLM missed them
+            summary = ensure_date_and_author(summary, long_summary)
 
             # Word count check
             wc = len(summary.split())
@@ -460,6 +469,8 @@ class QMEExtractorChained:
                         continue
                     cleaned_segments.append(seg)
                 summary = " | ".join(cleaned_segments).strip()
+                # Re-ensure date and author after correction
+                summary = ensure_date_and_author(summary, long_summary)
 
                 logger.info(f"🔧 Fixed summary word count: {len(summary.split())} words")
 

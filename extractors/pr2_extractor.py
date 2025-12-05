@@ -10,10 +10,8 @@ from typing import Dict, Optional, List
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
-
-from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
-
+from utils.summary_helpers import ensure_date_and_author
 logger = logging.getLogger("document_ai")
 
 
@@ -62,6 +60,7 @@ class PR2ExtractorChained:
         logger.info("=" * 80)
         logger.info("📋 STARTING PR-2 EXTRACTION (FULL CONTEXT + RAW TEXT)")
         logger.info("=" * 80)
+        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {raw_text} chars (accurate context)")
         
         start_time = time.time()
         
@@ -233,6 +232,7 @@ Description: [extracted]
 CRITICAL: Scan the ENTIRE document mainly (header, footer, cc: lines, letterhead) for claim numbers.
 
 Common claim number patterns (case-insensitive) and make sure to extract EXACTLY as written and must be claim number not just random numbers (like chart numbers, or id numbers) that look similar:
+- if in the structured raw_text like json formatted dat, if the fileds are first and values then handle the same way to extract the claim number of accurate filed, but most of the time the fields are first and values are second then the claim number will be in the second field
 - "[Claim #XXXXXXXXX]" or "[Claim #XXXXX-XXX]"
 - "Claim Number: XXXXXXXXX" or "Claim #: XXXXXXXXX"
 - "Claim: XXXXXXXXX" or "Claim #XXXXXXXXX"
@@ -421,6 +421,7 @@ Return Sooner If: [extracted]
     FORMAT & RULES:
     - MUST be **30–60 words**.
     - MUST be **ONE LINE**, pipe-delimited, no line breaks.
+    - For Author never use "Dr." with it
     - NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
     - NEVER fabricate: no invented dates, meds, restrictions, exam findings, or recommendations.
     - NO narrative sentences. Use short factual fragments ONLY.
@@ -465,6 +466,7 @@ Return Sooner If: [extracted]
 
     ABSOLUTELY FORBIDDEN:
     - assumptions, interpretations, invented medications, or inferred diagnoses
+    - For Author never use "Dr." with it
     - narrative writing
     - placeholder text or "Not provided"
     - duplicate pipes or empty pipe fields (e.g., "||")
@@ -491,7 +493,8 @@ Return Sooner If: [extracted]
 
             # Clean whitespace only
             summary = re.sub(r'\s+', ' ', summary).strip()
-
+            # Programmatically add missing Date or Author if LLM missed them
+            summary = ensure_date_and_author(summary, long_summary)
             # Word count check
             wc = len(summary.split())
             if wc < 30 or wc > 60:
@@ -507,7 +510,8 @@ Return Sooner If: [extracted]
                 chain2 = fix_prompt | self.llm
                 fixed = chain2.invoke({})
                 summary = re.sub(r'\s+', ' ', fixed.content.strip())
-
+                # Programmatically add missing Date or Author if LLM missed them
+                summary = ensure_date_and_author(summary, long_summary)
             logger.info(f"✅ PR-2 summary generated: {len(summary.split())} words")
             return summary
 

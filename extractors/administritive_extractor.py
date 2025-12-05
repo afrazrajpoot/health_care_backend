@@ -9,9 +9,8 @@ from typing import Dict, Optional, List
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
-
-from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
+from utils.summary_helpers import ensure_date_and_author
 
 logger = logging.getLogger("document_ai")
 
@@ -221,6 +220,7 @@ class AdministrativeExtractor:
     - Use PRIMARY SOURCE if full text is unclear or missing
 
     5. **CLAIM NUMBERS & IDENTIFIERS**:
+    - if in the structured raw_text like json formatted dat, if the fileds are first and values then handle the same way to extract the claim number of accurate filed, but most of the time the fields are first and values are second then the claim number will be in the second field
     - These are often in headers/footers (better in FULL TEXT)
     - Check FULL TEXT first for exact claim/case numbers
     - Use PRIMARY SOURCE if full text is unclear
@@ -507,7 +507,8 @@ NEW KEY RULES (IMPORTANT):
 FORMAT & RULES:
 - MUST be **30–60 words**.
 - MUST be **ONE LINE**, pipe-delimited, no line breaks.
-- First three fields (Document Title, Author, Date) appear without keys.
+- First three fields (Document Title, Author, Date) appear without keys
+- For Author never use Dr. with it
 - All other fields use key-value format: Key:[value].
 - DO NOT include patient details (name, DOB, ID).
 - NEVER fabricate any information or infer abnormalities.
@@ -534,6 +535,7 @@ ABSOLUTELY FORBIDDEN (donot include in output, for LLM use only):
 - placeholder text or "Not provided"
 - narrative writing
 - duplicate pipes or empty pipe fields (e.g., "||")
+- For Author never use Dr. with it
 - any patient details (patient name, DOB, ID)
 
 Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
@@ -557,6 +559,9 @@ Now produce a 30–60 word administrative structured summary following ALL rules
 
             # Clean formatting - only whitespace, no pipe cleaning
             summary = re.sub(r"\s+", " ", summary).strip()
+            
+            # Programmatically add missing Date or Author if LLM missed them
+            summary = ensure_date_and_author(summary, long_summary)
 
             # Word count validation
             wc = len(summary.split())
@@ -572,7 +577,8 @@ Now produce a 30–60 word administrative structured summary following ALL rules
                 chain2 = fix_prompt | self.llm
                 fixed = chain2.invoke({})
                 summary = re.sub(r"\s+", " ", fixed.content.strip())
-                # No pipe cleaning after correction
+                # Re-ensure date and author after correction
+                summary = ensure_date_and_author(summary, long_summary)
 
             logger.info(f"✅ Administrative summary generated: {len(summary.split())} words")
             return summary
