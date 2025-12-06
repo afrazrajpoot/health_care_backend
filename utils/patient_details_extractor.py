@@ -8,6 +8,11 @@ import re
 import logging
 from typing import Dict, Optional, List, Any
 from datetime import datetime
+from langchain_openai import AzureChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
+from config.settings import CONFIG
+import json
+import os
 
 logger = logging.getLogger("patient_extractor")
 
@@ -56,7 +61,8 @@ class PatientDetailsExtractor:
         r'\bclaim\s*no\.?\s*\b',  # Handles: Claim No, Claim No., ClaimNo
         r'\bclaim\s*number\b',  # Handles: Claim Number, Claimnumber
         r'\bclaim\s*#\b',  # Handles: Claim #, Claim#
-        r'\bclaim\b',  # Handles: Claim
+        r'\bclaim\s*:\s*\b',  # Handles: Claim: (with colon - specific match)
+        r'\bclaim\b',  # Handles: Claim (standalone)
         r'\bcl\.?\s*no\.?\b',  # Handles: Cl No, Cl. No., ClNo
         r'\bcl\.?\s*#\b',  # Handles: Cl #, Cl#
         r'\bcl\s*:\s*\b',  # Handles: Cl:, Cl : (abbreviated claim with colon)
@@ -74,6 +80,16 @@ class PatientDetailsExtractor:
         r'\breference\s*no\.?\b',  # Handles: Reference No
     ]
     
+    # ❌ EXCLUDED PATTERNS - DO NOT extract as claim numbers
+    NON_CLAIM_PATTERNS = [
+        r'\bBCN\s*:\s*',   # BCN: (Billing Control Number)
+        r'\bDCN\s*:\s*',   # DCN: (Document Control Number)
+        r'\bICN\s*:\s*',   # ICN: (Internal Control Number)
+        r'\bPCN\s*:\s*',   # PCN: (Prescription Control Number)
+        r'\bTRN\s*:\s*',   # TRN: (Transaction Number)
+        r'\bRCN\s*:\s*',   # RCN: (Record Control Number)
+    ]
+    
     # Date format patterns
     DATE_FORMATS = [
         r'\b\d{1}[-/]\d{1,2}[-/]\d{1,2}[-/]\d{4}\b',  # 4-part with leading zero: 0-4-05-1955 or 0/4/05/1955
@@ -86,10 +102,13 @@ class PatientDetailsExtractor:
     ]
     
     # Claim number patterns (WC claims often have specific formats)
+    # ✅ STRICT PATTERNS - Only match typical claim number formats
     CLAIM_NUMBER_PATTERNS = [
-        r'\b\d{5,}[-/]?\d+[-/]?(?:WC|wc)[-/]?\d*\b',  # 002456-654361-WC-01
-        r'\b\d{5,}[-/]?\d+\b',  # General number format
-        r'\b[A-Z]{2,}\d{5,}\b',  # State code + numbers
+        r'\b[A-Z]{2}\d{4,8}(?:-\d{3})?\b',  # JH34455-001, JH34455
+        r'\b\d{5,7}[-/]\d{5,7}[-/](?:WC|wc)[-/]?\d{1,3}\b',  # 002456-654361-WC-01
+        r'\b\d{4,6}[-/][A-Z]{2}[-/][A-Z]{2}\d[-/]\d{4}[-/][A-Z]\b',  # 480-CB-JH3-4455-K (space-separated converted)
+        r'\b[A-Z]{2,4}\d{2,4}[-/]?\d{2,4}\b',  # WC1234-5678, WCAB12-34
+        r'\b\d{4,6}\s+[A-Z]{2}\s+[A-Z]{2}\d\s+\d{4}\s+[A-Z]\b',  # 480 CB JH3 4455 K (with spaces)
     ]
     
     def __init__(self):
@@ -125,6 +144,11 @@ class PatientDetailsExtractor:
             else:
                 # Full words like "claim", "file", "case" etc. - case-insensitive
                 self.claim_regex.append(re.compile(p, re.IGNORECASE))
+        
+        # Compile non-claim patterns to exclude (BCN, DCN, etc.)
+        self.non_claim_regex = []
+        for p in self.NON_CLAIM_PATTERNS:
+            self.non_claim_regex.append(re.compile(p, re.IGNORECASE))
         
         self.date_formats = [re.compile(p, re.IGNORECASE) for p in self.DATE_FORMATS]
         self.claim_number_formats = [re.compile(p) for p in self.CLAIM_NUMBER_PATTERNS]
@@ -166,6 +190,9 @@ class PatientDetailsExtractor:
         result["dob"] = self._extract_dob(blocks)
         result["doi"] = self._extract_doi(blocks)
         result["claim_number"] = self._extract_claim_number(blocks)
+        
+        # 🆕 LLM Validation: Verify extracted details using first 2000 words
+        result = self._validate_with_llm(result, blocks)
         
         # Log results
         logger.info(f"Patient Details Extraction Results:")
@@ -668,19 +695,26 @@ class PatientDetailsExtractor:
         return None
     
     def _extract_claim_number(self, blocks: List[Dict[str, Any]]) -> Optional[str]:
-        """Extract claim number with format validation"""
+        """
+        Extract claim number with STRICT keyword validation.
+        Only extracts numbers that are explicitly associated with claim keywords.
+        """
         candidates = []
         
         for i, block in enumerate(blocks):
             text = block['text']
             
-            # NEW: Check for embedded claim number in brackets or after # symbol
+            # ✅ PRIORITY 1: Embedded claim number with keyword in brackets/parentheses
             # Pattern: "Something [Claim #123456-001]" or "Something (Claim: 123456)"
             for regex in self.claim_regex:
                 match = regex.search(text)
                 if match:
+                    # Check this is NOT a non-claim pattern
+                    is_non_claim = any(non_claim_regex.search(text) for non_claim_regex in self.non_claim_regex)
+                    if is_non_claim:
+                        continue
+                    
                     # Try to extract claim number from the same text after the keyword
-                    # Look for patterns like: [Claim #NUMBER], (Claim #NUMBER), [Claim: NUMBER]
                     embedded_patterns = [
                         r'[\[\(].*?claim.*?[#:]?\s*(\d+[-/\dA-Z]+).*?[\]\)]',  # [Claim #123-456] or (Claim: 123)
                         r'claim\s*[#:]\s*(\d+[-/\dA-Z]+)',  # Claim #123-456 or Claim: 123
@@ -694,28 +728,50 @@ class PatientDetailsExtractor:
                             if not any(date_regex.search(claim_number) for date_regex in self.date_formats):
                                 candidates.append({
                                     'value': claim_number,
-                                    'confidence': 0.96,
-                                    'source': 'embedded_in_text'
+                                    'confidence': 0.98,  # Highest confidence - explicit keyword
+                                    'source': 'embedded_with_keyword'
                                 })
                                 break
             
             # Check if block contains claim field with value in same block (colon or # separator)
             value_found_in_same_block = False
             
-            # Try colon separator
+            # Try colon separator - ENHANCED: Only extract after valid claim keywords
             if ':' in text:
                 for regex in self.claim_regex:
                     match = regex.search(text)
                     if match and self._is_valid_field_format(text, match.group(0)):
-                        # Extract value after colon
-                        parts = text.split(':', 1)
-                        if len(parts) == 2:
-                            claim_match = self._extract_claim_from_text(parts[1])
+                        # ✅ NEW: Check this is NOT a non-claim pattern (BCN:, DCN:, etc.)
+                        is_non_claim = any(non_claim_regex.search(text) for non_claim_regex in self.non_claim_regex)
+                        if is_non_claim:
+                            continue  # Skip this match, it's BCN:/DCN:/etc.
+                        
+                        # Find the position of the matched keyword
+                        keyword_pos = match.start()
+                        # Find the colon after this keyword
+                        text_after_keyword = text[keyword_pos:]
+                        colon_idx = text_after_keyword.find(':')
+                        
+                        if colon_idx != -1:
+                            # Extract text after the colon following THIS keyword
+                            value_text = text_after_keyword[colon_idx + 1:].strip()
+                            
+                            # Stop at next field or separator
+                            # Look for next keyword boundary (another field name or end of text)
+                            stop_idx = len(value_text)
+                            for stop_pattern in [r'\b(?:Received|Date|BCN|DCN|ICN|PCN|TRN|RCN)\s*:', r'\s{3,}']:  # Stop at next field or 3+ spaces
+                                stop_match = re.search(stop_pattern, value_text, re.IGNORECASE)
+                                if stop_match:
+                                    stop_idx = min(stop_idx, stop_match.start())
+                            
+                            value_text = value_text[:stop_idx].strip()
+                            
+                            claim_match = self._extract_claim_from_text(value_text)
                             if claim_match:
                                 candidates.append({
                                     'value': claim_match,
                                     'confidence': 0.95,
-                                    'source': 'same_block_colon'
+                                    'source': 'same_block_colon_specific'
                                 })
                                 value_found_in_same_block = True
                                 break
@@ -956,44 +1012,157 @@ class PatientDetailsExtractor:
         
         return None
     
-    def _extract_claim_from_text(self, text: str) -> Optional[str]:
-        """Extract claim number from text"""
+    def _extract_claim_from_text(self, text: str, require_keyword: bool = False) -> Optional[str]:
+        """
+        Extract claim number from text.
+        
+        Args:
+            text: Text to extract from
+            require_keyword: If True, only extract if claim keyword is present (stricter validation)
+        
+        Returns:
+            Extracted claim number or None
+        """
         if not text:
             return None
         
         text = text.strip()
         
-        # Try specific claim patterns first
+        # If require_keyword is True, check that claim keyword exists in the text
+        if require_keyword:
+            has_keyword = any(regex.search(text) for regex in self.claim_regex)
+            if not has_keyword:
+                return None  # No claim keyword found, don't extract
+        
+        # Try specific claim patterns first (formats with letters/dashes common in claims)
         for regex in self.claim_number_formats:
             match = regex.search(text)
             if match:
-                return match.group(0).strip()
+                candidate = match.group(0).strip()
+                # Make sure it's not a date
+                if not any(regex.search(candidate) for regex in self.date_formats):
+                    return candidate
         
-        # Fallback: any sequence that looks like a claim number
-        # Pattern 1: Continuous sequence (at least 5 chars with digits/letters/dashes/slashes)
-        fallback_pattern = r'\b[\dA-Z][-/\dA-Z]{4,}\b'
-        match = re.search(fallback_pattern, text)
-        if match:
-            candidate = match.group(0).strip()
-            # Make sure it's not a date
-            if not any(regex.search(candidate) for regex in self.date_formats):
-                return candidate
-        
-        # Pattern 2: Alphanumeric with spaces (common format: "480 CB JH3 4455 K")
-        # Must have at least one digit and one letter, and be at least 10 chars with spaces
-        if len(text) >= 10 and any(c.isdigit() for c in text) and any(c.isalpha() for c in text):
-            # Remove extra whitespace, but keep single spaces
-            normalized = ' '.join(text.split())
-            # Check if it looks like a claim (mix of letters, numbers, spaces)
-            # Must not be a date
-            if not any(regex.search(normalized) for regex in self.date_formats):
-                # Must not be all letters or all numbers
-                has_letters = any(c.isalpha() for c in normalized)
-                has_digits = any(c.isdigit() for c in normalized)
-                if has_letters and has_digits:
-                    return normalized
+        # ❌ REMOVED: Fallback patterns that extract any long number sequence
+        # This was causing false positives like "1500550266046699" 
+        # Now we ONLY extract if it matches specific claim formats or has keyword context
         
         return None
+    
+    def _validate_with_llm(self, extracted_data: Dict[str, Optional[str]], blocks: List[Dict[str, Any]]) -> Dict[str, Optional[str]]:
+        """
+        Validate extracted patient details using Azure OpenAI LLM.
+        Uses first 2000 words of document to verify accuracy.
+        
+        Args:
+            extracted_data: Initial extraction results
+            blocks: All text blocks from document
+            
+        Returns:
+            Validated/corrected extraction results
+        """
+        try:
+            
+            # Get first 2000 words from document
+            all_text = " ".join([block['text'] for block in blocks[:50]])  # First 50 blocks ~2000 words
+            words = all_text.split()[:2000]
+            context_text = " ".join(words)
+            
+            # Skip validation if Azure OpenAI is not configured
+            if not CONFIG.get("azure_openai_api_key") or not CONFIG.get("azure_openai_endpoint"):
+                logger.warning("⚠️ Azure OpenAI not configured, skipping LLM validation")
+                return extracted_data
+            
+            # Initialize Azure OpenAI client
+            llm = AzureChatOpenAI(
+                azure_endpoint=CONFIG.get("azure_openai_endpoint"),
+                api_key=CONFIG.get("azure_openai_api_key"),
+                deployment_name=CONFIG.get("azure_openai_deployment"),
+                api_version=CONFIG.get("azure_openai_api_version"),
+                temperature=0.0,
+                timeout=60
+            )
+            
+            # Create validation prompt
+            system_message = """You are a medical document analysis expert. Verify the accuracy of extracted patient details.
+
+INSTRUCTIONS:
+1. Verify each extracted detail against the document text
+2. For Claim Number: ONLY accept if it appears with keywords like "Claim:", "Claim #", "Claim No", "Cl:", "File No", etc.
+3. DO NOT accept random numbers like "1500550266046699" or "BCN: 1014518231" as claim numbers
+4. Patient Name should be an actual person's name, not a sentence fragment
+5. Dates should be in valid formats
+
+Return ONLY a JSON object with corrected values. Use "Not specified" if a field is truly not found or incorrect.
+
+Required JSON format:
+{
+  "patient_name": "corrected or original value",
+  "dob": "YYYY-MM-DD or Not specified",
+  "doi": "YYYY-MM-DD or Not specified",
+  "claim_number": "corrected or original value or Not specified",
+  "validation_notes": "brief explanation of any corrections made"
+}"""
+
+            human_message = f"""EXTRACTED DETAILS:
+- Patient Name: {extracted_data.get('patient_name', 'Not found')}
+- Date of Birth (DOB): {extracted_data.get('dob', 'Not found')}
+- Date of Injury (DOI): {extracted_data.get('doi', 'Not found')}
+- Claim Number: {extracted_data.get('claim_number', 'Not found')}
+
+DOCUMENT TEXT (first 2000 words):
+{context_text}
+
+Validate these details and return the JSON."""
+
+            messages = [
+                SystemMessage(content=system_message),
+                HumanMessage(content=human_message)
+            ]
+            
+            response = llm.invoke(messages)
+            response_text = response.content
+            
+            # Extract JSON from response (might be wrapped in markdown code blocks)
+            json_match = re.search(r'```(?:json)?\s*(\{[^`]+\})\s*```', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # Try to find JSON without code blocks
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text, re.DOTALL)
+                json_str = json_match.group(0) if json_match else None
+            
+            if json_str:
+                validated_data = json.loads(json_str)
+                
+                logger.info("✅ LLM Validation completed:")
+                logger.info(f"  Original Claim: {extracted_data.get('claim_number')} → Validated: {validated_data.get('claim_number')}")
+                logger.info(f"  Original Name: {extracted_data.get('patient_name')} → Validated: {validated_data.get('patient_name')}")
+                logger.info(f"  Notes: {validated_data.get('validation_notes', 'No corrections')}")
+                
+                # Update with validated data (but keep original if LLM returns "Not specified" and we had something)
+                result = {}
+                for key in ['patient_name', 'dob', 'doi', 'claim_number']:
+                    validated_value = validated_data.get(key)
+                    original_value = extracted_data.get(key)
+                    
+                    if validated_value and validated_value.lower() not in ['not specified', 'not found', 'none']:
+                        result[key] = validated_value
+                    elif original_value:
+                        # Keep original if LLM didn't find better value
+                        result[key] = original_value
+                    else:
+                        result[key] = None
+                
+                return result
+            else:
+                logger.warning("⚠️ Could not parse LLM response, using original extraction")
+                return extracted_data
+                
+        except Exception as e:
+            logger.error(f"❌ LLM validation failed: {str(e)}")
+            logger.debug("Using original extraction results")
+            return extracted_data
 
 
 # Global instance

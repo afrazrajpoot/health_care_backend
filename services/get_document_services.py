@@ -73,8 +73,13 @@ class DocumentAggregationService:
             all_documents_data=document_data,
             tasks_dict=tasks_dict
         )
+        
+        # 🆕 Use merged patient details from database service
+        response["patient_name"] = document_data.get("patient_name", patient_name)
+        response["dob"] = document_data.get("dob", dob)
+        response["claim_number"] = document_data.get("claim_number", claim_number)
 
-        logger.info(f"✅ Returned aggregated document for: {patient_name}")
+        logger.info(f"✅ Returned aggregated document for: {response['patient_name']}")
         return response
 
     def _parse_date(self, date_str: str, field_name: str) -> Optional[datetime]:
@@ -98,10 +103,7 @@ class DocumentAggregationService:
         all_documents_data: Dict[str, Any],
         tasks_dict: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """
-        Format the aggregated document response from all documents.
-        Returns array of documents, but each document includes ALL related data from ALL matching patient records.
-        """
+        """Format the aggregated document response from all documents."""
         documents = all_documents_data["documents"]
 
         if not documents:
@@ -116,36 +118,41 @@ class DocumentAggregationService:
         # Sort documents by reportDate descending (latest first)
         sorted_documents = sorted(documents, key=self._parse_report_date, reverse=True)
 
-        # 🆕 AGGREGATE ALL DATA ACROSS ALL DOCUMENTS (not grouped by document_id)
-        all_body_part_snapshots = []
-        all_whats_new = []
-        all_document_summaries = []
-        all_adl_data = []
-        all_summary_snapshots = []
-        all_task_quick_notes = []
+        # Grouped data by document_id
+        whats_new_by_document = {}  # Stores original whatsNew as is, without grouping
+        body_part_by_document = {}
+        brief_summary_by_document = {}
+        document_summary_by_document = {}
+        adl_by_document = {}
+        summary_snapshot_by_document = {}
 
         for doc in sorted_documents:
             doc_id = doc["id"]
             created_at = self._format_date_field(doc.get("createdAt"))
             report_date = self._format_date_field(doc.get("reportDate"))
 
-            # Collect ALL body_part_snapshots from ALL documents
+            # Group body_part_snapshots by document
             body_part_snapshots = doc.get("bodyPartSnapshots", [])
+            grouped_body_parts = []
             for snapshot in body_part_snapshots:
                 snapshot_with_context = snapshot.copy()
-                snapshot_with_context["document_id"] = doc_id
                 snapshot_with_context["document_created_at"] = created_at
                 snapshot_with_context["document_report_date"] = report_date
-                snapshot_with_context["file_name"] = doc.get("fileName")
-                snapshot_with_context["gcs_file_link"] = doc.get("gcsFileLink")
-                all_body_part_snapshots.append(snapshot_with_context)
+                grouped_body_parts.append(snapshot_with_context)
+            if doc_id not in body_part_by_document:
+                body_part_by_document[doc_id] = []
+            body_part_by_document[doc_id].extend(grouped_body_parts)
 
-            # Collect ALL whats_new from ALL documents
+            # Send whats_new as is, without processing or grouping
             whats_new_data = doc.get("whatsNew")
-            if whats_new_data:
-                all_whats_new.append(whats_new_data)
+            whats_new_by_document[doc_id] = whats_new_data if whats_new_data is not None else []
 
-            # Collect ALL document summaries from ALL documents
+            # Group brief_summary by document
+            brief_summary = doc.get("briefSummary")
+            if brief_summary:
+                brief_summary_by_document[doc_id] = brief_summary
+
+            # Group document_summary by document
             doc_summary = doc.get("documentSummary")
             if doc_summary:
                 summary_entry = {
@@ -153,80 +160,121 @@ class DocumentAggregationService:
                     "summary": doc_summary.get("summary"),
                     "type": doc_summary.get("type", "unknown")
                 }
-                all_document_summaries.append(summary_entry)
+                document_summary_by_document[doc_id] = summary_entry
 
-            # Collect ALL ADL data from ALL documents
+            # Group ADL by document - INCLUDING ALL FIELDS
             adl_data = doc.get("adl")
             if adl_data:
+                # Create complete ADL entry with all fields
                 complete_adl_entry = {
                     # Shared fields
                     "adls_affected": adl_data.get("adlsAffected"),
                     "work_restrictions": adl_data.get("workRestrictions"),
                     "mode": adl_data.get("mode", "wc"),
+                    
                     # GM-specific fields
                     "daily_living_impact": adl_data.get("dailyLivingImpact"),
                     "functional_limitations": adl_data.get("functionalLimitations"),
                     "symptom_impact": adl_data.get("symptomImpact"),
                     "quality_of_life": adl_data.get("qualityOfLife"),
+                    
                     # WC-specific fields
                     "work_impact": adl_data.get("workImpact"),
                     "physical_demands": adl_data.get("physicalDemands"),
                     "work_capacity": adl_data.get("workCapacity"),
+                    
                     # Metadata
                     "created_at": self._format_date_field(adl_data.get("createdAt")),
                     "updated_at": self._format_date_field(adl_data.get("updatedAt"))
                 }
-                all_adl_data.append(complete_adl_entry)
+                
+                if doc_id not in adl_by_document:
+                    adl_by_document[doc_id] = {
+                        "adls_affected": [],
+                        "work_restrictions": [],
+                        "complete_adl_data": []  # New field for complete ADL data
+                    }
+                
+                # Add to complete ADL data
+                adl_by_document[doc_id]["complete_adl_data"].append(complete_adl_entry)
+                
+                # Also maintain the legacy structure for backward compatibility
+                if "adls_affected" not in adl_by_document[doc_id]:
+                    adl_by_document[doc_id]["adls_affected"] = []
+                if adls_affected := adl_data.get("adlsAffected"):
+                    if isinstance(adl_by_document[doc_id]["adls_affected"], list):
+                        adl_by_document[doc_id]["adls_affected"].append(adls_affected)
+                    else:
+                        adl_by_document[doc_id]["adls_affected"] = [adl_by_document[doc_id]["adls_affected"], adls_affected]
+                
+                if "work_restrictions" not in adl_by_document[doc_id]:
+                    adl_by_document[doc_id]["work_restrictions"] = []
+                if work_restrictions := adl_data.get("workRestrictions"):
+                    if isinstance(adl_by_document[doc_id]["work_restrictions"], list):
+                        adl_by_document[doc_id]["work_restrictions"].append(work_restrictions)
+                    else:
+                        adl_by_document[doc_id]["work_restrictions"] = [adl_by_document[doc_id]["work_restrictions"], work_restrictions]
 
-            # Collect ALL summary snapshots from ALL documents
+            # Group summary_snapshot by document
             summary_snapshot = doc.get("summarySnapshot")
             if summary_snapshot:
-                all_summary_snapshots.append(summary_snapshot)
+                summary_snapshot_by_document[doc_id] = summary_snapshot
 
-            # Collect ALL task quick notes from ALL documents
-            document_tasks = tasks_dict.get(doc_id, []) if tasks_dict else []
-            for task in document_tasks:
-                task_note = task.get("quickNotes", {})
-                if task_note:
-                    all_task_quick_notes.append(task_note)
+        # Get unique document IDs, sorted by latest report date
+        unique_doc_ids = list(dict.fromkeys([doc["id"] for doc in sorted_documents]))
+        id_to_latest_doc = {doc["id"]: doc for doc in sorted_documents}
+        latest_docs = [id_to_latest_doc[doc_id] for doc_id in unique_doc_ids]
 
-        # Get the latest document to use as the base
-        latest_document = sorted_documents[0]
-        base_doc = await self._format_single_document_base(latest_document)
+        # Create list of per-document responses
+        per_document_responses = []
         
-        # Merge ADL fields (combine lists and text)
-        aggregated_adl = {
-            "adls_affected": [],
-            "work_restrictions": [],
-            "complete_adl_data": all_adl_data  # All ADL records with context
+        # Create merged patient data for consistent info across all documents
+        merged_patient_data = {
+            "patient_name": all_documents_data.get("patient_name"),
+            "dob": all_documents_data.get("dob"),
+            "claim_number": all_documents_data.get("claim_number")
         }
         
-        for adl_entry in all_adl_data:
-            if adl_entry.get("adls_affected"):
-                aggregated_adl["adls_affected"].append(adl_entry.get("adls_affected"))
-            if adl_entry.get("work_restrictions"):
-                aggregated_adl["work_restrictions"].append(adl_entry.get("work_restrictions"))
+        for latest_doc in latest_docs:
+            doc_id = latest_doc["id"]
+            base_doc = await self._format_single_document_base(latest_doc, merged_patient_data)
+            
+            # Get ADL data for this document
+            document_adl_data = adl_by_document.get(doc_id, {
+                "adls_affected": [], 
+                "work_restrictions": [],
+                "complete_adl_data": []
+            })
+            
+            # Get task quick notes for this document (list of quickNotes JSON from tasks)
+            document_tasks = tasks_dict.get(doc_id, []) if tasks_dict else []
+            task_quick_notes = [task.get("quickNotes", {}) for task in document_tasks]
+            
+            base_doc.update({
+                "body_part_snapshots": body_part_by_document.get(doc_id, []),
+                "whats_new": whats_new_by_document.get(doc_id, []),  # Original structure as is
+                "brief_summary": brief_summary_by_document.get(doc_id),
+                "document_summary": document_summary_by_document.get(doc_id),
+                "adl": document_adl_data,  # Now includes complete_adl_data with all fields
+                "summary_snapshot": summary_snapshot_by_document.get(doc_id),
+                "task_quick_notes": task_quick_notes,  # New field: list of quickNotes per task for this document
+                "document_index": latest_docs.index(latest_doc) + 1,
+                "is_latest": doc_id == latest_docs[0]["id"]
+            })
+            per_document_responses.append(base_doc)
 
-        base_doc.update({
-            "body_part_snapshots": all_body_part_snapshots,  # ALL body parts from ALL documents
-            "whats_new": all_whats_new,  # ALL whats_new from ALL documents
-            "brief_summary": latest_document.get("briefSummary"),  # Keep as single field from latest
-            "document_summary": all_document_summaries[0] if all_document_summaries else None,  # Keep as single from latest
-            "adl": aggregated_adl,  # AGGREGATED ADL data from ALL documents
-            "summary_snapshot": all_summary_snapshots[0] if all_summary_snapshots else None,  # Keep as single from latest
-            "task_quick_notes": all_task_quick_notes,  # ALL task quick notes from ALL documents
-            "document_index": 1,
-            "is_latest": True
-        })
+        # Top-level aggregations
+        total_body_parts = sum(len(snapshots) for snapshots in body_part_by_document.values())
+        unique_total = len(unique_doc_ids)
 
-        # Wrap in response structure - keep as array with single aggregated document
+        # Wrap in response structure
         return {
             "patient_name": all_documents_data["patient_name"],
-            "total_documents": len(sorted_documents),
-            "documents": [base_doc],  # Array with single aggregated document
+            "total_documents": unique_total,
+            "documents": per_document_responses,
             "patient_quiz": None,
-            "is_multiple_documents": len(sorted_documents) > 1,
-            "total_body_parts": len(all_body_part_snapshots)
+            "is_multiple_documents": unique_total > 1,
+            "total_body_parts": total_body_parts
         }
         
     def _parse_report_date(self, doc: Dict[str, Any]) -> datetime:
@@ -256,24 +304,37 @@ class DocumentAggregationService:
                 return created_at
         return datetime.min
 
-    async def _format_single_document_base(self, document: Dict[str, Any]) -> Dict[str, Any]:
-        """Format base info for a single document with all fields from the model."""
+    async def _format_single_document_base(self, document: Dict[str, Any], merged_patient_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Format base info for a single document with all fields from the model.
+        Uses merged_patient_data if provided for consolidated patient info across multiple documents.
+        """
+        # Use merged data if available, otherwise use document data
+        if merged_patient_data:
+            patient_name = merged_patient_data.get("patient_name") or document.get("patientName")
+            dob = merged_patient_data.get("dob") or document.get("dob")
+            claim_number = merged_patient_data.get("claim_number") or document.get("claimNumber")
+        else:
+            patient_name = document.get("patientName")
+            dob = document.get("dob")
+            claim_number = document.get("claimNumber")
+        
         return {
             "document_id": document.get("id"),
-            "patient_name": document.get("patientName"),
-            "dob": document.get("dob"),  # String as per schema
-            "doi": document.get("doi"),  # String as per schema
-            "claim_number": document.get("claimNumber"),
+            "patient_name": patient_name,
+            "dob": dob,  # Merged from all documents
+            "doi": document.get("doi"),
+            "claim_number": claim_number,  # Merged from all documents
             "status": document.get("status"),
             "gcs_file_link": document.get("gcsFileLink"),
             "blob_path": document.get("blobPath"),
             "file_name": document.get("fileName"),
-            "file_hash": document.get("fileHash"),  # ✅ Added fileHash field
-            "mode": document.get("mode"),  # ✅ Added mode field (default: "wc")
-            "original_name": document.get("originalName"),  # ✅ Added originalName field
-            "physician_id": document.get("physicianId"),  # ✅ Added physicianId field
-            "ur_denial_reason": document.get("ur_denial_reason"),  # ✅ Added ur_denial_reason field
-            "user_id": document.get("userId"),  # ✅ Added userId field
+            "file_hash": document.get("fileHash"),
+            "mode": document.get("mode"),
+            "original_name": document.get("originalName"),
+            "physician_id": document.get("physicianId"),
+            "ur_denial_reason": document.get("ur_denial_reason"),
+            "user_id": document.get("userId"),
             "created_at": self._format_date_field(document.get("createdAt")),
             "updated_at": self._format_date_field(document.get("updatedAt")),
             "report_date": self._format_date_field(document.get("reportDate")),
