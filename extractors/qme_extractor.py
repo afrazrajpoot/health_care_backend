@@ -229,6 +229,26 @@ class QMEExtractorChained:
     - Verify claim number is actual claim (not chart number or other ID)
     - if in the structured raw_text like json formatted dat, if the fileds are first and values then handle the same way to extract the claim number of accurate filed, but most of the time the fields are first and values are second then the claim number will be in the second field
 
+    🔍 SPECIAL INSTRUCTIONS FOR PATIENT DETAILS VALIDATION:
+
+    **CRITICAL - PATIENT DETAILS CROSS-VALIDATION**:
+    If the raw_text contains a "--- PATIENT DETAILS ---" section:
+    1. **FIRST**: Extract the patient details from that section (Patient Name, DOB, DOI, Claim Number)
+    2. **SECOND**: Cross-validate each detail against the FULL TEXT EXTRACTION (text parameter) as sometimes the full text is not properly formatted, so the fields and values are not aligned properly, but the full text must have the correct details, and if we are getting the pateint details from the patient details section, we need to make sure they are accurate by cross-checking with the full text extraction
+    3. **VALIDATION RULES**:
+       ✅ If the detail MATCHES what's in the full text extraction → USE IT (it's accurate)
+       ✅ If the detail is CLOSE but has minor formatting differences → USE the formatted version from patient details section
+       ❌ If the detail CONTRADICTS the full text extraction → IGNORE the patient details section value and extract directly from full text
+       ❌ If the detail is MISSING or shows "N/A" → Extract directly from full text extraction
+    4. **FINAL CHECK**: Ensure all patient details (Name, DOB, DOI, Claim Number) are accurate and consistent with the document content
+
+    **Example Validation Process**:
+    - Patient Details section shows: "Patient Name: John Smith"
+    - Full text contains: "Patient: John Smith" → ✅ VALID - Use "John Smith"
+    - Patient Details section shows: "DOB: N/A"
+    - Full text contains: "Date of Birth: 05/15/1975" → ❌ INVALID - Use "05/15/1975" from full text
+    - Patient Details section shows: "Claim Number: 12345-ABC"
+    - Full text contains: "Claim #: 12345-ABC" → ✅ VALID - Use "12345-ABC"
 
     **NOW GENERATE A COMPREHENSIVE LONG SUMMARY IN MARKDOWN FORMAT**
 

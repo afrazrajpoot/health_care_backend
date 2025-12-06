@@ -191,8 +191,8 @@ class BodyPartAnalysis(BaseModel):
     diagnosis: str = Field(..., description="Diagnosis for this body part")
     key_concern: str = Field(..., description="Key concern for this body part")
     clinical_summary: str = Field(..., description="Clinical summary of important findings for this body part")
-    treatment_plan: str = Field(..., description="Treatment plan specific to this body part")
-    extracted_recommendation: str = Field(..., description="Recommendations for this body part")
+    treatment_plan: Optional[str] = Field(None, description="Treatment plan specific to this body part")
+    extracted_recommendation: Optional[str] = Field(None, description="Recommendations for this body part")
     adls_affected: str = Field(..., description="ADLs affected for this body part")
     work_restrictions: str = Field(..., description="Work restrictions for this body part")
     

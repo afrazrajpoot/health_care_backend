@@ -96,19 +96,19 @@ class DocumentExtractorService:
             file_hash = self._compute_file_hash(content)
             db_service = DatabaseService()
             await db_service.connect()
-            existing_doc = await db_service.check_duplicate_by_hash(file_hash, physician_id)
+            # existing_doc = await db_service.check_duplicate_by_hash(file_hash, physician_id)
             
-            if existing_doc:
-                logger.warning(f"⚠️ DUPLICATE FILE DETECTED: {document.filename}")
-                logger.info(f"   Matches existing file: {existing_doc['fileName']}")
-                logger.info(f"   Document ID: {existing_doc['id']}")
-                return {
-                    "success": False,
-                    "error": "duplicate_file",
-                    "message": f"This file was already uploaded as '{existing_doc['fileName']}'.",
-                    "existing_document": existing_doc,
-                    "filename": document.filename
-                }
+            # if existing_doc:
+            #     logger.warning(f"⚠️ DUPLICATE FILE DETECTED: {document.filename}")
+            #     logger.info(f"   Matches existing file: {existing_doc['fileName']}")
+            #     logger.info(f"   Document ID: {existing_doc['id']}")
+            #     return {
+            #         "success": False,
+            #         "error": "duplicate_file",
+            #         "message": f"This file was already uploaded as '{existing_doc['fileName']}'.",
+            #         "existing_document": existing_doc,
+            #         "filename": document.filename
+            #     }
             
             # Step 2: Save to temp (unchanged)
             temp_path = self.file_service.save_temp_file(content, document.filename)

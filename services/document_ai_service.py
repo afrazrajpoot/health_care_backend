@@ -20,6 +20,7 @@ import logging
 from PyPDF2 import PdfReader, PdfWriter
 from models.schemas import ExtractionResult, FileInfo
 from config.settings import CONFIG
+from utils.patient_details_extractor import get_patient_extractor
 
 logger = logging.getLogger("document_ai")
 
@@ -299,12 +300,22 @@ class DocumentAIProcessor:
             if document_dict.get('document_layout') and document_dict['document_layout'].get('blocks'):
                 blocks = document_dict['document_layout']['blocks']
                 formatted_text = self._extract_fields_from_blocks(blocks)
+                logger.info(f"✅ Layout Parser extracted {len(blocks)} blocks from document_layout")
+            else:
+                logger.warning(f"⚠️ No document_layout blocks found in response")
+                # Check if blocks exist elsewhere
+                if document_dict.get('pages'):
+                    total_blocks = sum(len(page.get('blocks', [])) for page in document_dict['pages'])
+                    logger.info(f"📄 Found {total_blocks} blocks in pages structure")
             
             # Clean up temp file
             if temp_pdf_path and os.path.exists(temp_pdf_path):
                 os.remove(temp_pdf_path)
             
-            logger.info(f"✅ Layout Parser extracted {len(blocks)} blocks")
+            # Log document structure for debugging
+            logger.info(f"📊 Document structure keys: {list(document_dict.keys())}")
+            if 'pages' in document_dict:
+                logger.info(f"📄 Total pages in layout result: {len(document_dict['pages'])}")
             
             return {
                 "document_dict": document_dict,  # Full structured output from Google
@@ -388,10 +399,15 @@ class DocumentAIProcessor:
         
         return "\n".join(formatted_lines)
     
-    def _process_document_direct(self, filepath: str) -> ExtractionResult:
+    def _process_document_direct(self, filepath: str, is_first_chunk: bool = True, is_last_chunk: bool = True) -> ExtractionResult:
         """
         Process document using Document AI SUMMARIZER (not OCR).
         FIXED: Extract summary field instead of full text.
+        
+        Args:
+            filepath: Path to the document
+            is_first_chunk: Whether this is the first chunk (extract first 3 pages for patient details)
+            is_last_chunk: Whether this is the last chunk (extract last 3 pages for patient details)
         """
         try:
             mime_type = self.get_mime_type(filepath)
@@ -527,37 +543,71 @@ class DocumentAIProcessor:
             logger.info(f"   - Summary text: {len(summary_text)} chars")
             logger.info(f"   - Pages analyzed: {layout_data['structured_document']['document_structure']['total_pages']}")
             
-            # NEW: Extract first 3 and last 3 pages with Layout Parser
+            # NEW: Extract patient details only from first 3 pages of first chunk
             layout_extracted_text = ""
             total_pages = len(result.pages) if result.pages else 0
             
-            if total_pages > 0:
-                # Determine which pages to extract
-                if total_pages <= 2:
-                    # Process all pages if only 2 or fewer
+            # Only extract patient details from first chunk (first 3 pages only)
+            if total_pages > 0 and is_first_chunk:
+                pages_to_extract = []
+                
+                # Determine which pages to extract - only first 3 pages
+                if total_pages <= 3:
+                    # Process all pages if 3 or fewer
                     pages_to_extract = list(range(1, total_pages + 1))
                 else:
-                    # First 3 and last 3 pages
-                    first_pages = list(range(1, min(4, total_pages + 1)))
-                    last_pages = list(range(max(total_pages - 2, 4), total_pages + 1))
-                    pages_to_extract = sorted(set(first_pages + last_pages))
+                    # Extract only first 3 pages for patient details
+                    pages_to_extract = list(range(1, 4))
                 
-                logger.info(f"📄 Extracting layout from pages: {pages_to_extract}")
-                layout_result = self._process_with_layout_parser(filepath, pages_to_extract)
-                
-                # Get full structured JSON from layout parser
-                document_dict = layout_result.get("document_dict", {})
-                formatted_text = layout_result.get("formatted_text", "")
-                
-                if document_dict:
-                    logger.info(f"✅ Layout Parser extracted {len(layout_result.get('blocks', []))} blocks")
-                    # Append both formatted text and full JSON to raw_text
-                    json_output = json.dumps(document_dict, indent=2, ensure_ascii=False)
-                    layout_data["raw_text"] = (
-                        summary_text + 
-                        "\n\n--- STRUCTURED LAYOUT (Formatted) ---\n\n" + formatted_text +
-                        "\n\n--- STRUCTURED LAYOUT (Full JSON) ---\n\n" + json_output
-                    )
+                if pages_to_extract:
+                    logger.info(f"📄 Extracting layout from first {len(pages_to_extract)} pages for patient details")
+                    layout_result = self._process_with_layout_parser(filepath, pages_to_extract)
+                    
+                    # Get full structured JSON from layout parser
+                    document_dict = layout_result.get("document_dict", {})
+                    formatted_text = layout_result.get("formatted_text", "")
+                    
+                    logger.info(f"🔍 Layout result keys: {list(layout_result.keys())}")
+                    logger.info(f"📄 Document dict keys: {list(document_dict.keys()) if document_dict else 'None'}")
+                    
+                    if document_dict:
+                        logger.info(f"✅ Layout Parser returned document_dict with {(document_dict)} keys")
+                        
+                        # Extract patient details from layout JSON (only from first chunk)
+                        try:
+                            patient_extractor = get_patient_extractor()
+                            patient_details = patient_extractor.extract_from_layout_json(document_dict)
+                            
+                            # Log extracted patient details
+                            logger.info("=" * 80)
+                            logger.info("👤 EXTRACTED PATIENT DETAILS:")
+                            logger.info("=" * 80)
+                            logger.info(f"  Patient Name: {patient_details.get('patient_name', 'Not found')}")
+                            logger.info(f"  DOB: {patient_details.get('dob', 'Not found')}")
+                            logger.info(f"  DOI: {patient_details.get('doi', 'Not found')}")
+                            logger.info(f"  Claim Number: {patient_details.get('claim_number', 'Not found')}")
+                            logger.info("=" * 80)
+                            
+                            # Add patient details to metadata
+                            layout_data["structured_document"]["metadata"]["patient_details"] = patient_details
+                            
+                        except Exception as e:
+                            logger.error(f"❌ Patient details extraction failed: {e}")
+                            import traceback
+                            logger.error(f"Traceback: {traceback.format_exc()}")
+                        
+                        # Append both formatted text and full JSON to raw_text
+                        json_output = json.dumps(document_dict, indent=2, ensure_ascii=False)
+                        logger.info(f"📝 JSON output length: {len(json_output)} characters")
+                        layout_data["raw_text"] = (
+                            summary_text + 
+                            "\n\n--- STRUCTURED LAYOUT (Formatted) ---\n\n" + formatted_text +
+                            "\n\n--- STRUCTURED LAYOUT (Full JSON) ---\n\n" + json_output
+                        )
+                    else:
+                        logger.warning("⚠️ document_dict is empty, skipping patient extraction")
+            else:
+                logger.info(f"⏭️ Skipping layout extraction (is_first_chunk={is_first_chunk}, is_last_chunk={is_last_chunk})")
             
             # Build LLM-friendly JSON
             llm_json = build_llm_friendly_json(layout_data['structured_document'])
@@ -566,10 +616,38 @@ class DocumentAIProcessor:
 
             logger.info(f'summary text----------------- : {summary_text}')
             
-            # Create extraction result with merged raw_text
+            # Extract patient details from metadata
+            patient_details = layout_data.get("structured_document", {}).get("metadata", {}).get("patient_details", {})
+            
+            # Prepend patient details to raw_text if available (for single chunk documents)
+            final_raw_text = layout_data["raw_text"]
+            if patient_details:
+                logger.info("=" * 80)
+                logger.info("👤 PATIENT DETAILS (from layout extraction):")
+                logger.info("=" * 80)
+                logger.info(f"  Patient Name: {patient_details.get('patient_name', 'Not found')}")
+                logger.info(f"  DOB: {patient_details.get('dob', 'Not found')}")
+                logger.info(f"  DOI: {patient_details.get('doi', 'Not found')}")
+                logger.info(f"  Claim Number: {patient_details.get('claim_number', 'Not found')}")
+                logger.info("=" * 80)
+                
+                # Add patient details section to the beginning of raw_text
+                patient_details_text = "--- PATIENT DETAILS ---\n"
+                patient_details_text += f"Patient Name: {patient_details.get('patient_name', 'N/A')}\n"
+                patient_details_text += f"Date of Birth: {patient_details.get('dob', 'N/A')}\n"
+                patient_details_text += f"Date of Injury: {patient_details.get('doi', 'N/A')}\n"
+                patient_details_text += f"Claim Number: {patient_details.get('claim_number', 'N/A')}\n"
+                patient_details_text += "--- END PATIENT DETAILS ---\n\n"
+                
+                final_raw_text = patient_details_text + layout_data["raw_text"]
+                
+                logger.info("🔍 DEBUG: Patient details prepended to raw_text")
+                logger.info(f"🔍 First 500 chars of final_raw_text:\n{final_raw_text[:500]}")
+            
+            # Create extraction result with merged raw_text and patient_details in metadata
             processed_result = ExtractionResult(
                 text=result.text,  #full OCR text
-                raw_text=layout_data["raw_text"],  # Summary + Layout Parser structured text
+                raw_text=final_raw_text,  # Summary + Patient Details + Layout Parser structured text
                 llm_text=llm_text,
                 page_zones=layout_data["page_zones"],
                 pages=len(result.pages) if result.pages else 0,
@@ -579,6 +657,7 @@ class DocumentAIProcessor:
                 symbols=[],
                 confidence=1.0,
                 success=True,
+                metadata={"patient_details": patient_details} if patient_details else {}
             )
             
             logger.info("📊 Extraction summary:")
@@ -602,15 +681,18 @@ class DocumentAIProcessor:
             chunk_files = self.pdf_splitter.split_pdf(filepath)
             
             if len(chunk_files) == 1:
-                return self._process_document_direct(chunk_files[0])
+                return self._process_document_direct(chunk_files[0], is_first_chunk=True, is_last_chunk=True)
             
             logger.info(f"📦 Processing {len(chunk_files)} chunks with summarizer")
+            logger.info(f"📄 Patient details will be extracted from first 3 pages of chunk 1 only")
             
             all_results = []
             for i, chunk_file in enumerate(chunk_files):
-                logger.info(f"🔄 Processing chunk {i + 1}/{len(chunk_files)} with summarizer")
+                is_first = (i == 0)
+                is_last = (i == len(chunk_files) - 1)
+                logger.info(f"🔄 Processing chunk {i + 1}/{len(chunk_files)} with summarizer (first={is_first}, last={is_last})")
                 try:
-                    chunk_result = self._process_document_direct(chunk_file)
+                    chunk_result = self._process_document_direct(chunk_file, is_first_chunk=is_first, is_last_chunk=is_last)
                     if chunk_result.success:
                         all_results.append(chunk_result)
                 except Exception as e:
@@ -653,6 +735,34 @@ class DocumentAIProcessor:
         
         total_pages = sum(r.pages for r in results)
         
+        # Extract patient_details from the first chunk (only first chunk has patient details)
+        patient_details = {}
+        if results and hasattr(results[0], 'metadata') and results[0].metadata:
+            patient_details = results[0].metadata.get('patient_details', {})
+            if patient_details:
+                logger.info("=" * 80)
+                logger.info("👤 MERGED PATIENT DETAILS (from first chunk):")
+                logger.info("=" * 80)
+                logger.info(f"  Patient Name: {patient_details.get('patient_name', 'Not found')}")
+                logger.info(f"  DOB: {patient_details.get('dob', 'Not found')}")
+                logger.info(f"  DOI: {patient_details.get('doi', 'Not found')}")
+                logger.info(f"  Claim Number: {patient_details.get('claim_number', 'Not found')}")
+                logger.info("=" * 80)
+                
+                # Add patient details to merged raw text (at the very beginning, no leading newlines)
+                patient_details_text = "--- PATIENT DETAILS ---\n"
+                patient_details_text += f"Patient Name: {patient_details.get('patient_name', 'N/A')}\n"
+                patient_details_text += f"Date of Birth: {patient_details.get('dob', 'N/A')}\n"
+                patient_details_text += f"Date of Injury: {patient_details.get('doi', 'N/A')}\n"
+                patient_details_text += f"Claim Number: {patient_details.get('claim_number', 'N/A')}\n"
+                patient_details_text += "--- END PATIENT DETAILS ---\n\n"
+                
+                # Prepend to merged_raw_text
+                merged_raw_text = patient_details_text + merged_raw_text
+                
+                logger.info("🔍 DEBUG: Patient details prepended to merged_raw_text")
+                logger.info(f"🔍 First 500 chars of merged_raw_text:\n{merged_raw_text[:500]}")
+        
         logger.info(f"🔗 Merge complete:")
         logger.info(f"   - Total pages: {total_pages}")
         logger.info(f"   - Total text-merged---------------: {(merged_raw_text)}")
@@ -681,6 +791,7 @@ class DocumentAIProcessor:
             symbols=[],
             confidence=1.0,
             success=True,
+            metadata={"patient_details": patient_details} if patient_details else {}
         )
         
         return merged_result

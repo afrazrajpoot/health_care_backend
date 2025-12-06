@@ -83,3 +83,6 @@ tavily-python>=0.3.0
 passlib
 pydantic[email]>=2.0.0
 bcrypt>=4.0.0
+# transformers>=4.30.0
+# torch>=2.0.0
+# accelerate>=0.20.0

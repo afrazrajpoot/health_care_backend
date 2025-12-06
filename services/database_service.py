@@ -15,6 +15,7 @@ from cryptography.fernet import Fernet
 from cryptography.exceptions import InvalidKey
 import base64
 from datetime import datetime, timedelta
+import re
 
 load_dotenv()
 logger = logging.getLogger("document_ai")
@@ -357,6 +358,120 @@ class DatabaseService:
             logger.error(f"❌ Error retrieving recent documents: {str(e)}")
             raise
     
+ 
+
+    # ============================
+    # 🔵 Normalization Helpers
+    # ============================
+
+    @staticmethod
+    def normalize_name(name: Optional[str]) -> str:
+        if not name:
+            return ""
+
+        name = name.replace(",", " ").lower().strip()
+        parts = [p for p in name.split() if p]
+
+        if len(parts) >= 2:
+            first = parts[0]
+            last = parts[-1]
+            normalized = " ".join(sorted([first, last]))
+        else:
+            normalized = parts[0]
+
+        return normalized.strip()
+
+    @staticmethod
+    def normalize_claim(claim: Optional[str]) -> Optional[str]:
+        if not claim:
+            return None
+        # Treat "not specified", "unknown", etc. as None
+        claim_str = str(claim).strip().lower()
+        if claim_str in ["not specified", "unknown", "n/a", "na", ""]:
+            return None
+        return "".join(c for c in str(claim).upper() if c.isalnum())
+
+    @staticmethod
+    def normalize_dob(dob: Optional[str]) -> Optional[str]:
+        if not dob:
+            return None
+
+        # If it's already a datetime
+        if isinstance(dob, datetime):
+            return dob.strftime("%Y-%m-%d")
+
+        # Attempt ISO
+        try:
+            return datetime.fromisoformat(dob).strftime("%Y-%m-%d")
+        except:
+            pass
+
+        # Try common formats
+        for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(dob, fmt).strftime("%Y-%m-%d")
+            except:
+                pass
+
+        return dob
+
+
+    # ============================
+    # 🔵 Patient Match Logic
+    # ============================
+
+    @staticmethod
+    def is_same_patient(name1, dob1, claim1, name2, dob2, claim2) -> bool:
+        """
+        Implements the exact logic rules provided.
+        """
+        from utils.logger import logger
+        
+        # Debug logging
+        logger.debug(f"🔍 Comparing: name1='{name1}' vs name2='{name2}', dob1='{dob1}' vs dob2='{dob2}', claim1='{claim1}' vs claim2='{claim2}'")
+
+        # Rule 1: If both have claim & different → NOT same
+        if claim1 and claim2 and claim1 != claim2:
+            logger.debug(f"❌ Rule 1: Different claims - NOT same patient")
+            return False
+
+        # Rule 2: Same claim → same patient
+        if claim1 and claim2 and claim1 == claim2:
+            logger.debug(f"✅ Rule 2: Same claim '{claim1}' - SAME patient")
+            return True
+
+        # Now rely on name + DOB logic
+
+        # Names must match after normalization
+        if name1 == name2:
+            logger.debug(f"✅ Names match: '{name1}'")
+
+            # 3A — Both DOB provided & match
+            if dob1 and dob2 and dob1 == dob2:
+                logger.debug(f"✅ Rule 3A: Both DOB match '{dob1}' - SAME patient")
+                return True
+
+            # 3B — Both missing DOB
+            if not dob1 and not dob2:
+                logger.debug(f"✅ Rule 3B: Both DOB missing - SAME patient")
+                return True
+
+            # 3C — One missing DOB, still same
+            if (dob1 and not dob2) or (dob2 and not dob1):
+                logger.debug(f"✅ Rule 3C: One DOB missing - SAME patient")
+                return True
+        else:
+            logger.debug(f"❌ Names don't match: '{name1}' vs '{name2}'")
+
+        # Otherwise not same
+        logger.debug(f"❌ No matching rules - NOT same patient")
+        return False
+
+
+    # ============================
+    # 🔵 MAIN FUNCTION (FULL VERSION)
+    # ============================
+
     async def get_document_by_patient_details(
         self, 
         patient_name: str,
@@ -364,96 +479,88 @@ class DatabaseService:
         dob: Optional[str] = None,
         claim_number: Optional[str] = None
     ) -> Dict[str, Any]:
-        """
-        Retrieve last two documents for patient.
-        Handles dob and doi as strings (or converts datetime to string if needed).
-        Matches claim_number ignoring dashes, spaces, and case (normalizes to uppercase alphanumeric).
-        Matches patient_name flexibly: treats swapped first/last names as equivalent if DOB matches (assumes two-part names).
-        """
+
         try:
-            # Normalize patient_name parts for fuzzy matching (split, sort, join)
-            name_parts = patient_name.strip().split()
-            if len(name_parts) != 2:
-                # For non-two-part names, use exact match
-                normalized_name = patient_name
-                use_fuzzy = False
-            else:
-                normalized_name = ' '.join(sorted(name_parts))
-                use_fuzzy = True
+            # Normalize user inputs
+            normalized_input_name = DatabaseService.normalize_name(patient_name)
+            normalized_input_claim = DatabaseService.normalize_claim(claim_number)
+            normalized_input_dob = DatabaseService.normalize_dob(dob)
 
+            # Build initial DB query (broad) - ONLY filter by physicianId
+            # DO NOT filter by DOB/name/claim here - we'll apply matching logic manually
             where_clause = {}
-
-            # Always start with patient_name if no DOB or fuzzy not applicable
-            if not dob or not use_fuzzy:
-                where_clause["patientName"] = patient_name
-            # If DOB provided and fuzzy applicable, we'll fetch by DOB and filter names post-fetch
 
             if physicianId:
                 where_clause["physicianId"] = physicianId
 
-            # ✅ Handle dob (string or datetime)
-            if dob:
-                if isinstance(dob, datetime):
-                    dob_str = dob.strftime("%Y-%m-%d")
-                else:
-                    # Try parsing string into datetime for normalization
-                    try:
-                        parsed_dob = datetime.fromisoformat(dob)
-                        dob_str = parsed_dob.strftime("%Y-%m-%d")
-                    except ValueError:
-                        dob_str = dob  # Already correct format
-                where_clause["dob"] = dob_str
+            # 🆕 FIXED: Fetch ALL documents for physician, then apply matching logic
+            # This allows us to find documents with:
+            # - Same patient name but different/missing DOB
+            # - Same claim number but different name variations
+            # - Any combination that matches via is_same_patient logic
 
-            logger.info(f"🔍 Fetching documents with filters (pre-claim/post-name normalization): {where_clause}")
-            
+            logger.info(f"🔍 Initial DB filters (broad fetch): {where_clause}")
+            logger.info(f"🔍 Will match against: name='{normalized_input_name}', dob='{normalized_input_dob}', claim='{normalized_input_claim}'")
+
             documents = await self.prisma.document.find_many(
                 where=where_clause,
                 include={
                     "summarySnapshot": True,
                     "adl": True,
                     "documentSummary": True,
-                    "bodyPartSnapshots": True  # ✅ ADDED: Include body part snapshots
+                    "bodyPartSnapshots": True
                 },
-                order={"createdAt": "desc"},
-                # take=2  # Uncomment if you want to limit to last 2 regardless of claim filter
+                order={"createdAt": "desc"}
             )
 
-            # ✅ If DOB provided and fuzzy matching applicable, filter by normalized name
-            if dob and use_fuzzy:
-                def name_matches(db_name: str) -> bool:
-                    db_parts = db_name.strip().split()
-                    if len(db_parts) != 2:
-                        return db_name.lower() == patient_name.lower()  # Fallback to exact case-insensitive
-                    return ' '.join(sorted(db_parts)) == normalized_name
+            logger.info(f"📄 Retrieved {len(documents)} raw documents from DB (will filter with matching logic)")
 
-                documents = [doc for doc in documents if name_matches(doc.patientName)]
-                logger.info(f"📋 Fuzzy filtered to {len(documents)} documents matching normalized name '{normalized_name}' for '{patient_name}'")
+            # ============================
+            # 🔵 Apply EXACT match logic
+            # ============================
 
-            # ✅ Normalize and filter by claim_number if provided
-            if claim_number:
-                normalized_claim = ''.join(c for c in str(claim_number).upper() if c.isalnum())
-                logger.info(f"🔍 Normalizing claim_number to: {normalized_claim}")
-                
-                documents = [
-                    doc for doc in documents
-                    if ''.join(c for c in str(doc.claimNumber).upper() if c.isalnum()) == normalized_claim
-                ]
-                logger.info(f"📋 Filtered to {len(documents)} documents matching normalized claim")
+            matched_docs = []
 
-            logger.info(f"📋 Final: Found {len(documents)} documents for {patient_name}")
+            logger.info(f"🔍 Starting patient matching with {len(documents)} documents...")
+            for i, doc in enumerate(documents):
+
+                db_name = DatabaseService.normalize_name(doc.patientName)
+                db_claim = DatabaseService.normalize_claim(doc.claimNumber)
+                db_dob = DatabaseService.normalize_dob(doc.dob)
+
+                logger.info(f"📋 Doc {i+1}/{len(documents)}: ID={doc.id[:8]}..., Name='{doc.patientName}' → '{db_name}', DOB='{doc.dob}' → '{db_dob}', Claim='{doc.claimNumber}' → '{db_claim}'")
+
+                if DatabaseService.is_same_patient(
+                    normalized_input_name,
+                    normalized_input_dob,
+                    normalized_input_claim,
+                    db_name,
+                    db_dob,
+                    db_claim
+                ):
+                    logger.info(f"✅ MATCH! Adding document {doc.id[:8]}... to results")
+                    matched_docs.append(doc)
+                else:
+                    logger.info(f"❌ NO MATCH for document {doc.id[:8]}...")
+
+            logger.info(f"📌 After patient-matching rules: {len(matched_docs)} documents")
+
+            # ============================
+            # 🔵 Prepare response
+            # ============================
 
             response = {
                 "patient_name": patient_name,
-                "total_documents": len(documents),
+                "normalized_name": normalized_input_name,
+                "total_documents": len(matched_docs),
                 "documents": []
             }
 
-            for i, doc in enumerate(documents):
+            for i, doc in enumerate(matched_docs):
                 doc_data = doc.dict()
                 doc_data["document_index"] = i + 1
-                doc_data["is_latest"] = i == 0
+                doc_data["is_latest"] = (i == 0)
                 response["documents"].append(doc_data)
-                logger.info(f"📄 Added document {i+1}: ID {doc.id} with {len(doc.bodyPartSnapshots)} body part snapshots")
 
             return response
 
@@ -464,6 +571,8 @@ class DatabaseService:
                 "total_documents": 0,
                 "documents": []
             }
+
+   
     async def get_tasks_by_document_ids(self, document_ids: list[str], physician_id: Optional[str] = None) -> list[dict]:
         """Fetch tasks (with quickNotes and description) by document IDs, optionally filtered by physician_id"""
         where_clause = {

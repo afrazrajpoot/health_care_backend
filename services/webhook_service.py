@@ -118,14 +118,13 @@ class WebhookService:
         # Log if raw_text is missing to help debug
         if not raw_text:
             logger.warning("⚠️ raw_text is empty - Document AI summarizer output not available, will use full OCR text as fallback")
-
+        
         # Run ReportAnalyzer in dedicated LLM executor for better batch performance
         report_analyzer = ReportAnalyzer(mode)
         loop = asyncio.get_event_loop()
         report_result = await loop.run_in_executor(
             LLM_EXECUTOR, report_analyzer.extract_document, text, raw_text
         )
-
         long_summary = report_result.get("long_summary", "")
         short_summary = report_result.get("short_summary", "")
 
