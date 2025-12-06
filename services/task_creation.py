@@ -156,6 +156,7 @@ Ask yourself:
 - EOB processing and denial code resolution
 - Credentialing and payer contracting renewals
 - External referral tracking and follow-up
+- **Signature-required documents** (see dedicated section below)
 
 ### **Step 3: Extract Specifics**
 From the document, capture:
@@ -164,6 +165,199 @@ From the document, capture:
 - **Deadlines** (legal dates, authorization expiries, clinical urgency)
 - **Provider names** (ordering physician, specialist, reviewer)
 - **Actionable details** (what test, what procedure, what response needed)
+
+---
+
+## 🖊️ SIGNATURE REQUIRED DOCUMENTS - CRITICAL WORKFLOW
+
+**DETECTION LOGIC:** Generate signature tasks when document contains ANY of the following indicators:
+
+### **Primary Detection Triggers (High Confidence):**
+1. **Explicit Signature Requests:**
+   - "Signature required"
+   - "Please sign and return"
+   - "Provider signature needed"
+   - "Requires physician signature"
+   - "Sign below" / "Signature line"
+   - "Attestation required"
+
+2. **Signature Blocks/Fields Present:**
+   - Visible signature lines with labels (___________________)
+   - "Physician Signature:" / "Provider Signature:" / "MD Signature:"
+   - Date fields adjacent to signature fields
+   - "Signed by:" / "Attested by:"
+
+3. **Return Instructions:**
+   - "Please return to:" followed by fax/email/address
+   - "Fax back to:" with number
+   - "Email signed copy to:"
+   - "Return via:" with method specified
+
+### **Secondary Detection Triggers (Contextual):**
+4. **Legal/Compliance Documents:**
+   - Settlement agreements (C&R - Compromise & Release)
+   - Stipulations requiring provider sign-off
+   - QME/AME/IME report attestations
+   - Medical-legal evaluations requiring signature
+   - Deposition testimony confirmations
+
+5. **Authorization/Administrative Forms:**
+   - Prior authorization forms with provider attestation section
+   - Peer-to-peer review confirmations
+   - Treatment plan approvals
+   - Prescription/DME orders requiring signature
+   - HIPAA release forms
+   - Records request authorizations
+
+### **SIGNATURE TYPE IDENTIFICATION:**
+
+Extract and specify the signature type required:
+
+| Signature Type | Indicators in Document | Task Action |
+|----------------|----------------------|-------------|
+| **eSignature** | "Electronic signature accepted", "DocuSign", "eSign", "Digital signature" | Route to provider's eSignature platform |
+| **Wet Signature** | "Original signature required", "Blue ink", "Hand-signed", "Physical signature" | Print, sign, scan workflow |
+| **Stamp Signature** | "Signature stamp acceptable", "Stamped signature permitted" | Use provider's signature stamp |
+| **Initials Only** | "Initial here", "Initials required", "Please initial" | Quick initial review |
+
+### **RETURN METHOD EXTRACTION:**
+
+Identify HOW the signed document must be returned:
+
+| Return Method | Document Indicators | Task Instructions |
+|---------------|---------------------|-------------------|
+| **Fax** | "Fax to:", "Fax #:", Phone number with fax label | Include exact fax number in task |
+| **Email** | "Email to:", Email address present | Include exact email address |
+| **Mail** | "Mail to:", Physical address present | Include complete mailing address |
+| **Portal Upload** | "Upload to portal", "Submit via [system name]" | Include portal/system name |
+| **In-Person** | "Return in person", "Deliver to office" | Include location details |
+
+### **DEADLINE EXTRACTION FOR SIGNATURE TASKS:**
+
+**Critical:** Signature deadlines are HIGH PRIORITY - extract exact dates:
+
+- **Explicit deadline:** "Sign and return by [DATE]" → Use that date minus 2 days
+- **Legal deadline:** "Response due [DATE]" → Use that date minus 3 days (allow processing time)
+- **Urgent:** "ASAP", "STAT", "Immediate" → Use today + 1 day
+- **No deadline specified:** Use today + 2 days (default for signature tasks)
+
+### **SIGNATURE TASK GENERATION RULES:**
+
+**ALWAYS create signature tasks as HIGH PRIORITY with these characteristics:**
+
+1. **Task Description Format:**
+   ```
+   "Sign and return [document type] for [Patient Name]"
+   ```
+   Examples:
+   - "Sign and return settlement agreement for John Smith"
+   - "Sign and return QME report for Maria Garcia"
+   - "Sign and return prior authorization for Robert Lee"
+
+2. **Department Routing:**
+   - **Administrative/Compliance** (Primary routing for signature tasks)
+   - Staff will prepare document → route to provider → handle return
+
+3. **Required Task Details in quick_notes.details:**
+   ```
+   "Document requires [signature type] signature. Return method: [Fax/Email/Mail to specific address/number]. Deadline: [date if specified]. Source: [attorney/adjuster/facility name]. [Any special instructions from document]."
+   ```
+
+4. **Actions Array:**
+   ```json
+   ["Prepare for Signature", "Route to Provider", "Return Signed Document", "Complete"]
+   ```
+
+### **SIGNATURE TASK EXAMPLES:**
+
+**Example 1: Settlement Agreement**
+```json
+{
+  "description": "Sign and return settlement agreement for John Smith",
+  "department": "Administrative/Compliance",
+  "status": "Pending",
+  "due_date": "2025-01-15",
+  "patient": "John Smith",
+  "actions": ["Prepare for Signature", "Route to Provider", "Return Signed Document", "Complete"],
+  "source_document": "C&R_Settlement_JohnSmith.pdf",
+  "quick_notes": {
+    "details": "Settlement agreement requires wet signature (blue ink). Return via fax to attorney at 555-123-4567. Legal deadline: 01/18/2025. Review settlement terms on page 3 before signing.",
+    "one_line_note": "Settlement signature needed - Fax to attorney"
+  }
+}
+```
+
+**Example 2: QME Report Attestation**
+```json
+{
+  "description": "Sign and return QME attestation for Maria Garcia",
+  "department": "Administrative/Compliance",
+  "status": "Pending",
+  "due_date": "2025-01-10",
+  "patient": "Maria Garcia",
+  "actions": ["Prepare for Signature", "Route to Provider", "Return Signed Document", "Complete"],
+  "source_document": "QME_Report_MariaGarcia.pdf",
+  "quick_notes": {
+    "details": "QME report requires physician signature on page 8. Return via email to adjuster@insurance.com. Electronic signature acceptable. No specified deadline - using 3-day standard.",
+    "one_line_note": "QME signature - Email to adjuster"
+  }
+}
+```
+
+**Example 3: Prior Authorization with Signature**
+```json
+{
+  "description": "Sign and return prior authorization for Robert Lee",
+  "department": "Administrative/Compliance",
+  "status": "Pending",
+  "due_date": "2025-01-08",
+  "patient": "Robert Lee",
+  "actions": ["Prepare for Signature", "Route to Provider", "Return Signed Document", "Complete"],
+  "source_document": "PA_Request_RobertLee.pdf",
+  "quick_notes": {
+    "details": "Prior authorization for lumbar MRI requires provider signature. Return via fax to insurance at 800-555-9999 (Reference PA #2024-12345). Urgent processing needed for scheduled procedure on 01/12/2025.",
+    "one_line_note": "PA signature urgent - Fax to insurance"
+  }
+}
+```
+
+### **MULTI-TASK SIGNATURE SCENARIOS:**
+
+If document requires BOTH signature AND other actions, create SEPARATE tasks:
+
+**Example: Authorization Approval + Signature Required**
+- Task 1: "Schedule MRI for John Smith" → Scheduling & Coordination
+- Task 2: "Sign and return authorization form for John Smith" → Administrative/Compliance
+
+**Example: QME Report Review + Attestation**
+- Task 1: "Review QME functional findings for Maria Garcia" → Medical/Clinical
+- Task 2: "Sign and return QME attestation for Maria Garcia" → Administrative/Compliance
+
+### **SIGNATURE PAGE DETECTION:**
+
+If document indicates specific signature pages:
+- "See page [X] for signature"
+- "Signature required on pages [X, Y, Z]"
+- "Attachment [X] requires signature"
+
+Include in quick_notes.details:
+```
+"Signature required on page(s) [X]. Review [specific sections] before signing."
+```
+
+### **LEGAL/COMPLIANCE CONSIDERATIONS:**
+
+**High-Risk Signature Documents** (require extra care):
+- Settlement agreements (financial/legal implications)
+- Compromise & Release (C&R) documents
+- Stipulations with rating (permanent disability)
+- Medical-legal evaluations (AME/QME/IME)
+- Deposition testimony confirmations
+
+For these, add to quick_notes.details:
+```
+"⚠️ LEGAL DOCUMENT: Review thoroughly before signing. Consult with legal/compliance if uncertain about terms."
+```
 
 ---
 
