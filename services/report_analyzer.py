@@ -159,7 +159,7 @@ class ReportAnalyzer:
             is_standard_type = detection_result.get("is_standard_type", False)
             confidence = detection_result.get("confidence", 0.0)
 
-            logger.info(f"🔍 Document type1111111111 raw_text: {raw_text}")
+            # logger.info(f"🔍 Document type1111111111 raw_text: {raw_text}")
             
             logger.info(f"📄 Document type detected: {doc_type_str} (Conf: {confidence})")
             
@@ -173,8 +173,8 @@ class ReportAnalyzer:
             )
             
             logger.info(f"✅ Extraction complete")
-            logger.info(f"   Long summary: {len(result_dict.get('long_summary', ''))} chars")
-            logger.info(f"   Short summary: {result_dict.get('short_summary', '')}")
+            # logger.info(f"   Long summary: {len(result_dict.get('long_summary', ''))} chars")
+            # logger.info(f"   Short summary: {result_dict.get('short_summary', '')}")
             
             return result_dict
             

@@ -112,8 +112,8 @@ class QMEExtractorChained:
         This ensures accurate context preservation while capturing all necessary details.
         """
         logger.info("🔍 Processing document with DUAL-CONTEXT approach...")
-        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
-        logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        # logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
+        # logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
         
         # Build system prompt with CLEAR PRIORITY INSTRUCTIONS
         system_prompt = SystemMessagePromptTemplate.from_template("""

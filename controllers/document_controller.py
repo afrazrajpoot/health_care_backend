@@ -44,7 +44,24 @@ async def extract_documents(
     """
     Upload multiple documents: parse/validate synchronously, then queue for finalization.
     Subscription check temporarily disabled for testing.
+    🆕 NOW WITH INSTANT UPLOAD PROGRESS: Client can poll /api/agent/progress/{upload_task_id} immediately!
     """
+    # 🆕 INSTANT PROGRESS: Generate upload task ID and initialize progress BEFORE reading files
+    import uuid
+    from services.progress_service import progress_service
+    
+    upload_task_id = f"upload_{uuid.uuid4().hex[:12]}"
+    filenames = [doc.filename for doc in documents]
+    
+    # Initialize upload progress (client can start polling NOW)
+    progress_service.initialize_task_progress(
+        task_id=upload_task_id,
+        total_steps=len(documents),
+        filenames=filenames,
+        user_id=userId
+    )
+    progress_service.update_status(upload_task_id, "uploading", f"Receiving {len(documents)} file(s)...")
+    
     try:
         # 🧩 Temporary mock data (bypasses subscription)
         subscription_data = {
@@ -66,8 +83,13 @@ async def extract_documents(
         service = DocumentExtractorService()
         successful_uploads = []
 
-        # Process batch
-        batch_result = await service.process_documents_batch(documents, physicianId, userId, mode)
+        # 🆕 Update progress: Files received, starting validation
+        progress_service.update_status(upload_task_id, "validating", "Files received, validating...")
+        
+        # Process batch (now with progress callback)
+        batch_result = await service.process_documents_batch_with_progress(
+            documents, physicianId, userId, mode, upload_task_id, progress_service
+        )
         payloads = batch_result["payloads"]
         ignored = batch_result["ignored"]
 
@@ -78,11 +100,15 @@ async def extract_documents(
 
         # Queue batch if payloads exist
         task_id = await service.queue_batch_and_track_progress(payloads, userId)
+        
+        # 🆕 Mark upload phase complete
+        progress_service.update_status(upload_task_id, "completed", f"Upload complete. Processing {len(payloads)} documents...", completed=True)
 
         print("✅ === END MULTI-DOCUMENT REQUEST (Subscription Disabled) ===")
 
         return {
-            "task_id": task_id,
+            "upload_task_id": upload_task_id,  # 🆕 For polling upload progress
+            "task_id": task_id,  # Processing task ID (existing)
             "payload_count": len(payloads),
             "ignored": ignored,
             "ignored_count": len(ignored),

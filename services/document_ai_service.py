@@ -482,7 +482,7 @@ class DocumentAIProcessor:
                 logger.info("📄 FULL OCR TEXT (for comparison):")
                 logger.info("=" * 80)
                 logger.info(f"Full text length: {len(result.text)} chars")
-                logger.info(f"First 500 chars: {result.text}")
+                logger.info(f"First 500 chars: {result.text[:500]}")
                 logger.info("=" * 80)
             
             # Extract text using simplified extractor
@@ -524,9 +524,7 @@ class DocumentAIProcessor:
                     logger.info(f"🔍 Layout result keys: {list(layout_result.keys())}")
                     logger.info(f"📄 Document dict keys: {list(document_dict.keys()) if document_dict else 'None'}")
                     
-                    if document_dict:
-                        logger.info(f"✅ Layout Parser returned document_dict with {(document_dict)} keys")
-                        
+                    if document_dict:                        
                         # Extract patient details from layout JSON (only from first chunk)
                         try:
                             patient_extractor = get_patient_extractor()

@@ -94,8 +94,8 @@ class FormalMedicalReportExtractor:
         logger.info("🏥 STARTING FORMAL MEDICAL REPORT EXTRACTION (DUAL-CONTEXT PRIORITY)")
         logger.info("=" * 80)
         
-        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
-        logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        # logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
+        # logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
         
         # Auto-detect specific report type if not specified
         detected_type = self._detect_report_type(raw_text, doc_type)  # Use primary for detection

@@ -103,8 +103,8 @@ class ConsultExtractorChained:
         SUPPLEMENTARY: text (full OCR extraction for missing details only)
         """
         logger.info("🔍 Processing consultation report with DUAL-CONTEXT approach...")
-        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
-        logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        # logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
+        # logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
         
         # Updated System Prompt with DUAL-CONTEXT PRIORITY
         system_prompt = SystemMessagePromptTemplate.from_template("""

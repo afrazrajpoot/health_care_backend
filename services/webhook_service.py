@@ -699,7 +699,7 @@ class WebhookService:
             
             logger.info(f"📝 Passing {len(full_text)} characters to task generator (from {'Document AI summarizer' if processed_data.get('raw_text') else 'OCR text'})")
             
-            tasks = await task_creator.generate_tasks(document_data, filename, full_text)
+            tasks = await task_creator.generate_tasks(document_data, filename, full_text, matched_doctor_name)
             logger.info(f"📋 Generated {len(tasks)} tasks")
 
             # Save tasks to database

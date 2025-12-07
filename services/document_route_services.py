@@ -241,7 +241,7 @@ class DocumentExtractorService:
             has_page_zones = "page_zones" in result_data and result_data["page_zones"] is not None
             has_llm_text = "llm_text" in result_data and result_data["llm_text"] is not None
             has_raw_text = "raw_text" in result_data and result_data["raw_text"]
-            logger.info(f"📦 Webhook payload prepared - page_zones: {has_page_zones}, llm_text: {has_llm_text}, raw_text: {has_raw_text}")
+            # logger.info(f"📦 Webhook payload prepared - page_zones: {has_page_zones}, llm_text: {has_llm_text}, raw_text: {has_raw_text}")
             if has_page_zones:
                 logger.info(f"📄 page_zones has {len(result_data['page_zones'])} pages")
             else:
@@ -293,6 +293,108 @@ class DocumentExtractorService:
         """Compute SHA256 hash of file content (unchanged)."""
         import hashlib
         return hashlib.sha256(content).hexdigest()
+    
+    async def process_documents_batch_with_progress(
+        self,
+        documents: List[UploadFile],
+        physician_id: str = None,
+        user_id: str = None,
+        mode: str = None,
+        upload_task_id: str = None,
+        progress_service=None
+    ) -> Dict[str, Any]:
+        """
+        ENHANCED: Process batch with REAL-TIME progress updates during upload phase.
+        
+        Updates progress in Redis + emits WebSocket events so client polling sees instant updates.
+        """
+        await self.initialize_db()
+        
+        api_start_msg = f"\n🔄 === BATCH PROCESSING WITH UPLOAD PROGRESS ({len(documents)} files) ===\n"
+        logger.info(api_start_msg)
+        
+        if physician_id:
+            logger.info(f"👨⚕️ Physician ID: {physician_id}")
+        
+        # OPTIMIZATION: Parallel processing in batches of 10
+        batch_size = 10
+        all_payloads = []
+        all_ignored = []
+        
+        doc_index = 0
+        
+        for i in range(0, len(documents), batch_size):
+            batch = documents[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            
+            # 🆕 Update progress before processing each batch
+            if upload_task_id and progress_service:
+                progress_pct = int((doc_index / len(documents)) * 100)
+                progress_service.update_status(
+                    upload_task_id, 
+                    "processing", 
+                    f"Processing batch {batch_num} ({doc_index}/{len(documents)} files)..."
+                )
+            
+            logger.info(f"📦 Processing batch {batch_num} ({len(batch)} docs) - Conversions serialized, rest parallel")
+            
+            # FIXED: Submit all to parallel tasks (gather handles)
+            tasks = [
+                self.process_single_document(doc, physician_id, user_id, mode)
+                for doc in batch
+            ]
+            
+            # Execute all tasks concurrently (conversions auto-serialized via executor)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Collect results and update per-file progress
+            for idx, result in enumerate(results):
+                doc_index += 1
+                current_doc = batch[idx]
+                
+                # 🆕 Update per-file progress
+                if upload_task_id and progress_service:
+                    file_progress = 100 if isinstance(result, dict) and result.get("success") else 50
+                    status = "completed" if file_progress == 100 else "failed"
+                    progress_service.update_file_progress_only(
+                        task_id=upload_task_id,
+                        file_index=doc_index - 1,
+                        filename=current_doc.filename,
+                        status=status,
+                        file_progress=file_progress,
+                        message=result.get("error", "Processed") if isinstance(result, dict) else "Error"
+                    )
+                
+                if isinstance(result, Exception):
+                    logger.error(f"❌ Document failed with exception: {result}")
+                    all_ignored.append({
+                        "filename": "unknown",
+                        "reason": str(result)
+                    })
+                elif result["success"]:
+                    all_payloads.append(result["payload"])
+                else:
+                    # Handle duplicate files specially
+                    if result.get("error") == "duplicate_file":
+                        all_ignored.append({
+                            "filename": result["filename"],
+                            "reason": result.get("message", "Duplicate file"),
+                            "existing_file": result.get("existing_document", {}).get("fileName"),
+                            "document_id": result.get("existing_document", {}).get("id")
+                        })
+                    else:
+                        all_ignored.append({
+                            "filename": result["filename"],
+                            "reason": result.get("error", "Unknown error")
+                        })
+        
+        preprocess_msg = f"✅ BATCH complete: {len(all_payloads)} ready, {len(all_ignored)} ignored"
+        logger.info(preprocess_msg)
+        
+        return {
+            "payloads": all_payloads,
+            "ignored": all_ignored
+        }
     
     async def process_documents_batch(
         self,

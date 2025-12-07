@@ -73,8 +73,8 @@ class ImagingExtractorChained:
         logger.info("📊 STARTING IMAGING EXTRACTION (DUAL-CONTEXT PRIORITY)")
         logger.info("=" * 80)
         
-        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
-        logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        # logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
+        # logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
         
         start_time = time.time()
         

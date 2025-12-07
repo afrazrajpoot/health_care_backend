@@ -103,8 +103,8 @@ class ClinicalNoteExtractor:
         logger.info(f"📋 Clinical Note Type: {detected_type} (original: {doc_type})")
         
         # Check document size
-        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
-        logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        # logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
+        # logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
         
         text_length = len(raw_text)
         token_estimate = text_length // 4

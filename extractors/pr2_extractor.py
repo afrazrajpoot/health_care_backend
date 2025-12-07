@@ -60,7 +60,7 @@ class PR2ExtractorChained:
         logger.info("=" * 80)
         logger.info("📋 STARTING PR-2 EXTRACTION (FULL CONTEXT + RAW TEXT)")
         logger.info("=" * 80)
-        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {raw_text} chars (accurate context)")
+        # logger.info(f"   📌 PRIMARY SOURCE (raw_text): {raw_text} chars (accurate context)")
         
         start_time = time.time()
         
@@ -124,8 +124,8 @@ class PR2ExtractorChained:
         This ensures accurate context preservation while capturing all necessary details.
         """
         logger.info("🔍 Processing PR-2 document with DUAL-CONTEXT approach...")
-        logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
-        logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        # logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
+        # logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
         
         # Build system prompt with CLEAR PRIORITY INSTRUCTIONS
         system_prompt = SystemMessagePromptTemplate.from_template("""
