@@ -345,7 +345,7 @@ async def startup():
     
     # 🕓 Start enhanced cron scheduler - runs every 1 minute FOR TESTING
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(check_all_overdue_tasks, "interval", minutes=1)
+    # scheduler.add_job(check_all_overdue_tasks, "interval", minutes=1)
     scheduler.start()
     print("🕒 Enhanced scheduler started — runs every 1 minute (FOR TESTING)")
     print("🔒 All API routes are secured with JWT authentication")
