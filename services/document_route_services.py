@@ -9,8 +9,6 @@ FIXED: Hoist 'loop' outside conditionals to avoid UnboundLocalError for PDFs.
 
 import traceback
 import asyncio
-import uuid
-import shutil
 from datetime import datetime
 from typing import Dict, Any, List
 from fastapi import UploadFile

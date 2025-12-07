@@ -21,6 +21,7 @@ from PyPDF2 import PdfReader, PdfWriter
 from models.schemas import ExtractionResult, FileInfo
 from config.settings import CONFIG
 from utils.patient_details_extractor import get_patient_extractor
+from helpers.helpers import build_llm_friendly_json , extract_text_from_summarizer
 
 logger = logging.getLogger("document_ai")
 
@@ -29,53 +30,6 @@ class LayoutPreservingTextExtractor:
     Extract text from Document AI Summarizer results.
     Simplified since summarizer returns clean text without complex layout.
     """
-    
-    @staticmethod
-    def extract_text_from_summarizer(document) -> Dict[str, Any]:
-        """
-        Extract text from summarizer response.
-        Summarizer returns clean, organized text with natural paragraph structure.
-        """
-        summarized_text = document.text or ""
-        
-        # Extract page count if available
-        page_count = len(document.pages) if document.pages else 0
-        
-        # Build simple structure for compatibility with existing code
-        return {
-            "layout_preserved": summarized_text,
-            "raw_text": summarized_text,
-            "page_zones": {},  # Summarizer doesn't provide detailed zones
-            "structured_document": {
-                "document_structure": {
-                    "total_pages": page_count,
-                    "summarized": True
-                },
-                "pages": [],
-                "metadata": {
-                    "has_summary": True,
-                    "total_chars": len(summarized_text)
-                }
-            }
-        }
-
-def build_llm_friendly_json(structured_document: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Build LLM-optimized JSON structure from summarizer output.
-    """
-    return {
-        "document_type_hints": {
-            "header_text": "",
-            "first_page_context": "",
-            "has_form_structure": False,
-            "is_summarized": True
-        },
-        "content": {
-            "summary": structured_document.get("summarized_text", ""),
-            "page_count": structured_document.get("document_structure", {}).get("total_pages", 0)
-        },
-        "metadata": structured_document.get("metadata", {})
-    }
 
 class PDFSplitter:
     """Utility to split large PDFs into smaller chunks"""
@@ -532,7 +486,7 @@ class DocumentAIProcessor:
                 logger.info("=" * 80)
             
             # Extract text using simplified extractor
-            layout_data = self.layout_extractor.extract_text_from_summarizer(result)
+            layout_data = extract_text_from_summarizer(result)
             # Override with actual summary
             layout_data["layout_preserved"] = summary_text
             layout_data["raw_text"] = summary_text

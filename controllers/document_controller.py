@@ -1,199 +1,37 @@
-# controllers/document_controller.py (updated: check for existing document before GCS upload and handle like ignored/required field issue)
-
 from fastapi import APIRouter, File, UploadFile, HTTPException, Request, Query
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from datetime import datetime
 import traceback
-
 from services.file_service import FileService
-
 from utils.logger import logger
-
-from services.database_service import DatabaseService, get_database_service
-
-from services.progress_service import progress_service
+from services.database_service import get_database_service
 from utils.socket_manager import sio
 from pathlib import Path
 from fastapi import Path as FastAPIPath
-
 from services.document_converter import DocumentConverter
 from datetime import timezone
 from services.webhook_service import WebhookService
 from services.document_route_services import DocumentExtractorService
 from services.get_document_services import DocumentAggregationService
 import os
-from fastapi import Form
 import json
-
-router = APIRouter()
-
-
-
-import os
-
-from google.cloud import dlp_v2
-from typing import Dict, Any
-from datetime import datetime
+from fastapi import HTTPException, UploadFile, File, Form, Query
+from prisma import Prisma
+import hashlib
+from fastapi.responses import Response
+from services.document_converter import DocumentConverter
+import urllib.parse
+from helpers.helpers import check_subscription
 
 PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT', 'your-gcp-project-id')
 
-
-
-
-@router.post("/update-fail-document")
-async def update_fail_document(request: Request):
-    try:
-        data = await request.json()
-        logger.info(f"📥 Update fail document request for ID: {data.get('fail_doc_id', 'unknown')}")
-
-        fail_doc_id = data.get("fail_doc_id")
-        if not fail_doc_id:
-            raise HTTPException(status_code=400, detail="Missing required fail_doc_id in request payload")
-
-        updated_fields = {
-            "document_text": data.get("document_text"),
-            "dob": data.get("dob"),
-            "doi": data.get("doi"),
-            "claim_number": data.get("claim_number"),
-            "patient_name": data.get("patient_name")
-        }
-
-        db_service = await get_database_service()
-        fail_doc = await db_service.get_fail_doc_by_id(fail_doc_id)
-
-        if not fail_doc:
-            raise HTTPException(status_code=404, detail="Fail document not found")
-
-        service = WebhookService()
-        result = await service.update_fail_document(fail_doc, updated_fields, data.get("user_id"), db_service)
-
-        # Defensive logging: avoid KeyError if result doesn't include expected keys
-        if not isinstance(result, dict):
-            logger.warning(f"⚠️ update_fail_document returned non-dict result: {result}")
-            return result
-
-        doc_id = result.get("document_id") or result.get("id") or result.get("fail_doc_id")
-        status = result.get("status") or result.get("result_status") or "unknown"
-
-        if doc_id is None:
-            logger.warning(f"⚠️ update_fail_document result missing document id. Full result: {json.dumps(result, default=str)[:1000]}")
-        else:
-            logger.info(f"💾 Fail document updated and saved via route with ID: {doc_id}, status: {status}")
-
-        return result
-
-    except Exception as e:
-        logger.error(f"❌ Update fail document failed: {str(e)}", exc_info=True)
-
-        # On exception, emit error
-        if 'data' in locals():
-            try:
-                await sio.emit('task_error', {
-                    'document_id': data.get('fail_doc_id', 'unknown'),
-                    'filename': fail_doc.fileName if 'fail_doc' in locals() else 'unknown',
-                    'error': str(e),
-                    'gcs_url': fail_doc.gcsFileLink if 'fail_doc' in locals() else 'unknown',
-                    'physician_id': fail_doc.physicianId if 'fail_doc' in locals() else None,
-                    'blob_path': fail_doc.blobPath if 'fail_doc' in locals() else ''
-                })
-            except:
-                pass  # Ignore emit failure during error
-        raise HTTPException(status_code=500, detail=f"Update fail document processing failed: {str(e)}")
-import hashlib
-
-def compute_file_hash(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
-
-
-
-
-
-
-
-from fastapi import Depends, HTTPException, UploadFile, File, Form, Query
-from typing import Dict, Any, List
-from prisma import Prisma
-import traceback
-
+# Initialize router
+router = APIRouter()
 # Create Prisma client instance
 db = Prisma()
 
-async def check_subscription(
-    documents: List[UploadFile] = File(...),
-    physicianId: str = Query(None),
-    userId: str = Query(None)
-):
-    """Dependency to check subscription before processing documents"""
-    
-    try:
-        # Ensure database is connected
-        if not db.is_connected():
-            await db.connect()
-            print("✅ Database connected in subscription check")
-
-        # Count documents
-        document_count = len(documents)
-        print(f"📄 Documents to process: {document_count}")
-        
-        # Use physicianId for subscription check (as per your schema)
-        subscription_id = physicianId
-        if not subscription_id:
-            raise HTTPException(status_code=400, detail="physicianId is required for subscription check")
-        
-        print(f"🔍 Checking subscription for physicianId: {subscription_id}")
-
-        # Query DB for active subscription using physicianId
-        sub = await db.subscription.find_first(
-            where={
-                "physicianId": subscription_id,
-                "status": "active"
-            }
-        )
-        
-        print(f"📊 Database query completed. Found subscription: {sub is not None}")
-        
-        if not sub:
-            print("❌ No active subscription found")
-            raise HTTPException(
-                status_code=400,
-                detail="No active subscription found. Please upgrade your plan."
-            )
-        
-        # Get documentParse from subscription (as per your schema)
-        remaining_parses = sub.documentParse
-        print(f"📊 Subscription ID: {sub.id}, Remaining parses: {remaining_parses}")
-        print(f"📄 Requested documents: {document_count}")
-        
-        if document_count > remaining_parses:
-            print(f"❌ Document count ({document_count}) exceeds remaining parses ({remaining_parses})")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Not enough remaining parses. You requested {document_count} documents, but only {remaining_parses} parses available. Please upgrade your plan."
-            )
-        
-        if remaining_parses <= 0:
-            print("❌ Document parse limit exceeded")
-            raise HTTPException(
-                status_code=400,
-                detail="Document parse limit exceeded. Please upgrade your plan."
-            )
-        
-        print("✅ Subscription check passed")
-        return {
-            "subscription": sub,
-            "document_count": document_count,
-            "physician_id": subscription_id,
-            "remaining_parses": remaining_parses
-        }
-        
-    except HTTPException:
-        # Re-raise HTTP exceptions
-        raise
-    except Exception as e:
-        print(f"❌ Subscription check error: {e}")
-        print(f"🔍 Full traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail="Internal server error during subscription check")
-
+def compute_file_hash(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
 
 @router.post("/extract-documents", response_model=Dict[str, Any])
 async def extract_documents(
@@ -261,34 +99,65 @@ async def extract_documents(
 
         raise HTTPException(status_code=500, detail=f"Global processing failed: {str(global_exc)}")
 
+@router.post("/update-fail-document")
+async def update_fail_document(request: Request):
+    try:
+        data = await request.json()
+        logger.info(f"📥 Update fail document request for ID: {data.get('fail_doc_id', 'unknown')}")
 
+        fail_doc_id = data.get("fail_doc_id")
+        if not fail_doc_id:
+            raise HTTPException(status_code=400, detail="Missing required fail_doc_id in request payload")
 
+        updated_fields = {
+            "document_text": data.get("document_text"),
+            "dob": data.get("dob"),
+            "doi": data.get("doi"),
+            "claim_number": data.get("claim_number"),
+            "patient_name": data.get("patient_name")
+        }
 
+        db_service = await get_database_service()
+        fail_doc = await db_service.get_fail_doc_by_id(fail_doc_id)
 
-from typing import Optional
+        if not fail_doc:
+            raise HTTPException(status_code=404, detail="Fail document not found")
 
-from datetime import datetime
+        service = WebhookService()
+        result = await service.update_fail_document(fail_doc, updated_fields, data.get("user_id"), db_service)
 
-def parse_date(date_str: Optional[str], field_name: str) -> datetime:
-    """Parse a date string safely, supporting multiple formats."""
-    if not date_str or date_str.strip() == "":
-        raise HTTPException(status_code=400, detail=f"{field_name} cannot be empty or missing")
+        # Defensive logging: avoid KeyError if result doesn't include expected keys
+        if not isinstance(result, dict):
+            logger.warning(f"⚠️ update_fail_document returned non-dict result: {result}")
+            return result
 
-    # Supported formats
-    formats = ["%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y"]
+        doc_id = result.get("document_id") or result.get("id") or result.get("fail_doc_id")
+        status = result.get("status") or result.get("result_status") or "unknown"
 
-    for fmt in formats:
-        try:
-            return datetime.strptime(date_str.strip(), fmt)
-        except ValueError:
-            continue
+        if doc_id is None:
+            logger.warning(f"⚠️ update_fail_document result missing document id. Full result: {json.dumps(result, default=str)[:1000]}")
+        else:
+            logger.info(f"💾 Fail document updated and saved via route with ID: {doc_id}, status: {status}")
 
-    # If no format worked
-    raise HTTPException(
-        status_code=400,
-        detail=f"Invalid date format for {field_name}. Expected one of: YYYY-MM-DD, MM/DD/YYYY, DD-MM-YYYY"
-    )
+        return result
 
+    except Exception as e:
+        logger.error(f"❌ Update fail document failed: {str(e)}", exc_info=True)
+
+        # On exception, emit error
+        if 'data' in locals():
+            try:
+                await sio.emit('task_error', {
+                    'document_id': data.get('fail_doc_id', 'unknown'),
+                    'filename': fail_doc.fileName if 'fail_doc' in locals() else 'unknown',
+                    'error': str(e),
+                    'gcs_url': fail_doc.gcsFileLink if 'fail_doc' in locals() else 'unknown',
+                    'physician_id': fail_doc.physicianId if 'fail_doc' in locals() else None,
+                    'blob_path': fail_doc.blobPath if 'fail_doc' in locals() else ''
+                })
+            except:
+                pass  # Ignore emit failure during error
+        raise HTTPException(status_code=500, detail=f"Update fail document processing failed: {str(e)}")
 
 @router.get('/document')
 async def get_document(
@@ -355,9 +224,7 @@ async def get_fail_documents(
     except Exception as e:
         logger.error(f"❌ Error retrieving fail docs for physician {physicianId}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to retrieve fail docs: {str(e)}")
-from fastapi.responses import Response
-from services.document_converter import DocumentConverter
-import urllib.parse
+
  # ✅ pathlib.Path here too
 @router.get("/preview/{blob_path:path}")
 async def preview_file(blob_path: str = FastAPIPath(..., description="GCS blob path, e.g., uploads/filename.ext")):  # ✅ Use aliased FastAPIPath
@@ -402,7 +269,6 @@ async def preview_file(blob_path: str = FastAPIPath(..., description="GCS blob p
     except Exception as e:
         logger.error(f"❌ Preview error for {blob_path}: {str(e)}")
         raise HTTPException(status_code=500, detail="Preview failed")
-
 
 @router.delete("/fail-docs/{doc_id}")
 async def delete_fail_document(
@@ -466,7 +332,6 @@ async def delete_fail_document(
     except Exception as e:
         logger.error(f"❌ Error in delete_fail_document for {doc_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Deletion failed: {str(e)}")
-
 
 @router.get("/workflow-stats")
 async def get_workflow_stats(

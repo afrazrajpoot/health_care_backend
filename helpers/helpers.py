@@ -1,0 +1,298 @@
+from fastapi import File, UploadFile, HTTPException, Query
+from typing import List, Optional, Any, Dict
+from datetime import datetime
+import traceback
+import os
+from datetime import datetime
+from fastapi import HTTPException, UploadFile, File, Query
+from prisma import Prisma
+import traceback
+from datetime import datetime
+
+# Create Prisma client instance
+db = Prisma()
+
+
+async def check_subscription(
+    documents: List[UploadFile] = File(...),
+    physicianId: str = Query(None),
+    userId: str = Query(None)
+):
+    """Dependency to check subscription before processing documents"""
+    
+    try:
+        # Ensure database is connected
+        if not db.is_connected():
+            await db.connect()
+            print("✅ Database connected in subscription check")
+
+        # Count documents
+        document_count = len(documents)
+        print(f"📄 Documents to process: {document_count}")
+        
+        # Use physicianId for subscription check (as per your schema)
+        subscription_id = physicianId
+        if not subscription_id:
+            raise HTTPException(status_code=400, detail="physicianId is required for subscription check")
+        
+        print(f"🔍 Checking subscription for physicianId: {subscription_id}")
+
+        # Query DB for active subscription using physicianId
+        sub = await db.subscription.find_first(
+            where={
+                "physicianId": subscription_id,
+                "status": "active"
+            }
+        )
+        
+        print(f"📊 Database query completed. Found subscription: {sub is not None}")
+        
+        if not sub:
+            print("❌ No active subscription found")
+            raise HTTPException(
+                status_code=400,
+                detail="No active subscription found. Please upgrade your plan."
+            )
+        
+        # Get documentParse from subscription (as per your schema)
+        remaining_parses = sub.documentParse
+        print(f"📊 Subscription ID: {sub.id}, Remaining parses: {remaining_parses}")
+        print(f"📄 Requested documents: {document_count}")
+        
+        if document_count > remaining_parses:
+            print(f"❌ Document count ({document_count}) exceeds remaining parses ({remaining_parses})")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Not enough remaining parses. You requested {document_count} documents, but only {remaining_parses} parses available. Please upgrade your plan."
+            )
+        
+        if remaining_parses <= 0:
+            print("❌ Document parse limit exceeded")
+            raise HTTPException(
+                status_code=400,
+                detail="Document parse limit exceeded. Please upgrade your plan."
+            )
+        
+        print("✅ Subscription check passed")
+        return {
+            "subscription": sub,
+            "document_count": document_count,
+            "physician_id": subscription_id,
+            "remaining_parses": remaining_parses
+        }
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        print(f"❌ Subscription check error: {e}")
+        print(f"🔍 Full traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Internal server error during subscription check")
+
+def parse_date(date_str: Optional[str], field_name: str) -> datetime:
+    """Parse a date string safely, supporting multiple formats."""
+    if not date_str or date_str.strip() == "":
+        raise HTTPException(status_code=400, detail=f"{field_name} cannot be empty or missing")
+
+    # Supported formats
+    formats = ["%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y"]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str.strip(), fmt)
+        except ValueError:
+            continue
+
+    # If no format worked
+    raise HTTPException(
+        status_code=400,
+        detail=f"Invalid date format for {field_name}. Expected one of: YYYY-MM-DD, MM/DD/YYYY, DD-MM-YYYY"
+    )
+
+def serialize_payload(payload: dict) -> dict:
+    """Convert any non-JSON datatypes to ISO strings for Celery serialization."""
+    def convert(obj: Any) -> Any:
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, dict):
+            return {k: convert(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [convert(item) for item in obj]
+        return obj
+    return convert(payload)
+
+
+# ============================
+# 🔵 Normalization Helpers
+# ============================
+
+def normalize_name(name: Optional[str]) -> str:
+    """
+    Normalize patient name for matching.
+    Handles: comma-separated names, case differences, extra spaces.
+    Returns: sorted lowercase name parts (e.g., "morales lorina")
+    """
+    if not name or str(name).lower() in ["not specified", "unknown", "n/a", "na", ""]:
+        return ""
+    
+    # Remove commas, convert to lowercase, strip whitespace
+    name = str(name).replace(",", " ").lower().strip()
+    # Split into parts and remove empty strings
+    parts = [p for p in name.split() if p]
+    
+    if not parts:
+        return ""
+    
+    # For 2+ part names, use first and last name sorted
+    if len(parts) >= 2:
+        first = parts[0]
+        last = parts[-1]
+        # Sort alphabetically for consistent comparison
+        normalized = " ".join(sorted([first, last]))
+    else:
+        normalized = parts[0]
+    
+    return normalized.strip()
+
+def normalize_claim(claim: Optional[str]) -> Optional[str]:
+    """
+    Normalize claim number for matching.
+    Returns: uppercase alphanumeric only, or None if invalid/missing.
+    """
+    if not claim or str(claim).lower() in ["not specified", "unknown", "n/a", "na", ""]:
+        return None
+    # Remove all non-alphanumeric characters and convert to uppercase
+    normalized = "".join(c for c in str(claim).upper() if c.isalnum())
+    return normalized if normalized else None
+
+def normalize_dob(dob: Optional[Any]) -> Optional[str]:
+    """
+    Normalize DOB to YYYY-MM-DD format.
+    Handles: datetime objects, ISO strings, common date formats.
+    Returns: YYYY-MM-DD string or None if invalid/missing.
+    """
+    if not dob or str(dob).lower() in ["not specified", "unknown", "n/a", "na", ""]:
+        return None
+    
+    # If it's already a datetime object
+    if isinstance(dob, datetime):
+        return dob.strftime("%Y-%m-%d")
+    
+    # Try ISO format first
+    try:
+        return datetime.fromisoformat(str(dob)).strftime("%Y-%m-%d")
+    except:
+        pass
+    
+    # Try common formats
+    for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d", "%m-%d-%Y"):
+        try:
+            return datetime.strptime(str(dob), fmt).strftime("%Y-%m-%d")
+        except:
+            pass
+    
+    # Return as-is if parsing fails (for manual review)
+    return str(dob) if dob else None
+
+def is_same_patient(name1: str, dob1: Optional[str], claim1: Optional[str],
+                   name2: str, dob2: Optional[str], claim2: Optional[str]) -> bool:
+    """
+    Implements comprehensive patient matching rules.
+    
+    🔥 MATCHING RULES:
+    Rule 1: BOTH have claims AND they're different → DIFFERENT PATIENT
+    Rule 2: BOTH have same claim → SAME PATIENT (highest priority)
+    Rule 3: At least ONE claim is None → Use name + DOB logic:
+      3A: Names match AND DOBs match → SAME
+      3B: Names match AND both DOBs None → SAME
+      3C: Names match AND one DOB None → SAME
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # Rule 1: If BOTH have claim & different → NOT same
+    # KEY FIX: Only reject if BOTH claims exist and are different
+    if claim1 and claim2 and claim1 != claim2:
+        logger.debug(f"❌ Rule 1: Different claims '{claim1}' vs '{claim2}' - NOT same patient")
+        return False
+    
+    # Rule 2: If BOTH have same claim → same patient (highest priority)
+    if claim1 and claim2 and claim1 == claim2:
+        logger.debug(f"✅ Rule 2: Same claim '{claim1}' - SAME patient")
+        return True
+    
+    # Rule 3: At least ONE claim is None - rely on name + DOB
+    # This includes: (claim1 and not claim2) OR (not claim1 and claim2) OR (not claim1 and not claim2)
+    
+    # Names must match after normalization
+    if name1 == name2:
+        logger.debug(f"✅ Names match: '{name1}'")
+        
+        # 3A: Both DOB provided & match
+        if dob1 and dob2 and dob1 == dob2:
+            logger.debug(f"✅ Rule 3A: Both DOB match '{dob1}' - SAME patient (one or both claims None)")
+            return True
+        
+        # 3B: Both missing DOB
+        if not dob1 and not dob2:
+            logger.debug(f"✅ Rule 3B: Both DOB missing - SAME patient (one or both claims None)")
+            return True
+        
+        # 3C: One missing DOB, still same
+        if (dob1 and not dob2) or (dob2 and not dob1):
+            logger.debug(f"✅ Rule 3C: One DOB missing - SAME patient (one or both claims None)")
+            return True
+    else:
+        logger.debug(f"❌ Names don't match: '{name1}' vs '{name2}'")
+    
+    # Otherwise not same
+    logger.debug(f"❌ No matching rules - NOT same patient")
+    return False
+    
+
+def extract_text_from_summarizer(document) -> Dict[str, Any]:
+    """
+    Extract text from summarizer response.
+    Summarizer returns clean, organized text with natural paragraph structure.
+    """
+    summarized_text = document.text or ""
+    
+    # Extract page count if available
+    page_count = len(document.pages) if document.pages else 0
+    
+    # Build simple structure for compatibility with existing code
+    return {
+        "layout_preserved": summarized_text,
+        "raw_text": summarized_text,
+        "page_zones": {},  # Summarizer doesn't provide detailed zones
+        "structured_document": {
+            "document_structure": {
+                "total_pages": page_count,
+                "summarized": True
+            },
+            "pages": [],
+            "metadata": {
+                "has_summary": True,
+                "total_chars": len(summarized_text)
+            }
+        }
+    }
+
+
+def build_llm_friendly_json(structured_document: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Build LLM-optimized JSON structure from summarizer output.
+    """
+    return {
+        "document_type_hints": {
+            "header_text": "",
+            "first_page_context": "",
+            "has_form_structure": False,
+            "is_summarized": True
+        },
+        "content": {
+            "summary": structured_document.get("summarized_text", ""),
+            "page_count": structured_document.get("document_structure", {}).get("total_pages", 0)
+        },
+        "metadata": structured_document.get("metadata", {})
+    }

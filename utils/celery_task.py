@@ -8,30 +8,13 @@ from datetime import datetime
 import traceback
 import asyncio
 import aiohttp
-import json
 import uuid
 from typing import Any, Dict, List
 from services.progress_service import progress_service
 from services.file_service import FileService
 from utils.logger import logger
 from config.settings import CONFIG
-
-
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
-
-def serialize_payload(payload: dict) -> dict:
-    """Convert any non-JSON datatypes to ISO strings for Celery serialization."""
-    def convert(obj: Any) -> Any:
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        if isinstance(obj, dict):
-            return {k: convert(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [convert(item) for item in obj]
-        return obj
-    return convert(payload)
+from helpers.helpers import serialize_payload
 
 
 # ============================================================================
@@ -394,10 +377,6 @@ def _batch_complete_callback(results: List[Dict], batch_task_id: str, filenames:
             "status": "callback_failed",
             "error": str(e)
         }
-
-
-
-
 
 # ============================================================================
 # OTHER TASKS (UNCHANGED)

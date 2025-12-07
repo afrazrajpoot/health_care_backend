@@ -16,6 +16,7 @@ from cryptography.fernet import Fernet
 from cryptography.exceptions import InvalidKey
 import base64
 from datetime import datetime, timedelta
+from helpers.helpers import normalize_name, normalize_claim, normalize_dob, is_same_patient
 
 load_dotenv()
 logger = logging.getLogger("document_ai")
@@ -358,135 +359,6 @@ class DatabaseService:
             logger.error(f"❌ Error retrieving recent documents: {str(e)}")
             raise
     
-    # ============================
-    # 🔵 Normalization Helpers
-    # ============================
-    
-    @staticmethod
-    def normalize_name(name: Optional[str]) -> str:
-        """
-        Normalize patient name for matching.
-        Handles: comma-separated names, case differences, extra spaces.
-        Returns: sorted lowercase name parts (e.g., "morales lorina")
-        """
-        if not name or str(name).lower() in ["not specified", "unknown", "n/a", "na", ""]:
-            return ""
-        
-        # Remove commas, convert to lowercase, strip whitespace
-        name = str(name).replace(",", " ").lower().strip()
-        # Split into parts and remove empty strings
-        parts = [p for p in name.split() if p]
-        
-        if not parts:
-            return ""
-        
-        # For 2+ part names, use first and last name sorted
-        if len(parts) >= 2:
-            first = parts[0]
-            last = parts[-1]
-            # Sort alphabetically for consistent comparison
-            normalized = " ".join(sorted([first, last]))
-        else:
-            normalized = parts[0]
-        
-        return normalized.strip()
-    
-    @staticmethod
-    def normalize_claim(claim: Optional[str]) -> Optional[str]:
-        """
-        Normalize claim number for matching.
-        Returns: uppercase alphanumeric only, or None if invalid/missing.
-        """
-        if not claim or str(claim).lower() in ["not specified", "unknown", "n/a", "na", ""]:
-            return None
-        # Remove all non-alphanumeric characters and convert to uppercase
-        normalized = "".join(c for c in str(claim).upper() if c.isalnum())
-        return normalized if normalized else None
-    
-    @staticmethod
-    def normalize_dob(dob: Optional[any]) -> Optional[str]:
-        """
-        Normalize DOB to YYYY-MM-DD format.
-        Handles: datetime objects, ISO strings, common date formats.
-        Returns: YYYY-MM-DD string or None if invalid/missing.
-        """
-        if not dob or str(dob).lower() in ["not specified", "unknown", "n/a", "na", ""]:
-            return None
-        
-        # If it's already a datetime object
-        if isinstance(dob, datetime):
-            return dob.strftime("%Y-%m-%d")
-        
-        # Try ISO format first
-        try:
-            return datetime.fromisoformat(str(dob)).strftime("%Y-%m-%d")
-        except:
-            pass
-        
-        # Try common formats
-        for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d", "%m-%d-%Y"):
-            try:
-                return datetime.strptime(str(dob), fmt).strftime("%Y-%m-%d")
-            except:
-                pass
-        
-        # Return as-is if parsing fails (for manual review)
-        return str(dob) if dob else None
-    
-    @staticmethod
-    def is_same_patient(name1: str, dob1: Optional[str], claim1: Optional[str],
-                       name2: str, dob2: Optional[str], claim2: Optional[str]) -> bool:
-        """
-        Implements comprehensive patient matching rules.
-        
-        🔥 MATCHING RULES:
-        Rule 1: BOTH have claims AND they're different → DIFFERENT PATIENT
-        Rule 2: BOTH have same claim → SAME PATIENT (highest priority)
-        Rule 3: At least ONE claim is None → Use name + DOB logic:
-          3A: Names match AND DOBs match → SAME
-          3B: Names match AND both DOBs None → SAME
-          3C: Names match AND one DOB None → SAME
-        """
-        
-        # Rule 1: If BOTH have claim & different → NOT same
-        # KEY FIX: Only reject if BOTH claims exist and are different
-        if claim1 and claim2 and claim1 != claim2:
-            logger.debug(f"❌ Rule 1: Different claims '{claim1}' vs '{claim2}' - NOT same patient")
-            return False
-        
-        # Rule 2: If BOTH have same claim → same patient (highest priority)
-        if claim1 and claim2 and claim1 == claim2:
-            logger.debug(f"✅ Rule 2: Same claim '{claim1}' - SAME patient")
-            return True
-        
-        # Rule 3: At least ONE claim is None - rely on name + DOB
-        # This includes: (claim1 and not claim2) OR (not claim1 and claim2) OR (not claim1 and not claim2)
-        
-        # Names must match after normalization
-        if name1 == name2:
-            logger.debug(f"✅ Names match: '{name1}'")
-            
-            # 3A: Both DOB provided & match
-            if dob1 and dob2 and dob1 == dob2:
-                logger.debug(f"✅ Rule 3A: Both DOB match '{dob1}' - SAME patient (one or both claims None)")
-                return True
-            
-            # 3B: Both missing DOB
-            if not dob1 and not dob2:
-                logger.debug(f"✅ Rule 3B: Both DOB missing - SAME patient (one or both claims None)")
-                return True
-            
-            # 3C: One missing DOB, still same
-            if (dob1 and not dob2) or (dob2 and not dob1):
-                logger.debug(f"✅ Rule 3C: One DOB missing - SAME patient (one or both claims None)")
-                return True
-        else:
-            logger.debug(f"❌ Names don't match: '{name1}' vs '{name2}'")
-        
-        # Otherwise not same
-        logger.debug(f"❌ No matching rules - NOT same patient")
-        return False
-    
     async def get_document_by_patient_details(
         self, 
         patient_name: str,
@@ -506,9 +378,9 @@ class DatabaseService:
         """
         try:
             # Normalize search inputs
-            normalized_input_name = self.normalize_name(patient_name)
-            normalized_input_claim = self.normalize_claim(claim_number)
-            normalized_input_dob = self.normalize_dob(dob)
+            normalized_input_name = normalize_name(patient_name)
+            normalized_input_claim = normalize_claim(claim_number)
+            normalized_input_dob = normalize_dob(dob)
             
             logger.info(f"🔍 Searching for patient:")
             logger.info(f"  Input: name='{patient_name}', dob='{dob}', claim='{claim_number}'")
@@ -536,13 +408,13 @@ class DatabaseService:
             matched_docs = []
             
             for i, doc in enumerate(documents):
-                db_name = self.normalize_name(doc.patientName)
-                db_claim = self.normalize_claim(doc.claimNumber)
-                db_dob = self.normalize_dob(doc.dob)
+                db_name = normalize_name(doc.patientName)
+                db_claim = normalize_claim(doc.claimNumber)
+                db_dob = normalize_dob(doc.dob)
                 
                 logger.debug(f"📋 Doc {i+1}: Name='{doc.patientName}'→'{db_name}', DOB='{doc.dob}'→'{db_dob}', Claim='{doc.claimNumber}'→'{db_claim}'")
                 
-                if self.is_same_patient(
+                if is_same_patient(
                     normalized_input_name, normalized_input_dob, normalized_input_claim,
                     db_name, db_dob, db_claim
                 ):
@@ -628,9 +500,6 @@ class DatabaseService:
         ]
         return tasks_data
 
-
-
-
     async def get_tasks_by_patient_details(
         self, 
         patient_name: str, 
@@ -700,10 +569,6 @@ class DatabaseService:
         ]
 
         return tasks_data
-
-
-
-  
 
     async def get_all_unverified_documents(
         self, 
@@ -793,9 +658,6 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"❌ Error retrieving unverified documents: {str(e)}")
             raise
-    
-
-
   
     async def update_document_fields(
         self,
@@ -1740,5 +1602,3 @@ async def cleanup_database_service():
     if _db_service:
         await _db_service.disconnect()
         _db_service = None
-
-# services/document_aggregation_service.py

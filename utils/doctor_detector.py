@@ -237,5 +237,3 @@ Output one line: "Dr. John Smith" or "Jane Doe, NP" or "EMPTY"
         logger.debug(f"Positive context hits: {positive_hits}")
         
         return True
-
-    # Removed _has_required_title() — no longer needed
