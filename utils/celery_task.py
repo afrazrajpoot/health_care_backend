@@ -264,12 +264,12 @@ def process_batch_documents(self, payloads: list[dict]):
             queue_id=queue_id
         )
         
-        # ✅ FIX: Initial progress at 0% - use original method with completed=False
-        # ✅ FIX: Initial progress at 0%
+        # ✅ Start AI processing at 30% (upload complete, now processing 30-100%)
         progress_service.update_status(
             task_id=batch_task_id,
             status='processing',
-            message="Initializing batch processing..."
+            message="Initializing AI processing...",
+            progress=30
         )
         
         # ===== PARALLEL PROCESSING =====

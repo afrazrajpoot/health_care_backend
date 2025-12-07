@@ -327,13 +327,16 @@ class DocumentExtractorService:
             batch = documents[i:i + batch_size]
             batch_num = i // batch_size + 1
             
-            # 🆕 Update progress before processing each batch
+            # 🆕 Update progress before processing each batch (scale 15% → 30%)
             if upload_task_id and progress_service:
-                progress_pct = int((doc_index / len(documents)) * 100)
+                # Upload phase is 15-30%, so scale the progress
+                file_progress = (doc_index / len(documents))  # 0.0 to 1.0
+                progress_pct = int(15 + (file_progress * 15))  # 15% to 30%
                 progress_service.update_status(
                     upload_task_id, 
                     "processing", 
-                    f"Processing batch {batch_num} ({doc_index}/{len(documents)} files)..."
+                    f"Processing batch {batch_num} ({doc_index}/{len(documents)} files)...",
+                    progress=progress_pct
                 )
             
             logger.info(f"📦 Processing batch {batch_num} ({len(batch)} docs) - Conversions serialized, rest parallel")
@@ -352,7 +355,7 @@ class DocumentExtractorService:
                 doc_index += 1
                 current_doc = batch[idx]
                 
-                # 🆕 Update per-file progress
+                # 🆕 Update per-file progress with overall percentage
                 if upload_task_id and progress_service:
                     file_progress = 100 if isinstance(result, dict) and result.get("success") else 50
                     status = "completed" if file_progress == 100 else "failed"
@@ -363,6 +366,16 @@ class DocumentExtractorService:
                         status=status,
                         file_progress=file_progress,
                         message=result.get("error", "Processed") if isinstance(result, dict) else "Error"
+                    )
+                    
+                    # Update overall progress based on files completed (scale to 15-30%)
+                    file_progress = (doc_index / len(documents))  # 0.0 to 1.0
+                    overall_progress = int(15 + (file_progress * 15))  # 15% to 30%
+                    progress_service.update_status(
+                        upload_task_id,
+                        "processing",
+                        f"Processed {doc_index}/{len(documents)} files",
+                        progress=overall_progress
                     )
                 
                 if isinstance(result, Exception):

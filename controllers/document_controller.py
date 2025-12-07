@@ -60,7 +60,8 @@ async def extract_documents(
         filenames=filenames,
         user_id=userId
     )
-    progress_service.update_status(upload_task_id, "uploading", f"Receiving {len(documents)} file(s)...")
+    # 🆕 Start at 10% (upload phase: 10-30%)
+    progress_service.update_status(upload_task_id, "uploading", f"Receiving {len(documents)} file(s)...", progress=10)
     
     try:
         # 🧩 Temporary mock data (bypasses subscription)
@@ -83,8 +84,8 @@ async def extract_documents(
         service = DocumentExtractorService()
         successful_uploads = []
 
-        # 🆕 Update progress: Files received, starting validation
-        progress_service.update_status(upload_task_id, "validating", "Files received, validating...")
+        # 🆕 Update progress: Files received, starting validation (15%)
+        progress_service.update_status(upload_task_id, "validating", "Files received, validating...", progress=15)
         
         # Process batch (now with progress callback)
         batch_result = await service.process_documents_batch_with_progress(
@@ -101,8 +102,8 @@ async def extract_documents(
         # Queue batch if payloads exist
         task_id = await service.queue_batch_and_track_progress(payloads, userId)
         
-        # 🆕 Mark upload phase complete
-        progress_service.update_status(upload_task_id, "completed", f"Upload complete. Processing {len(payloads)} documents...", completed=True)
+        # 🆕 Mark upload phase complete at 30% (not "completed" status, just upload done)
+        progress_service.update_status(upload_task_id, "upload_complete", f"Upload complete. Starting AI processing for {len(payloads)} documents...", progress=30, completed=True)
 
         print("✅ === END MULTI-DOCUMENT REQUEST (Subscription Disabled) ===")
 

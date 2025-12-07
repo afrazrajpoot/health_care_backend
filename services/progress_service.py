@@ -411,7 +411,7 @@ class ProgressService:
         except Exception as e:
             logger.error(f"❌ Failed to emit batch_started for task {task_id}: {str(e)}")
 
-    def update_status(self, task_id: str, status: str, message: str = None, completed: bool = False):
+    def update_status(self, task_id: str, status: str, message: str = None, completed: bool = False, progress: int = None):
         """Update task status and message (non-file specific)"""
         try:
             progress_data = self._get_progress_sync(task_id)
@@ -422,12 +422,18 @@ class ProgressService:
             if message:
                 progress_data['current_file'] = message
             
+            # Update progress if provided
+            if progress is not None:
+                progress_data['progress_percentage'] = min(100, max(0, progress))
+            
             if completed:
                 progress_data['progress_percentage'] = 100
                 progress_data['end_time'] = datetime.now().isoformat()
 
             self._save_progress(task_id, progress_data, completed=completed)
             self._emit_progress_update_background(task_id, progress_data)
+            
+            logger.info(f"📊 Progress updated: {task_id} → {progress_data['progress_percentage']}% ({status})")
             
         except Exception as e:
             logger.error(f"❌ Failed to update status for task {task_id}: {str(e)}")
@@ -458,16 +464,18 @@ class ProgressService:
         completed_files = sum(1 for fp in progress_data['files_progress'] if fp and fp['progress'] == 100)
         progress_data['completed_steps'] = completed_files  # Reuse for "X/Y files"
         
-        # Overall progress: weighted average (completed at 100%, ongoing averaged)
+        # Overall progress: weighted average scaled to 30-100% range (AI processing phase)
         total_files = progress_data['total_steps']
         if total_files > 0:
             completed_weight = completed_files * 100
             ongoing_files = [fp['progress'] for fp in progress_data['files_progress'] if fp and fp['progress'] < 100]
             ongoing_weight = (sum(ongoing_files) / len(ongoing_files) if ongoing_files else 0) * (total_files - completed_files)
-            overall = (completed_weight + ongoing_weight) / total_files
-            progress_data['progress_percentage'] = min(overall, 99)  # Cap until callback
+            file_progress_raw = (completed_weight + ongoing_weight) / total_files  # 0-100
+            
+            # 🆕 Scale to 30-100% range (AI processing phase comes after 30% upload phase)
+            progress_data['progress_percentage'] = min(30 + (file_progress_raw * 0.7), 99)  # 30 + (0-70) = 30-99%
         else:
-            progress_data['progress_percentage'] = 0
+            progress_data['progress_percentage'] = 30  # Start of AI processing phase
         
         progress_data['current_step'] = file_index + 1  # For sorting/display
         progress_data['current_file'] = f"{filename} - {message or status}"
@@ -499,11 +507,12 @@ class ProgressService:
         progress_data['processed_files'] = [r.get('filename') for r in results if r.get('status') == 'success']
         progress_data['failed_files'] = [r.get('filename') for r in results if r.get('status') == 'failed']
         
-        progress_data['status'] = status
+        # 🆕 CRITICAL: Set status to 'completed' (not just the passed status)
+        progress_data['status'] = 'completed' if status == 'completed' else 'completed_with_errors'
         progress_data['progress_percentage'] = 100
         progress_data['completed_steps'] = len(results)  # All done
         progress_data['end_time'] = datetime.now().isoformat()
-        progress_data['current_file'] = f"Batch complete: {success_count}/{len(results)} successful"
+        progress_data['current_file'] = f"All files processed: {success_count}/{len(results)} successful"
         
         # Complete queue task (now with subtasks, complete all matching)
         queue_id = progress_data.get('queue_id')
@@ -512,11 +521,19 @@ class ProgressService:
             for subtask_key, subtask in list(queue_data.get('active_tasks', {}).items()):
                 if subtask['task_id'] == task_id:
                     self.complete_task_in_queue(queue_id, subtask_key, success=failed_count == 0)
-            # Also complete any queued subtasks for safety
-            queued_to_remove = [i for i, t in enumerate(queue_data['queued_tasks']) if t['task_id'] == task_id]
-            for i in reversed(queued_to_remove):
+            
+            # 🐛 FIX: Store task info BEFORE deleting from list
+            queued_to_remove = []
+            for i, t in enumerate(queue_data.get('queued_tasks', [])):
+                if t.get('task_id') == task_id:
+                    queued_to_remove.append((i, t.get('unique_key', t['task_id'])))  # Store index AND unique_key
+            
+            # Remove in reverse order and complete tasks
+            for i, unique_key in reversed(queued_to_remove):
                 del queue_data['queued_tasks'][i]
-                self.complete_task_in_queue(queue_id, queue_data['queued_tasks'][i]['unique_key'], success=failed_count == 0)
+                self.complete_task_in_queue(queue_id, unique_key, success=failed_count == 0)
+            
+            if queued_to_remove:
                 self._save_queue_data(queue_id, queue_data)
         
         self._save_progress(task_id, progress_data, completed=completed)
