@@ -128,8 +128,7 @@ For administrative documents (authorizations, EOBs, denials, referrals, credenti
 
 Breakdown of Generated Approval Tasks | UR Approval Task Generation
 Scheduling/Confirmation Task (T-UR-1A/3A): This is the most critical staff-first action for an approval. It tells the staff to immediately schedule the approved service (like the orthosis fitting or confirming the medication was sent).
-Patient Notification Task (T-UR-1B/3B): This task ensures the patient is informed of the approval, which is a required administrative step.
-Document Upload Task: This is the common final step for all documents, ensuring the approval is filed in the EMR.
+Document Management Task: Ensuring the approval is properly filed for billing and compliance purposes.
 
 **Administrative Task Characteristics:**
 - Focus on billing, scheduling, compliance workflows
@@ -155,6 +154,9 @@ When you determine the report is EXTERNAL, apply these strict rules:
 - Treatment planning that belongs to the external provider
 - Medication management already handled externally
 - Follow-up appointments already scheduled at external facility
+- Notifying the patient (do not create patient notification tasks)
+- Updating EMR with patient charts or any EMR-related documentation tasks
+- Similar or duplicate tasks (avoid creating the same task with different wording)
 
 **✅ ONLY CREATE tasks for:**
 1. **Care Coordination** (when explicitly needed):
@@ -162,23 +164,20 @@ When you determine the report is EXTERNAL, apply these strict rules:
    - "Obtain external records from [Provider] for continuity"
    - "Follow up on referral status with [External Specialist]"
 
-2. **Patient Communication** (when action required):
-   - "Inform patient of external appointment on [date]"
-   - "Contact patient regarding external test results requiring discussion"
-
-3. **Administrative Actions** (when our clinic must act):
+2. **Administrative Actions** (when our clinic must act):
    - "Review external authorization approval for billing purposes"
-   - "Update patient chart with external treatment summary"
    - "Respond to external provider inquiry regarding patient"
 
-4. **Clinical Review** (when our physician must review and decide):
+3. **Clinical Review** (when our physician must review and decide):
    - "Review external specialist recommendations for treatment plan modification"
    - "Review external imaging results and determine next steps"
 
 **CRITICAL EXTERNAL REPORT RULES:**
 - If treatment is ALREADY COMPLETED externally → Generate NO scheduling/treatment tasks
-- If appointment is ALREADY SCHEDULED externally → Only create communication task if needed
+- If appointment is ALREADY SCHEDULED externally → Do not create any communication tasks
 - If authorization is ALREADY APPROVED externally → Only create billing coordination task if relevant
+- Do not create patient notification tasks
+- Do not create EMR update tasks
 - Default to FEWER tasks for external reports
 - When in doubt about external origin → Generate MINIMAL tasks
 
@@ -565,6 +564,9 @@ Base due dates on document content analysis:
 3. **DOCUMENT-DRIVEN** - Based only on actual content, no assumptions
 4. **CONCISE DESCRIPTION** - 5-8 words maximum, avoid jargon
 5. **CONTEXT IN DETAILS** - Technical details go in quick_notes.details
+6. **NO PATIENT NOTIFICATIONS** - Do not create tasks to notify patients
+7. **NO EMR UPDATES** - Do not create tasks to update EMR, patient charts, or any EMR-related documentation
+8. **NO DUPLICATES** - Avoid creating similar or duplicate tasks (same task with different wording)
 
 **Task Description Formula:**
 [Simple Action] + [What/Who] + [Key Detail if critical]
@@ -734,11 +736,17 @@ Before generating ANY tasks, you MUST analyze:
 For EXTERNAL reports:
 - Generate ONLY coordination, communication, or administrative tasks when necessary
 - DO NOT create scheduling/treatment tasks for care already managed externally
+- DO NOT create tasks to notify patients
+- DO NOT create tasks to update EMR with patient charts or any EMR-related documentation
+- DO NOT create similar or duplicate tasks (same task with different wording)
 - Be extremely conservative - when in doubt, generate fewer tasks
 
 For INTERNAL reports:
 - Generate ALL necessary actionable tasks using full workflow logic
 - Follow all standard department routing and priority rules
+- DO NOT create tasks to notify patients
+- DO NOT create tasks to update EMR with patient charts or any EMR-related documentation
+- DO NOT create similar or duplicate tasks (same task with different wording)
 
 **Think through:**
 1. Is this an external or internal report? (Evidence from document)
