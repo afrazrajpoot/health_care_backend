@@ -377,14 +377,13 @@ class DatabaseService:
         Returns: Aggregated response with ALL matching documents and merged patient details.
         """
         try:
-            # Normalize search inputs
-            normalized_input_name = normalize_name(patient_name)
+            # Normalize search inputs for claim and DOB only (name uses flexible matching)
             normalized_input_claim = normalize_claim(claim_number)
             normalized_input_dob = normalize_dob(dob)
             
             logger.info(f"🔍 Searching for patient:")
             logger.info(f"  Input: name='{patient_name}', dob='{dob}', claim='{claim_number}'")
-            logger.info(f"  Normalized: name='{normalized_input_name}', dob='{normalized_input_dob}', claim='{normalized_input_claim}'")
+            logger.info(f"  Normalized: dob='{normalized_input_dob}', claim='{normalized_input_claim}'")
             
             # Fetch ALL documents for physician (broad query)
             where_clause = {}
@@ -408,15 +407,16 @@ class DatabaseService:
             matched_docs = []
             
             for i, doc in enumerate(documents):
-                db_name = normalize_name(doc.patientName)
+                # 🆕 CRITICAL: Pass ORIGINAL names (not normalized) to is_same_patient()
+                # is_same_patient() will generate all name variations internally
                 db_claim = normalize_claim(doc.claimNumber)
                 db_dob = normalize_dob(doc.dob)
                 
-                logger.debug(f"📋 Doc {i+1}: Name='{doc.patientName}'→'{db_name}', DOB='{doc.dob}'→'{db_dob}', Claim='{doc.claimNumber}'→'{db_claim}'")
+                logger.info(f"📋 Checking Doc {i+1}/{len(documents)}: Name='{doc.patientName}', DOB='{doc.dob}'→'{db_dob}', Claim='{doc.claimNumber}'→'{db_claim}'")
                 
                 if is_same_patient(
-                    normalized_input_name, normalized_input_dob, normalized_input_claim,
-                    db_name, db_dob, db_claim
+                    patient_name, normalized_input_dob, normalized_input_claim,
+                    doc.patientName, db_dob, db_claim
                 ):
                     logger.info(f"✅ MATCH! Adding document {doc.id[:12]}...")
                     matched_docs.append(doc)

@@ -131,6 +131,8 @@ def normalize_name(name: Optional[str]) -> str:
     Normalize patient name for matching.
     Handles: comma-separated names, case differences, extra spaces.
     Returns: sorted lowercase name parts (e.g., "morales lorina")
+    
+    NOTE: For comparison, use get_name_variations() to get all possible formats.
     """
     if not name or str(name).lower() in ["not specified", "unknown", "n/a", "na", ""]:
         return ""
@@ -153,6 +155,51 @@ def normalize_name(name: Optional[str]) -> str:
         normalized = parts[0]
     
     return normalized.strip()
+
+def get_name_variations(name: Optional[str]) -> list[str]:
+    """
+    Generate all possible name format variations for flexible matching.
+    
+    Examples:
+    - "John, Smith" → ["john smith", "smith john"]
+    - "Smith, John" → ["john smith", "smith john"]
+    - "John Smith" → ["john smith", "smith john"]
+    - "Jason Nasr" → ["jason nasr", "nasr jason"]
+    
+    Returns: List of all possible name orderings (lowercase, no commas)
+    """
+    if not name or str(name).lower() in ["not specified", "unknown", "n/a", "na", ""]:
+        return [""]
+    
+    # Remove commas, convert to lowercase, strip whitespace
+    name = str(name).replace(",", " ").lower().strip()
+    # Split into parts and remove empty strings
+    parts = [p for p in name.split() if p]
+    
+    if not parts:
+        return [""]
+    
+    # Single name - only one variation
+    if len(parts) == 1:
+        return [parts[0]]
+    
+    # Two or more parts - generate variations
+    variations = []
+    
+    if len(parts) == 2:
+        # Two parts: "first last" and "last first"
+        variations.append(f"{parts[0]} {parts[1]}")  # original order
+        variations.append(f"{parts[1]} {parts[0]}")  # reversed order
+    
+    elif len(parts) >= 3:
+        # Three+ parts: use first and last name in both orders
+        first = parts[0]
+        last = parts[-1]
+        variations.append(f"{first} {last}")  # first last
+        variations.append(f"{last} {first}")  # last first
+    
+    # Remove duplicates and return
+    return list(set(variations))
 
 def normalize_claim(claim: Optional[str]) -> Optional[str]:
     """
@@ -197,15 +244,19 @@ def normalize_dob(dob: Optional[Any]) -> Optional[str]:
 def is_same_patient(name1: str, dob1: Optional[str], claim1: Optional[str],
                    name2: str, dob2: Optional[str], claim2: Optional[str]) -> bool:
     """
-    Implements comprehensive patient matching rules.
+    Implements comprehensive patient matching rules with flexible name matching.
     
     🔥 MATCHING RULES:
     Rule 1: BOTH have claims AND they're different → DIFFERENT PATIENT
     Rule 2: BOTH have same claim → SAME PATIENT (highest priority)
     Rule 3: At least ONE claim is None → Use name + DOB logic:
-      3A: Names match AND DOBs match → SAME
-      3B: Names match AND both DOBs None → SAME
-      3C: Names match AND one DOB None → SAME
+      3A: Names match (any variation) AND DOBs match → SAME
+      3B: Names match (any variation) AND both DOBs None → SAME
+      3C: Names match (any variation) AND one DOB None → SAME
+    
+    Name matching tries all possible orderings:
+    - "John Smith" matches "Smith John"
+    - "Jason Nasr" matches "Nasr Jason"
     """
     import logging
     logger = logging.getLogger(__name__)
@@ -224,9 +275,17 @@ def is_same_patient(name1: str, dob1: Optional[str], claim1: Optional[str],
     # Rule 3: At least ONE claim is None - rely on name + DOB
     # This includes: (claim1 and not claim2) OR (not claim1 and claim2) OR (not claim1 and not claim2)
     
-    # Names must match after normalization
-    if name1 == name2:
-        logger.debug(f"✅ Names match: '{name1}'")
+    # 🆕 ENHANCED: Check if names match using ANY possible variation
+    name1_variations = get_name_variations(name1)
+    name2_variations = get_name_variations(name2)
+    
+    # Check if any variation of name1 matches any variation of name2
+    names_match = any(v1 == v2 for v1 in name1_variations for v2 in name2_variations)
+    
+    if names_match:
+        logger.info(f"✅ Names match (variations): '{name1}' ~ '{name2}'")
+        logger.info(f"   Search variations: {name1_variations}")
+        logger.info(f"   DB variations: {name2_variations}")
         
         # 3A: Both DOB provided & match
         if dob1 and dob2 and dob1 == dob2:
@@ -243,7 +302,8 @@ def is_same_patient(name1: str, dob1: Optional[str], claim1: Optional[str],
             logger.debug(f"✅ Rule 3C: One DOB missing - SAME patient (one or both claims None)")
             return True
     else:
-        logger.debug(f"❌ Names don't match: '{name1}' vs '{name2}'")
+        logger.debug(f"❌ Names don't match (any variation): '{name1}' vs '{name2}'")
+        logger.debug(f"   Search variations: {name1_variations} | DB variations: {name2_variations}")
     
     # Otherwise not same
     logger.debug(f"❌ No matching rules - NOT same patient")

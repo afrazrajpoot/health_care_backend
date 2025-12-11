@@ -80,9 +80,9 @@ google-cloud-dlp>=3.0.0
 aiohttp
 langchain-community>=0.3.0
 tavily-python>=0.3.0
-passlib
+passlib[bcrypt]
 pydantic[email]>=2.0.0
-bcrypt>=4.0.0
+bcrypt==4.0.1
 # transformers>=4.30.0
 # torch>=2.0.0
 # accelerate>=0.20.0
