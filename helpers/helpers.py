@@ -161,10 +161,8 @@ def get_name_variations(name: Optional[str]) -> list[str]:
     Generate all possible name format variations for flexible matching.
     
     Examples:
-    - "John, Smith" → ["john smith", "smith john"]
-    - "Smith, John" → ["john smith", "smith john"]
     - "John Smith" → ["john smith", "smith john"]
-    - "Jason Nasr" → ["jason nasr", "nasr jason"]
+    - "Lemus Guillen, Miguel" → ["lemus guillen miguel", "miguel lemus guillen", "lemus miguel", "miguel lemus", ...]
     
     Returns: List of all possible name orderings (lowercase, no commas)
     """
@@ -183,23 +181,36 @@ def get_name_variations(name: Optional[str]) -> list[str]:
     if len(parts) == 1:
         return [parts[0]]
     
-    # Two or more parts - generate variations
-    variations = []
+    variations = set()
     
     if len(parts) == 2:
         # Two parts: "first last" and "last first"
-        variations.append(f"{parts[0]} {parts[1]}")  # original order
-        variations.append(f"{parts[1]} {parts[0]}")  # reversed order
+        variations.add(f"{parts[0]} {parts[1]}")
+        variations.add(f"{parts[1]} {parts[0]}")
     
     elif len(parts) >= 3:
-        # Three+ parts: use first and last name in both orders
+        # Three+ parts: Generate comprehensive variations
+        # Full name in original and reversed order
+        variations.add(" ".join(parts))  # full name original order
+        variations.add(" ".join(reversed(parts)))  # full name reversed
+        
+        # First + Last (skip middle names)
         first = parts[0]
         last = parts[-1]
-        variations.append(f"{first} {last}")  # first last
-        variations.append(f"{last} {first}")  # last first
+        variations.add(f"{first} {last}")
+        variations.add(f"{last} {first}")
+        
+        # First + Middle(s) variations
+        for i in range(1, len(parts)):
+            variations.add(f"{first} {parts[i]}")
+            variations.add(f"{parts[i]} {first}")
+        
+        # Last + Middle(s) variations  
+        for i in range(len(parts) - 1):
+            variations.add(f"{parts[i]} {last}")
+            variations.add(f"{last} {parts[i]}")
     
-    # Remove duplicates and return
-    return list(set(variations))
+    return list(variations)
 
 def normalize_claim(claim: Optional[str]) -> Optional[str]:
     """
