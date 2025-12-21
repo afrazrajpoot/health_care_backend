@@ -9,7 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTempla
 from langchain_openai import AzureChatOpenAI
 from langchain_core.runnables import RunnableLambda, RunnableBranch
 
-from utils.summary_helpers import ensure_date_and_author
+from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 
 
 
@@ -68,6 +68,9 @@ class SimpleExtractor:
             # STEP 1: Generate long summary with dual-context approach (raw_text + text)
             long_summary = self._generate_long_summary_direct(text, raw_text, doc_type, fallback_date)
             
+            # STEP 1.5: Clean the long summary - remove empty fields, placeholders, and instruction text
+            long_summary = clean_long_summary(long_summary)
+            
             # STEP 2: Generate short summary from long summary
             short_summary = self._generate_short_summary_from_long_summary(long_summary, doc_type)
             
@@ -101,7 +104,14 @@ class SimpleExtractor:
         system_prompt = SystemMessagePromptTemplate.from_template("""
 You are a universal medical and administrative document summarization expert analyzing a COMPLETE document.
 
-🎯 CRITICAL CONTEXT HIERARCHY (HIGHEST PRIORITY):
+🚨 ABSOLUTE ANTI-FABRICATION RULE (HIGHEST PRIORITY):
+**YOU MUST ONLY EXTRACT AND SUMMARIZE INFORMATION THAT EXISTS IN THE PROVIDED SOURCES.**
+- NEVER generate, infer, assume, or fabricate ANY information
+- If information is NOT explicitly stated in either source → OMIT IT ENTIRELY
+- An incomplete summary is 100x better than a fabricated one
+- Every single piece of information in your output MUST be traceable to the source text
+
+🎯 CRITICAL CONTEXT HIERARCHY:
 
 You are provided with TWO versions of the document:
 
@@ -122,19 +132,24 @@ You are provided with TWO versions of the document:
        * Precise dates or measurements
    - **DO NOT let this override the context from the primary source**
 
-⚠️ ANTI-HALLUCINATION RULES FOR DUAL-CONTEXT:
+⚠️ STRICT ANTI-HALLUCINATION RULES:
 
-1. **CONTEXT PRIORITY ENFORCEMENT**:
+1. **ZERO FABRICATION TOLERANCE**:
+   - If a field (e.g., DOB, Claim Number, Diagnosis) is NOT in either source → LEAVE IT BLANK or OMIT
+   - NEVER write "likely", "probably", "typically", "usually" - these indicate fabrication
+   - NEVER fill in "standard" or "typical" values - only actual extracted values
+
+2. **CONTEXT PRIORITY ENFORCEMENT**:
    - When both sources provide information about the SAME finding:
      ✅ ALWAYS use interpretation from PRIMARY SOURCE (accurate context)
      ❌ NEVER override with potentially inaccurate full text version
 
-2. **EXTRACT ONLY EXPLICITLY STATED INFORMATION** - Empty if not mentioned
-3. **NO ASSUMPTIONS** - Do not infer or add typical values
-4. **ADAPT STRUCTURE** - Use medical sections for clinical content, administrative for non-clinical
-5. **EMPTY FIELDS BETTER THAN GUESSES** - Omit sections if no data
-6. **SIGNATURE EXTRACTION**: Scan both sources for signatures. Identify authors who signed PHYSICALLY or ELECTRONICALLY.
-7. **CLAIM NUMBER EXTRACTION**: Scan both sources for claim number. Extract exact value if present.
+3. **EXTRACT ONLY EXPLICITLY STATED INFORMATION** - Empty if not mentioned
+4. **NO ASSUMPTIONS** - Do not infer or add typical values
+5. **ADAPT STRUCTURE** - Use medical sections for clinical content, administrative for non-clinical
+6. **EMPTY FIELDS BETTER THAN GUESSES** - Omit sections if no data
+7. **SIGNATURE EXTRACTION**: Scan both sources for signatures. Identify authors who signed PHYSICALLY or ELECTRONICALLY. If no signature found, OMIT - do not guess.
+8. **CLAIM NUMBER EXTRACTION**: Scan both sources for claim number. Extract exact value if present. If not found, OMIT - do not fabricate.
 
 🔍 SPECIAL INSTRUCTIONS FOR PATIENT DETAILS VALIDATION:
 
@@ -193,17 +208,21 @@ DOCUMENT TYPE: {doc_type}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-CURRENT DATE: {fallback_date}
+⚠️ REPORT DATE INSTRUCTION:
+- Extract the ACTUAL report/examination/document date from the sources above
+- DO NOT use current/today's date - only use dates explicitly mentioned in the document
+- IMPORTANT: US date format is MM/DD/YYYY. Example: 11/25/2025 means November 25, 2025 (NOT day 11 of month 25)
+- If no date found, use "00/00/0000" as placeholder
 
-**INSTRUCTIONS**: Generate a comprehensive structured summary following the DUAL-CONTEXT hierarchy. Prioritize PRIMARY SOURCE for clinical/administrative context. Use SUPPLEMENTARY SOURCE only for specific details (dosages, claim numbers, exact dates, additional names) not found in PRIMARY SOURCE.
+**INSTRUCTIONS**: Generate a comprehensive structured summary following the DUAL-CONTEXT hierarchy. Prioritize PRIMARY SOURCE for clinical/administrative context. Use SUPPLEMENTARY SOURCE only for specific details (dosages, claim numbers, exact dates, additional names) if not found in PRIMARY SOURCE.
 
 Generate the long summary in this EXACT STRUCTURED FORMAT (adapt to medical or administrative content):
 
 For MEDICAL CONTENT:
 📋 MEDICAL DOCUMENT OVERVIEW
 --------------------------------------------------
-Document Type: {doc_type}
-Report Date: [extracted or {fallback_date}]
+Document Type: [extracted]
+Report Date: [extract ACTUAL date from document; if not found use "00/00/0000"]
 Claim Number: [extracted if present; otherwise omit]
 Patient Name: [extracted]
 Provider: [extracted]
@@ -273,7 +292,7 @@ For ADMINISTRATIVE CONTENT:
 📋 ADMINISTRATIVE DOCUMENT OVERVIEW
 --------------------------------------------------
 Document Type: {doc_type}
-Document Date: [extracted or {fallback_date}]
+Document Date: [extract ACTUAL date from document; if not found use "00/00/0000"]
 Claim Number: [extracted if present; otherwise omit]
 Purpose: [extracted]
 Author:
@@ -311,6 +330,14 @@ Next Steps: [extracted]
 5. No assumptions or additions
 6. For signatures: Look for end-of-document sign blocks, /s/ notations, scanned signatures, or explicit "signed by" statements. Distinguish physical (e.g., "Handwritten by Dr. X") vs. electronic (e.g., "Electronically signed by Dr. Y").
 7. For claim number: Search for patterns like "Claim #", "Claim Number", "WC Claim", etc., and extract the alphanumeric value exactly.
+
+🚨 FINAL VERIFICATION (CRITICAL):
+Before outputting, verify EVERY piece of information:
+- Can I point to the exact text in PRIMARY or SUPPLEMENTARY source? → YES = Include | NO = OMIT
+- Am I assuming or inferring this? → If YES = REMOVE IT
+- Is this a "typical" or "standard" value I'm adding? → If YES = REMOVE IT
+- Did I fabricate any dates, names, numbers, or findings? → If YES = REMOVE THEM
+**Output ONLY what is explicitly stated in the sources. Leave fields blank rather than guess.**
 """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])

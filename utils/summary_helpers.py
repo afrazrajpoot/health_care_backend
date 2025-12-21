@@ -1,12 +1,213 @@
 """
 Summary Helper Utilities
 Shared functions for ensuring Date and Author extraction across all document extractors.
+Also includes long summary cleaning utilities.
 """
 import logging
 import re
-from typing import Optional
+from typing import Optional, List
 
 logger = logging.getLogger("document_ai")
+
+
+def clean_long_summary(long_summary: str) -> str:
+    """
+    Clean up the long summary by removing empty fields, placeholders, 
+    instruction text, and formatting artifacts.
+    
+    This function removes:
+    - Lines with empty values (None, Not specified, Not applicable, etc.)
+    - Placeholder text and instructions
+    - Mandatory notes/rules sections
+    - Empty bullet points and list items
+    - Consecutive empty lines
+    
+    Args:
+        long_summary: The generated long summary from LLM
+    
+    Returns:
+        Cleaned long summary with only populated fields
+    """
+    if not long_summary:
+        return ""
+    
+    # Patterns to identify empty/placeholder values
+    empty_value_patterns = [
+        r':\s*None\s*$',
+        r':\s*Not specified\s*$',
+        r':\s*Not applicable\s*$',
+        r':\s*N/A\s*$',
+        r':\s*n/a\s*$',
+        r':\s*None explicitly mentioned\s*$',
+        r':\s*Not explicitly mentioned\s*$',
+        r':\s*Not mentioned\s*$',
+        r':\s*Not provided\s*$',
+        r':\s*Not available\s*$',
+        r':\s*Unknown\s*$',
+        r':\s*\-\s*$',
+        r':\s*$',  # Empty value after colon
+        r'^-\s*None\s*$',
+        r'^-\s*Not specified\s*$',
+        r'^-\s*Not applicable\s*$',
+        r'^-\s*N/A\s*$',
+        r'^•\s*None\s*$',
+        r'^•\s*Not specified\s*$',
+        r'^•\s*$',  # Empty bullet point
+        r'^-\s*$',  # Empty dash item
+        r'^\*\s*$',  # Empty asterisk item
+    ]
+    
+    # Patterns to remove entire sections/blocks
+    remove_section_patterns = [
+        r'⚠️\s*MANDATORY\s*EXTRACTION\s*(?:NOTES|RULES).*?(?=\n#|\n📋|\n---|\Z)',
+        r'⚠️\s*CRITICAL\s*REMINDERS.*?(?=\n#|\n📋|\n---|\Z)',
+        r'⚠️\s*FINAL\s*REMINDER.*?(?=\n#|\n📋|\n---|\Z)',
+        r'\(donot include in output.*?\)',
+        r'\(for LLM use only\)',
+        r'━━━.*?EXTRACTION.*?━━━.*?(?=\n\n|\Z)',
+        r'MANDATORY EXTRACTION NOTES:.*?(?=\n#|\n📋|\Z)',
+        r'\d+\.\s*All radiological interpretations.*?(?=\n\d+\.|\n#|\Z)',
+        r'\d+\.\s*No additional findings.*?(?=\n\d+\.|\n#|\Z)',
+        r'\d+\.\s*Empty fields indicate.*?(?=\n\d+\.|\n#|\Z)',
+    ]
+    
+    # First, remove entire instruction/note sections
+    cleaned = long_summary
+    for pattern in remove_section_patterns:
+        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE | re.DOTALL | re.MULTILINE)
+    
+    # Process line by line
+    lines = cleaned.split('\n')
+    cleaned_lines: List[str] = []
+    skip_next_empty = False
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        # Skip empty lines after a removed line
+        if skip_next_empty and not stripped:
+            skip_next_empty = False
+            continue
+        
+        # Check if line matches empty value patterns
+        should_remove = False
+        for pattern in empty_value_patterns:
+            if re.search(pattern, stripped, re.IGNORECASE):
+                should_remove = True
+                skip_next_empty = True
+                break
+        
+        if should_remove:
+            continue
+        
+        # Skip lines that are just placeholders in brackets
+        if re.match(r'^-?\s*\[.*(?:extracted|from|if|or).*\]\s*$', stripped, re.IGNORECASE):
+            continue
+        
+        # Skip instruction lines that shouldn't be in output
+        instruction_keywords = [
+            'donot include in output',
+            'for llm use only',
+            'extract only',
+            'never assume',
+            'never infer',
+            'zero tolerance',
+            'mandatory extraction',
+        ]
+        if any(kw in stripped.lower() for kw in instruction_keywords):
+            continue
+        
+        cleaned_lines.append(line)
+    
+    # Join lines back
+    result = '\n'.join(cleaned_lines)
+    
+    # Clean up multiple consecutive empty lines (reduce to max 2)
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    
+    # Clean up empty sections (header followed by only dashes/empty lines)
+    result = re.sub(r'(^#+\s*[^\n]+\n---+\n)(\s*\n)+(?=^#|\Z)', '', result, flags=re.MULTILINE)
+    result = re.sub(r'(^---+\n)(\s*\n)+(?=^#|\Z)', '', result, flags=re.MULTILINE)
+    
+    # Remove trailing whitespace and empty lines
+    result = result.strip()
+    
+    # Remove empty sub-sections that have no content
+    result = _remove_empty_sections(result)
+    
+    logger.info(f"✅ Cleaned long summary: {len(long_summary)} → {len(result)} chars")
+    return result
+
+
+def _remove_empty_sections(text: str) -> str:
+    """
+    Remove sections that have a header but no meaningful content.
+    """
+    lines = text.split('\n')
+    result_lines: List[str] = []
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i]
+        
+        # Check if this is a section header (starts with # or has --- underneath)
+        is_header = line.strip().startswith('#') or line.strip().startswith('📋') or line.strip().startswith('🎯') or line.strip().startswith('🔧') or line.strip().startswith('📊') or line.strip().startswith('💡') or line.strip().startswith('👥') or line.strip().startswith('👤')
+        
+        if is_header:
+            # Look ahead to see if this section has content
+            section_lines = [line]
+            j = i + 1
+            
+            # Skip separator lines (--- or similar)
+            while j < len(lines) and (lines[j].strip().startswith('---') or lines[j].strip() == ''):
+                section_lines.append(lines[j])
+                j += 1
+            
+            # Check for content until next header or end
+            has_content = False
+            while j < len(lines):
+                next_line = lines[j].strip()
+                
+                # Check if we hit another header
+                if next_line.startswith('#') or any(next_line.startswith(e) for e in ['📋', '🎯', '🔧', '📊', '💡', '👥', '👤']):
+                    break
+                
+                # Check if this line has actual content (not just empty or placeholder)
+                if next_line and not next_line.startswith('---'):
+                    # Check it's not just a label with no value
+                    if ':' in next_line:
+                        # Get value after colon
+                        value = next_line.split(':', 1)[1].strip() if ':' in next_line else ''
+                        if value and value.lower() not in ['none', 'not specified', 'not applicable', 'n/a', '-', '']:
+                            has_content = True
+                            break
+                    elif next_line.startswith('-') or next_line.startswith('•') or next_line.startswith('*'):
+                        # List item - check if it has content
+                        item_content = re.sub(r'^[-•*]\s*', '', next_line).strip()
+                        if item_content and item_content.lower() not in ['none', 'not specified', 'not applicable', 'n/a']:
+                            has_content = True
+                            break
+                    else:
+                        has_content = True
+                        break
+                
+                section_lines.append(lines[j])
+                j += 1
+            
+            if has_content:
+                # Keep this section header and continue
+                result_lines.append(line)
+            else:
+                # Skip the empty section
+                i = j - 1  # Will be incremented at end of loop
+                if i < 0:
+                    i = 0
+        else:
+            result_lines.append(line)
+        
+        i += 1
+    
+    return '\n'.join(result_lines)
 
 
 def ensure_date_and_author(summary: str, long_summary: str) -> str:

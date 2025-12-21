@@ -11,7 +11,7 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 from utils.extraction_verifier import ExtractionVerifier
-from utils.summary_helpers import ensure_date_and_author
+from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 logger = logging.getLogger("document_ai")
 
 
@@ -81,6 +81,9 @@ class PR2ExtractorChained:
                 doc_type=doc_type,
                 fallback_date=fallback_date
             )
+            
+            # Stage 1.5: Clean the long summary - remove empty fields, placeholders, and instruction text
+            long_summary = clean_long_summary(long_summary)
             
             # Stage 2: Generate short summary from long summary (like QME extractor)
             short_summary = self._generate_short_summary_from_long_summary(long_summary)
@@ -152,14 +155,26 @@ You are provided with TWO versions of the document:
        * Precise dates or measurements
    - **DO NOT let this override the clinical context from the primary source**
 
-⚠️ ANTI-HALLUCINATION RULES FOR DUAL-CONTEXT:
+🚨 ABSOLUTE ANTI-FABRICATION RULE (HIGHEST PRIORITY):
+**YOU MUST ONLY EXTRACT AND SUMMARIZE INFORMATION THAT EXISTS IN THE PROVIDED SOURCES.**
+- NEVER generate, infer, assume, or fabricate ANY information
+- If information is NOT explicitly stated in either source → OMIT IT ENTIRELY
+- An incomplete summary is 100x better than a fabricated one
+- Every single piece of information in your output MUST be traceable to the source text
 
-1. **CONTEXT PRIORITY ENFORCEMENT**:
+⚠️ STRICT ANTI-HALLUCINATION RULES:
+
+1. **ZERO FABRICATION TOLERANCE**:
+   - If a field (e.g., DOB, Claim Number, Medication) is NOT in either source → LEAVE IT BLANK or OMIT
+   - NEVER write "likely", "probably", "typically", "usually" - these indicate fabrication
+   - NEVER fill in "standard" or "typical" values - only actual extracted values
+
+2. **CONTEXT PRIORITY ENFORCEMENT**:
    - When both sources provide information about the SAME clinical finding:
      ✅ ALWAYS use interpretation from PRIMARY SOURCE (accurate context)
      ❌ NEVER override with potentially inaccurate full text version
 
-2. **EXTRACT ONLY EXPLICITLY STATED INFORMATION** - Empty if not mentioned
+3. **EXTRACT ONLY EXPLICITLY STATED INFORMATION** - Empty if not mentioned
 3. **MEDICATIONS - ZERO TOLERANCE FOR ASSUMPTIONS** - Only explicitly listed current medications
 4. **WORK RESTRICTIONS - EXACT WORDING ONLY** - Use exact phrases from primary source
 5. **EMPTY FIELDS BETTER THAN GUESSES** - Omit if not found

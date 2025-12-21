@@ -1029,7 +1029,7 @@ class DatabaseService:
                     "briefSummary": brief_summary,
                     "whatsNew": whats_new_json,
                     "physicianId": physician_id,
-                    "reportDate": rd if rd else datetime.now(),
+                    "reportDate": rd,  # Use actual report date only, None if not found (do NOT fallback to current date)
                     "blobPath": blob_path,
                     "fileName": file_name,
                     "originalName": original_name,

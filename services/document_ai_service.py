@@ -3,6 +3,7 @@
 """
 Enhanced Document AI Service using Document Summarizer processor.
 REPLACED doc-ocr with document-summarizer for better accuracy.
+UPDATED: Added batch processing API for large documents (>15 pages) for better context understanding.
 """
 
 import os
@@ -10,12 +11,15 @@ import base64
 import tempfile
 import json
 import time
+import uuid
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from google.cloud import documentai_v1 as documentai
 from google.cloud.documentai_v1 import DocumentProcessorServiceClient, types
+from google.cloud import storage
 from google.api_core import exceptions as google_exceptions
+from google.api_core.operation import Operation
 import logging
 from PyPDF2 import PdfReader, PdfWriter
 from models.schemas import ExtractionResult, FileInfo
@@ -99,7 +103,14 @@ class PDFSplitter:
                 logger.warning(f"⚠️ Could not clean up {chunk_file}: {str(e)}")
 
 class DocumentAIProcessor:
-    """Service for Document AI Summarizer processing"""
+    """Service for Document AI Summarizer processing with batch API support for large documents"""
+    
+    # Batch processing configuration
+    BATCH_GCS_BUCKET = "hiregenix"
+    BATCH_INPUT_PREFIX = "docai-batch-input/"
+    BATCH_OUTPUT_PREFIX = "docai-batch-output/"
+    BATCH_TIMEOUT_SECONDS = 600  # 10 minutes max wait
+    BATCH_POLL_INTERVAL = 5  # seconds between status checks
     
     def __init__(self):
         self.client: Optional[DocumentProcessorServiceClient] = None
@@ -107,7 +118,10 @@ class DocumentAIProcessor:
         self.layout_parser_processor_path: Optional[str] = None  # NEW: Layout parser
         self.pdf_splitter = PDFSplitter(max_pages_per_chunk=10)
         self.layout_extractor = LayoutPreservingTextExtractor()
+        self.storage_client: Optional[storage.Client] = None
+        self.gcs_bucket = None
         self._initialize_client()
+        self._initialize_gcs_client()
     
     def _initialize_client(self):
         """Initialize Document AI client with SUMMARIZER processor"""
@@ -146,6 +160,18 @@ class DocumentAIProcessor:
         except Exception as e:
             logger.error(f"❌ Failed to initialize Document AI Client: {str(e)}")
             raise
+    
+    def _initialize_gcs_client(self):
+        """Initialize GCS client for batch processing"""
+        try:
+            self.storage_client = storage.Client()
+            self.gcs_bucket = self.storage_client.bucket(self.BATCH_GCS_BUCKET)
+            logger.info(f"✅ GCS client initialized for batch processing (bucket: {self.BATCH_GCS_BUCKET})")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to initialize GCS client for batch processing: {str(e)}")
+            logger.warning("⚠️ Batch processing will fall back to chunking method")
+            self.storage_client = None
+            self.gcs_bucket = None
     
     def get_mime_type(self, filepath: str) -> str:
         """Get MIME type based on file extension"""
@@ -627,9 +653,359 @@ class DocumentAIProcessor:
             logger.error(f"Full traceback: {traceback.format_exc()}")
             return ExtractionResult(success=False, error=error_msg)
 
-    def process_large_document(self, filepath: str) -> ExtractionResult:
-        """Process large documents by splitting them first"""
+    # ==================== BATCH PROCESSING METHODS ====================
+    
+    def _upload_to_gcs_for_batch(self, filepath: str) -> str:
+        """
+        Upload a local file to GCS for batch processing.
+        Returns the GCS URI (gs://bucket/path/file.pdf)
+        
+        NOTE: This is NOT a duplicate upload. The Document AI batch API requires files
+        to be in GCS (cannot process local files). The standard flow is:
+        1. User uploads file → saved as LOCAL temp file
+        2. Document AI processes the file (batch API needs it in GCS temporarily)
+        3. AFTER processing, file is uploaded to permanent "uploads/" folder
+        
+        This temporary upload to "docai-batch-input/" is cleaned up after processing.
+        """
         try:
+            # Generate unique filename to avoid collisions
+            unique_id = str(uuid.uuid4())[:8]
+            original_name = Path(filepath).stem
+            extension = Path(filepath).suffix
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            gcs_filename = f"{original_name}_{timestamp}_{unique_id}{extension}"
+            
+            blob_path = f"{self.BATCH_INPUT_PREFIX}{gcs_filename}"
+            blob = self.gcs_bucket.blob(blob_path)
+            
+            # Upload file
+            blob.upload_from_filename(filepath)
+            gcs_uri = f"gs://{self.BATCH_GCS_BUCKET}/{blob_path}"
+            
+            logger.info(f"✅ Uploaded to GCS for batch processing: {gcs_uri}")
+            return gcs_uri
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to upload to GCS: {str(e)}")
+            raise
+    
+    def _get_batch_output_uri(self, input_uri: str) -> str:
+        """Generate output GCS URI for batch processing results"""
+        # Extract filename from input URI
+        input_filename = Path(input_uri).stem
+        unique_id = str(uuid.uuid4())[:8]
+        output_folder = f"{self.BATCH_OUTPUT_PREFIX}{input_filename}_{unique_id}/"
+        return f"gs://{self.BATCH_GCS_BUCKET}/{output_folder}"
+    
+    def _batch_process_document(self, gcs_input_uri: str, gcs_output_uri: str, mime_type: str = "application/pdf") -> bool:
+        """
+        Call Document AI batch_process_documents API.
+        Returns True if operation completed successfully.
+        """
+        try:
+            logger.info(f"🚀 Starting batch processing...")
+            logger.info(f"   Input: {gcs_input_uri}")
+            logger.info(f"   Output: {gcs_output_uri}")
+            
+            # Create batch process request
+            gcs_document = documentai.GcsDocument(
+                gcs_uri=gcs_input_uri,
+                mime_type=mime_type
+            )
+            
+            gcs_documents = documentai.GcsDocuments(documents=[gcs_document])
+            
+            input_config = documentai.BatchDocumentsInputConfig(
+                gcs_documents=gcs_documents
+            )
+            
+            output_config = documentai.DocumentOutputConfig(
+                gcs_output_config=documentai.DocumentOutputConfig.GcsOutputConfig(
+                    gcs_uri=gcs_output_uri
+                )
+            )
+            
+            request = documentai.BatchProcessRequest(
+                name=self.summarizer_processor_path,
+                input_documents=input_config,
+                document_output_config=output_config
+            )
+            
+            # Start the batch operation (returns a long-running operation)
+            operation = self.client.batch_process_documents(request=request)
+            
+            logger.info(f"⏳ Batch operation started: {operation.operation.name}")
+            logger.info(f"⏳ Waiting for completion (timeout: {self.BATCH_TIMEOUT_SECONDS}s)...")
+            
+            # Wait for the operation to complete (synchronous blocking)
+            result = operation.result(timeout=self.BATCH_TIMEOUT_SECONDS)
+            
+            logger.info(f"✅ Batch processing completed successfully!")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Batch processing failed: {str(e)}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            return False
+    
+    def _download_batch_results(self, gcs_output_uri: str) -> str:
+        """
+        Download and parse results from batch processing output location.
+        Returns the extracted summary text.
+        """
+        try:
+            # Extract bucket and prefix from GCS URI
+            # gs://bucket/path/ -> bucket, path/
+            gcs_output_uri = gcs_output_uri.rstrip('/')
+            parts = gcs_output_uri.replace("gs://", "").split("/", 1)
+            bucket_name = parts[0]
+            prefix = parts[1] if len(parts) > 1 else ""
+            
+            logger.info(f"📥 Downloading batch results from: {gcs_output_uri}")
+            logger.info(f"   Bucket: {bucket_name}, Prefix: {prefix}")
+            
+            # List all blobs in the output folder
+            blobs = list(self.storage_client.list_blobs(bucket_name, prefix=prefix))
+            
+            if not blobs:
+                logger.warning(f"⚠️ No output files found at {gcs_output_uri}")
+                return ""
+            
+            logger.info(f"📄 Found {len(blobs)} output file(s)")
+            
+            # Batch processing outputs JSON files (shards)
+            all_text = []
+            all_summaries = []
+            
+            for blob in blobs:
+                if blob.name.endswith(".json"):
+                    logger.info(f"   Processing: {blob.name}")
+                    content = blob.download_as_text()
+                    
+                    try:
+                        # Parse the Document AI output JSON
+                        doc_json = json.loads(content)
+                        
+                        # Extract text from the document
+                        if "text" in doc_json:
+                            all_text.append(doc_json["text"])
+                        
+                        # Extract summary from chunkedDocument or entities
+                        if "chunkedDocument" in doc_json:
+                            chunked_doc = doc_json["chunkedDocument"]
+                            if "chunks" in chunked_doc:
+                                for chunk in chunked_doc["chunks"]:
+                                    if "content" in chunk:
+                                        all_summaries.append(chunk["content"])
+                        
+                        # Also check entities for summary
+                        if "entities" in doc_json:
+                            for entity in doc_json["entities"]:
+                                if entity.get("type") == "summary" or "summary" in entity.get("type", "").lower():
+                                    mention_text = entity.get("mentionText", "")
+                                    if mention_text:
+                                        all_summaries.append(mention_text)
+                        
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"⚠️ Failed to parse JSON from {blob.name}: {e}")
+                        continue
+            
+            # Combine results - prefer summaries if available, otherwise use text
+            if all_summaries:
+                result_text = "\n\n".join(all_summaries)
+                logger.info(f"✅ Extracted {len(all_summaries)} summary chunk(s), total {len(result_text)} chars")
+            elif all_text:
+                result_text = "\n\n".join(all_text)
+                logger.info(f"✅ Extracted full text, total {len(result_text)} chars")
+            else:
+                result_text = ""
+                logger.warning("⚠️ No text or summary found in batch results")
+            
+            return result_text
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to download batch results: {str(e)}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            return ""
+    
+    def _cleanup_batch_gcs_files(self, gcs_input_uri: str, gcs_output_uri: str):
+        """Clean up temporary GCS files after batch processing"""
+        try:
+            # Delete input file
+            if gcs_input_uri:
+                input_path = gcs_input_uri.replace(f"gs://{self.BATCH_GCS_BUCKET}/", "")
+                input_blob = self.gcs_bucket.blob(input_path)
+                if input_blob.exists():
+                    input_blob.delete()
+                    logger.debug(f"🧹 Deleted input file: {gcs_input_uri}")
+            
+            # Delete output folder and contents
+            if gcs_output_uri:
+                output_prefix = gcs_output_uri.replace(f"gs://{self.BATCH_GCS_BUCKET}/", "").rstrip("/")
+                blobs = list(self.storage_client.list_blobs(self.BATCH_GCS_BUCKET, prefix=output_prefix))
+                for blob in blobs:
+                    blob.delete()
+                logger.debug(f"🧹 Deleted {len(blobs)} output file(s) from: {gcs_output_uri}")
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to clean up GCS files: {str(e)}")
+    
+    def _process_document_batch(self, filepath: str) -> ExtractionResult:
+        """
+        Process document using Document AI batch API.
+        This is the main batch processing method that:
+        1. Uploads document to GCS
+        2. Calls batch_process_documents API
+        3. Waits for completion
+        4. Downloads and parses results
+        5. Still extracts patient details from first 3 pages using layout parser
+        """
+        gcs_input_uri = None
+        gcs_output_uri = None
+        
+        try:
+            logger.info("=" * 80)
+            logger.info("🔄 BATCH PROCESSING: Starting holistic document summarization")
+            logger.info("=" * 80)
+            
+            # Get page count for logging
+            with open(filepath, "rb") as f:
+                pdf_reader = PdfReader(f)
+                total_pages = len(pdf_reader.pages)
+            logger.info(f"📄 Document has {total_pages} pages - using batch API for full context")
+            
+            # Step 1: Upload to GCS
+            gcs_input_uri = self._upload_to_gcs_for_batch(filepath)
+            
+            # Step 2: Generate output URI
+            gcs_output_uri = self._get_batch_output_uri(gcs_input_uri)
+            
+            # Step 3: Run batch processing
+            mime_type = self.get_mime_type(filepath)
+            success = self._batch_process_document(gcs_input_uri, gcs_output_uri, mime_type)
+            
+            if not success:
+                raise Exception("Batch processing operation failed")
+            
+            # Step 4: Download results
+            summary_text = self._download_batch_results(gcs_output_uri)
+            
+            if not summary_text:
+                raise Exception("No summary text extracted from batch results")
+            
+            # Step 5: Extract patient details from first 3 pages using layout parser
+            logger.info("📋 Extracting patient details from first 3 pages using layout parser...")
+            patient_details = {}
+            layout_data = {"raw_text": "", "structured_document": {}, "page_zones": {}}
+            
+            try:
+                layout_data = self._process_with_layout_parser(filepath, [1, 2, 3])
+                if layout_data and layout_data.get("blocks"):
+                    logger.info(f"📊 Layout extraction found {len(layout_data.get('blocks', []))} blocks")
+                    
+                    # Extract patient details using the patient extractor
+                    patient_extractor = get_patient_extractor()
+                    document_dict = layout_data.get("structured_document", {})
+                    
+                    if document_dict:
+                        extracted_patients = patient_extractor.extract_patient_details_from_document(document_dict)
+                        if extracted_patients:
+                            patient_details = extracted_patients[0] if isinstance(extracted_patients, list) else extracted_patients
+                            logger.info(f"👤 Patient details extracted: {patient_details.get('patient_name', 'N/A')}")
+            except Exception as layout_err:
+                logger.warning(f"⚠️ Layout parser extraction failed: {layout_err}")
+            
+            # Step 6: Build final result
+            final_raw_text = summary_text
+            
+            # Prepend patient details if found
+            if patient_details:
+                patient_details_text = "--- PATIENT DETAILS ---\n"
+                patient_details_text += f"Patient Name: {patient_details.get('patient_name', 'N/A')}\n"
+                patient_details_text += f"Date of Birth: {patient_details.get('dob', 'N/A')}\n"
+                patient_details_text += f"Date of Injury: {patient_details.get('doi', 'N/A')}\n"
+                patient_details_text += f"Claim Number: {patient_details.get('claim_number', 'N/A')}\n"
+                patient_details_text += "--- END PATIENT DETAILS ---\n\n"
+                final_raw_text = patient_details_text + summary_text
+            
+            logger.info("=" * 80)
+            logger.info("✅ BATCH PROCESSING COMPLETE")
+            logger.info(f"   Summary length: {len(summary_text)} chars")
+            logger.info(f"   Total pages: {total_pages}")
+            logger.info(f"   Patient details: {'Found' if patient_details else 'Not found'}")
+            logger.info("=" * 80)
+            
+            # Log the complete summary for debugging/verification
+            logger.info("=" * 80)
+            logger.info("🤖 COMPLETE BATCH SUMMARY OUTPUT:")
+            logger.info("=" * 80)
+            logger.info(summary_text)
+            logger.info("=" * 80)
+            
+            return ExtractionResult(
+                text=summary_text,
+                raw_text=final_raw_text,
+                llm_text=final_raw_text,
+                page_zones=layout_data.get("page_zones", {}),
+                pages=total_pages,
+                entities=[],
+                tables=[],
+                formFields=[],
+                symbols=[],
+                confidence=1.0,
+                success=True,
+                metadata={"patient_details": patient_details} if patient_details else {}
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Batch processing failed: {str(e)}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            raise  # Re-raise to trigger fallback to chunking
+            
+        finally:
+            # Clean up GCS files
+            if gcs_input_uri or gcs_output_uri:
+                self._cleanup_batch_gcs_files(gcs_input_uri, gcs_output_uri)
+    
+    # ==================== END BATCH PROCESSING METHODS ====================
+
+    def process_large_document(self, filepath: str) -> ExtractionResult:
+        """
+        Process large documents using batch API for full context understanding.
+        Falls back to chunking method if batch API fails.
+        """
+        try:
+            # First, try batch processing for better context understanding
+            if self.storage_client and self.gcs_bucket:
+                logger.info("🔄 Attempting batch processing for holistic summarization...")
+                try:
+                    return self._process_document_batch(filepath)
+                except Exception as batch_error:
+                    logger.warning(f"⚠️ Batch processing failed, falling back to chunking: {batch_error}")
+            else:
+                logger.warning("⚠️ GCS client not available, using chunking method")
+            
+            # Fallback to chunking method
+            return self._process_large_document_chunked(filepath)
+            
+        except Exception as e:
+            logger.error(f"❌ Error processing large document: {str(e)}")
+            return ExtractionResult(success=False, error=f"Failed: {str(e)}")
+    
+    def _process_large_document_chunked(self, filepath: str) -> ExtractionResult:
+        """
+        Fallback method: Process large documents by splitting into chunks.
+        Used when batch API is not available or fails.
+        """
+        try:
+            logger.info("=" * 80)
+            logger.info("🔄 CHUNKED PROCESSING: Splitting document into smaller parts")
+            logger.info("=" * 80)
+            
             chunk_files = self.pdf_splitter.split_pdf(filepath)
             
             if len(chunk_files) == 1:
@@ -658,7 +1034,7 @@ class DocumentAIProcessor:
             return self._merge_results(all_results, filepath)
             
         except Exception as e:
-            logger.error(f"❌ Error processing large document: {str(e)}")
+            logger.error(f"❌ Error in chunked processing: {str(e)}")
             return ExtractionResult(success=False, error=f"Failed: {str(e)}")
     
     def _merge_results(self, results: List[ExtractionResult], original_file: str) -> ExtractionResult:
@@ -749,7 +1125,15 @@ class DocumentAIProcessor:
         return merged_result
     
     def process_document(self, filepath: str) -> ExtractionResult:
-        """Main document processing method using SUMMARIZER"""
+        """
+        Main document processing method using SUMMARIZER.
+        
+        Strategy based on page count:
+        - ≤15 pages: Use synchronous API (fast, seconds)
+        - >15 pages: Use batch API (slower but handles large docs with full context)
+        
+        Patient details are extracted from first 3 pages using layout parser.
+        """
         try:
             mime_type = self.get_mime_type(filepath)
             
@@ -761,16 +1145,30 @@ class DocumentAIProcessor:
                     
                     logger.info(f"📄 Document has {page_count} pages")
                     
-                    if page_count > 10:
-                        logger.info("📦 Using chunked processing with summarizer")
-                        return self.process_large_document(filepath)
-                    else:
+                    # Synchronous API limit is 15 pages for Document AI Summarizer
+                    if page_count <= 15:
+                        logger.info("⚡ Using synchronous API (fast processing for ≤15 pages)")
                         return self._process_document_direct(filepath)
+                    else:
+                        # Large documents need batch API for full context
+                        logger.info(f"📦 Document has {page_count} pages (>15) - using batch API for full context")
+                        logger.info("⏳ Note: Batch API takes 2-6 minutes but preserves full document context")
+                        
+                        if self.storage_client and self.gcs_bucket:
+                            try:
+                                return self._process_document_batch(filepath)
+                            except Exception as batch_error:
+                                logger.warning(f"⚠️ Batch processing failed, falling back to chunked: {batch_error}")
+                                return self._process_large_document_chunked(filepath)
+                        else:
+                            logger.warning("⚠️ GCS client not available, using chunked processing")
+                            return self._process_large_document_chunked(filepath)
                         
                 except Exception as e:
                     logger.warning(f"⚠️ Could not check page count: {str(e)}")
                     return self._process_document_direct(filepath)
             else:
+                # Non-PDF files use direct processing
                 return self._process_document_direct(filepath)
                 
         except Exception as e:

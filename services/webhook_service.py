@@ -809,19 +809,43 @@ class WebhookService:
         # Prepare the additional required parameters with default values
         document_analysis = processed_data["document_analysis"]
         
-        # Get RD (Report Date) - use from analysis or current date
+        # Get RD (Report Date) - use from analysis
         rd = None
         if hasattr(document_analysis, 'rd') and document_analysis.rd and str(document_analysis.rd).lower() != "not specified":
             try:
-                # Parse the RD date if available
-                if '/' in document_analysis.rd:
-                    month, day = document_analysis.rd.split('/')
-                    year = datetime.now().year
-                    rd = datetime.strptime(f"{year}-{month.zfill(2)}-{day.zfill(2)}", "%Y-%m-%d")
-                elif '-' in document_analysis.rd:
-                    rd = datetime.strptime(document_analysis.rd, "%Y-%m-%d")
-            except Exception:
-                rd = datetime.now()  # Fallback to current date
+                date_str = str(document_analysis.rd).strip()
+                logger.info(f"📅 Parsing report date: {date_str}")
+                
+                # Try multiple date formats
+                date_formats = [
+                    "%Y-%m-%d",      # 2025-11-25
+                    "%m-%d-%Y",      # 11-25-2025
+                    "%m/%d/%Y",      # 11/25/2025
+                    "%m/%d/%y",      # 11/25/25
+                    "%d-%m-%Y",      # 25-11-2025
+                    "%d/%m/%Y",      # 25/11/2025
+                    "%Y/%m/%d",      # 2025/11/25
+                ]
+                
+                parsed = False
+                for fmt in date_formats:
+                    try:
+                        rd = datetime.strptime(date_str, fmt)
+                        # Set time to noon to avoid timezone shifting issues
+                        rd = rd.replace(hour=12, minute=0, second=0, microsecond=0)
+                        logger.info(f"✅ Parsed report date with format {fmt}: {rd}")
+                        parsed = True
+                        break
+                    except ValueError:
+                        continue
+                
+                if not parsed:
+                    logger.warning(f"⚠️ Could not parse report date: {date_str}, keeping as None")
+                    rd = None
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Error parsing report date: {e}")
+                rd = None  # Don't fallback to current date - leave as None
         
         # Create summary snapshots
         summary_snapshots = []

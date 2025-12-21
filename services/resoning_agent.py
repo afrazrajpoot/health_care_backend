@@ -19,6 +19,7 @@ logger = logging.getLogger("document_ai")
 
 from models.data_models import DocumentAnalysis, VerificationResult, BriefSummary
 
+
 # ============================================================================
 # MODE-AWARE ENHANCED REPORT ANALYZER (WC/GM)
 # ============================================================================
@@ -107,7 +108,12 @@ class EnhancedReportAnalyzer:
 
     {signature_context}
 
-    CURRENT DATE: {current_date}
+    ⚠️ REPORT DATE INSTRUCTION:
+    - Identify the ACTUAL report/examination/document date from the text above
+    - DO NOT use current/today's date - only use dates explicitly mentioned in the document
+    - IMPORTANT: US date format is MM/DD/YYYY. Example: 11/25/2025 means November 25, 2025 (NOT day 11 of month 25)
+    - Convert to YYYY-MM-DD format. Example: 11/25/2025 → 2025-11-25
+    - If no report date found, use "00/00/0000" as placeholder
 
     ═══════════════════════════════════════════════════════════════════════
     MODE-AWARE COMPREHENSIVE ANALYSIS INSTRUCTIONS
@@ -124,10 +130,12 @@ class EnhancedReportAnalyzer:
 
     DOCUMENT TEXT:
     {document_text}
-
+date
     {signature_context}
 
-    CURRENT DATE: {current_date}
+    ⚠️ REPORT DATE: Extract the actual report/examination date from the document above. DO NOT use current date.
+    - US date format: MM/DD/YYYY. Example: 11/25/2025 = November 25, 2025
+    - Output in YYYY-MM-DD format. Example: 11/25/2025 → 2025-11-25
 
     Use the system instructions to extract and structure all key fields with {mode_upper} focus.
 
@@ -263,7 +271,7 @@ class EnhancedReportAnalyzer:
         try:
             logger.info(f"🚀 Starting MODE-AWARE extraction (Mode: {mode})...")
             # print(document_text,'document text')
-            current_date = datetime.now().strftime("%Y-%m-%d")
+            # NOTE: Report date extraction is handled by LLM from document context
             # OPTIMIZATION: Removed redundant separate detection call
             # detected_doc_type = self.detect_document_type(document_text)
             detected_doc_type = "Unknown - Please Identify from text"
@@ -303,7 +311,6 @@ class EnhancedReportAnalyzer:
             invocation_data = {
                 "document_text": document_text,
                 "signature_context": signature_context,
-                "current_date": current_date,
                 "detected_doc_type": detected_doc_type,
                 "format_instructions": self.parser.get_format_instructions(),
                 # Mode-specific variables
@@ -327,6 +334,9 @@ class EnhancedReportAnalyzer:
             logger.info(f"   - Patient: {analysis.patient_name}")
             logger.info(f"   - Document Type: {analysis.document_type}")
             logger.info(f"   - Mode: {mode}")
+            logger.info(f"   - REPORT DATE (rd): {analysis.rd}")  # Log the extracted report date
+            logger.info(f"   - DOB: {analysis.dob}")
+            logger.info(f"   - DOI: {analysis.doi}")
             logger.info(f"   - CONSULTING DOCTOR: {analysis.consulting_doctor}")
             logger.info(f"   - ALL DOCTORS: {analysis.all_doctors if analysis.all_doctors else '[]'}")
             logger.info(f"   - Confidence: {analysis.extraction_confidence:.2f}")
@@ -343,7 +353,7 @@ class EnhancedReportAnalyzer:
         """
         logger.info(f"🔍 Generating summary for {mode.upper()} mode...")
         try:
-            current_date = datetime.now().strftime("%Y-%m-%d")
+            # NOTE: Report date extraction is handled by LLM from document context
 
             # Mode-specific summary guidance
             mode_focus = "workers compensation injury" if mode == "wc" else "general medical condition"
@@ -365,7 +375,9 @@ class EnhancedReportAnalyzer:
     DOCUMENT TEXT:
     {{summarizer_output}}
 
-    CURRENT DATE: {{current_date}}
+    ⚠️ REPORT DATE: Extract the actual report/examination date from the document above. DO NOT use current/today's date. If not found, use "00/00/0000".
+    - US date format: MM/DD/YYYY. Example: 11/25/2025 = November 25, 2025
+    - Output in YYYY-MM-DD format. Example: 11/25/2025 → 2025-11-25
 
     SUMMARY REQUIREMENTS:
     1. Include the specific diagnosis/condition (use exact terms from document)
@@ -390,7 +402,6 @@ class EnhancedReportAnalyzer:
             chain = summary_prompt | self.llm | self.brief_summary_parser
             result = chain.invoke({
                 "summarizer_output": summarizer_output,
-                "current_date": current_date,
                 "format_instructions": self.brief_summary_parser.get_format_instructions()
             })
 
@@ -405,7 +416,8 @@ class EnhancedReportAnalyzer:
 
     def create_fallback_analysis(self, mode: str = "wc") -> DocumentAnalysis:
         """Create mode-aware fallback analysis when extraction fails"""
-        timestamp = datetime.now().strftime("%Y-%m-%d")
+        # Use placeholder date instead of current date (we don't know the actual report date)
+        fallback_date = "00/00/0000"
         
         # Mode-specific fallback fields
         if mode == "wc":
@@ -418,10 +430,10 @@ class EnhancedReportAnalyzer:
         return DocumentAnalysis(
             patient_name="Not specified",
             claim_number="Not specified",
-            dob=timestamp,
-            doi=timestamp if mode == "wc" else "Not specified",
+            dob=fallback_date,
+            doi=fallback_date if mode == "wc" else "Not specified",
             status="Not specified",
-            rd=timestamp,
+            rd=fallback_date,
             body_part="Not specified",
             body_parts_analysis=[],
             diagnosis="Not specified",

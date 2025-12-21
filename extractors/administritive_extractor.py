@@ -10,7 +10,7 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 from utils.extraction_verifier import ExtractionVerifier
-from utils.summary_helpers import ensure_date_and_author
+from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 
 logger = logging.getLogger("document_ai")
 
@@ -141,6 +141,9 @@ class AdministrativeExtractor:
             fallback_date=fallback_date
         )
         
+        # Stage 1.5: Clean the long summary - remove empty fields, placeholders, and instruction text
+        long_summary = clean_long_summary(long_summary)
+        
         # Stage 2: Generate short summary from long summary
         short_summary = self._generate_short_summary_from_long_summary(long_summary, detected_type)
         
@@ -197,14 +200,26 @@ class AdministrativeExtractor:
         * Exact deadline wording if more specific in full text
     - **DO NOT let this override the administrative context from the primary source**
 
-    ⚠️ ANTI-HALLUCINATION RULES FOR DUAL-CONTEXT:
+    🚨 ABSOLUTE ANTI-FABRICATION RULE (HIGHEST PRIORITY):
+    **YOU MUST ONLY EXTRACT AND SUMMARIZE INFORMATION THAT EXISTS IN THE PROVIDED SOURCES.**
+    - NEVER generate, infer, assume, or fabricate ANY information
+    - If information is NOT explicitly stated in either source → OMIT IT ENTIRELY
+    - An incomplete summary is 100x better than a fabricated one
+    - Every single piece of information in your output MUST be traceable to the source text
 
-    1. **CONTEXT PRIORITY ENFORCEMENT**:
+    ⚠️ STRICT ANTI-HALLUCINATION RULES:
+
+    1. **ZERO FABRICATION TOLERANCE**:
+    - If a field (e.g., DOB, Claim Number, Deadline) is NOT in either source → LEAVE IT BLANK or OMIT
+    - NEVER write "likely", "probably", "typically", "usually" - these indicate fabrication
+    - NEVER fill in "standard" or "typical" values - only actual extracted values
+
+    2. **CONTEXT PRIORITY ENFORCEMENT**:
     - When both sources provide information about the SAME administrative element:
         ✅ ALWAYS use interpretation from PRIMARY SOURCE (accurate context)
         ❌ NEVER override with potentially inaccurate full text version
     
-    2. **LEGAL DEMANDS & REQUIREMENTS PRIORITY**:
+    3. **LEGAL DEMANDS & REQUIREMENTS PRIORITY**:
     - PRIMARY SOURCE provides accurate legal context and interpretations
     - Use FULL TEXT only for exact legal wording if more specific
     - NEVER change legal interpretation based on full text alone
@@ -329,7 +344,7 @@ class AdministrativeExtractor:
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     Document Type: {doc_type}
-    Report Date: {fallback_date}
+    Report Date: [extracted date of report]
 
     Generate the long summary in this EXACT STRUCTURED FORMAT using the DUAL-CONTEXT PRIORITY rules:
 
@@ -478,9 +493,9 @@ class AdministrativeExtractor:
             long_summary = result.content.strip()
             
             end_time = time.time()
-            processing_time = time.time() - start_time if 'start_time' in locals() else 0
+            # processing_time = time.time() - start_time if 'start_time' in locals() else 0
             
-            logger.info(f"⚡ Administrative long summary generated in {processing_time:.2f}s")
+            # logger.info(f"⚡ Administrative long summary generated in {processing_time:.2f}s")
             logger.info(f"✅ Generated long summary: {len(long_summary):,} chars")
             logger.info("✅ Context priority maintained: PRIMARY source used for administrative findings")
             

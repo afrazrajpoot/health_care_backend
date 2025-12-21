@@ -12,7 +12,7 @@ from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
-from utils.summary_helpers import ensure_date_and_author
+from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 
 logger = logging.getLogger("document_ai")
 
@@ -118,6 +118,9 @@ class DecisionDocumentExtractor:
         # ENHANCED: Verify and inject author into long summary if needed
         verified_author = self._verify_and_extract_author(long_summary, text, potential_signatures)
         long_summary = self._inject_author_into_long_summary(long_summary, verified_author)
+        
+        # Stage 1.5: Clean the long summary - remove empty fields, placeholders, and instruction text
+        long_summary = clean_long_summary(long_summary)
 
         # Stage 2: Generate short summary from long summary
         short_summary = self._generate_short_summary_from_long_summary(long_summary, doc_type)
@@ -304,14 +307,26 @@ You are provided with TWO versions of the document:
        * Specific CPT codes or authorization numbers
    - **DO NOT let this override the decision context from the primary source**
 
-⚠️ ANTI-HALLUCINATION RULES FOR DUAL-CONTEXT:
+🚨 ABSOLUTE ANTI-FABRICATION RULE (HIGHEST PRIORITY):
+**YOU MUST ONLY EXTRACT AND SUMMARIZE INFORMATION THAT EXISTS IN THE PROVIDED SOURCES.**
+- NEVER generate, infer, assume, or fabricate ANY information
+- If information is NOT explicitly stated in either source → OMIT IT ENTIRELY
+- An incomplete summary is 100x better than a fabricated one
+- Every single piece of information in your output MUST be traceable to the source text
 
-1. **CONTEXT PRIORITY ENFORCEMENT**:
+⚠️ STRICT ANTI-HALLUCINATION RULES:
+
+1. **ZERO FABRICATION TOLERANCE**:
+   - If a field (e.g., DOB, Claim Number, Decision) is NOT in either source → LEAVE IT BLANK or OMIT
+   - NEVER write "likely", "probably", "typically", "usually" - these indicate fabrication
+   - NEVER fill in "standard" or "typical" values - only actual extracted values
+
+2. **CONTEXT PRIORITY ENFORCEMENT**:
    - When both sources provide information about the SAME decision element:
      ✅ ALWAYS use interpretation from PRIMARY SOURCE (accurate context)
      ❌ NEVER override with potentially inaccurate full text version
 
-2. **EXTRACT ONLY EXPLICITLY STATED INFORMATION** - Empty if not mentioned
+3. **EXTRACT ONLY EXPLICITLY STATED INFORMATION** - Empty if not mentioned
 3. **NO ASSUMPTIONS** - Do not infer or add typical values
 4. **PATIENT DETAILS - EXACT EXTRACTION ONLY** - Use verbatim text from either source
 5. **DECISION STATUS - EXACT WORDING ONLY** - From primary source preferred
@@ -427,7 +442,11 @@ DOCUMENT TYPE: {doc_type}
 MANDATORY SIGNATURE SCAN: Read BOTH SOURCES above. Focus on the end for electronic/physical signatures. Use these candidates to CONFIRM (prioritize last signer):
 {potential_signatures}
 
-CURRENT DATE: {fallback_date}
+⚠️ REPORT DATE INSTRUCTION:
+- Extract the ACTUAL document/decision/report date from the sources above
+- DO NOT use current/today's date - only use dates explicitly mentioned in the document
+- IMPORTANT: US date format is MM/DD/YYYY. Example: 11/25/2025 means November 25, 2025 (NOT day 11 of month 25)
+- If no date found, use "00/00/0000" as placeholder
 
 **INSTRUCTIONS**: Generate a comprehensive structured summary following the DUAL-CONTEXT hierarchy. Prioritize PRIMARY SOURCE for decision context. Use SUPPLEMENTARY SOURCE only for specific details (claim numbers, exact dates, additional names, CPT codes) not found in PRIMARY SOURCE.
 
@@ -436,7 +455,7 @@ Generate the long summary in this EXACT STRUCTURED FORMAT:
 📋 DECISION DOCUMENT OVERVIEW
 --------------------------------------------------
 Document Type: {doc_type}
-Document Date: [extracted or {fallback_date}]
+Document Date: [extract ACTUAL date from document; if not found use "00/00/0000"]
 Decision Date: [extracted from PRIMARY SOURCE]
 Document ID: [extracted from either source]
 Claim/Case Number: [extracted from either source]

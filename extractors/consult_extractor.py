@@ -15,7 +15,7 @@ from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
-from utils.summary_helpers import ensure_date_and_author
+from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 
 logger = logging.getLogger("document_ai")
 
@@ -65,6 +65,9 @@ class ConsultExtractorChained:
                 doc_type=doc_type,
                 fallback_date=fallback_date
             )
+            
+            # Step 1.5: Clean the long summary - remove empty fields, placeholders, and instruction text
+            long_summary = clean_long_summary(long_summary)
             
             # Step 2: Generate short summary from long summary (like QME extractor)
             short_summary = self._generate_short_summary_from_long_summary(long_summary)
@@ -132,14 +135,26 @@ class ConsultExtractorChained:
         * Exact work restriction wording if more specific in full text
     - **DO NOT let this override the clinical context from the primary source**
 
-    ⚠️ ANTI-HALLUCINATION RULES FOR DUAL-CONTEXT:
+    🚨 ABSOLUTE ANTI-FABRICATION RULE (HIGHEST PRIORITY):
+    **YOU MUST ONLY EXTRACT AND SUMMARIZE INFORMATION THAT EXISTS IN THE PROVIDED SOURCES.**
+    - NEVER generate, infer, assume, or fabricate ANY information
+    - If information is NOT explicitly stated in either source → OMIT IT ENTIRELY
+    - An incomplete summary is 100x better than a fabricated one
+    - Every single piece of information in your output MUST be traceable to the source text
 
-    1. **CONTEXT PRIORITY ENFORCEMENT**:
+    ⚠️ STRICT ANTI-HALLUCINATION RULES:
+
+    1. **ZERO FABRICATION TOLERANCE**:
+    - If a field (e.g., DOB, Claim Number, Diagnosis) is NOT in either source → LEAVE IT BLANK or OMIT
+    - NEVER write "likely", "probably", "typically", "usually" - these indicate fabrication
+    - NEVER fill in "standard" or "typical" values - only actual extracted values
+
+    2. **CONTEXT PRIORITY ENFORCEMENT**:
     - When both sources provide information about the SAME clinical finding:
         ✅ ALWAYS use interpretation from PRIMARY SOURCE (accurate context)
         ❌ NEVER override with potentially inaccurate full text version
     
-    2. **DIAGNOSIS PRIORITY**:
+    3. **DIAGNOSIS PRIORITY**:
     - PRIMARY SOURCE provides accurate diagnostic context
     - Use FULL TEXT only to add ICD-10 codes or body part specifics if missing
     - NEVER change diagnosis interpretation based on full text alone
@@ -263,7 +278,7 @@ class ConsultExtractorChained:
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     Document Type: {doc_type}
-    Report Date: {fallback_date}
+    Report Date: [extracted date of report]
 
     Generate the long summary in this EXACT STRUCTURED FORMAT using the DUAL-CONTEXT PRIORITY rules:
 

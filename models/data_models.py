@@ -219,10 +219,10 @@ class DocumentAnalysis(BaseModel):
     """Structured analysis of medical document matching database schema with WC/GM mode support"""
     patient_name: str = Field(..., description="Full name of the patient")
     claim_number: str = Field(..., description="Claim number. Use 'Not specified' if not found")
-    dob: str = Field(..., description="Date of birth in YYYY-MM-DD format")
-    doi: str = Field(..., description="Date of injury in YYYY-MM-DD format")
+    dob: str = Field(..., description="Date of birth in YYYY-MM-DD format. Input dates like 11/25/2025 (MM/DD/YYYY US format) should be converted to 2025-11-25")
+    doi: str = Field(..., description="Date of injury in YYYY-MM-DD format. Input dates like 11/25/2025 (MM/DD/YYYY US format) should be converted to 2025-11-25")
     status: str = Field(..., description="Current status: normal, urgent, critical, etc.")
-    rd: str = Field(..., description="Report date in YYYY-MM-DD format")
+    rd: str = Field(..., description="Report date in YYYY-MM-DD format. Input dates like 11/25/2025 (MM/DD/YYYY US format) should be converted to 2025-11-25")
     
     # Body parts analysis
     body_part: str = Field(..., description="Primary body part involved if it's a workers comp report else disease/condition")
