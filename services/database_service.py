@@ -200,7 +200,8 @@ class DatabaseService:
             file_name: Optional[str] = None,
             file_hash: Optional[str] = None,
             blob_path: Optional[str] = None,
-            mode : Optional[str] = None
+            mode : Optional[str] = None,
+            summary: Optional[str] = None
         ) -> str:
             """Save a failed document record to the FailDocs table."""
             try:
@@ -227,6 +228,8 @@ class DatabaseService:
                     data["fileHash"] = file_hash
                 if blob_path is not None:
                     data["blobPath"] = blob_path
+                if summary is not None:
+                    data["summary"] = summary
                 # if mode is not None:
                 #     data["mode"] = mode
                 

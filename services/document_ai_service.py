@@ -26,8 +26,10 @@ from models.schemas import ExtractionResult, FileInfo
 from config.settings import CONFIG
 from utils.patient_details_extractor import get_patient_extractor
 from helpers.helpers import build_llm_friendly_json , extract_text_from_summarizer
+from utils.multi_report_detector import detect_multiple_reports
 
 logger = logging.getLogger("document_ai")
+
 
 class LayoutPreservingTextExtractor:
     """
@@ -502,6 +504,9 @@ class DocumentAIProcessor:
             logger.info(summary_text)
             logger.info("=" * 80)
             
+            # NEW: Run multi-report detection on summarizer output (using o3-pro AI model)
+            multi_report_result = detect_multiple_reports(summary_text)
+            
             # Also log full text comparison for debugging
             if result.text and len(result.text) != len(summary_text):
                 logger.info("=" * 80)
@@ -635,7 +640,9 @@ class DocumentAIProcessor:
                 symbols=[],
                 confidence=1.0,
                 success=True,
-                metadata={"patient_details": patient_details} if patient_details else {}
+                metadata={"patient_details": patient_details} if patient_details else {},
+                is_multiple_reports=multi_report_result.get("is_multiple", False),
+                multi_report_info=multi_report_result
             )
             
             logger.info("📊 Extraction summary:")
@@ -945,6 +952,9 @@ class DocumentAIProcessor:
             logger.info(summary_text)
             logger.info("=" * 80)
             
+            # Run multi-report detection on batch summary (using o3-pro AI model)
+            multi_report_result = detect_multiple_reports(summary_text)
+            
             return ExtractionResult(
                 text=summary_text,
                 raw_text=final_raw_text,
@@ -957,7 +967,9 @@ class DocumentAIProcessor:
                 symbols=[],
                 confidence=1.0,
                 success=True,
-                metadata={"patient_details": patient_details} if patient_details else {}
+                metadata={"patient_details": patient_details} if patient_details else {},
+                is_multiple_reports=multi_report_result.get("is_multiple", False),
+                multi_report_info=multi_report_result
             )
             
         except Exception as e:
@@ -1107,6 +1119,9 @@ class DocumentAIProcessor:
         logger.info(merged_text)
         logger.info("=" * 80)
         
+        # Run multi-report detection on merged text (using o3-pro AI model)
+        multi_report_result = detect_multiple_reports(merged_text)
+        
         merged_result = ExtractionResult(
             text=merged_raw_text,
             raw_text=merged_raw_text,
@@ -1119,7 +1134,9 @@ class DocumentAIProcessor:
             symbols=[],
             confidence=1.0,
             success=True,
-            metadata={"patient_details": patient_details} if patient_details else {}
+            metadata={"patient_details": patient_details} if patient_details else {},
+            is_multiple_reports=multi_report_result.get("is_multiple", False),
+            multi_report_info=multi_report_result
         )
         
         return merged_result

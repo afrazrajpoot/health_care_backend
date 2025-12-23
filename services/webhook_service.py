@@ -111,9 +111,14 @@ class WebhookService:
         text = result_data.get("text", "")
         raw_text = result_data.get("raw_text") or ""  # Handle None case
         mode = data.get("mode", "wc")
+        
+        # Check for multi-report detection from Document AI processing
+        is_multiple_reports = result_data.get("is_multiple_reports", False)
+        multi_report_info = result_data.get("multi_report_info", {})
 
         logger.info(f"📋 Document mode: {mode}")
         logger.info(f"📊 Text lengths - Full OCR: {len(text)} chars, Document AI summary: {len(raw_text)} chars")
+        logger.info(f"📊 Multiple reports detected: {is_multiple_reports}")
         
         # Log if raw_text is missing to help debug
         if not raw_text:
@@ -190,7 +195,9 @@ class WebhookService:
             "file_hash": data.get("file_hash"),
             "result_data": result_data,
             "document_id": data.get("document_id", "unknown"),
-            "mode": mode
+            "mode": mode,
+            "is_multiple_reports": is_multiple_reports,
+            "multi_report_info": multi_report_info
         }
 
     async def save_to_redis_cache(self, document_id: str, document_data: dict):
@@ -991,6 +998,48 @@ class WebhookService:
             
             # Step 1: Process document data
             processed_data = await self.process_document_data(data)
+            
+            # Step 1.5: Check for multiple reports - if detected, save to FailDocs
+            if processed_data.get("is_multiple_reports", False):
+                multi_report_info = processed_data.get("multi_report_info", {})
+                confidence = multi_report_info.get("confidence", "unknown")
+                reason = multi_report_info.get("reason", "Multiple reports detected")
+                summary_text = processed_data.get("raw_text", "")
+                
+                logger.warning(f"⚠️ MULTIPLE REPORTS DETECTED (confidence: {confidence})")
+                logger.warning(f"   Reason: {reason}")
+                logger.info("💾 Saving to FailDocs for manual review...")
+                
+                # Save to FailDocs with summary
+                fail_doc_id = await db_service.save_fail_doc(
+                    reason=f"Multiple reports detected - manual review required. {reason}",
+                    db=processed_data.get("dob"),
+                    claim_number=processed_data.get("claim_number"),
+                    patient_name=processed_data.get("patient_name"),
+                    physician_id=processed_data.get("physician_id"),
+                    gcs_file_link=processed_data.get("gcs_url"),
+                    file_name=processed_data.get("filename"),
+                    file_hash=processed_data.get("file_hash"),
+                    blob_path=processed_data.get("blob_path"),
+                    mode=processed_data.get("mode", "wc"),
+                    document_text=processed_data.get("text_for_analysis", ""),
+                    doi=None,
+                    summary=summary_text  # Store the Document AI summarizer output
+                )
+                
+                # Decrement parse count
+                parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
+                
+                logger.info(f"✅ Multiple reports document saved to FailDocs with ID: {fail_doc_id}")
+                
+                return {
+                    "status": "multiple_reports_detected",
+                    "document_id": fail_doc_id,
+                    "filename": processed_data.get("filename"),
+                    "parse_count_decremented": parse_decremented,
+                    "failure_reason": f"Multiple reports detected - manual review required. {reason}",
+                    "multi_report_info": multi_report_info
+                }
             
             # DEBUG: Check Redis before patient lookup
             await self.debug_redis_contents("patient_lookup:*")

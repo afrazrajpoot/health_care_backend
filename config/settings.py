@@ -20,6 +20,7 @@ class Settings:
         self.azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
         self.azure_openai_api_key = os.getenv("AZURE_OPENAI_API_KEY")
         self.azure_openai_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+        self.azure_openai_o3_model = os.getenv("AZURE_OPENAI_O3_MODEL_NAME")
         self.azure_openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION")
         self.api_base_url = os.getenv("API_BASE_URL", "https://api.kebilo.com")
         # self.api_base_url = os.getenv("API_BASE_URL", "https://api.kebilo.com")

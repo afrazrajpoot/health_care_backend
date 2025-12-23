@@ -139,3 +139,7 @@ class ExtractionResult(BaseModel):
     symbols: List[Dict[str, Any]] = Field(default_factory=list)
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional metadata including checkboxes and handwritten text")
     
+    # Multi-report detection fields
+    is_multiple_reports: bool = Field(default=False, description="True if multiple reports detected in document")
+    multi_report_info: Optional[Dict[str, Any]] = Field(default=None, description="Details about multiple reports detection")
+    
