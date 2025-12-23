@@ -13,6 +13,17 @@ from datetime import timezone
 from services.webhook_service import WebhookService
 from services.document_route_services import DocumentExtractorService
 from services.get_document_services import DocumentAggregationService
+from utils.document_splitter import get_document_splitter
+from utils.page_extractor import get_page_extractor
+from utils.document_detector import detect_document_type
+from services.report_analyzer import ReportAnalyzer
+from services.resoning_agent import EnhancedReportAnalyzer
+from services.patient_lookup_service import EnhancedPatientLookup
+from services.webhook_service import WebhookService
+from models.schemas import ExtractionResult
+from datetime import datetime
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import os
 import json
 from fastapi import HTTPException, UploadFile, File, Form, Query
@@ -359,6 +370,243 @@ async def delete_fail_document(
     except Exception as e:
         logger.error(f"❌ Error in delete_fail_document for {doc_id}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Deletion failed: {str(e)}")
+
+@router.post("/split-and-process-document")
+async def split_and_process_document(request: Request):
+    """
+    Split a multi-report document by page ranges, process each page group, and save as documents.
+    Staff provides page ranges (e.g., pages 1-5 for QME, pages 6-10 for PR2) from client side.
+    This is optimized - only processes the specified pages, not all text.
+    """
+    try:
+        data = await request.json()
+        logger.info("📥 Split and process document request received (page-based)")
+        
+        mode = data.get("mode", "wc")
+        physician_id = data.get("physician_id")
+        original_filename = data.get("original_filename", "split_document")
+        fail_doc_id = data.get("fail_doc_id")  # Optional: ID of the failed document being split
+        blob_path = data.get("blob_path")  # GCS blob path to the original PDF
+        page_ranges = data.get("page_ranges")  # List of page ranges: [{"start_page": 1, "end_page": 5, "report_title": "QME"}, ...]
+        
+        if not physician_id:
+            raise HTTPException(status_code=400, detail="Missing physician_id in request")
+        
+        if not blob_path:
+            raise HTTPException(status_code=400, detail="Missing blob_path - need original PDF file to extract pages")
+        
+        if not page_ranges or not isinstance(page_ranges, list) or len(page_ranges) == 0:
+            raise HTTPException(status_code=400, detail="Missing page_ranges - staff must specify which pages belong to each report")
+        
+        logger.info(f"📄 Processing page-based split request (mode: {mode}, {len(page_ranges)} page groups)")
+        logger.info(f"   Page ranges: {page_ranges}")
+        
+        # Initialize services
+        db_service = await get_database_service()
+        webhook_service = WebhookService()
+        report_analyzer = ReportAnalyzer(mode)
+        enhanced_analyzer = EnhancedReportAnalyzer()
+        patient_lookup = EnhancedPatientLookup()
+        page_extractor = get_page_extractor()
+        
+        # Use dedicated thread pool for LLM operations
+        from concurrent.futures import ThreadPoolExecutor
+        llm_executor = ThreadPoolExecutor(max_workers=10)
+        loop = asyncio.get_event_loop()
+        
+        # Step 1: Extract text from specified page ranges (OPTIMIZED - only process specified pages)
+        logger.info(f"📄 Extracting text from {len(page_ranges)} page groups...")
+        extracted_groups = await loop.run_in_executor(
+            llm_executor,
+            page_extractor.extract_pages_from_gcs,
+            blob_path,
+            page_ranges
+        )
+        
+        total_reports = len(extracted_groups)
+        logger.info(f"✅ Extracted text from {total_reports} page groups")
+        
+        # Step 2: Process and save each extracted page group (OPTIMIZED - only process specified pages)
+        processed_reports = []
+        saved_documents = []
+        
+        for idx, page_group in enumerate(extracted_groups):
+            try:
+                report_text = page_group.get("text", "")
+                raw_text = page_group.get("raw_text", report_text)
+                report_title = page_group.get("report_title", f"Report_{idx + 1}")
+                start_page = page_group.get("start_page", 1)
+                end_page = page_group.get("end_page", 1)
+                
+                if not report_text or len(report_text.strip()) < 50:
+                    error_msg = page_group.get("error", "Text too short")
+                    logger.warning(f"⚠️ Page group {idx + 1} (pages {start_page}-{end_page}) too short or error: {error_msg}")
+                    processed_reports.append({
+                        "report_index": idx + 1,
+                        "report_title": report_title,
+                        "start_page": start_page,
+                        "end_page": end_page,
+                        "error": error_msg,
+                        "status": "failed"
+                    })
+                    continue
+                
+                logger.info(f"🔍 Processing and saving report {idx + 1}/{total_reports}: {report_title} (pages {start_page}-{end_page})")
+                
+                # Step 2a: Detect document type
+                doc_type_result = detect_document_type(report_text)
+                doc_type = doc_type_result.get("doc_type", "Unknown")
+                doc_confidence = doc_type_result.get("confidence", 0.0)
+                
+                logger.info(f"   Document type detected: {doc_type} (confidence: {doc_confidence})")
+                
+                # Step 2b: Extract using ReportAnalyzer (routes to appropriate extractor)
+                # Use raw_text (Document AI summary) if available, otherwise use full text
+                report_result = await loop.run_in_executor(
+                    llm_executor, report_analyzer.extract_document, report_text, raw_text
+                )
+                long_summary = report_result.get("long_summary", "")
+                short_summary = report_result.get("short_summary", "")
+                
+                # Step 2c: Use EnhancedReportAnalyzer for full extraction
+                analysis_task = loop.run_in_executor(
+                    llm_executor,
+                    lambda: enhanced_analyzer.extract_document_data_with_reasoning(
+                        long_summary, None, None, mode
+                    )
+                )
+                
+                summary_task = loop.run_in_executor(
+                    llm_executor,
+                    lambda: enhanced_analyzer.generate_brief_summary(raw_text if raw_text else report_text, mode)
+                )
+                
+                document_analysis, brief_summary = await asyncio.gather(
+                    analysis_task, summary_task
+                )
+                
+                # Step 2d: Prepare processed_data similar to webhook processing
+                processed_data = {
+                    "document_analysis": document_analysis,
+                    "brief_summary": brief_summary,
+                    "text_for_analysis": report_text,
+                    "raw_text": report_text,
+                    "report_analyzer_result": report_result,
+                    "patient_name": (
+                        document_analysis.patient_name
+                        if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified"
+                        else None
+                    ),
+                    "claim_number": (
+                        document_analysis.claim_number
+                        if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified"
+                        else None
+                    ),
+                    "dob": (
+                        document_analysis.dob
+                        if hasattr(document_analysis, 'dob') and document_analysis.dob and str(document_analysis.dob).lower() != "not specified"
+                        else None
+                    ),
+                    "physician_id": physician_id,
+                    "filename": f"{original_filename}_pages{start_page}-{end_page}_{report_title}",
+                    "gcs_url": "",  # No file upload for split documents
+                    "blob_path": None,
+                    "file_size": len(report_text),
+                    "mime_type": "text/plain",
+                    "processing_time_ms": 0,
+                    "file_hash": None,
+                    "mode": mode,
+                    "result_data": {
+                        "text": report_text,
+                        "raw_text": raw_text if raw_text else report_text,
+                        "pages": end_page - start_page + 1,
+                        "entities": [],
+                        "tables": [],
+                        "formFields": [],
+                        "confidence": 1.0,
+                        "success": True,
+                        "gcs_file_link": "",
+                        "fileInfo": {
+                            "originalName": f"{original_filename}_pages{start_page}-{end_page}_{report_title}",
+                            "size": len(report_text),
+                            "mimeType": "text/plain",
+                            "gcsUrl": ""
+                        },
+                        "document_id": f"split_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{idx + 1}"
+                    }
+                }
+                
+                # Step 2e: Perform patient lookup
+                lookup_result = await patient_lookup.perform_patient_lookup(db_service, processed_data)
+                
+                # Step 2f: Save document
+                save_result = await webhook_service.save_document(db_service, processed_data, lookup_result)
+                
+                document_id = save_result.get("document_id")
+                status = save_result.get("status", "unknown")
+                
+                if document_id:
+                    logger.info(f"   ✅ Report {idx + 1} saved as document: {document_id}")
+                    saved_documents.append(document_id)
+                else:
+                    logger.warning(f"   ⚠️ Report {idx + 1} processing completed but not saved")
+                
+                processed_reports.append({
+                    "report_index": idx + 1,
+                    "report_title": report_title,
+                    "document_type": doc_type,
+                    "document_type_confidence": doc_confidence,
+                    "long_summary": long_summary,
+                    "short_summary": short_summary,
+                    "document_id": document_id,
+                    "status": status,
+                    "patient_name": processed_data.get("patient_name"),
+                    "claim_number": processed_data.get("claim_number"),
+                    "text_length": len(report_text),
+                    "start_page": start_page,
+                    "end_page": end_page,
+                    "page_count": end_page - start_page + 1
+                })
+                
+                logger.info(f"   ✅ Report {idx + 1} processed and saved successfully")
+                
+            except Exception as e:
+                logger.error(f"❌ Error processing report {idx + 1}: {str(e)}", exc_info=True)
+                processed_reports.append({
+                    "report_index": idx + 1,
+                    "report_title": page_group.get("report_title", "Unknown"),
+                    "start_page": page_group.get("start_page", 1),
+                    "end_page": page_group.get("end_page", 1),
+                    "error": str(e),
+                    "status": "failed"
+                })
+        
+        # Step 3: Optionally delete the failed document if all reports were saved successfully
+        if fail_doc_id and len(saved_documents) == total_reports and all(r.get("document_id") for r in processed_reports):
+            try:
+                logger.info(f"🗑️ All reports saved successfully, deleting failed document: {fail_doc_id}")
+                await db_service.delete_fail_doc_by_id(fail_doc_id, physician_id)
+                logger.info(f"✅ Failed document {fail_doc_id} deleted")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to delete failed document: {str(e)}")
+        
+        result = {
+            "status": "success",
+            "total_reports": total_reports,
+            "processed_reports": len(processed_reports),
+            "saved_documents": len(saved_documents),
+            "document_ids": saved_documents,
+            "reports": processed_reports
+        }
+        
+        logger.info(f"✅ Page-based split and process completed: {len(processed_reports)} reports processed, {len(saved_documents)} documents saved")
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Split and process document failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Split and process failed: {str(e)}")
 
 @router.get("/workflow-stats")
 async def get_workflow_stats(

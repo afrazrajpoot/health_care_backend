@@ -10,6 +10,7 @@ from services.report_analyzer import ReportAnalyzer
 from services.task_creation import TaskCreator
 from services.resoning_agent import EnhancedReportAnalyzer
 from services.patient_lookup_service import EnhancedPatientLookup
+from utils.multi_report_detector import get_multi_report_detector
 from utils.logger import logger
 from prisma import Prisma
 from concurrent.futures import ThreadPoolExecutor
@@ -118,11 +119,76 @@ class WebhookService:
 
         logger.info(f"📋 Document mode: {mode}")
         logger.info(f"📊 Text lengths - Full OCR: {len(text)} chars, Document AI summary: {len(raw_text)} chars")
-        logger.info(f"📊 Multiple reports detected: {is_multiple_reports}")
+        logger.info(f"📊 Multiple reports detected (from Document AI): {is_multiple_reports}")
         
         # Log if raw_text is missing to help debug
         if not raw_text:
             logger.warning("⚠️ raw_text is empty - Document AI summarizer output not available, will use full OCR text as fallback")
+        
+        # 🔍 Check for multiple reports using MultiReportDetector
+        # Use raw_text (Document AI summary) if available, otherwise use full OCR text
+        text_to_check = raw_text if raw_text else text
+        if text_to_check and len(text_to_check.strip()) > 50:
+            try:
+                logger.info("🔍 Running MultiReportDetector to check for multiple reports in document...")
+                detector = get_multi_report_detector()
+                loop = asyncio.get_event_loop()
+                detection_result = await loop.run_in_executor(
+                    LLM_EXECUTOR, 
+                    detector.detect_multiple_reports, 
+                    text_to_check
+                )
+                
+                # If multiple reports detected, override the flags and return early
+                if detection_result.get("is_multiple", False):
+                    is_multiple_reports = True
+                    multi_report_info = {
+                        "is_multiple": True,
+                        "confidence": detection_result.get("confidence", "unknown"),
+                        "reason": detection_result.get("reason", "Multiple reports detected in document"),
+                        "report_count_estimate": detection_result.get("report_count_estimate", 2),
+                        "reports_identified": detection_result.get("reports_identified", [])
+                    }
+                    logger.warning(f"⚠️ MULTIPLE REPORTS DETECTED by MultiReportDetector!")
+                    logger.warning(f"   Confidence: {multi_report_info.get('confidence')}")
+                    logger.warning(f"   Reason: {multi_report_info.get('reason')}")
+                    logger.warning(f"   Estimated count: {multi_report_info.get('report_count_estimate')}")
+                    logger.info("⏭️ Skipping further processing - will save to FailDocs")
+                    
+                    # Return early with minimal data - save resources by not running expensive analyzers
+                    return {
+                        "document_analysis": None,
+                        "brief_summary": "",
+                        "text_for_analysis": text,
+                        "raw_text": raw_text,
+                        "report_analyzer_result": {},
+                        "patient_name": None,
+                        "claim_number": None,
+                        "dob": None,
+                        "has_patient_name": False,
+                        "has_claim_number": False,
+                        "physician_id": data.get("physician_id"),
+                        "user_id": data.get("user_id"),
+                        "filename": data["filename"],
+                        "gcs_url": data["gcs_url"],
+                        "blob_path": data.get("blob_path"),
+                        "file_size": data.get("file_size", 0),
+                        "mime_type": data.get("mime_type", "application/octet-stream"),
+                        "processing_time_ms": data.get("processing_time_ms", 0),
+                        "file_hash": data.get("file_hash"),
+                        "result_data": result_data,
+                        "document_id": data.get("document_id", "unknown"),
+                        "mode": mode,
+                        "is_multiple_reports": is_multiple_reports,
+                        "multi_report_info": multi_report_info
+                    }
+                else:
+                    logger.info("✅ MultiReportDetector: Single report confirmed")
+                    
+            except Exception as e:
+                logger.error(f"❌ Multi-report detection failed: {str(e)}")
+                # Continue processing even if detection fails
+                logger.warning("⚠️ Continuing with document processing despite detection error")
         
         # Run ReportAnalyzer in dedicated LLM executor for better batch performance
         report_analyzer = ReportAnalyzer(mode)
@@ -1004,15 +1070,33 @@ class WebhookService:
                 multi_report_info = processed_data.get("multi_report_info", {})
                 confidence = multi_report_info.get("confidence", "unknown")
                 reason = multi_report_info.get("reason", "Multiple reports detected")
-                summary_text = processed_data.get("raw_text", "")
+                report_count = multi_report_info.get("report_count_estimate", 2)
+                reports_identified = multi_report_info.get("reports_identified", [])
+                
+                # Get the original text/summary
+                raw_text = processed_data.get("raw_text", "")
+                text_for_analysis = processed_data.get("text_for_analysis", "")
+                
+                # Create enhanced summary with detection details
+                summary_parts = []
+                if raw_text:
+                    summary_parts.append(f"DOCUMENT AI SUMMARY:\n{raw_text}")
+                summary_parts.append(f"\n\n=== MULTI-REPORT DETECTION RESULTS ===")
+                summary_parts.append(f"Confidence: {confidence}")
+                summary_parts.append(f"Reason: {reason}")
+                summary_parts.append(f"Estimated Report Count: {report_count}")
+                if reports_identified:
+                    summary_parts.append(f"Reports Identified: {', '.join(reports_identified)}")
+                summary_text = "\n".join(summary_parts)
                 
                 logger.warning(f"⚠️ MULTIPLE REPORTS DETECTED (confidence: {confidence})")
                 logger.warning(f"   Reason: {reason}")
+                logger.warning(f"   Estimated count: {report_count}")
                 logger.info("💾 Saving to FailDocs for manual review...")
                 
-                # Save to FailDocs with summary
+                # Save to FailDocs with enhanced summary
                 fail_doc_id = await db_service.save_fail_doc(
-                    reason=f"Multiple reports detected - manual review required. {reason}",
+                    reason=f"Multiple reports detected ({report_count} reports) - manual review required. {reason}",
                     db=processed_data.get("dob"),
                     claim_number=processed_data.get("claim_number"),
                     patient_name=processed_data.get("patient_name"),
@@ -1022,9 +1106,9 @@ class WebhookService:
                     file_hash=processed_data.get("file_hash"),
                     blob_path=processed_data.get("blob_path"),
                     mode=processed_data.get("mode", "wc"),
-                    document_text=processed_data.get("text_for_analysis", ""),
+                    document_text=text_for_analysis if text_for_analysis else raw_text,
                     doi=None,
-                    summary=summary_text  # Store the Document AI summarizer output
+                    summary=summary_text  # Store enhanced summary with detection details
                 )
                 
                 # Decrement parse count
@@ -1063,6 +1147,109 @@ class WebhookService:
                     processed_data["filename"],
                     processed_data  # Pass full processed_data for document text access
                 )
+            
+            # Step 5: Post-save check - Verify document doesn't contain multiple different reports
+            # This check happens AFTER document is saved to catch cases where multiple reports
+            # of the same patient (e.g., QME + PR2) are combined in one document
+            if save_result["document_id"] and save_result["status"] != "failed":
+                try:
+                    logger.info("🔍 Running post-save multi-report detection check...")
+                    
+                    # Get document text for analysis
+                    raw_text = processed_data.get("raw_text", "")
+                    text_for_analysis = processed_data.get("text_for_analysis", "")
+                    text_to_check = raw_text if raw_text else text_for_analysis
+                    
+                    if text_to_check and len(text_to_check.strip()) > 50:
+                        detector = get_multi_report_detector()
+                        loop = asyncio.get_event_loop()
+                        detection_result = await loop.run_in_executor(
+                            LLM_EXECUTOR,
+                            detector.detect_multiple_reports,
+                            text_to_check
+                        )
+                        
+                        # If multiple reports detected, move document to FailDocs
+                        if detection_result.get("is_multiple", False):
+                            confidence = detection_result.get("confidence", "unknown")
+                            reason = detection_result.get("reason", "Multiple reports detected in document")
+                            report_count = detection_result.get("report_count_estimate", 2)
+                            reports_identified = detection_result.get("reports_identified", [])
+                            
+                            logger.warning(f"⚠️ POST-SAVE CHECK: Multiple reports detected in saved document!")
+                            logger.warning(f"   Document ID: {save_result['document_id']}")
+                            logger.warning(f"   Confidence: {confidence}")
+                            logger.warning(f"   Reason: {reason}")
+                            logger.warning(f"   Estimated count: {report_count}")
+                            logger.info("🔄 Moving document from Documents to FailDocs...")
+                            
+                            # Get document details before deletion
+                            document_details = await db_service.get_document(save_result["document_id"])
+                            
+                            # Create enhanced summary with detection details
+                            summary_parts = []
+                            if raw_text:
+                                summary_parts.append(f"DOCUMENT AI SUMMARY:\n{raw_text}")
+                            summary_parts.append(f"\n\n=== POST-SAVE MULTI-REPORT DETECTION RESULTS ===")
+                            summary_parts.append(f"Confidence: {confidence}")
+                            summary_parts.append(f"Reason: {reason}")
+                            summary_parts.append(f"Estimated Report Count: {report_count}")
+                            if reports_identified:
+                                summary_parts.append(f"Reports Identified: {', '.join(reports_identified)}")
+                            summary_parts.append(f"\nNote: Document was initially saved successfully but failed post-save validation.")
+                            summary_text = "\n".join(summary_parts)
+                            
+                            # Save to FailDocs with all document information
+                            fail_doc_id = await db_service.save_fail_doc(
+                                reason=f"Multiple reports detected after save ({report_count} reports) - manual review required. {reason}",
+                                db=document_details.get("dob") if document_details else processed_data.get("dob"),
+                                claim_number=document_details.get("claimNumber") if document_details else processed_data.get("claim_number"),
+                                patient_name=document_details.get("patientName") if document_details else processed_data.get("patient_name"),
+                                physician_id=processed_data.get("physician_id"),
+                                gcs_file_link=processed_data.get("gcs_url"),
+                                file_name=processed_data.get("filename"),
+                                file_hash=processed_data.get("file_hash"),
+                                blob_path=processed_data.get("blob_path"),
+                                mode=processed_data.get("mode", "wc"),
+                                document_text=text_for_analysis if text_for_analysis else raw_text,
+                                doi=document_details.get("doi") if document_details else None,
+                                summary=summary_text
+                            )
+                            
+                            # Delete the document and all related records
+                            try:
+                                await db_service._delete_existing_document(save_result["document_id"])
+                                logger.info(f"🗑️ Deleted document {save_result['document_id']} after multi-report detection")
+                            except Exception as delete_error:
+                                logger.error(f"❌ Failed to delete document {save_result['document_id']}: {str(delete_error)}")
+                                # Continue even if deletion fails - document is already in FailDocs
+                            
+                            logger.info(f"✅ Document moved to FailDocs with ID: {fail_doc_id}")
+                            
+                            # Return failure status
+                            return {
+                                "status": "multiple_reports_detected_after_save",
+                                "document_id": fail_doc_id,
+                                "filename": processed_data["filename"],
+                                "parse_count_decremented": save_result.get("parse_count_decremented", False),
+                                "failure_reason": f"Multiple reports detected after save - document moved to FailDocs. {reason}",
+                                "original_document_id": save_result["document_id"],
+                                "multi_report_info": {
+                                    "confidence": confidence,
+                                    "reason": reason,
+                                    "report_count_estimate": report_count,
+                                    "reports_identified": reports_identified
+                                }
+                            }
+                        else:
+                            logger.info("✅ Post-save check: Single report confirmed - document is valid")
+                    else:
+                        logger.info("⚠️ Post-save check skipped: Document text too short for analysis")
+                        
+                except Exception as check_error:
+                    logger.error(f"❌ Post-save multi-report check failed: {str(check_error)}")
+                    # Don't fail the document if the check itself fails - log and continue
+                    logger.warning("⚠️ Continuing with saved document despite check error")
             
             # DEBUG: Final Redis check
             await self.debug_redis_contents("*")
