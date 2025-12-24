@@ -313,6 +313,7 @@ model Task {
   actions        String[]  @default(["Claim", "Complete"])
   sourceDocument String?
   claimNumber    String?
+  assignee       String?   @default("Unclaimed")
   
   quickNotes Json? @default("{\"status_update\": \"\", \"details\": \"\", \"one_line_note\": \"\"}")
   followUpTaskId  String?
