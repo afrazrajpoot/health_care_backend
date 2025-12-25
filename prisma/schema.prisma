@@ -93,6 +93,7 @@ model Document {
   documentSummary DocumentSummary?
   tasks           Task[]
   bodyPartSnapshots BodyPartSnapshot[]
+  patientIntakeUpdates PatientIntakeUpdate[]
   
   userId String?
   user   User?   @relation(fields: [userId], references: [id])
@@ -372,4 +373,44 @@ model CheckoutSession {
   @@index([stripeSessionId])
   @@index([physicianId])
   @@map("checkout_sessions")
+}
+
+model PatientIntakeUpdate {
+  id                      String   @id @default(cuid())
+  patientName             String
+  dob                     String?
+  claimNumber             String?
+  doi                     String?
+  
+  // Link to patient quiz submission
+  patientQuizId           String?
+  
+  // Link to document (latest document for this patient)
+  documentId              String?
+  document                Document? @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  
+  // AI-generated content (keyword-based, concise)
+  keyPatientReportedChanges String?  // AI-generated keyword-based summary (not story-like)
+  systemInterpretation     String?  // AI-generated interpretation as 2 clear sentences
+  keyFindings              String?  // AI-generated key findings in format: "Condition | Patient Name | Body Parts:X | Diagnosis:Y | Recommendations:Z | Work Status:W | MMI Status:V | WPI:U%"
+  
+  // Point-based summaries for staff dashboard
+  adlEffectPoints         String[] @default([])  // Array of ADL effect points (e.g., ["Grip strength decreased", "Walking distance limited"])
+  intakePatientPoints     String[] @default([])  // Array of intake patient points (e.g., ["Med refill requested", "New ortho consult scheduled"])
+  
+  // Extracted tags/pills for quick view
+  medRefillsRequested      String?  // "Yes" or "No"
+  newAppointments          String?  // Comma-separated list of appointment types
+  adlChanges               String?  // ADL changes summary (e.g., "Grip ↓")
+  
+  // Raw intake data (for reference)
+  intakeData              Json?     // Store the original intake form data
+  
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+  
+  @@index([patientName, dob, claimNumber])
+  @@index([documentId])
+  @@index([createdAt])
+  @@map("patient_intake_updates")
 }
