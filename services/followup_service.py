@@ -163,7 +163,8 @@ async def check_all_overdue_tasks():
                     "physicianId": suggestion["related_physician_id"],
                     "sourceDocument": suggestion["sourceDocument"],
                     "claimNumber": suggestion["claimNumber"],
-                    "followUpTaskId": overdue_task.id  # 🆕 Store the overdue task ID as followUpTaskId
+                    "followUpTaskId": overdue_task.id,  # 🆕 Store the overdue task ID as followUpTaskId
+                    "type": overdue_task.type if hasattr(overdue_task, 'type') and overdue_task.type else "internal"  # Inherit type from original task or default to internal
                     # 🆕 REMOVED quickNotes entirely - let it use the default value from schema
                 }
                

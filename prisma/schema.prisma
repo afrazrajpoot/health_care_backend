@@ -315,6 +315,7 @@ model Task {
   sourceDocument String?
   claimNumber    String?
   assignee       String?   @default("Unclaimed")
+  type           String?   @default("internal") // "internal" or "external" - internal = signed-in physician's reports, external = other physicians' reports
   
   quickNotes Json? @default("{\"status_update\": \"\", \"details\": \"\", \"one_line_note\": \"\"}")
   followUpTaskId  String?
@@ -327,6 +328,7 @@ model Task {
   updatedAt   DateTime  @updatedAt
 
   @@map("tasks")
+  @@index([type])
 }
 
 model WorkflowStats {

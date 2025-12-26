@@ -682,6 +682,13 @@ class WebhookService:
                 
                 return (best_match, best_confidence, best_details)
             
+            # Initialize variables
+            matching_user = None
+            confidence = 0.0
+            match_details = ""
+            match_source = ""
+            matched_doctor_name = consulting_doctor or ""  # Initialize with consulting_doctor
+            
             # STEP 1: Try to match consulting_doctor first (highest priority)
             logger.info(f"🔍 Looking for match with consulting doctor: '{consulting_doctor}'")
             matching_user, confidence, match_details = find_best_match(consulting_doctor, users)
@@ -741,17 +748,31 @@ class WebhookService:
                     logger.info(f"   Confidence: {confidence}")
                     logger.info(f"   User ID: {matching_user.id}")
             
-            # STEP 3: If still no match found, return 0
-            if not matching_user:
+            # STEP 3: Determine if this is an internal (signed-in physician) or external (other physician) document
+            is_internal_document = False
+            matched_physician_id = None
+            
+            if matching_user:
+                matched_physician_id = matching_user.id
+                # Check if matched doctor is the signed-in physician
+                is_internal_document = (matched_physician_id == physician_id)
+                logger.info(f"🎯 Final match: User='{matching_user.firstName} {matching_user.lastName}', Confidence={confidence}, Source='{match_source}'")
+                logger.info(f"📋 Document type: {'INTERNAL' if is_internal_document else 'EXTERNAL'} (Matched physician ID: {matched_physician_id}, Signed-in physician ID: {physician_id})")
+            else:
                 logger.warning(f"⚠️ No physician name matches found in consulting_doctor or all_doctors")
                 logger.warning(f"   Consulting doctor: '{consulting_doctor}'")
                 logger.warning(f"   All doctors: {all_doctors if 'all_doctors' in locals() else '[]'}")
                 logger.warning(f"   Available users: {[f'{u.firstName} {u.lastName}' for u in users]}")
-                return 0
+                logger.info(f"📋 Document type: EXTERNAL (No matching physician found - other physician's report)")
+                # Set matched_doctor_name to consulting_doctor or first doctor from all_doctors for context
+                if consulting_doctor:
+                    matched_doctor_name = consulting_doctor
+                elif all_doctors and len(all_doctors) > 0:
+                    matched_doctor_name = all_doctors[0]
+                else:
+                    matched_doctor_name = "Unknown Physician"
             
-            logger.info(f"🎯 Final match: User='{matching_user.firstName} {matching_user.lastName}', Confidence={confidence}, Source='{match_source}'")
-            
-            # Generate and create tasks
+            # Generate and create tasks (ALWAYS generate tasks, regardless of match)
             task_creator = TaskCreator()
             document_data = document_analysis.dict()
             document_data["filename"] = filename
@@ -774,18 +795,33 @@ class WebhookService:
             
             tasks_result = await task_creator.generate_tasks(document_data, filename, full_text, matched_doctor_name)
             
-            # Extract and combine both internal and external tasks
-            internal_tasks = tasks_result.get("internal_tasks", [])
-            external_tasks = tasks_result.get("external_tasks", [])
+            # Categorize tasks based on document type:
+            # - INTERNAL: Matched doctor is the signed-in physician → tasks go to internal_tasks
+            # - EXTERNAL: Matched doctor is different physician OR no match → tasks go to external_tasks
+            ai_internal_tasks = tasks_result.get("internal_tasks", [])
+            ai_external_tasks = tasks_result.get("external_tasks", [])
+            
+            if is_internal_document:
+                # This is the signed-in physician's own report - all tasks are internal
+                internal_tasks = ai_internal_tasks + ai_external_tasks  # Combine all as internal
+                external_tasks = []
+                logger.info(f"📋 Document is INTERNAL (signed-in physician's report) - All {len(internal_tasks)} tasks categorized as INTERNAL")
+            else:
+                # This is another physician's report - all tasks are external
+                internal_tasks = []
+                external_tasks = ai_internal_tasks + ai_external_tasks  # Combine all as external
+                logger.info(f"📋 Document is EXTERNAL (other physician's report) - All {len(external_tasks)} tasks categorized as EXTERNAL")
+            
             all_tasks = internal_tasks + external_tasks
             
-            logger.info(f"📋 Generated {len(all_tasks)} tasks ({len(internal_tasks)} internal, {len(external_tasks)} external)")
+            logger.info(f"📋 Final categorization: {len(internal_tasks)} internal task(s), {len(external_tasks)} external task(s)")
 
             # Save tasks to database
             prisma = Prisma()
             await prisma.connect()
             
-            for task in all_tasks:
+            # Process internal tasks
+            for task in internal_tasks:
                 try:
                     # Ensure task is a dict
                     if not isinstance(task, dict):
@@ -813,11 +849,52 @@ class WebhookService:
                         "sourceDocument": task.get("source_document") or filename,
                         "documentId": document_id,
                         "physicianId": physician_id,
+                        "type": "internal",  # Set type as internal
                     }
                     
                     await prisma.task.create(data=mapped_task)
                     created_tasks += 1
-                    logger.info(f"✅ Created task: {task.get('description', 'Unknown task')}")
+                    logger.info(f"✅ Created INTERNAL task: {task.get('description', 'Unknown task')}")
+                    
+                except Exception as task_err:
+                    logger.error(f"❌ Failed to create task: {task_err}")
+                    continue
+            
+            # Process external tasks
+            for task in external_tasks:
+                try:
+                    # Ensure task is a dict
+                    if not isinstance(task, dict):
+                        if hasattr(task, 'dict'):
+                            task = task.dict()
+                        elif hasattr(task, '__dict__'):
+                            task = task.__dict__
+                        elif isinstance(task, str):
+                            try:
+                                task = json.loads(task)
+                            except:
+                                logger.warning(f"⚠️ Skipping invalid task (not a dict): {task}")
+                                continue
+                        else:
+                            logger.warning(f"⚠️ Skipping invalid task type: {type(task)}")
+                            continue
+                    
+                    mapped_task = {
+                        "description": task.get("description"),
+                        "department": task.get("department"),
+                        "status": "Open",
+                        "dueDate": datetime.now(),
+                        "patient": task.get("patient", "Unknown"),
+                        "actions": task.get("actions") if isinstance(task.get("actions"), list) else [],
+                        "sourceDocument": task.get("source_document") or filename,
+                        "documentId": document_id,
+                        "physicianId": physician_id,
+                        "type": "external",  # Set type as external
+                    }
+                    
+                    await prisma.task.create(data=mapped_task)
+                    created_tasks += 1
+                    logger.info(f"✅ Created EXTERNAL task: {task.get('description', 'Unknown task')}")
                     
                 except Exception as task_err:
                     logger.error(f"❌ Failed to create task: {task_err}")
