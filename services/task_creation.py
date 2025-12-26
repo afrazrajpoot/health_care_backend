@@ -139,14 +139,14 @@ Generate when coordination with external entities is needed:
 
 **Signature Task Format:**
 ```json
-{
+{{
   "description": "Sign and return [document type] for [Patient Name]",
   "department": "Signature Required",
-  "quick_notes": {
+  "quick_notes": {{
     "details": "Document requires [signature type]. Return via [method] to [recipient]. Deadline: [date].",
     "one_line_note": "[Document type] signature needed"
-  }
-}
+  }}
+}}
 ```
 
 **Return Methods to Extract:**
@@ -236,38 +236,38 @@ Instead of skipping, create a clarification task:
 ## 📤 OUTPUT FORMAT
 
 ```json
-{
+{{
   "internal_tasks": [
-    {
+    {{
       "description": "Simple action in plain English",
       "department": "Exact department name",
       "status": "Pending",
       "due_date": "YYYY-MM-DD",
       "patient": "Exact patient name",
       "actions": ["Claim", "Complete"],
-      "source_document": "{{source_document}}",
-      "quick_notes": {
+      "source_document": "{source_document}",
+      "quick_notes": {{
         "details": "Why this matters and what to do (1-2 sentences)",
         "one_line_note": "Short dashboard summary (under 50 chars)"
-      }
-    }
+      }}
+    }}
   ],
   "external_tasks": [
-    {
+    {{
       "description": "External coordination action",
       "department": "Administrative Tasks",
       "status": "Pending",
       "due_date": "YYYY-MM-DD",
       "patient": "Exact patient name",
       "actions": ["Claim", "Complete"],
-      "source_document": "{{source_document}}",
-      "quick_notes": {
+      "source_document": "{source_document}",
+      "quick_notes": {{
         "details": "External entity and coordination details",
         "one_line_note": "External action summary"
-      }
-    }
+      }}
+    }}
   ]
-}
+}}
 ```
 
 ---
@@ -410,18 +410,50 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
                 "Provider Action Required"
             ]
             
-            # Validate internal tasks
+            # Validate internal tasks - ensure tasks are dicts
             validated_internal = []
             for task in internal_tasks:
+                # Convert to dict if it's a Pydantic model or string
+                if not isinstance(task, dict):
+                    if hasattr(task, 'dict'):
+                        task = task.dict()
+                    elif hasattr(task, '__dict__'):
+                        task = task.__dict__
+                    elif isinstance(task, str):
+                        try:
+                            task = json.loads(task)
+                        except:
+                            logger.warning(f"⚠️ Skipping invalid task (not a dict): {task}")
+                            continue
+                    else:
+                        logger.warning(f"⚠️ Skipping invalid task type: {type(task)}")
+                        continue
+                
                 if not task.get("description"):
                     continue
                 if task.get("department") not in valid_departments:
                     task["department"] = self._infer_department(task.get("description", ""), document_type)
                 validated_internal.append(task)
             
-            # Validate external tasks
+            # Validate external tasks - ensure tasks are dicts
             validated_external = []
             for task in external_tasks:
+                # Convert to dict if it's a Pydantic model or string
+                if not isinstance(task, dict):
+                    if hasattr(task, 'dict'):
+                        task = task.dict()
+                    elif hasattr(task, '__dict__'):
+                        task = task.__dict__
+                    elif isinstance(task, str):
+                        try:
+                            task = json.loads(task)
+                        except:
+                            logger.warning(f"⚠️ Skipping invalid task (not a dict): {task}")
+                            continue
+                    else:
+                        logger.warning(f"⚠️ Skipping invalid task type: {type(task)}")
+                        continue
+                
                 if not task.get("description"):
                     continue
                 if task.get("department") not in valid_departments:

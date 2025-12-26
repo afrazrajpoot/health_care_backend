@@ -772,15 +772,37 @@ class WebhookService:
             
             logger.info(f"📝 Passing {len(full_text)} characters to task generator (from {'Document AI summarizer' if processed_data.get('raw_text') else 'OCR text'})")
             
-            tasks = await task_creator.generate_tasks(document_data, filename, full_text, matched_doctor_name)
-            logger.info(f"📋 Generated {len(tasks)} tasks")
+            tasks_result = await task_creator.generate_tasks(document_data, filename, full_text, matched_doctor_name)
+            
+            # Extract and combine both internal and external tasks
+            internal_tasks = tasks_result.get("internal_tasks", [])
+            external_tasks = tasks_result.get("external_tasks", [])
+            all_tasks = internal_tasks + external_tasks
+            
+            logger.info(f"📋 Generated {len(all_tasks)} tasks ({len(internal_tasks)} internal, {len(external_tasks)} external)")
 
             # Save tasks to database
             prisma = Prisma()
             await prisma.connect()
             
-            for task in tasks:
+            for task in all_tasks:
                 try:
+                    # Ensure task is a dict
+                    if not isinstance(task, dict):
+                        if hasattr(task, 'dict'):
+                            task = task.dict()
+                        elif hasattr(task, '__dict__'):
+                            task = task.__dict__
+                        elif isinstance(task, str):
+                            try:
+                                task = json.loads(task)
+                            except:
+                                logger.warning(f"⚠️ Skipping invalid task (not a dict): {task}")
+                                continue
+                        else:
+                            logger.warning(f"⚠️ Skipping invalid task type: {type(task)}")
+                            continue
+                    
                     mapped_task = {
                         "description": task.get("description"),
                         "department": task.get("department"),
