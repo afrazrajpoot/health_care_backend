@@ -41,7 +41,7 @@ class TaskCreator:
         self.llm = AzureChatOpenAI(
             azure_endpoint=CONFIG.get("azure_openai_endpoint"),
             api_key=CONFIG.get("azure_openai_api_key"),
-            deployment_name=CONFIG.get("azure_openai_o3_model"),
+            deployment_name=CONFIG.get("azure_openai_deployment"),
             api_version=CONFIG.get("azure_openai_api_version"),
             temperature=0.1,
             timeout=90,
@@ -245,7 +245,7 @@ Instead of skipping, create a clarification task:
       "due_date": "YYYY-MM-DD",
       "patient": "Exact patient name",
       "actions": ["Claim", "Complete"],
-      "source_document": "{source_document}",
+      "source_document": "{{{{source_document}}}}",
       "quick_notes": {{
         "details": "Why this matters and what to do (1-2 sentences)",
         "one_line_note": "Short dashboard summary (under 50 chars)"
@@ -260,7 +260,7 @@ Instead of skipping, create a clarification task:
       "due_date": "YYYY-MM-DD",
       "patient": "Exact patient name",
       "actions": ["Claim", "Complete"],
-      "source_document": "{source_document}",
+      "source_document": "{{{{source_document}}}}",
       "quick_notes": {{
         "details": "External entity and coordination details",
         "one_line_note": "External action summary"
@@ -410,50 +410,18 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
                 "Provider Action Required"
             ]
             
-            # Validate internal tasks - ensure tasks are dicts
+            # Validate internal tasks
             validated_internal = []
             for task in internal_tasks:
-                # Convert to dict if it's a Pydantic model or string
-                if not isinstance(task, dict):
-                    if hasattr(task, 'dict'):
-                        task = task.dict()
-                    elif hasattr(task, '__dict__'):
-                        task = task.__dict__
-                    elif isinstance(task, str):
-                        try:
-                            task = json.loads(task)
-                        except:
-                            logger.warning(f"⚠️ Skipping invalid task (not a dict): {task}")
-                            continue
-                    else:
-                        logger.warning(f"⚠️ Skipping invalid task type: {type(task)}")
-                        continue
-                
                 if not task.get("description"):
                     continue
                 if task.get("department") not in valid_departments:
                     task["department"] = self._infer_department(task.get("description", ""), document_type)
                 validated_internal.append(task)
             
-            # Validate external tasks - ensure tasks are dicts
+            # Validate external tasks
             validated_external = []
             for task in external_tasks:
-                # Convert to dict if it's a Pydantic model or string
-                if not isinstance(task, dict):
-                    if hasattr(task, 'dict'):
-                        task = task.dict()
-                    elif hasattr(task, '__dict__'):
-                        task = task.__dict__
-                    elif isinstance(task, str):
-                        try:
-                            task = json.loads(task)
-                        except:
-                            logger.warning(f"⚠️ Skipping invalid task (not a dict): {task}")
-                            continue
-                    else:
-                        logger.warning(f"⚠️ Skipping invalid task type: {type(task)}")
-                        continue
-                
                 if not task.get("description"):
                     continue
                 if task.get("department") not in valid_departments:

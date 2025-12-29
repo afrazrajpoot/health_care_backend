@@ -85,381 +85,319 @@ class MultiReportDetector:
             else:
                 raise
     
-    SYSTEM_PROMPT = """You are an expert medical document analyst. Your PRIMARY task is to identify ALL REPORT TITLES that appear at the TOP OF EACH REPORT SECTION throughout the document.
+    SYSTEM_PROMPT = """You are an expert medical document analyst. Your task is to determine if a document contains MULTIPLE SEPARATE REPORTS or is a SINGLE REPORT that may reference other documents.
 
-## YOUR PRIMARY TASK
-1. **SCAN THE ENTIRE DOCUMENT FOR ANY REPORT TITLES**:
-   - Look for ANY report titles/headers that appear at the BEGINNING OF EACH REPORT SECTION
-   - Report titles appear at the TOP of each report section, not just at the very top of the document
-   - Scan through the entire document looking for ANY report section headers/titles
-   - Report titles can be ANY type of medical document/report, including but NOT LIMITED TO:
-     * "QUALIFIED MEDICAL EVALUATION" or "QME"
-     * "PROGRESS REPORT - PR2" or "PR-2" or "PR2"
-     * "PROGRESS REPORT - PR4" or "PR-4" or "PR4"
-     * "DOCTOR'S FIRST REPORT" or "DFR"
-     * "AGREED MEDICAL EVALUATION" or "AME"
-     * "INDEPENDENT MEDICAL EVALUATION" or "IME"
-     * "CONSULTATION REPORT" or "CONSULT"
-     * "AUTHORIZATION REQUEST" or "TREATMENT AUTHORIZATION"
-     * "DISCHARGE SUMMARY" or "DISCHARGE REPORT"
-     * "OPERATIVE REPORT" or "SURGERY REPORT"
-     * "RADIOLOGY REPORT" or "IMAGING REPORT"
-     * "PATHOLOGY REPORT" or "LAB REPORT"
-     * "PHYSICAL THERAPY REPORT" or "PT REPORT"
-     * "OCCUPATIONAL THERAPY REPORT" or "OT REPORT"
-     * "PSYCHOLOGICAL EVALUATION" or "PSYCH REPORT"
-     * "FUNCTIONAL CAPACITY EVALUATION" or "FCE"
-     * "WORKERS' COMPENSATION REPORT"
-     * "MEDICAL RECORDS REVIEW"
-     * "DEPOSITION SUMMARY"
-     * "EXPERT WITNESS REPORT"
-     * ANY OTHER TYPE OF MEDICAL REPORT OR DOCUMENT TITLE
-   - **IMPORTANT**: Do NOT limit yourself to only known report types. Identify ANY distinct report title/header that appears at the top of a report section, regardless of whether it's a common type or not.
-   
-2. **IDENTIFY EACH REPORT SECTION BY ITS TITLE**:
-   - Each report section starts with its own title/header
-   - Look for titles that appear after page breaks, section breaks, or document separators
-   - A new report title indicates a NEW REPORT SECTION
-   - Report titles are typically:
-     * In ALL CAPS or Title Case
-     * Appear at the beginning of a line or section
-     * Are followed by report content (patient info, dates, etc.)
-     * May include words like: "REPORT", "EVALUATION", "SUMMARY", "RECORD", "ASSESSMENT", "NOTE", "LETTER", etc.
-   - Example: If you see "QUALIFIED MEDICAL EVALUATION" at one point, then later see "PROGRESS REPORT - PR2", these are TWO DIFFERENT REPORTS
-   - Example: If you see "CONSULTATION REPORT" and later see "RADIOLOGY REPORT", these are TWO DIFFERENT REPORTS
-   - Example: If you see "DISCHARGE SUMMARY" and later see "OPERATIVE REPORT", these are TWO DIFFERENT REPORTS
-   
-3. **COUNT DISTINCT REPORT TITLES FOUND**:
-   - List ALL distinct report titles you find throughout the document, regardless of type
-   - Do NOT ignore report titles just because they're not in your predefined list
-   - If you find 2 or more DISTINCT report titles (of ANY type) = MULTIPLE REPORTS = INVALID DOCUMENT
-   - If you find only 1 report title = SINGLE REPORT = VALID DOCUMENT
-   
-4. **Determine confidence and report types found**
+## CRITICAL DISTINCTION: ACTUAL REPORTS vs. REFERENCES
 
-## WHAT COUNTS AS MULTIPLE REPORTS (INVALID DOCUMENT)
-**CRITICAL RULE: If the document contains MULTIPLE DISTINCT REPORT TITLES, it is INVALID and must be flagged as multiple reports.**
+**A SINGLE report often REFERENCES other reports without containing them:**
+- "I reviewed the patient's PR2 dated 01/15/2024" - This is a REFERENCE, not a separate report
+- "Based on the QME by Dr. Smith" - This is a REFERENCE
+- "The PR-2 report indicated..." - This is a REFERENCE
+- "See attached AME dated..." - This is a REFERENCE
+- "Records reviewed: PR2, QME, imaging reports" - These are REFERENCES
 
-Multiple reports means the document contains DISTINCT, SEPARATE medical documents that were combined/scanned together, identified by:
+**MULTIPLE reports means ACTUAL SEPARATE DOCUMENTS combined together:**
+- Each report has its own distinct HEADER/TITLE at the TOP of a section
+- Each report has its own patient information section
+- Each report has its own date and provider signature
+- There is a clear document boundary/separation between reports
 
-1. **MULTIPLE REPORT TITLES/HEADERS** - This is the PRIMARY indicator:
-   - Document contains ANY 2+ distinct report titles = MULTIPLE REPORTS = INVALID
-   - Examples (but NOT limited to these):
-     * "QUALIFIED MEDICAL EVALUATION" title AND "PROGRESS REPORT - PR2" title = MULTIPLE REPORTS = INVALID
-     * "QME" header AND "PR2" header = MULTIPLE REPORTS = INVALID
-     * "CONSULTATION REPORT" AND "RADIOLOGY REPORT" = MULTIPLE REPORTS = INVALID
-     * "DISCHARGE SUMMARY" AND "OPERATIVE REPORT" = MULTIPLE REPORTS = INVALID
-     * "PROGRESS REPORT - PR2" title AND "PROGRESS REPORT - PR4" title = MULTIPLE REPORTS = INVALID
-     * "QME" title AND "PR4" title = MULTIPLE REPORTS = INVALID
-     * "AME" title AND "PR2" title = MULTIPLE REPORTS = INVALID
-     * "IME" title AND any Progress Report title = MULTIPLE REPORTS = INVALID
-     * "AUTHORIZATION REQUEST" AND "PROGRESS REPORT" = MULTIPLE REPORTS = INVALID
-     * ANY combination of 2+ distinct report titles (of ANY type) = MULTIPLE REPORTS = INVALID
+## HOW TO IDENTIFY ACTUAL REPORT HEADERS vs. REFERENCES
 
-2. **Different report types for the same patient** - Still counts as multiple reports:
-   - ANY combination of distinct report types in one file = MULTIPLE REPORTS
-   - Examples include but are NOT limited to:
-     * QME (Qualified Medical Evaluation) AND PR2 (Progress Report) in one file
-     * QME AND PR4 in one file
-     * PR2 AND PR4 in one file
-     * Consultation Report AND Radiology Report in one file
-     * Discharge Summary AND Operative Report in one file
-     * Progress Report AND Authorization Request in one file
-     * QME/AME/IME AND any Progress Report (PR2, PR4) in one file
-     * QME/AME/IME AND Consultation report in one file
-     * Progress Report AND Authorization Decision in one file
-     * ANY combination of distinct report types (regardless of whether they're common or uncommon)
+**Actual Report Headers (indicate separate reports):**
+1. Appear at the TOP of a document section, not in flowing text
+2. Are standalone titles on their own line or prominently displayed
+3. Are followed by report metadata (patient name, DOB, date of evaluation, etc.)
+4. Mark the BEGINNING of a complete report structure
+5. Example: A line that just says "QUALIFIED MEDICAL EVALUATION" followed by patient info
 
-3. Other indicators (secondary):
-   - Reports from different dates that are clearly separate documents
-   - Reports for different patients (very strong indicator)
-   - Reports with different claim numbers
-   - Reports from different providers/facilities that aren't just referenced
+**References (do NOT indicate separate reports):**
+1. Appear WITHIN the narrative text of a report
+2. Are preceded by words like: "reviewed", "referenced", "attached", "per the", "based on", "see", "copy of"
+3. Are followed by words like: "dated", "by Dr.", "indicates", "shows", "revealed"
+4. Are mentioned in a "Records Reviewed" or "Documents Reviewed" section
+5. Example: "I reviewed the PR-2 dated 03/15/2024 which showed..."
 
-## WHAT IS STILL A SINGLE REPORT
-A single report may contain:
-- Multiple dates (visit history, treatment timeline within one report)
-- References to other reports or external documents
-- Multiple sections (history, exam, assessment, plan)
-- Multiple body parts or conditions discussed
-- Multiple providers mentioned (referring physician, consulting specialist)
-- Attachments or addendums that are part of the same report
+## EXAMPLES
 
-## KEY INDICATORS TO LOOK FOR
+**SINGLE REPORT (even with multiple report type mentions):**
+- A QME report that states "I reviewed the patient's PR2 reports from January and March"
+- A report with a "Records Reviewed" section listing "QME, PR2, PR4, imaging studies"
+- A consultation that references "the prior AME by Dr. Johnson dated 06/01/2024"
+- A report that mentions "as documented in the DFR from the initial injury"
 
-**PRIMARY INDICATOR - MULTIPLE REPORT TITLES (INVALID):**
-- **Multiple distinct report titles/headers** appearing at the TOP OF DIFFERENT REPORT SECTIONS throughout the document:
-  - Scan the ENTIRE document from beginning to end
-  - Look for ANY report titles that appear at the START of each report section (not just at the very top of the document)
-  - Report titles can appear anywhere in the document - at the beginning, middle, or after page breaks
-  - **DO NOT limit yourself to only known report types** - identify ANY distinct report title, regardless of type
-  - Examples of multiple reports (but NOT limited to these):
-    - "QUALIFIED MEDICAL EVALUATION" title at one section AND "PROGRESS REPORT - PR2" title at another section = INVALID
-    - "CONSULTATION REPORT" at one section AND "RADIOLOGY REPORT" at another section = INVALID
-    - "DISCHARGE SUMMARY" at one section AND "OPERATIVE REPORT" at another section = INVALID
-    - "QME" header at one section AND "PR2" header at another section = INVALID
-    - "QUALIFIED MEDICAL EVALUATION" at beginning AND "PROGRESS REPORT - PR4" later in document = INVALID
-    - "PROGRESS REPORT - PR2" at one section AND "PROGRESS REPORT - PR4" at another section = INVALID
-    - "AUTHORIZATION REQUEST" at one section AND "PROGRESS REPORT" at another section = INVALID
-    - ANY 2+ distinct report titles (of ANY type) appearing at different sections = INVALID
+**MULTIPLE REPORTS (separate documents combined):**
+- Document starts with "QUALIFIED MEDICAL EVALUATION" header, then later has a completely new "PROGRESS REPORT - PR2" header with its own patient info section
+- Two distinct report sections, each with their own title, date, and signature
+- Clear document boundaries where one report ends and another begins
 
-**Secondary indicators of MULTIPLE reports:**
-- Explicit mentions like "Report 1", "Report 2", "First document", "Second document"
-- Different patient names appearing as the primary subject
-- Different claim numbers for the same patient
-- Completely different report headers/types appearing sequentially
-- Clear document separators, page breaks, or restart of report formatting with new headers
-- Drastically different dates with complete separate report structures
+## YOUR ANALYSIS STEPS
 
-**Indicators of SINGLE report:**
-- Continuous narrative flow
-- Single patient throughout
-- Single claim number
-- Logical progression (history → exam → assessment → plan)
-- References to previous visits or reports (not the reports themselves)
-- Consistent formatting and structure
-
-## CRITICAL RULES
-1. **PRIMARY FOCUS: Check for MULTIPLE REPORT TITLES** - Scan the ENTIRE document and if you find 2+ distinct report titles appearing at different sections, flag as MULTIPLE REPORTS (INVALID)
-2. **Report Title Detection - SCAN ENTIRE DOCUMENT FOR ANY REPORT TYPE**:
-   - **IMPORTANT**: Do NOT just look at the very top of the document
-   - **IMPORTANT**: Do NOT limit yourself to only known/common report types
-   - Scan through the ENTIRE document from beginning to end
-   - Look for ANY report titles that appear at the TOP OF EACH REPORT SECTION
-   - Report titles can appear:
-     * At the beginning of the document
-     * After page breaks or section separators
-     * In the middle of the document (indicating a new report section starts)
-     * At any point where a new report section begins
-   - Report titles typically:
-     * Are in ALL CAPS or Title Case
-     * Include words like: "REPORT", "EVALUATION", "SUMMARY", "RECORD", "ASSESSMENT", "NOTE", "LETTER", "CONSULTATION", "AUTHORIZATION", etc.
-     * Appear as headers or major section titles
-   - Common report titles include: "QUALIFIED MEDICAL EVALUATION", "QME", "PROGRESS REPORT - PR2", "PR-2", "PROGRESS REPORT - PR4", "PR-4", "DOCTOR'S FIRST REPORT", "DFR", "CONSULTATION REPORT", "AME", "IME", "RADIOLOGY REPORT", "DISCHARGE SUMMARY", "OPERATIVE REPORT", etc.
-   - **BUT ALSO identify ANY other report titles you find, even if they're not in the common list**
-   - If document has ANY 2+ distinct report titles at different sections = MULTIPLE REPORTS = INVALID
-3. **Key distinction**: 
-   - Multiple sections within ONE report type (e.g., QME with history/exam/assessment sections) = SINGLE REPORT = VALID
-   - Multiple DIFFERENT report titles (e.g., "QME" title AND "PR2" title) = MULTIPLE REPORTS = INVALID
-4. A report discussing multiple visits/dates is usually STILL one report (unless they have different titles)
-5. A report referencing external documents is STILL one report (unless the other report's title is present)
-6. **Examples of MULTIPLE REPORTS (INVALID)** - ANY combination of 2+ distinct report titles:
-   - Document with "QUALIFIED MEDICAL EVALUATION" title AND "PROGRESS REPORT - PR2" title = MULTIPLE REPORTS = INVALID
-   - Document with "CONSULTATION REPORT" title AND "RADIOLOGY REPORT" title = MULTIPLE REPORTS = INVALID
-   - Document with "DISCHARGE SUMMARY" title AND "OPERATIVE REPORT" title = MULTIPLE REPORTS = INVALID
-   - Document with "QME" header AND "PR2" header = MULTIPLE REPORTS = INVALID
-   - Document with "PROGRESS REPORT - PR2" title AND "PROGRESS REPORT - PR4" title = MULTIPLE REPORTS = INVALID
-   - Document with "AUTHORIZATION REQUEST" title AND "PROGRESS REPORT" title = MULTIPLE REPORTS = INVALID
-   - Document with ANY 2+ distinct report titles (regardless of type) = MULTIPLE REPORTS = INVALID
-7. **Examples of SINGLE REPORT (VALID)**:
-   - A document with only ONE report title (even with multiple sections) = SINGLE REPORT = VALID
-   - A document with only "QUALIFIED MEDICAL EVALUATION" title (even with multiple sections) = SINGLE REPORT = VALID
-   - A document with only "PROGRESS REPORT - PR2" title (even with multiple dates/visits) = SINGLE REPORT = VALID
-   - A document with only "CONSULTATION REPORT" title = SINGLE REPORT = VALID
-   - A report that mentions another report type but doesn't include its title = SINGLE REPORT = VALID
+1. **Identify the PRIMARY report type** - What is the main report in this document?
+2. **Look for OTHER report type mentions** - Are they HEADERS or REFERENCES?
+3. **For each mention, determine:**
+   - Is it at the TOP of a section (header) or WITHIN text (reference)?
+   - Is it preceded/followed by reference indicators?
+   - Does it have its own patient info, date, and structure?
+4. **Conclusion:** Only flag as multiple reports if you find 2+ ACTUAL report headers
 
 ## OUTPUT FORMAT
-Provide your analysis in the following JSON format:
 {format_instructions}
 """
 
-    USER_PROMPT = """Analyze the following Document AI Summarizer output and identify ALL REPORT TITLES that appear at the TOP OF EACH REPORT SECTION throughout the entire document.
+    USER_PROMPT = """Analyze the following document summary and determine if it contains MULTIPLE SEPARATE REPORTS or is a SINGLE REPORT that may reference other documents.
 
-## DOCUMENT SUMMARY TO ANALYZE:
+## DOCUMENT SUMMARY:
 {summary_text}
 
-## YOUR ANALYSIS - STEP BY STEP:
+## YOUR ANALYSIS:
 
-**STEP 1: SCAN ENTIRE DOCUMENT FOR ANY REPORT SECTION TITLES**
-Carefully scan through the ENTIRE document from beginning to end, looking for ANY report titles/headers that appear at the TOP OF EACH REPORT SECTION.
+**Step 1: Identify the PRIMARY report**
+What is the main report type in this document?
 
-Report titles appear:
-- At the beginning of each report section (not just the very top of the document)
-- After page breaks or section separators
-- As major section headings that indicate a new report is starting
-- Report titles are typically in ALL CAPS or Title Case
-- Report titles often include words like: "REPORT", "EVALUATION", "SUMMARY", "RECORD", "ASSESSMENT", "NOTE", "LETTER", "CONSULTATION", "AUTHORIZATION", etc.
+**Step 2: Find all report type mentions**
+List every mention of report types (QME, PR2, PR4, AME, IME, DFR, etc.)
 
-Examples of report titles to look for (but DO NOT limit yourself to only these):
-  * "QUALIFIED MEDICAL EVALUATION" or "QME" (appears at top of QME report section)
-  * "PROGRESS REPORT - PR2" or "PR-2" or "PR2" (appears at top of PR2 report section)
-  * "PROGRESS REPORT - PR4" or "PR-4" or "PR4" (appears at top of PR4 report section)
-  * "DOCTOR'S FIRST REPORT" or "DFR" (appears at top of DFR report section)
-  * "AGREED MEDICAL EVALUATION" or "AME" (appears at top of AME report section)
-  * "INDEPENDENT MEDICAL EVALUATION" or "IME" (appears at top of IME report section)
-  * "CONSULTATION REPORT" or "CONSULT" (appears at top of consultation report section)
-  * "RADIOLOGY REPORT" or "IMAGING REPORT" (appears at top of radiology report section)
-  * "DISCHARGE SUMMARY" or "DISCHARGE REPORT" (appears at top of discharge report section)
-  * "OPERATIVE REPORT" or "SURGERY REPORT" (appears at top of operative report section)
-  * "AUTHORIZATION REQUEST" or "TREATMENT AUTHORIZATION" (appears at top of authorization section)
-  * "PHYSICAL THERAPY REPORT" or "PT REPORT" (appears at top of PT report section)
-  * "FUNCTIONAL CAPACITY EVALUATION" or "FCE" (appears at top of FCE report section)
-  * ANY OTHER TYPE OF MEDICAL REPORT OR DOCUMENT TITLE
+**Step 3: Classify each mention**
+For each mention, determine:
+- Is this an ACTUAL REPORT HEADER (standalone title at top of section)?
+- Or is this a REFERENCE (mentioned within text, preceded by "reviewed", "see", "dated", etc.)?
 
-**CRITICAL**: 
-- Look for titles that appear at the START of each report section, not just references to report types in the text.
-- Do NOT limit yourself to only known/common report types. Identify ANY distinct report title you find.
-- If you see ANY title that looks like it's the header of a new report section, include it in your analysis.
+**Step 4: Look for reference indicators**
+Check if mentions are preceded/followed by:
+- "reviewed", "referenced", "see", "per the", "based on", "copy of", "attached"
+- "dated", "by Dr.", "indicates", "shows", "was reviewed"
+- "Records Reviewed:", "Documents Reviewed:"
 
-**STEP 2: LIST ALL DISTINCT REPORT TITLES FOUND**
-Go through the document and list EVERY distinct report title you find that appears at the top of a report section, regardless of whether it's a common type or not:
-- Title 1: [e.g., "QUALIFIED MEDICAL EVALUATION" or "CONSULTATION REPORT" or "RADIOLOGY REPORT" or ANY other report title]
-- Title 2: [e.g., "PROGRESS REPORT - PR2" or "DISCHARGE SUMMARY" or ANY other report title]
-- Title 3: [if any more...]
+**Step 5: Determine if truly multiple reports**
+- If only ONE actual report header exists (others are just references) = SINGLE REPORT
+- If TWO OR MORE actual report headers exist with their own sections = MULTIPLE REPORTS
 
-**IMPORTANT**: Include ALL report titles you find, even if they're not in the common list. Do NOT skip titles just because they're unfamiliar.
+## CRITICAL RULE
+A single report that REFERENCES other reports is still a SINGLE REPORT. Only flag as multiple if there are clearly SEPARATE report sections with their own headers and structure.
 
-**STEP 3: COUNT AND DETERMINE**
-- How many DISTINCT report titles did you find? [Count]
-- If you found 2 or more distinct titles (of ANY type) = MULTIPLE REPORTS = INVALID DOCUMENT
-- If you found only 1 title = SINGLE REPORT = VALID DOCUMENT
+Provide your response in JSON format."""
 
-**STEP 4: PROVIDE EVIDENCE**
-List the exact report titles you found and where they appear in the document (e.g., "Found 'QUALIFIED MEDICAL EVALUATION' at the beginning, then found 'PROGRESS REPORT - PR2' later in the document" or "Found 'CONSULTATION REPORT' at line X, then found 'RADIOLOGY REPORT' at line Y").
+    def _is_reference_context(self, text: str, match_start: int, match_end: int) -> bool:
+        """
+        Check if a report title match appears in a reference/citation context rather than as an actual report header.
+        Returns True if this is likely a reference to another report, not an actual report section.
+        """
+        # Get surrounding context (200 chars before and after)
+        context_start = max(0, match_start - 200)
+        context_end = min(len(text), match_end + 200)
+        
+        before_context = text[context_start:match_start].upper()
+        after_context = text[match_end:context_end].upper()
+        
+        # Get the line containing the match
+        line_start = text.rfind('\n', 0, match_start) + 1
+        line_end = text.find('\n', match_end)
+        if line_end == -1:
+            line_end = len(text)
+        full_line = text[line_start:line_end].strip().upper()
+        
+        # Reference indicator words that suggest this is a mention, not a report header
+        reference_indicators_before = [
+            'REVIEWED', 'REVIEW OF', 'REVIEWING', 'SEE', 'REFER TO', 'REFERENCED',
+            'ATTACHED', 'ENCLOSED', 'PER THE', 'PER MY', 'IN THE', 'IN MY',
+            'FROM THE', 'FROM MY', 'BASED ON', 'ACCORDING TO', 'AS NOTED IN',
+            'AS STATED IN', 'AS DOCUMENTED IN', 'AS PER', 'PREVIOUS', 'PRIOR',
+            'RECEIVED', 'OBTAINED', 'REVIEWED THE', 'I REVIEWED', 'WE REVIEWED',
+            'UPON REVIEW', 'AFTER REVIEW', 'RECORDS REVIEWED', 'DOCUMENTS REVIEWED',
+            'SUBMITTED', 'PROVIDED', 'FORWARDED', 'INCLUDED', 'COPY OF',
+            'DATED', 'OF THE', 'THE PATIENT\'S', 'PATIENT\'S', 'HIS', 'HER',
+            'THEIR', 'THIS PATIENT\'S', 'MR.', 'MS.', 'MRS.', 'DR.',
+        ]
+        
+        reference_indicators_after = [
+            'DATED', 'FROM', 'BY DR', 'BY DOCTOR', 'PERFORMED BY', 'CONDUCTED BY',
+            'WAS REVIEWED', 'WERE REVIEWED', 'INDICATES', 'INDICATED', 'SHOWS',
+            'SHOWED', 'REVEALED', 'DEMONSTRATES', 'DOCUMENTED', 'NOTED',
+            'STATES', 'STATED', 'REPORTS', 'REPORTED', 'CONCLUDED', 'FINDINGS',
+        ]
+        
+        # Check for reference indicators before the match
+        for indicator in reference_indicators_before:
+            if indicator in before_context:
+                logger.debug(f"   Found reference indicator '{indicator}' before match")
+                return True
+        
+        # Check for reference indicators after the match
+        for indicator in reference_indicators_after:
+            if indicator in after_context[:100]:  # Only check first 100 chars after
+                logger.debug(f"   Found reference indicator '{indicator}' after match")
+                return True
+        
+        # Check if the line contains typical reference patterns
+        reference_line_patterns = [
+            r'REVIEWED.*(?:QME|PR-?2|PR-?4|AME|IME|DFR)',
+            r'(?:QME|PR-?2|PR-?4|AME|IME|DFR).*DATED',
+            r'(?:QME|PR-?2|PR-?4|AME|IME|DFR).*(?:BY DR|BY DOCTOR)',
+            r'(?:SEE|REFER TO|ATTACHED).*(?:QME|PR-?2|PR-?4|AME|IME|DFR)',
+            r'(?:COPY OF|THE).*(?:QME|PR-?2|PR-?4|AME|IME|DFR)',
+            r'(?:PREVIOUS|PRIOR).*(?:QME|PR-?2|PR-?4|AME|IME|DFR)',
+        ]
+        
+        for pattern in reference_line_patterns:
+            if re.search(pattern, full_line, re.IGNORECASE):
+                logger.debug(f"   Line matches reference pattern: {pattern}")
+                return True
+        
+        return False
 
-## CRITICAL RULE: If you find 2+ distinct report titles (of ANY type) that appear at the top of different report sections, this document is INVALID and must be flagged as multiple reports, even if they're for the same patient. Do NOT limit yourself to only known report types - identify ANY distinct report titles you find.
-
-Provide your determination in JSON format with:
-- is_multiple: true if 2+ distinct report section titles found (of ANY type), false if only 1 title
-- reports_identified: List of ALL report section titles you found (exact titles as they appear, including any uncommon types)
-- reason: Explain which report titles you found (including their types), where they appear, and why this is single/multiple"""
+    def _is_standalone_title(self, text: str, match_start: int, match_end: int) -> bool:
+        """
+        Check if a report title match appears as a standalone title/header.
+        A standalone title typically:
+        - Appears on its own line or nearly so
+        - Is at the beginning of a document section
+        - Is followed by report metadata (patient name, date, etc.)
+        """
+        # Get the line containing the match
+        line_start = text.rfind('\n', 0, match_start) + 1
+        line_end = text.find('\n', match_end)
+        if line_end == -1:
+            line_end = len(text)
+        
+        full_line = text[line_start:line_end].strip()
+        matched_text = text[match_start:match_end].strip()
+        
+        # Check if the match takes up most of the line (indicating a standalone title)
+        # Allow for some extra characters like colons, report numbers, etc.
+        line_length = len(full_line)
+        match_length = len(matched_text)
+        
+        if line_length > 0 and match_length / line_length >= 0.5:
+            # The match is at least 50% of the line, likely a standalone title
+            return True
+        
+        # Check if the line is short (typical for headers)
+        if line_length < 80:
+            # Short line, check if it looks like a header
+            header_indicators = [
+                r'^[\s]*(?:QUALIFIED\s+MEDICAL\s+EVALUATION|QME|AME|IME|PR-?2|PR-?4|DFR)',
+                r'^[\s]*(?:PROGRESS\s+REPORT)',
+                r'^[\s]*(?:DOCTOR\'?S?\s+FIRST\s+REPORT)',
+                r'^[\s]*(?:AGREED\s+MEDICAL\s+EVALUATION)',
+                r'^[\s]*(?:INDEPENDENT\s+MEDICAL\s+EVALUATION)',
+            ]
+            for pattern in header_indicators:
+                if re.match(pattern, full_line, re.IGNORECASE):
+                    return True
+        
+        return False
 
     def _detect_report_titles_pattern(self, text: str) -> Dict[str, Any]:
         """
-        Pattern-based detection to identify multiple report titles/headers.
-        Scans the ENTIRE document for report titles that appear at the top of each report section.
-        Returns detection result if multiple distinct titles are found.
+        Context-aware pattern-based detection to identify multiple report titles/headers.
+        Distinguishes between actual report section headers vs. references to other reports.
+        Only flags as multiple reports if there are clearly separate report sections.
         """
         text_upper = text.upper()
-        text_lines = text.split('\n')
         
-        # Report title patterns - looking for titles that appear at the top of report sections
-        report_titles_found = []
-        report_title_positions = {}  # Track where each title appears
+        # Report titles found as actual headers (not references)
+        actual_report_titles = []
+        report_title_positions = {}
         
-        # Scan ENTIRE document, not just first 20 lines
-        # Look for report titles that appear at the start of lines (indicating new report sections)
-        full_text_upper = text_upper
+        # Referenced reports (mentioned but not actual separate documents)
+        referenced_reports = []
         
-        # QME title patterns - look for titles at start of lines or after page breaks
-        qme_patterns = [
-            r'(?:^|\n)\s*QUALIFIED\s+MEDICAL\s+EVALUATION\s*(?:\(QME\)|REPORT|FOR|:)?',
-            r'(?:^|\n)\s*QME\s+(?:REPORT|EVALUATION|EXAM)',
-            r'(?:^|\n)\s*QUALIFIED\s+MEDICAL\s+EVALUATION\s+(?:REPORT|FOR)',
-        ]
-        for pattern in qme_patterns:
-            matches = re.finditer(pattern, full_text_upper, re.MULTILINE | re.IGNORECASE)
-            for match in matches:
-                if "QME" not in report_titles_found:
-                    report_titles_found.append("QME")
-                    # Get line number
-                    line_num = text_upper[:match.start()].count('\n') + 1
-                    report_title_positions["QME"] = line_num
-                break
+        logger.debug("🔍 Starting context-aware report title detection...")
         
-        # AME title patterns
-        ame_patterns = [
-            r'(?:^|\n)\s*AGREED\s+MEDICAL\s+EVALUATION\s*(?:\(AME\)|REPORT|FOR|:)?',
-            r'(?:^|\n)\s*AME\s+(?:REPORT|EVALUATION|EXAM)',
-            r'(?:^|\n)\s*AGREED\s+MEDICAL\s+EVALUATION\s+(?:REPORT|FOR)',
-        ]
-        for pattern in ame_patterns:
-            matches = re.finditer(pattern, full_text_upper, re.MULTILINE | re.IGNORECASE)
-            for match in matches:
-                if "AME" not in report_titles_found:
-                    report_titles_found.append("AME")
-                    line_num = text_upper[:match.start()].count('\n') + 1
-                    report_title_positions["AME"] = line_num
-                break
+        # Define report type patterns with their identifiers
+        report_patterns = {
+            "QME": [
+                r'QUALIFIED\s+MEDICAL\s+EVALUATION\s*(?:\(QME\)|REPORT|FOR|:)?',
+                r'QME\s+(?:REPORT|EVALUATION|EXAM)',
+            ],
+            "AME": [
+                r'AGREED\s+MEDICAL\s+EVALUATION\s*(?:\(AME\)|REPORT|FOR|:)?',
+                r'AME\s+(?:REPORT|EVALUATION|EXAM)',
+            ],
+            "IME": [
+                r'INDEPENDENT\s+MEDICAL\s+EVALUATION\s*(?:\(IME\)|REPORT|FOR|:)?',
+                r'IME\s+(?:REPORT|EVALUATION|EXAM)',
+            ],
+            "PR2": [
+                r'PROGRESS\s+REPORT\s*[-]?\s*PR\s*[-]?\s*2',
+                r'PR\s*[-]?\s*2\s+(?:PRIMARY\s+TREATING\s+PHYSICIAN\'?S\s+)?(?:PROGRESS\s+REPORT|REPORT)',
+                r'PR\s*[-]?\s*2\s*[:]?\s*PRIMARY\s+TREATING\s+PHYSICIAN',
+            ],
+            "PR4": [
+                r'PROGRESS\s+REPORT\s*[-]?\s*PR\s*[-]?\s*4',
+                r'PR\s*[-]?\s*4\s+(?:PROGRESS\s+REPORT|REPORT)',
+                r'PERMANENT\s+AND\s+STATIONARY\s+REPORT',
+            ],
+            "DFR": [
+                r'DOCTOR\'?S?\s+FIRST\s+REPORT(?:\s+OF\s+OCCUPATIONAL)?',
+                r'DFR\s+(?:REPORT|FORM)',
+            ],
+        }
         
-        # IME title patterns
-        ime_patterns = [
-            r'(?:^|\n)\s*INDEPENDENT\s+MEDICAL\s+EVALUATION\s*(?:\(IME\)|REPORT|FOR|:)?',
-            r'(?:^|\n)\s*IME\s+(?:REPORT|EVALUATION|EXAM)',
-            r'(?:^|\n)\s*INDEPENDENT\s+MEDICAL\s+EVALUATION\s+(?:REPORT|FOR)',
-        ]
-        for pattern in ime_patterns:
-            matches = re.finditer(pattern, full_text_upper, re.MULTILINE | re.IGNORECASE)
-            for match in matches:
-                if "IME" not in report_titles_found:
-                    report_titles_found.append("IME")
-                    line_num = text_upper[:match.start()].count('\n') + 1
-                    report_title_positions["IME"] = line_num
-                break
+        for report_type, patterns in report_patterns.items():
+            for pattern in patterns:
+                # Look for matches at the start of lines (potential headers)
+                full_pattern = r'(?:^|\n)\s*' + pattern
+                matches = list(re.finditer(full_pattern, text, re.MULTILINE | re.IGNORECASE))
+                
+                for match in matches:
+                    match_start = match.start()
+                    match_end = match.end()
+                    line_num = text[:match_start].count('\n') + 1
+                    
+                    logger.debug(f"   Found potential {report_type} at line {line_num}")
+                    
+                    # Check if this is a reference context or an actual report header
+                    if self._is_reference_context(text, match_start, match_end):
+                        logger.debug(f"   -> Classified as REFERENCE (not actual report)")
+                        if report_type not in referenced_reports:
+                            referenced_reports.append(report_type)
+                    elif self._is_standalone_title(text, match_start, match_end):
+                        logger.debug(f"   -> Classified as ACTUAL REPORT HEADER")
+                        if report_type not in actual_report_titles:
+                            actual_report_titles.append(report_type)
+                            report_title_positions[report_type] = line_num
+                    else:
+                        # Ambiguous - check if it appears early in the document (likely main report)
+                        # or later (likely reference)
+                        if line_num <= 30 and report_type not in actual_report_titles:
+                            # Early in document, more likely to be the main report title
+                            logger.debug(f"   -> Early in document, classified as POTENTIAL REPORT HEADER")
+                            actual_report_titles.append(report_type)
+                            report_title_positions[report_type] = line_num
+                        else:
+                            logger.debug(f"   -> Ambiguous, classified as REFERENCE")
+                            if report_type not in referenced_reports:
+                                referenced_reports.append(report_type)
+                    
+                    break  # Only process first match for each pattern
         
-        # PR2 title patterns - look for "PROGRESS REPORT" with "PR2" or "PR-2" at start of lines
-        pr2_patterns = [
-            r'(?:^|\n)\s*PROGRESS\s+REPORT\s*[-]?\s*PR\s*[-]?\s*2',
-            r'(?:^|\n)\s*PR\s*[-]?\s*2\s+(?:PRIMARY\s+TREATING\s+PHYSICIAN\'?S\s+)?(?:PROGRESS\s+REPORT|REPORT)',
-            r'(?:^|\n)\s*PR\s*[-]?\s*2\s*[:]?\s*PRIMARY\s+TREATING\s+PHYSICIAN',
-            r'(?:^|\n)\s*PROGRESS\s+REPORT.*?PR\s*[-]?\s*2',
-        ]
-        for pattern in pr2_patterns:
-            matches = re.finditer(pattern, full_text_upper, re.MULTILINE | re.IGNORECASE)
-            for match in matches:
-                if "PR2" not in report_titles_found:
-                    report_titles_found.append("PR2")
-                    line_num = text_upper[:match.start()].count('\n') + 1
-                    report_title_positions["PR2"] = line_num
-                break
+        logger.debug(f"   Actual report headers found: {actual_report_titles}")
+        logger.debug(f"   Referenced reports (not counted): {referenced_reports}")
         
-        # PR4 title patterns - look for titles at start of lines
-        pr4_patterns = [
-            r'(?:^|\n)\s*PROGRESS\s+REPORT\s*[-]?\s*PR\s*[-]?\s*4',
-            r'(?:^|\n)\s*PR\s*[-]?\s*4\s+(?:PROGRESS\s+REPORT|REPORT)',
-            r'(?:^|\n)\s*PERMANENT\s+AND\s+STATIONARY',
-            r'(?:^|\n)\s*PERMANENT\s+STATIONARY',
-            r'(?:^|\n)\s*PROGRESS\s+REPORT.*?PR\s*[-]?\s*4',
-        ]
-        for pattern in pr4_patterns:
-            matches = re.finditer(pattern, full_text_upper, re.MULTILINE | re.IGNORECASE)
-            for match in matches:
-                if "PR4" not in report_titles_found:
-                    report_titles_found.append("PR4")
-                    line_num = text_upper[:match.start()].count('\n') + 1
-                    report_title_positions["PR4"] = line_num
-                break
-        
-        # DFR title patterns - look for titles at start of lines
-        dfr_patterns = [
-            r'(?:^|\n)\s*DOCTOR[\'S]?\s+FIRST\s+REPORT',
-            r'(?:^|\n)\s*DFR\s+(?:REPORT|FORM)',
-            r'(?:^|\n)\s*DOCTOR[\'S]?\s+FIRST\s+REPORT\s+(?:OF|FOR)',
-        ]
-        for pattern in dfr_patterns:
-            matches = re.finditer(pattern, full_text_upper, re.MULTILINE | re.IGNORECASE)
-            for match in matches:
-                if "DFR" not in report_titles_found:
-                    report_titles_found.append("DFR")
-                    line_num = text_upper[:match.start()].count('\n') + 1
-                    report_title_positions["DFR"] = line_num
-                break
-        
-        # Remove duplicates while preserving order
-        unique_titles = []
-        for title in report_titles_found:
-            if title not in unique_titles:
-                unique_titles.append(title)
-        
-        # If we find 2+ distinct report titles, it's multiple reports
-        if len(unique_titles) >= 2:
-            # Build detailed reason with positions
+        # Only flag as multiple reports if we have 2+ ACTUAL report headers
+        if len(actual_report_titles) >= 2:
             position_info = []
-            for title in unique_titles:
+            for title in actual_report_titles:
                 if title in report_title_positions:
-                    position_info.append(f"{title} (found at line {report_title_positions[title]})")
+                    position_info.append(f"{title} (header at line {report_title_positions[title]})")
                 else:
                     position_info.append(title)
             
             return {
                 "is_multiple": True,
                 "confidence": "high",
-                "reason": f"Pattern detection found multiple distinct report section titles: {', '.join(position_info)}. These titles appear at the top of different report sections throughout the document.",
-                "report_count_estimate": len(unique_titles),
-                "reports_identified": unique_titles
+                "reason": f"Found {len(actual_report_titles)} distinct report section headers: {', '.join(position_info)}. These appear to be separate reports combined in one document.",
+                "report_count_estimate": len(actual_report_titles),
+                "reports_identified": actual_report_titles
             }
         
-        return None  # No clear pattern match
+        # If only references were found (no actual headers), it's a single report
+        if len(actual_report_titles) <= 1 and len(referenced_reports) > 0:
+            logger.debug(f"   Single report that references other reports: {referenced_reports}")
+        
+        return None  # No clear pattern match for multiple reports
 
     def _detect_report_types_pattern(self, text: str) -> Dict[str, Any]:
         """
