@@ -247,42 +247,45 @@ class TreatmentHistoryGenerator:
             logger.error(f"❌ Error generating treatment history with LLM: {str(e)}")
             return self._get_empty_history_template()
     
-    def _get_empty_history_template(self) -> Dict[str, List]:
-        """Return empty treatment history template"""
+    def _get_empty_history_template(self) -> Dict[str, Dict[str, List]]:
+        """Return empty treatment history template with current and archive structure"""
         return {
-            "musculoskeletal_system": [],
-            "cardiovascular_system": [],
-            "pulmonary_respiratory": [],
-            "neurological": [],
-            "gastrointestinal": [],
-            "metabolic_endocrine": [],
-            "other_systems": [],
-            "general_treatments": []
+            "musculoskeletal_system": {"current": [], "archive": []},
+            "cardiovascular_system": {"current": [], "archive": []},
+            "pulmonary_respiratory": {"current": [], "archive": []},
+            "neurological": {"current": [], "archive": []},
+            "gastrointestinal": {"current": [], "archive": []},
+            "metabolic_endocrine": {"current": [], "archive": []},
+            "other_systems": {"current": [], "archive": []},
+            "general_treatments": {"current": [], "archive": []}
         }
     
-    async def create_or_update_treatment_history(self, 
+    async def generate_treatment_history(self, 
                                                 patient_name: str,
                                                 dob: Optional[str],
                                                 claim_number: Optional[str],
                                                 physician_id: str,
                                                 current_document_id: Optional[str] = None,
                                                 current_document_analysis: Any = None,
-                                                current_document_data: Dict = None) -> Dict:
+                                                current_document_data: Dict = None,
+                                                only_current: bool = False) -> Dict:
         """
-        Main function to create or update treatment history
+        Main function to generate treatment history
         Returns the treatment history data
         """
         try:
-            logger.info(f"🔄 Creating/updating treatment history for patient: {patient_name}")
+            logger.info(f"🔄 Generating treatment history for patient: {patient_name} (only_current={only_current})")
             
-            # Get previous documents
-            previous_docs = await self.get_patient_documents(
-                patient_name=patient_name,
-                dob=dob,
-                claim_number=claim_number,
-                physician_id=physician_id,
-                exclude_document_id=current_document_id
-            )
+            # Get previous documents (skip if only_current is True)
+            previous_docs = []
+            if not only_current:
+                previous_docs = await self.get_patient_documents(
+                    patient_name=patient_name,
+                    dob=dob,
+                    claim_number=claim_number,
+                    physician_id=physician_id,
+                    exclude_document_id=current_document_id
+                )
             
             # Prepare context for LLM
             context = await self.extract_treatment_history_from_docs(
@@ -304,17 +307,9 @@ class TreatmentHistoryGenerator:
                 current_document_analysis=current_document_analysis
             )
             
-            # Save to database
-            await self.save_treatment_history(
-                patient_name=patient_name,
-                dob=dob,
-                claim_number=claim_number,
-                physician_id=physician_id,
-                history_data=treatment_history,
-                document_id=current_document_id
-            )
-            
-            logger.info(f"✅ Treatment history saved/updated for patient: {patient_name}")
+            # Return the generated history without saving to DB here
+            # (Saving is now handled by the caller, e.g., WebhookService)
+            logger.info(f"✅ Treatment history generated for patient: {patient_name}")
             return treatment_history
             
         except Exception as e:
@@ -329,7 +324,7 @@ class TreatmentHistoryGenerator:
                                    history_data: Dict,
                                    document_id: Optional[str] = None):
         """
-        Save treatment history to database
+        Save treatment history to database with archiving logic
         """
         try:
             await self.connect()
@@ -347,17 +342,30 @@ class TreatmentHistoryGenerator:
             )
             
             if existing:
+                # Merge new history with existing history
+                existing_data = existing.historyData
+                if isinstance(existing_data, str):
+                    existing_data = json.loads(existing_data)
+                
+                merged_data = self.merge_history_data(existing_data, history_data)
+                
                 # Update existing record
                 await self.prisma.treatmenthistory.update(
                     where={"id": existing.id},
                     data={
-                        "historyData": json.dumps(history_data),
+                        "historyData": json.dumps(merged_data),
                         "documentId": document_id,
                         "updatedAt": datetime.now()
                     }
                 )
-                logger.info(f"📝 Updated existing treatment history for {patient_name}")
+                logger.info(f"📝 Merged and updated treatment history for {patient_name}")
             else:
+                # For new records, wrap the LLM output in the current/archive structure
+                formatted_data = self._get_empty_history_template()
+                for system, events in history_data.items():
+                    if system in formatted_data:
+                        formatted_data[system]["current"] = events
+                
                 # Create new record
                 await self.prisma.treatmenthistory.create(
                     data={
@@ -365,7 +373,7 @@ class TreatmentHistoryGenerator:
                         "dob": dob,
                         "claimNumber": claim_number,
                         "physicianId": physician_id,
-                        "historyData": json.dumps(history_data),
+                        "historyData": json.dumps(formatted_data),
                         "documentId": document_id
                     }
                 )
@@ -374,6 +382,36 @@ class TreatmentHistoryGenerator:
         except Exception as e:
             logger.error(f"❌ Error saving treatment history to database: {str(e)}")
             raise
+
+    def merge_history_data(self, existing_data: Dict, new_data: Dict) -> Dict:
+        """
+        Merge new treatment history into existing history with archiving.
+        If a system has new events, move existing 'current' to 'archive' and set new as 'current'.
+        """
+        merged = existing_data.copy()
+        
+        for system, new_events in new_data.items():
+            if not new_events:
+                continue
+                
+            if system not in merged:
+                merged[system] = {"current": new_events, "archive": []}
+                continue
+            
+            # If the system structure is old (just a list), convert it
+            if isinstance(merged[system], list):
+                merged[system] = {"current": merged[system], "archive": []}
+            
+            # If there are new events for this system
+            if new_events:
+                # Move existing current to archive (prepend to keep chronological order if possible)
+                if merged[system]["current"]:
+                    merged[system]["archive"] = merged[system]["current"] + merged[system]["archive"]
+                
+                # Set new events as current
+                merged[system]["current"] = new_events
+                
+        return merged
     
     async def get_treatment_history(self,
                                   patient_name: str,

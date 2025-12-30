@@ -147,17 +147,17 @@ class DocumentAggregationService:
             logger.error(f"❌ Error fetching treatment history: {str(e)}")
             return self._get_empty_treatment_history_template()
 
-    def _get_empty_treatment_history_template(self) -> Dict[str, List]:
-        """Return empty treatment history template"""
+    def _get_empty_treatment_history_template(self) -> Dict[str, Dict[str, List]]:
+        """Return empty treatment history template with current and archive structure"""
         return {
-            "musculoskeletal_system": [],
-            "cardiovascular_system": [],
-            "pulmonary_respiratory": [],
-            "neurological": [],
-            "gastrointestinal": [],
-            "metabolic_endocrine": [],
-            "other_systems": [],
-            "general_treatments": []
+            "musculoskeletal_system": {"current": [], "archive": []},
+            "cardiovascular_system": {"current": [], "archive": []},
+            "pulmonary_respiratory": {"current": [], "archive": []},
+            "neurological": {"current": [], "archive": []},
+            "gastrointestinal": {"current": [], "archive": []},
+            "metabolic_endocrine": {"current": [], "archive": []},
+            "other_systems": {"current": [], "archive": []},
+            "general_treatments": {"current": [], "archive": []}
         }
 
     async def _format_aggregated_document_response(
@@ -446,25 +446,34 @@ class DocumentAggregationService:
                 "oldest_event_date": None
             }
         
-        total_events = sum(len(events) for events in treatment_history.values())
-        categories_with_events = sum(1 for events in treatment_history.values() if len(events) > 0)
-        
-        # Find most active category
+        total_events = 0
+        categories_with_events = 0
         most_active_category = None
         max_events = 0
-        for category, events in treatment_history.items():
-            if len(events) > max_events:
-                max_events = len(events)
-                most_active_category = category
-        
-        # Find latest and oldest event dates
         all_dates = []
-        for events in treatment_history.values():
-            for event in events:
-                if isinstance(event, dict) and "date" in event:
-                    parsed_date = self._parse_date_from_various_formats(event["date"])
-                    if parsed_date:
-                        all_dates.append(parsed_date)
+        
+        for category, data in treatment_history.items():
+            # Handle both old structure (list) and new structure (dict)
+            if isinstance(data, list):
+                events = data
+            elif isinstance(data, dict):
+                events = data.get("current", []) + data.get("archive", [])
+            else:
+                continue
+                
+            if len(events) > 0:
+                total_events += len(events)
+                categories_with_events += 1
+                
+                if len(events) > max_events:
+                    max_events = len(events)
+                    most_active_category = category
+                
+                for event in events:
+                    if isinstance(event, dict) and "date" in event:
+                        parsed_date = self._parse_date_from_various_formats(event["date"])
+                        if parsed_date:
+                            all_dates.append(parsed_date)
         
         latest_event_date = max(all_dates) if all_dates else None
         oldest_event_date = min(all_dates) if all_dates else None

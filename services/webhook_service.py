@@ -543,8 +543,6 @@ class WebhookService:
         logger.info(f"🔄 Creating treatment history for {lookup_result.get('patient_name_to_use')}")
         
         try:
-     
-            
             # Initialize treatment history generator
             history_generator = TreatmentHistoryGenerator()
             
@@ -581,25 +579,52 @@ class WebhookService:
                             "adlsAffected": getattr(bp, 'adls_affected', None)
                         })
             
+            # ✅ Step 3.4: Check if treatment history already exists
+            existing_history = await history_generator.get_treatment_history(
+                patient_name=lookup_result.get("patient_name_to_use"),
+                dob=getattr(document_analysis, 'dob', None) if document_analysis else None,
+                claim_number=lookup_result.get("claim_to_save"),
+                physician_id=processed_data.get("physician_id")
+            )
+            
+            # If history exists, we only generate history for the CURRENT document and then merge/archive
+            # If history doesn't exist, we generate from ALL documents
+            only_current = existing_history is not None
+            if only_current:
+                logger.info(f"🔄 Treatment history exists for {lookup_result.get('patient_name_to_use')}, generating new entries for archive/merge")
+            
             # Create treatment history
-            treatment_history = await history_generator.create_or_update_treatment_history(
+            treatment_history = await history_generator.generate_treatment_history(
                 patient_name=lookup_result.get("patient_name_to_use"),
                 dob=getattr(document_analysis, 'dob', None) if document_analysis else None,
                 claim_number=lookup_result.get("claim_to_save"),
                 physician_id=processed_data.get("physician_id"),
                 current_document_id=document_id,
                 current_document_analysis=document_analysis,
-                current_document_data=current_doc_data
+                current_document_data=current_doc_data,
+                only_current=only_current
             )
             
-            logger.info(f"✅ Treatment history created for {lookup_result.get('patient_name_to_use')}")
+            # ✅ Step 3.6: Save treatment history to database (Moved from TreatmentHistoryGenerator)
+            if treatment_history:
+                logger.info(f"💾 Saving treatment history to database for {lookup_result.get('patient_name_to_use')}")
+                await history_generator.save_treatment_history(
+                    patient_name=lookup_result.get("patient_name_to_use"),
+                    dob=getattr(document_analysis, 'dob', None) if document_analysis else None,
+                    claim_number=lookup_result.get("claim_to_save"),
+                    physician_id=processed_data.get("physician_id"),
+                    history_data=treatment_history,
+                    document_id=document_id
+                )
+            
+            logger.info(f"✅ Treatment history created and saved for {lookup_result.get('patient_name_to_use')}")
             return treatment_history
             
         except ImportError as e:
             logger.error(f"❌ TreatmentHistoryGenerator not found: {str(e)}")
             return {}
         except Exception as e:
-            logger.error(f"❌ Error creating treatment history: {str(e)}")
+            logger.error(f"❌ Error creating/saving treatment history: {str(e)}")
             # Return empty template on error
             return {
                 "musculoskeletal_system": [],
@@ -610,7 +635,14 @@ class WebhookService:
                 "metabolic_endocrine": [],
                 "other_systems": [],
                 "general_treatments": []
-        }
+            }
+        finally:
+            # ✅ Ensure database connection is closed
+            try:
+                if 'history_generator' in locals():
+                    await history_generator.disconnect()
+            except Exception as disconnect_error:
+                logger.warning(f"⚠️ Error disconnecting history generator: {disconnect_error}")
     
     async def create_tasks_if_needed(self, document_analysis, document_id: str, physician_id: str, filename: str, processed_data: dict = None) -> int:
         """Step 3: Create tasks if conditions are met"""
