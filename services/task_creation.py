@@ -21,7 +21,7 @@ class QuickNotes(BaseModel):
 
 class AITask(BaseModel):
     description: str
-    department: str = Field(..., description="Must be one of: Signature Required, Denials & Appeals, Approvals to Schedule, Scheduling Tasks, Administrative Tasks, Provider Action Required")
+    department: str = Field(..., description="Must be one of: Signature Required, Denials & Appeals, Approvals to Schedule, Scheduling Tasks, Administrative Tasks")
     status: str = "Pending"
     due_date: str
     patient: str
@@ -31,7 +31,6 @@ class AITask(BaseModel):
 
 class TaskCreationResult(BaseModel):
     internal_tasks: List[AITask] = Field(default_factory=list, description="Tasks for internal clinic operations")
-    external_tasks: List[AITask] = Field(default_factory=list, description="Tasks related to external coordination")
 
 # ------------------ TASK CREATOR ------------------
 class TaskCreator:
@@ -51,19 +50,17 @@ class TaskCreator:
     SYSTEM_PROMPT = """
 You are an expert healthcare operations AI using OpenAI O3 reasoning to create high-quality, actionable tasks from medical documents.
 
-## 🎯 CORE MISSION
-Generate TWO separate task arrays:
+Generate internal_tasks array:
 1. **internal_tasks**: Tasks for OUR clinic's workflow
-2. **external_tasks**: Tasks for external coordination/communication
 
-Generate ALL relevant tasks for BOTH categories - don't choose between them. The system will handle both types of workflows.
+Generate ALL relevant tasks for this category. The system will handle these workflows.
 
 ---
 
 ## 📋 TASK GENERATION PRINCIPLES
 
 ### **Critical Rules:**
-1. ✅ Generate tasks for BOTH internal and external actions when applicable
+1. ✅ Generate tasks for internal actions when applicable
 2. ✅ Use plain, simple English - avoid medical jargon in descriptions
 3. ✅ Create only genuinely actionable tasks
 4. ✅ Each task must be distinct - NO duplicates
@@ -80,7 +77,6 @@ Generate ALL relevant tasks for BOTH categories - don't choose between them. The
 ### **Understanding Before Creating:**
 Before generating tasks, analyze:
 - What actions does OUR clinic need to take? → internal_tasks
-- What external coordination is needed? → external_tasks
 - Are there missing/unclear items that need clarification? → Create clarification task
 - Is this task genuinely different from others, or a duplicate?
 
@@ -107,24 +103,6 @@ Generate when document requires OUR clinic to:
 
 ---
 
-## 🌐 EXTERNAL TASKS (external_tasks array)
-
-Generate when coordination with external entities is needed:
-- Obtain records from external providers
-- Confirm appointments at external facilities
-- Coordinate care transitions with outside specialists
-- Follow up on external referrals we made
-- Communicate with external adjusters/attorneys
-- Track external authorization status
-- Verify external procedures were completed
-
-**Examples:**
-- "Obtain records from ABC Orthopedics for John Smith"
-- "Confirm MRI appointment at XYZ Imaging for Maria Garcia"
-- "Follow up with external cardiologist referral for Robert Lee"
-- "Verify physical therapy completion at external facility"
-
----
 
 ## 🖊️ SIGNATURE REQUIRED TASKS
 
@@ -166,7 +144,6 @@ Generate when coordination with external entities is needed:
 | **Approvals to Schedule** | Authorization approved and needs appointment scheduling |
 | **Scheduling Tasks** | Follow-up visits, general appointment booking, procedure scheduling |
 | **Administrative Tasks** | Legal correspondence, compliance docs, QME admin, attorney letters, credentialing, external referral tracking |
-| **Provider Action Required** | Clinical findings needing physician review, treatment decisions, abnormal results, medication management |
 
 ---
 
@@ -251,21 +228,6 @@ Instead of skipping, create a clarification task:
         "one_line_note": "Short dashboard summary (under 50 chars)"
       }}
     }}
-  ],
-  "external_tasks": [
-    {{
-      "description": "External coordination action",
-      "department": "Administrative Tasks",
-      "status": "Pending",
-      "due_date": "YYYY-MM-DD",
-      "patient": "Exact patient name",
-      "actions": ["Claim", "Complete"],
-      "source_document": "{{{{source_document}}}}",
-      "quick_notes": {{
-        "details": "External entity and coordination details",
-        "one_line_note": "External action summary"
-      }}
-    }}
   ]
 }}
 ```
@@ -276,7 +238,7 @@ Instead of skipping, create a clarification task:
 
 Before generating output, verify:
 1. ✅ Did I identify ALL distinct actions in the document?
-2. ✅ Are internal vs external tasks correctly categorized?
+2. ✅ Are internal tasks correctly identified?
 3. ✅ Is each description in simple, plain English?
 4. ✅ Are there any duplicate tasks (same meaning, different words)?
 5. ✅ Did I avoid EMR upload and patient notification tasks?
@@ -309,7 +271,6 @@ MATCHED DOCTOR: {{matched_doctor_name}}
 Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
 
 1. **internal_tasks**: All tasks OUR clinic must perform
-2. **external_tasks**: All external coordination tasks
 
 **Think through step-by-step:**
 
@@ -327,12 +288,6 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
 - What signatures are needed?
 - What administrative tasks are ours?
 
-**Step 3: Identify External Actions**
-- What coordination with outside entities is needed?
-- What records must we obtain?
-- What external appointments need verification?
-- What communication with adjusters/attorneys is required?
-- What external referrals need follow-up?
 
 **Step 4: Check for Issues**
 - Is any information missing or unclear?
@@ -348,7 +303,7 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
 - Are departments correctly assigned?
 - Are due dates appropriate?
 
-**If no actionable tasks exist:** Return empty arrays for both internal_tasks and external_tasks.
+**If no actionable tasks exist:** Return empty array for internal_tasks.
 
 **If document has issues:** Create task like "Clarify missing authorization details in report"
 
@@ -361,7 +316,7 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
         ])
 
     async def generate_tasks(self, document_analysis: dict, source_document: str = "", full_text: str = "", matched_doctor_name: str = "") -> dict:
-        """Generate dual-array task output: internal_tasks and external_tasks."""
+        """Generate internal_tasks array."""
         try:
             current_date = datetime.now()
             patient_name = document_analysis.get("patient_name", "Unknown")
@@ -394,11 +349,10 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
                 try:
                     tasks_data = result.dict()
                 except Exception:
-                    tasks_data = {"internal_tasks": [], "external_tasks": []}
+                    tasks_data = {"internal_tasks": []}
 
             # Extract both arrays
             internal_tasks = tasks_data.get("internal_tasks", [])
-            external_tasks = tasks_data.get("external_tasks", [])
             
             # Validate departments
             valid_departments = [
@@ -406,8 +360,7 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
                 "Denials & Appeals", 
                 "Approvals to Schedule", 
                 "Scheduling Tasks",
-                "Administrative Tasks",
-                "Provider Action Required"
+                "Administrative Tasks"
             ]
             
             # Validate internal tasks
@@ -420,32 +373,21 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
                 validated_internal.append(task)
             
             # Validate external tasks
-            validated_external = []
-            for task in external_tasks:
-                if not task.get("description"):
-                    continue
-                if task.get("department") not in valid_departments:
-                    task["department"] = "Administrative Tasks"  # External tasks typically admin
-                validated_external.append(task)
 
             # If both arrays are empty, create fallback
-            if not validated_internal and not validated_external:
+            if not validated_internal:
                 fallback = await self._create_fallback_task(document_analysis, source_document)
                 validated_internal = fallback  # Put fallback in internal
 
             result_dict = {
-                "internal_tasks": validated_internal,
-                "external_tasks": validated_external
+                "internal_tasks": validated_internal
             }
 
-            logger.info(f"✅ Generated {len(validated_internal)} internal task(s), {len(validated_external)} external task(s)")
             if validated_internal:
                 logger.info(f"   Internal: {[t['description'] for t in validated_internal]}")
-            if validated_external:
-                logger.info(f"   External: {[t['description'] for t in validated_external]}")
 
             # Update analytics for all tasks
-            all_tasks = validated_internal + validated_external
+            all_tasks = validated_internal
             await self._update_workflow_analytics(all_tasks)
 
             return result_dict
@@ -453,7 +395,7 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
         except Exception as e:
             logger.error(f"❌ Task generation failed: {str(e)}")
             fallback = await self._create_fallback_task(document_analysis, source_document)
-            return {"internal_tasks": fallback, "external_tasks": []}
+            return {"internal_tasks": fallback}
 
     def _infer_department(self, description: str, doc_type: str) -> str:
         """Quick fallback department inference."""
@@ -470,7 +412,7 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
         if any(word in desc_lower for word in ["attorney", "legal", "qme", "obtain", "follow up"]):
             return "Administrative Tasks"
         
-        return "Provider Action Required"
+        return "Administrative Tasks"
 
     async def _create_fallback_task(self, document_analysis: dict, source_document: str) -> list[dict]:
         """Create intelligent fallback task when generation fails."""
@@ -481,16 +423,16 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
         patient = document_analysis.get("patient_name", "Unknown")
         
         fallback_task = {
-            "description": f"Review and route {doc_type}",
-            "department": "Provider Action Required",
+            "description": f"Handle {doc_type}",
+            "department": "Administrative Tasks",
             "status": "Pending",
             "due_date": due_date,
             "patient": patient,
             "actions": ["Claim", "Complete"],
             "source_document": source_document or "Unknown",
             "quick_notes": {
-                "details": f"Document requires manual review to determine appropriate actions and routing.",
-                "one_line_note": "Manual review needed"
+                "details": f"Document requires manual handling to determine appropriate actions.",
+                "one_line_note": "Manual handling needed"
             }
         }
         
@@ -506,9 +448,7 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
                 department = task.get("department", "").lower()
                 description = task.get("description", "").lower()
 
-                if "provider action" in department:
-                    await db.increment_workflow_stat("clinicalReviews")
-                elif "scheduling" in department:
+                if "scheduling" in department:
                     await db.increment_workflow_stat("schedulingTasks")
                 elif "approvals to schedule" in department:
                     await db.increment_workflow_stat("approvalsToSchedule")

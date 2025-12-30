@@ -644,240 +644,207 @@ class WebhookService:
             except Exception as disconnect_error:
                 logger.warning(f"⚠️ Error disconnecting history generator: {disconnect_error}")
     
+    def _normalize_name(self, name):
+        """
+        Advanced name normalization:
+        - Removes titles (Dr, Dr., MD, M.D, DO, D.O, Prof, etc.)
+        - Removes commas
+        - Handles "LastName, FirstName" and "FirstName LastName" formats
+        - Converts to lowercase for comparison
+        """
+        if not name:
+            return ""
+        
+        # Remove all titles and credentials (case-insensitive, with or without dots)
+        name = re.sub(r'\b(Dr\.?|M\.?D\.?|D\.?O\.?|D\.?P\.?M\.?|D\.?C\.?|N\.?P\.?|P\.?A\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?|Doctor|QME)\b', '', name, flags=re.IGNORECASE)
+        
+        # Remove all commas
+        name = name.replace(',', ' ')
+        
+        # Remove all standalone periods and extra whitespace
+        name = name.replace('.', ' ')
+        
+        # Remove extra whitespace and convert to lowercase
+        name = ' '.join(name.split()).lower()
+        
+        return name.strip()
+
+    def _extract_name_parts(self, name):
+        """
+        Extract first name and last name, ignoring middle initials/names.
+        Returns: (first_name, last_name, middle_parts)
+        """
+        if not name:
+            return ("", "", [])
+        
+        normalized = self._normalize_name(name)
+        parts = normalized.split()
+        
+        if len(parts) == 0:
+            return ("", "", [])
+        elif len(parts) == 1:
+            return (parts[0], "", [])
+        elif len(parts) == 2:
+            return (parts[0], parts[1], [])
+        else:
+            return (parts[0], parts[-1], parts[1:-1])
+
+    def _names_match(self, name1, name2, match_type="exact"):
+        """Compare two names with different matching strategies."""
+        first1, last1, middle1 = self._extract_name_parts(name1)
+        first2, last2, middle2 = self._extract_name_parts(name2)
+        
+        if first1 and last1 and first1 == first2 and last1 == last2:
+            return (True, 1.0, f"Exact match: {first1} {last1}")
+        
+        if match_type in ["partial", "fuzzy"]:
+            if first1 and first1 == first2:
+                return (True, 0.8, f"First name match: {first1}")
+            if last1 and last1 == last2:
+                return (True, 0.8, f"Last name match: {last1}")
+        
+        if first1 and last1 and first1 == last2 and last1 == first2:
+            return (True, 0.9, f"Reversed match: {first1} {last1}")
+        
+        return (False, 0.0, "No match")
+
+    def _find_best_match(self, doctor_name, users):
+        """Find the best matching user for a given doctor name."""
+        best_match = None
+        best_confidence = 0.0
+        best_details = ""
+        
+        for user in users:
+            user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
+            is_match, confidence, details = self._names_match(doctor_name, user_full_name, "exact")
+            
+            if is_match and confidence > best_confidence:
+                best_match = user
+                best_confidence = confidence
+                best_details = details
+                if confidence >= 1.0:
+                    break
+        
+        if best_confidence < 1.0:
+            for user in users:
+                user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
+                is_match, confidence, details = self._names_match(doctor_name, user_full_name, "partial")
+                
+                if is_match and confidence > best_confidence:
+                    best_match = user
+                    best_confidence = confidence
+                    best_details = details
+        
+        return (best_match, best_confidence, best_details)
+
+    async def _check_physician_author(self, document_analysis, physician_id: str, uploader_id: str = None) -> dict:
+        """
+        Check if the document author is the signed-in physician or a clinic member.
+        Returns a dict with match information.
+        """
+        try:
+            prisma = Prisma()
+            await prisma.connect()
+            
+            # 1. Find the uploader to get their clinic ID
+            # Use uploader_id if provided, otherwise fallback to physician_id
+            search_id = uploader_id if uploader_id else physician_id
+            
+            current_user = await prisma.user.find_first(where={
+                "OR": [
+                    {"id": search_id},
+                    {"physicianId": search_id}
+                ]
+            })
+            
+            clinic_id = current_user.physicianId if current_user and current_user.physicianId else physician_id
+            
+            # 2. Find all physicians in this clinic
+            users = await prisma.user.find_many(where={
+                "physicianId": clinic_id,
+                "role": "Physician"
+            })
+            
+            if current_user and not any(u.id == current_user.id for u in users):
+                users.append(current_user)
+            
+            await prisma.disconnect()
+
+            consulting_doctor = document_analysis.consulting_doctor or ""
+            all_doctors = getattr(document_analysis, 'all_doctors', []) or []
+            
+            # Try to match consulting_doctor
+            matching_user, confidence, match_details = self._find_best_match(consulting_doctor, users)
+            match_source = "consulting_doctor"
+            matched_doctor_name = consulting_doctor
+            
+            # If no match, try all_doctors
+            if not matching_user:
+                for doctor_name in all_doctors:
+                    if not doctor_name or doctor_name == consulting_doctor:
+                        continue
+                    user_match, conf, details = self._find_best_match(doctor_name, users)
+                    if user_match and conf > confidence:
+                        matching_user = user_match
+                        confidence = conf
+                        match_details = details
+                        match_source = "all_doctors"
+                        matched_doctor_name = doctor_name
+
+            result = {
+                "matching_user": matching_user,
+                "confidence": confidence,
+                "match_details": match_details,
+                "match_source": match_source,
+                "matched_doctor_name": matched_doctor_name,
+                "is_self_authored": False,
+                "is_clinic_member": False
+            }
+
+            if matching_user:
+                result["is_clinic_member"] = True
+                # Check if document author is the uploader themselves
+                # We compare with uploader_id if available, otherwise fallback to physician_id
+                compare_id = uploader_id if uploader_id else physician_id
+                if matching_user.id == compare_id:
+                    result["is_self_authored"] = True
+            
+            return result
+        except Exception as e:
+            logger.error(f"❌ Physician author check failed: {str(e)}")
+            return {"matching_user": None, "is_self_authored": False, "is_clinic_member": False}
+
     async def create_tasks_if_needed(self, document_analysis, document_id: str, physician_id: str, filename: str, processed_data: dict = None) -> int:
         """Step 3: Create tasks if conditions are met"""
         logger.info(f"🔧 Creating tasks for document {filename}")
         created_tasks = 0
         
         try:
-            # Find physician user
-            prisma = Prisma()
-            await prisma.connect()
+            # Use the refactored check - pass both physician_id (clinic) and uploader_id
+            author_info = await self._check_physician_author(
+                document_analysis, 
+                physician_id, 
+                processed_data.get("user_id") if processed_data else None
+            )
+            matching_user = author_info["matching_user"]
+            confidence = author_info["confidence"]
+            match_details = author_info["match_details"]
+            match_source = author_info["match_source"]
+            matched_doctor_name = author_info["matched_doctor_name"]
             
-            users = await prisma.user.find_many(where={
-                "OR": [
-                    {"physicianId": physician_id, "role": "Physician"},
-                    {"id": physician_id, "role": "Physician"}
-                ]
-            })
-            
-            await prisma.disconnect()
-
-            if not users:
-                logger.warning(f"⚠️ No physician user found for ID: {physician_id}")
-                return 0
-            
-            # Check if consulting doctor matches physician
-            consulting_doctor = document_analysis.consulting_doctor or ""
-            
-            def normalize_name(name):
-                """
-                Advanced name normalization:
-                - Removes titles (Dr, Dr., MD, M.D, DO, D.O, Prof, etc.)
-                - Removes commas
-                - Handles "LastName, FirstName" and "FirstName LastName" formats
-                - Converts to lowercase for comparison
-                """
-                if not name:
-                    return ""
-                
-                # Remove all titles and credentials (case-insensitive, with or without dots)
-                name = re.sub(r'\b(Dr\.?|M\.?D\.?|D\.?O\.?|D\.?P\.?M\.?|D\.?C\.?|N\.?P\.?|P\.?A\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?|Doctor|QME)\b', '', name, flags=re.IGNORECASE)
-                
-                # Remove all commas
-                name = name.replace(',', ' ')
-                
-                # Remove all standalone periods and extra whitespace
-                name = name.replace('.', ' ')
-                
-                # Remove extra whitespace and convert to lowercase
-                name = ' '.join(name.split()).lower()
-                
-                return name.strip()
-            
-            def extract_name_parts(name):
-                """
-                Extract first name and last name, ignoring middle initials/names.
-                Returns: (first_name, last_name, middle_parts)
-                
-                Examples:
-                - "Kevin B. Calhoun" → ("kevin", "calhoun", ["b"])
-                - "Kevin Calhoun" → ("kevin", "calhoun", [])
-                - "Calhoun, Kevin B." → ("kevin", "calhoun", ["b"])
-                """
-                if not name:
-                    return ("", "", [])
-                
-                normalized = normalize_name(name)
-                parts = normalized.split()
-                
-                if len(parts) == 0:
-                    return ("", "", [])
-                elif len(parts) == 1:
-                    return (parts[0], "", [])
-                elif len(parts) == 2:
-                    # Could be "FirstName LastName" or "LastName FirstName"
-                    return (parts[0], parts[1], [])
-                else:
-                    # 3+ parts: assume first is first name, last is last name, middle are middle names/initials
-                    return (parts[0], parts[-1], parts[1:-1])
-            
-            def names_match(name1, name2, match_type="exact"):
-                """
-                Compare two names with different matching strategies.
-                
-                match_type options:
-                - "exact": First and last name must match exactly
-                - "partial": Either first OR last name matches
-                - "fuzzy": First AND last name match (ignoring middle names)
-                
-                Returns: (is_match, confidence_score, match_details)
-                """
-                first1, last1, middle1 = extract_name_parts(name1)
-                first2, last2, middle2 = extract_name_parts(name2)
-                
-                # Exact match on first + last (ignoring middle)
-                if first1 and last1 and first1 == first2 and last1 == last2:
-                    return (True, 1.0, f"Exact match: {first1} {last1}")
-                
-                # Partial match: first name OR last name
-                if match_type in ["partial", "fuzzy"]:
-                    if first1 and first1 == first2:
-                        return (True, 0.8, f"First name match: {first1}")
-                    if last1 and last1 == last2:
-                        return (True, 0.8, f"Last name match: {last1}")
-                
-                # Check reversed order (LastName, FirstName vs FirstName LastName)
-                if first1 and last1 and first1 == last2 and last1 == first2:
-                    return (True, 0.9, f"Reversed match: {first1} {last1}")
-                
-                return (False, 0.0, "No match")
-            
-            def find_best_match(doctor_name, users):
-                """
-                Find the best matching user for a given doctor name.
-                Returns: (matching_user, confidence, match_details) or (None, 0, "")
-                """
-                best_match = None
-                best_confidence = 0.0
-                best_details = ""
-                
-                for user in users:
-                    user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
-                    
-                    # Try exact match first
-                    is_match, confidence, details = names_match(doctor_name, user_full_name, "exact")
-                    
-                    if is_match and confidence > best_confidence:
-                        best_match = user
-                        best_confidence = confidence
-                        best_details = details
-                        
-                        # If we found a perfect match, we can stop
-                        if confidence >= 1.0:
-                            break
-                
-                # If no exact match, try partial matching
-                if best_confidence < 1.0:
-                    for user in users:
-                        user_full_name = f"{user.firstName or ''} {user.lastName or ''}".strip()
-                        is_match, confidence, details = names_match(doctor_name, user_full_name, "partial")
-                        
-                        if is_match and confidence > best_confidence:
-                            best_match = user
-                            best_confidence = confidence
-                            best_details = details
-                
-                return (best_match, best_confidence, best_details)
-            
-            # Initialize variables
-            matching_user = None
-            confidence = 0.0
-            match_details = ""
-            match_source = ""
-            matched_doctor_name = consulting_doctor or ""  # Initialize with consulting_doctor
-            
-            # STEP 1: Try to match consulting_doctor first (highest priority)
-            logger.info(f"🔍 Looking for match with consulting doctor: '{consulting_doctor}'")
-            matching_user, confidence, match_details = find_best_match(consulting_doctor, users)
-            match_source = "consulting_doctor"
-            
-            if matching_user:
-                user_full_name = f"{matching_user.firstName or ''} {matching_user.lastName or ''}".strip()
-                logger.info(f"✅ Physician name MATCH found in CONSULTING DOCTOR!")
-                logger.info(f"   User: '{user_full_name}'")
-                logger.info(f"   Consulting Doctor: '{consulting_doctor}'")
-                logger.info(f"   Match Details: {match_details}")
-                logger.info(f"   Confidence: {confidence}")
-                logger.info(f"   User ID: {matching_user.id}")
-            
-            # STEP 2: If no match in consulting_doctor, try all_doctors list
-            if not matching_user:
-                logger.info(f"⚠️ No match found in consulting_doctor, checking all_doctors list...")
-                
-                # Get all_doctors list from document_analysis
-                all_doctors = []
-                if hasattr(document_analysis, 'all_doctors') and document_analysis.all_doctors:
-                    all_doctors = document_analysis.all_doctors
-                    logger.info(f"📋 Found {len(all_doctors)} doctors in all_doctors: {all_doctors}")
-                else:
-                    logger.info(f"📋 No all_doctors list found in document_analysis")
-                
-                # Try to match each doctor in all_doctors list
-                best_overall_match = None
-                best_overall_confidence = 0.0
-                best_overall_details = ""
-                matched_doctor_name = None
-                
-                for doctor_name in all_doctors:
-                    if not doctor_name or doctor_name == consulting_doctor:
-                        continue
-                    
-                    logger.info(f"🔍 Trying doctor from all_doctors: '{doctor_name}'")
-                    user_match, conf, details = find_best_match(doctor_name, users)
-                    
-                    if user_match and conf > best_overall_confidence:
-                        best_overall_match = user_match
-                        best_overall_confidence = conf
-                        best_overall_details = details
-                        matched_doctor_name = doctor_name
-                
-                if best_overall_match:
-                    matching_user = best_overall_match
-                    confidence = best_overall_confidence
-                    match_details = best_overall_details
-                    match_source = "all_doctors"
-                    
-                    user_full_name = f"{matching_user.firstName or ''} {matching_user.lastName or ''}".strip()
-                    logger.info(f"✅ Physician name MATCH found in ALL_DOCTORS!")
-                    logger.info(f"   User: '{user_full_name}'")
-                    logger.info(f"   Doctor from all_doctors: '{matched_doctor_name}'")
-                    logger.info(f"   Match Details: {match_details}")
-                    logger.info(f"   Confidence: {confidence}")
-                    logger.info(f"   User ID: {matching_user.id}")
-            
-            # STEP 3: Determine if this is an internal (signed-in physician) or external (other physician) document
             is_internal_document = False
-            matched_physician_id = None
             
-            if matching_user:
-                matched_physician_id = matching_user.id
-                # Check if matched doctor is the signed-in physician
-                is_internal_document = (matched_physician_id == physician_id)
+            if author_info["is_self_authored"]:
+                logger.warning(f"⚠️ Document author is the signed-in physician themselves. Marking as fail.")
+                return -1
+            
+            if author_info["is_clinic_member"]:
+                is_internal_document = True
                 logger.info(f"🎯 Final match: User='{matching_user.firstName} {matching_user.lastName}', Confidence={confidence}, Source='{match_source}'")
-                logger.info(f"📋 Document type: {'INTERNAL' if is_internal_document else 'EXTERNAL'} (Matched physician ID: {matched_physician_id}, Signed-in physician ID: {physician_id})")
+                logger.info(f"📋 Document type: INTERNAL (Clinic member matched: {matching_user.id})")
             else:
-                logger.warning(f"⚠️ No physician name matches found in consulting_doctor or all_doctors")
-                logger.warning(f"   Consulting doctor: '{consulting_doctor}'")
-                logger.warning(f"   All doctors: {all_doctors if 'all_doctors' in locals() else '[]'}")
-                logger.warning(f"   Available users: {[f'{u.firstName} {u.lastName}' for u in users]}")
-                logger.info(f"📋 Document type: EXTERNAL (No matching physician found - other physician's report)")
-                # Set matched_doctor_name to consulting_doctor or first doctor from all_doctors for context
-                if consulting_doctor:
-                    matched_doctor_name = consulting_doctor
-                elif all_doctors and len(all_doctors) > 0:
-                    matched_doctor_name = all_doctors[0]
-                else:
+                logger.info(f"📋 Document type: EXTERNAL (No clinic member matched)")
+                if not matched_doctor_name:
                     matched_doctor_name = "Unknown Physician"
             
             # Generate and create tasks (ALWAYS generate tasks, regardless of match)
@@ -903,26 +870,15 @@ class WebhookService:
             
             tasks_result = await task_creator.generate_tasks(document_data, filename, full_text, matched_doctor_name)
             
-            # Categorize tasks based on document type:
-            # - INTERNAL: Matched doctor is the signed-in physician → tasks go to internal_tasks
-            # - EXTERNAL: Matched doctor is different physician OR no match → tasks go to external_tasks
-            ai_internal_tasks = tasks_result.get("internal_tasks", [])
-            ai_external_tasks = tasks_result.get("external_tasks", [])
+            # Extract tasks
+            internal_tasks = tasks_result.get("internal_tasks", [])
             
-            if is_internal_document:
-                # This is the signed-in physician's own report - all tasks are internal
-                internal_tasks = ai_internal_tasks + ai_external_tasks  # Combine all as internal
-                external_tasks = []
-                logger.info(f"📋 Document is INTERNAL (signed-in physician's report) - All {len(internal_tasks)} tasks categorized as INTERNAL")
-            else:
-                # This is another physician's report - all tasks are external
-                internal_tasks = []
-                external_tasks = ai_internal_tasks + ai_external_tasks  # Combine all as external
-                logger.info(f"📋 Document is EXTERNAL (other physician's report) - All {len(external_tasks)} tasks categorized as EXTERNAL")
-            
-            all_tasks = internal_tasks + external_tasks
-            
-            logger.info(f"📋 Final categorization: {len(internal_tasks)} internal task(s), {len(external_tasks)} external task(s)")
+            if not is_internal_document:
+                logger.info(f"📋 Document is EXTERNAL (other physician's report) - Skipping task creation as per requirements")
+                return 0
+
+            logger.info(f"📋 Document is INTERNAL (signed-in physician's report) - Processing {len(internal_tasks)} tasks")
+            all_tasks = internal_tasks
 
             # Save tasks to database
             prisma = Prisma()
@@ -968,45 +924,6 @@ class WebhookService:
                     logger.error(f"❌ Failed to create task: {task_err}")
                     continue
             
-            # Process external tasks
-            for task in external_tasks:
-                try:
-                    # Ensure task is a dict
-                    if not isinstance(task, dict):
-                        if hasattr(task, 'dict'):
-                            task = task.dict()
-                        elif hasattr(task, '__dict__'):
-                            task = task.__dict__
-                        elif isinstance(task, str):
-                            try:
-                                task = json.loads(task)
-                            except:
-                                logger.warning(f"⚠️ Skipping invalid task (not a dict): {task}")
-                                continue
-                        else:
-                            logger.warning(f"⚠️ Skipping invalid task type: {type(task)}")
-                            continue
-                    
-                    mapped_task = {
-                        "description": task.get("description"),
-                        "department": task.get("department"),
-                        "status": "Open",
-                        "dueDate": datetime.now(),
-                        "patient": task.get("patient", "Unknown"),
-                        "actions": task.get("actions") if isinstance(task.get("actions"), list) else [],
-                        "sourceDocument": task.get("source_document") or filename,
-                        "documentId": document_id,
-                        "physicianId": physician_id,
-                        "type": "external",  # Set type as external
-                    }
-                    
-                    await prisma.task.create(data=mapped_task)
-                    created_tasks += 1
-                    logger.info(f"✅ Created EXTERNAL task: {task.get('description', 'Unknown task')}")
-                    
-                except Exception as task_err:
-                    logger.error(f"❌ Failed to create task: {task_err}")
-                    continue
 
             await prisma.disconnect()
             logger.info(f"✅ {created_tasks} tasks created successfully")
@@ -1273,6 +1190,50 @@ class WebhookService:
             # Step 1: Process document data
             processed_data = await self.process_document_data(data)
             
+            # Step 1.2: Check if author is the signed-in physician themselves
+            # Requirement: If physician is author in parsed document itself, document is fail
+            author_info = await self._check_physician_author(
+                processed_data["document_analysis"], 
+                processed_data["physician_id"],
+                processed_data.get("user_id")
+            )
+            
+            if author_info["is_self_authored"]:
+                logger.warning(f"⚠️ SELF-AUTHORED DOCUMENT DETECTED: Physician is the author of their own report.")
+                logger.info("💾 Saving to FailDocs as per requirements...")
+                
+                # Get the original text/summary
+                raw_text = processed_data.get("raw_text", "")
+                text_for_analysis = processed_data.get("text_for_analysis", "")
+                
+                # Save to FailDocs
+                fail_doc_id = await db_service.save_fail_doc(
+                    reason=f"Self-authored document detected - physician cannot upload their own reports as new documents. Author matched: {author_info.get('matched_doctor_name')}",
+                    db=processed_data.get("dob"),
+                    claim_number=processed_data.get("claim_number"),
+                    patient_name=processed_data.get("patient_name"),
+                    physician_id=processed_data.get("physician_id"),
+                    gcs_file_link=processed_data.get("gcs_url"),
+                    file_name=processed_data.get("filename"),
+                    file_hash=processed_data.get("file_hash"),
+                    blob_path=processed_data.get("blob_path"),
+                    mode=processed_data.get("mode", "wc"),
+                    document_text=text_for_analysis if text_for_analysis else raw_text,
+                    doi=None,
+                    summary=f"Self-authored document detected.\nMatched Doctor: {author_info.get('matched_doctor_name')}\nMatch Source: {author_info.get('match_source')}"
+                )
+                
+                # Decrement parse count
+                parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
+                
+                return {
+                    "status": "self_authored_document_fail",
+                    "document_id": fail_doc_id,
+                    "filename": processed_data.get("filename"),
+                    "parse_count_decremented": parse_decremented,
+                    "failure_reason": "Self-authored document detected - physician is the author of this report."
+                }
+            
             # Step 1.5: Check for multiple reports - if detected, save to FailDocs
             if processed_data.get("is_multiple_reports", False):
                 multi_report_info = processed_data.get("multi_report_info", {})
@@ -1367,6 +1328,13 @@ class WebhookService:
                     processed_data["filename"],
                     processed_data  # Pass full processed_data for document text access
                 )
+                
+                if tasks_created == -1:
+                    # This should ideally be caught by Step 1.2, but as a safety measure:
+                    logger.warning(f"⚠️ Task creation returned -1 (self-authored).")
+                    # We already saved the document, so we might need to move it to FailDocs here too
+                    # but Step 1.2 should have caught it.
+                    pass
             
             # Step 5: Post-save check - Verify document doesn't contain multiple different reports
             # This check happens AFTER document is saved to catch cases where multiple reports
