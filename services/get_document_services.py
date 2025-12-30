@@ -2,6 +2,7 @@ import traceback
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
 from fastapi import HTTPException
+import json
 
 from services.database_service import get_database_service
 from utils.logger import logger
@@ -69,9 +70,18 @@ class DocumentAggregationService:
                 tasks_dict[doc_id] = []
             tasks_dict[doc_id].append(task)
 
+        # 🆕 Fetch treatment history for the patient
+        treatment_history = await self._get_treatment_history(
+            patient_name=patient_name,
+            dob=dob,
+            claim_number=claim_number,
+            physician_id=physician_id
+        )
+
         response = await self._format_aggregated_document_response(
             all_documents_data=document_data,
-            tasks_dict=tasks_dict
+            tasks_dict=tasks_dict,
+            treatment_history=treatment_history  # Pass treatment history to formatter
         )
         
         # 🆕 Use merged patient details from database service
@@ -98,10 +108,63 @@ class DocumentAggregationService:
                 logger.warning(f"⚠️ Failed to parse {field_name}: {date_str}")
                 return None
 
+    async def _get_treatment_history(self,
+                                   patient_name: str,
+                                   dob: str,
+                                   claim_number: Optional[str],
+                                   physician_id: Optional[str]) -> Dict[str, Any]:
+        """
+        Fetch treatment history for the patient
+        """
+        try:
+            logger.info(f"🔄 Fetching treatment history for patient: {patient_name}")
+            
+            # Import TreatmentHistoryGenerator locally to avoid circular imports
+            from services.treatment_history_generator import TreatmentHistoryGenerator
+            
+            history_generator = TreatmentHistoryGenerator()
+            
+            # Get treatment history from database
+            history_data = await history_generator.get_treatment_history(
+                patient_name=patient_name,
+                dob=dob,
+                claim_number=claim_number,
+                physician_id=physician_id
+            )
+            
+            if history_data:
+                logger.info(f"✅ Found treatment history with {sum(len(v) for v in history_data.values())} events")
+                return history_data
+            else:
+                logger.info(f"📝 No treatment history found for {patient_name}, creating empty template")
+                # Return empty template structure
+                return self._get_empty_treatment_history_template()
+                
+        except ImportError as e:
+            logger.warning(f"⚠️ TreatmentHistoryGenerator not available: {str(e)}")
+            return self._get_empty_treatment_history_template()
+        except Exception as e:
+            logger.error(f"❌ Error fetching treatment history: {str(e)}")
+            return self._get_empty_treatment_history_template()
+
+    def _get_empty_treatment_history_template(self) -> Dict[str, List]:
+        """Return empty treatment history template"""
+        return {
+            "musculoskeletal_system": [],
+            "cardiovascular_system": [],
+            "pulmonary_respiratory": [],
+            "neurological": [],
+            "gastrointestinal": [],
+            "metabolic_endocrine": [],
+            "other_systems": [],
+            "general_treatments": []
+        }
+
     async def _format_aggregated_document_response(
         self,
         all_documents_data: Dict[str, Any],
-        tasks_dict: Optional[Dict[str, Any]] = None
+        tasks_dict: Optional[Dict[str, Any]] = None,
+        treatment_history: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Format the aggregated document response from all documents."""
         documents = all_documents_data["documents"]
@@ -125,11 +188,13 @@ class DocumentAggregationService:
         document_summary_by_document = {}
         adl_by_document = {}
         summary_snapshot_by_document = {}
+        report_date_by_document = {}  # Store report dates for each document
 
         for doc in sorted_documents:
             doc_id = doc["id"]
             created_at = self._format_date_field(doc.get("createdAt"))
             report_date = self._format_date_field(doc.get("reportDate"))
+            report_date_by_document[doc_id] = report_date  # Store for filtering treatment history
 
             # Group body_part_snapshots by document
             body_part_snapshots = doc.get("bodyPartSnapshots", [])
@@ -250,6 +315,16 @@ class DocumentAggregationService:
             document_tasks = tasks_dict.get(doc_id, []) if tasks_dict else []
             task_quick_notes = [task.get("quickNotes", {}) for task in document_tasks]
             
+            # 🆕 Get document-specific treatment history (events up to this document's date)
+            document_report_date = report_date_by_document.get(doc_id)
+            document_specific_history = self._filter_treatment_history_by_date(
+                treatment_history, 
+                document_report_date
+            ) if treatment_history else self._get_empty_treatment_history_template()
+            
+            # 🆕 Calculate document-specific treatment history summary
+            doc_history_summary = self._format_treatment_history_summary(document_specific_history)
+            
             base_doc.update({
                 "body_part_snapshots": body_part_by_document.get(doc_id, []),
                 "whats_new": whats_new_by_document.get(doc_id, []),  # Original structure as is
@@ -259,7 +334,9 @@ class DocumentAggregationService:
                 "summary_snapshot": summary_snapshot_by_document.get(doc_id),
                 "task_quick_notes": task_quick_notes,  # New field: list of quickNotes per task for this document
                 "document_index": latest_docs.index(latest_doc) + 1,
-                "is_latest": doc_id == latest_docs[0]["id"]
+                "is_latest": doc_id == latest_docs[0]["id"],
+                "treatment_history": document_specific_history,  # 🆕 Document-specific treatment history
+                "treatment_history_summary": doc_history_summary  # 🆕 Document-specific summary
             })
             per_document_responses.append(base_doc)
 
@@ -267,7 +344,7 @@ class DocumentAggregationService:
         total_body_parts = sum(len(snapshots) for snapshots in body_part_by_document.values())
         unique_total = len(unique_doc_ids)
 
-        # Wrap in response structure
+        # Wrap in response structure - REMOVED separate treatment_history fields
         return {
             "patient_name": all_documents_data["patient_name"],
             "total_documents": unique_total,
@@ -275,6 +352,134 @@ class DocumentAggregationService:
             "patient_quiz": None,
             "is_multiple_documents": unique_total > 1,
             "total_body_parts": total_body_parts
+        }
+
+    def _filter_treatment_history_by_date(self, 
+                                        treatment_history: Dict[str, List[Dict]], 
+                                        cutoff_date: Optional[str]) -> Dict[str, List[Dict]]:
+        """
+        Filter treatment history to include only events up to a specific date.
+        Returns a copy of treatment history with events filtered by date.
+        """
+        if not treatment_history or not cutoff_date:
+            return self._get_empty_treatment_history_template()
+        
+        try:
+            # Parse cutoff date
+            cutoff_datetime = self._parse_date_from_various_formats(cutoff_date)
+            if not cutoff_datetime:
+                return treatment_history.copy()
+            
+            filtered_history = {}
+            
+            for category, events in treatment_history.items():
+                filtered_events = []
+                for event in events:
+                    if isinstance(event, dict) and "date" in event:
+                        event_date = self._parse_date_from_various_formats(event["date"])
+                        if event_date and event_date <= cutoff_datetime:
+                            filtered_events.append(event.copy())
+                    else:
+                        # Keep events without dates
+                        filtered_events.append(event.copy())
+                filtered_history[category] = filtered_events
+            
+            return filtered_history
+            
+        except Exception as e:
+            logger.error(f"❌ Error filtering treatment history by date: {str(e)}")
+            return treatment_history.copy()
+
+    def _parse_date_from_various_formats(self, date_str: str) -> Optional[datetime]:
+        """
+        Parse date string from various formats used in treatment history.
+        Supports formats like: "03/10/2025", "03/2025", "2025", "Q2 2023"
+        """
+        if not date_str:
+            return None
+        
+        date_str = str(date_str).strip()
+        
+        # Try common date formats
+        date_formats = [
+            "%m/%d/%Y",    # 03/10/2025
+            "%d/%m/%Y",    # 10/03/2025
+            "%Y-%m-%d",    # 2025-03-10
+            "%m/%Y",       # 03/2025
+            "%Y",          # 2025
+            "%B %Y",       # March 2025
+            "%b %Y",       # Mar 2025
+        ]
+        
+        for fmt in date_formats:
+            try:
+                return datetime.strptime(date_str, fmt)
+            except ValueError:
+                continue
+        
+        # Try to parse quarter format (Q2 2023)
+        if date_str.startswith("Q"):
+            try:
+                parts = date_str.split()
+                if len(parts) == 2 and parts[0].startswith("Q"):
+                    quarter = int(parts[0][1:])
+                    year = int(parts[1])
+                    # Convert quarter to approximate month (middle of quarter)
+                    month = (quarter - 1) * 3 + 2  # February, May, August, November
+                    return datetime(year, month, 15)
+            except (ValueError, IndexError):
+                pass
+        
+        logger.warning(f"⚠️ Could not parse date: {date_str}")
+        return None
+
+    def _format_treatment_history_summary(self, treatment_history: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Create summary statistics for treatment history
+        """
+        if not treatment_history:
+            return {
+                "total_events": 0,
+                "categories_with_events": 0,
+                "most_active_category": None,
+                "latest_event_date": None,
+                "oldest_event_date": None
+            }
+        
+        total_events = sum(len(events) for events in treatment_history.values())
+        categories_with_events = sum(1 for events in treatment_history.values() if len(events) > 0)
+        
+        # Find most active category
+        most_active_category = None
+        max_events = 0
+        for category, events in treatment_history.items():
+            if len(events) > max_events:
+                max_events = len(events)
+                most_active_category = category
+        
+        # Find latest and oldest event dates
+        all_dates = []
+        for events in treatment_history.values():
+            for event in events:
+                if isinstance(event, dict) and "date" in event:
+                    parsed_date = self._parse_date_from_various_formats(event["date"])
+                    if parsed_date:
+                        all_dates.append(parsed_date)
+        
+        latest_event_date = max(all_dates) if all_dates else None
+        oldest_event_date = min(all_dates) if all_dates else None
+        
+        # Convert dates back to string format for response
+        latest_str = latest_event_date.strftime("%m/%d/%Y") if latest_event_date else None
+        oldest_str = oldest_event_date.strftime("%m/%d/%Y") if oldest_event_date else None
+        
+        return {
+            "total_events": total_events,
+            "categories_with_events": categories_with_events,
+            "most_active_category": most_active_category,
+            "most_active_category_count": max_events if most_active_category else 0,
+            "latest_event_date": latest_str,
+            "oldest_event_date": oldest_str
         }
         
     def _parse_report_date(self, doc: Dict[str, Any]) -> datetime:
