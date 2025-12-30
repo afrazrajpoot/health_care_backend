@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 import asyncio
 import re
 import json
-
+from .treatment_history_generator import TreatmentHistoryGenerator
 # Dedicated thread pool for LLM operations (shared across all WebhookService instances)
 LLM_EXECUTOR = ThreadPoolExecutor(max_workers=10)
 
@@ -535,7 +535,83 @@ class WebhookService:
         
         return lookup_data
 
+    async def create_treatment_history(self, 
+                                    processed_data: dict, 
+                                    lookup_result: dict,
+                                    document_id: str = None) -> dict:
+        """Step 3.5: Create or update treatment history"""
+        logger.info(f"🔄 Creating treatment history for {lookup_result.get('patient_name_to_use')}")
+        
+        try:
      
+            
+            # Initialize treatment history generator
+            history_generator = TreatmentHistoryGenerator()
+            
+            # Get document analysis
+            document_analysis = processed_data.get("document_analysis")
+            
+            # Prepare current document data for history generator
+            current_doc_data = {
+                "short_summary": processed_data.get("brief_summary", ""),
+                "long_summary": processed_data.get("text_for_analysis", ""),
+                "createdAt": datetime.now().isoformat(),
+                "briefSummary": processed_data.get("brief_summary", ""),
+                "whatsNew": json.dumps({
+                    "long_summary": processed_data.get("text_for_analysis", ""),
+                    "short_summary": processed_data.get("brief_summary", "")
+                }) if processed_data.get("text_for_analysis") else None
+            }
+            
+            # Add body part snapshots if available
+            if hasattr(document_analysis, 'body_parts_analysis') and document_analysis.body_parts_analysis:
+                current_doc_data["bodyPartSnapshots"] = []
+                for bp in document_analysis.body_parts_analysis:
+                    if hasattr(bp, 'dict'):
+                        current_doc_data["bodyPartSnapshots"].append(bp.dict())
+                    else:
+                        current_doc_data["bodyPartSnapshots"].append({
+                            "bodyPart": getattr(bp, 'body_part', None),
+                            "condition": getattr(bp, 'condition', None),
+                            "dx": getattr(bp, 'diagnosis', None),
+                            "keyConcern": getattr(bp, 'key_concern', None),
+                            "nextStep": getattr(bp, 'extracted_recommendation', None),
+                            "clinicalSummary": getattr(bp, 'clinical_summary', None),
+                            "treatmentApproach": getattr(bp, 'treatment_plan', None),
+                            "adlsAffected": getattr(bp, 'adls_affected', None)
+                        })
+            
+            # Create treatment history
+            treatment_history = await history_generator.create_or_update_treatment_history(
+                patient_name=lookup_result.get("patient_name_to_use"),
+                dob=getattr(document_analysis, 'dob', None) if document_analysis else None,
+                claim_number=lookup_result.get("claim_to_save"),
+                physician_id=processed_data.get("physician_id"),
+                current_document_id=document_id,
+                current_document_analysis=document_analysis,
+                current_document_data=current_doc_data
+            )
+            
+            logger.info(f"✅ Treatment history created for {lookup_result.get('patient_name_to_use')}")
+            return treatment_history
+            
+        except ImportError as e:
+            logger.error(f"❌ TreatmentHistoryGenerator not found: {str(e)}")
+            return {}
+        except Exception as e:
+            logger.error(f"❌ Error creating treatment history: {str(e)}")
+            # Return empty template on error
+            return {
+                "musculoskeletal_system": [],
+                "cardiovascular_system": [],
+                "pulmonary_respiratory": [],
+                "neurological": [],
+                "gastrointestinal": [],
+                "metabolic_endocrine": [],
+                "other_systems": [],
+                "general_treatments": []
+        }
+    
     async def create_tasks_if_needed(self, document_analysis, document_id: str, physician_id: str, filename: str, processed_data: dict = None) -> int:
         """Step 3: Create tasks if conditions are met"""
         logger.info(f"🔧 Creating tasks for document {filename}")
@@ -1154,6 +1230,7 @@ class WebhookService:
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
         Clean webhook processing pipeline WITHOUT duplicate prevention
+        Includes treatment history creation
         """
         try:
             # Test Redis connection first
@@ -1236,6 +1313,18 @@ class WebhookService:
             # Step 3: Save document (ALL documents are saved - no duplicate blocking)
             save_result = await self.save_document(db_service, processed_data, lookup_result)
             
+            # Step 3.5: Create treatment history (ONLY for successfully saved documents)
+            treatment_history = {}
+            if save_result["document_id"] and save_result["status"] != "failed":
+                treatment_history = await self.create_treatment_history(
+                    processed_data=processed_data,
+                    lookup_result=lookup_result,
+                    document_id=save_result["document_id"]
+                )
+                logger.info(f"✅ Treatment history created with {sum(len(v) for v in treatment_history.values())} total events across {len(treatment_history)} categories")
+            else:
+                logger.info("⚠️ Skipping treatment history creation - document not saved or failed")
+            
             # Step 4: Create tasks if document was saved successfully
             tasks_created = 0
             if save_result["document_id"]:
@@ -1315,10 +1404,20 @@ class WebhookService:
                                 summary=summary_text
                             )
                             
-                            # Delete the document and all related records
+                            # Delete the document and all related records including treatment history
                             try:
+                                # First, delete the treatment history if it exists
+                                if treatment_history:
+                                    history_generator = TreatmentHistoryGenerator()
+                                    await history_generator.connect()
+                                    await history_generator.prisma.treatmenthistory.delete_many(
+                                        where={"documentId": save_result["document_id"]}
+                                    )
+                                    await history_generator.disconnect()
+                                
+                                # Delete the document
                                 await db_service._delete_existing_document(save_result["document_id"])
-                                logger.info(f"🗑️ Deleted document {save_result['document_id']} after multi-report detection")
+                                logger.info(f"🗑️ Deleted document {save_result['document_id']} and related treatment history after multi-report detection")
                             except Exception as delete_error:
                                 logger.error(f"❌ Failed to delete document {save_result['document_id']}: {str(delete_error)}")
                                 # Continue even if deletion fails - document is already in FailDocs
@@ -1353,12 +1452,15 @@ class WebhookService:
             # DEBUG: Final Redis check
             await self.debug_redis_contents("*")
             
-            # Prepare final response
+            # Prepare final response - INCLUDE TREATMENT HISTORY INFORMATION
             result = {
                 "status": save_result["status"],
                 "document_id": save_result["document_id"],
                 "filename": processed_data["filename"],
                 "tasks_created": tasks_created,
+                "treatment_history_created": len(treatment_history) > 0,
+                "treatment_history_event_count": sum(len(v) for v in treatment_history.values()) if treatment_history else 0,
+                "treatment_history_categories": list(treatment_history.keys()) if treatment_history else [],
                 "mode": processed_data["mode"],
                 "parse_count_decremented": save_result["parse_count_decremented"],
                 "cache_success": save_result.get("cache_success", False)
@@ -1367,13 +1469,24 @@ class WebhookService:
             if lookup_result["pending_reason"]:
                 result["pending_reason"] = lookup_result["pending_reason"]
             
+            # Add sample treatment history preview (first event from each category)
+            if treatment_history:
+                result["treatment_history_preview"] = {}
+                for category, events in treatment_history.items():
+                    if events and len(events) > 0:
+                        result["treatment_history_preview"][category] = {
+                            "count": len(events),
+                            "latest_event": events[0] if len(events) > 0 else None,
+                            "oldest_event": events[-1] if len(events) > 0 else None
+                        }
+            
             logger.info(f"✅ Webhook processing completed: {result}")
             return result
             
         except Exception as e:
             logger.error(f"❌ Webhook processing failed: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
-
+    
     async def handle_webhook_with_retry(self, data: dict, db_service, max_retries: int = 1) -> dict:
         """
         Wrapper that retries handle_webhook once on failure.

@@ -341,6 +341,21 @@ CREATE TABLE "patient_intake_updates" (
     CONSTRAINT "patient_intake_updates_pkey" PRIMARY KEY ("id")
 );
 
+-- CreateTable
+CREATE TABLE "treatment_histories" (
+    "id" TEXT NOT NULL,
+    "patientName" TEXT NOT NULL,
+    "dob" TEXT,
+    "claimNumber" TEXT,
+    "physicianId" TEXT,
+    "historyData" JSONB NOT NULL,
+    "documentId" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "treatment_histories_pkey" PRIMARY KEY ("id")
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "users_email_key" ON "users"("email");
 
@@ -404,6 +419,15 @@ CREATE INDEX "patient_intake_updates_documentId_idx" ON "patient_intake_updates"
 -- CreateIndex
 CREATE INDEX "patient_intake_updates_createdAt_idx" ON "patient_intake_updates"("createdAt");
 
+-- CreateIndex
+CREATE INDEX "treatment_histories_patientName_dob_claimNumber_idx" ON "treatment_histories"("patientName", "dob", "claimNumber");
+
+-- CreateIndex
+CREATE INDEX "treatment_histories_physicianId_idx" ON "treatment_histories"("physicianId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "treatment_histories_patientName_dob_claimNumber_physicianId_key" ON "treatment_histories"("patientName", "dob", "claimNumber", "physicianId");
+
 -- AddForeignKey
 ALTER TABLE "accounts" ADD CONSTRAINT "accounts_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
@@ -430,3 +454,6 @@ ALTER TABLE "tasks" ADD CONSTRAINT "tasks_documentId_fkey" FOREIGN KEY ("documen
 
 -- AddForeignKey
 ALTER TABLE "patient_intake_updates" ADD CONSTRAINT "patient_intake_updates_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "documents"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "treatment_histories" ADD CONSTRAINT "treatment_histories_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "documents"("id") ON DELETE CASCADE ON UPDATE CASCADE;

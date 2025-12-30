@@ -94,6 +94,7 @@ model Document {
   tasks           Task[]
   bodyPartSnapshots BodyPartSnapshot[]
   patientIntakeUpdates PatientIntakeUpdate[]
+  treatmentHistories TreatmentHistory[]  // ← ADDED THIS LINE: Reverse relation to TreatmentHistory
   
   userId String?
   user   User?   @relation(fields: [userId], references: [id])
@@ -415,4 +416,23 @@ model PatientIntakeUpdate {
   @@index([documentId])
   @@index([createdAt])
   @@map("patient_intake_updates")
+}
+
+model TreatmentHistory {
+  id          String   @id @default(cuid())
+  patientName String
+  dob         String?
+  claimNumber String?
+  physicianId String?
+  historyData Json     // Stores the structured treatment history
+  documentId  String?  // Reference to the latest document that contributed
+  document    Document? @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@unique([patientName, dob, claimNumber, physicianId])
+  @@map("treatment_histories")
+  @@index([patientName, dob, claimNumber])
+  @@index([physicianId])
 }

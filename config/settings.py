@@ -34,8 +34,12 @@ class Settings:
         if self.credentials_path:
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.credentials_path
 
-# Create singleton config
-CONFIG: Dict[str, Any] = Settings().__dict__
+# Create singleton settings instance
+settings = Settings()
+
+# Create singleton config dict for backward compatibility and other services
+CONFIG: Dict[str, Any] = settings.__dict__
 
 # Ensure upload directory exists
-os.makedirs(CONFIG["upload_dir"], exist_ok=True)
+if settings.upload_dir:
+    os.makedirs(settings.upload_dir, exist_ok=True)
