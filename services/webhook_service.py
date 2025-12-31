@@ -36,6 +36,69 @@ class WebhookService:
         self.redis_client = redis_client
         self.patient_lookup = EnhancedPatientLookup(redis_client=redis_client)
     
+    def _generate_document_filename(self, patient_name: str, document_type: str, report_date, original_filename: str) -> str:
+        """
+        Generate a structured filename in format: patientName_typeOfReport_dateOfReport.ext
+        
+        Args:
+            patient_name: Patient's name
+            document_type: Type of document/report
+            report_date: Report date (datetime object or string)
+            original_filename: Original filename to extract extension from
+            
+        Returns:
+            Formatted filename string
+        """
+        import os
+        
+        # Get file extension from original filename
+        _, ext = os.path.splitext(original_filename)
+        if not ext:
+            ext = ".pdf"  # Default extension
+        
+        # Sanitize patient name (remove special characters, replace spaces with underscores)
+        sanitized_patient = "Unknown"
+        if patient_name and str(patient_name).lower() not in ["not specified", "unknown", "none", ""]:
+            # Remove special characters and normalize
+            sanitized_patient = re.sub(r'[^\w\s-]', '', str(patient_name))
+            sanitized_patient = re.sub(r'\s+', '_', sanitized_patient.strip())
+            sanitized_patient = sanitized_patient[:50]  # Limit length
+        
+        # Sanitize document type
+        sanitized_type = "Document"
+        if document_type and str(document_type).lower() not in ["not specified", "unknown", "none", ""]:
+            sanitized_type = re.sub(r'[^\w\s-]', '', str(document_type))
+            sanitized_type = re.sub(r'\s+', '_', sanitized_type.strip())
+            sanitized_type = sanitized_type[:30]  # Limit length
+        
+        # Format report date
+        date_str = "NoDate"
+        if report_date:
+            try:
+                if isinstance(report_date, datetime):
+                    date_str = report_date.strftime("%Y-%m-%d")
+                elif isinstance(report_date, str) and report_date.lower() not in ["not specified", "unknown", "none", ""]:
+                    # Try to parse and reformat the date string
+                    for fmt in ["%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y", "%m/%d/%y", "%d-%m-%Y", "%d/%m/%Y"]:
+                        try:
+                            parsed_date = datetime.strptime(report_date.strip(), fmt)
+                            date_str = parsed_date.strftime("%Y-%m-%d")
+                            break
+                        except ValueError:
+                            continue
+                    else:
+                        # If parsing fails, use sanitized original string
+                        date_str = re.sub(r'[^\w-]', '-', str(report_date).strip())[:10]
+            except Exception as e:
+                logger.warning(f"⚠️ Could not format report date: {e}")
+                date_str = "NoDate"
+        
+        # Construct the new filename
+        new_filename = f"{sanitized_patient}_{sanitized_type}_{date_str}{ext}"
+        logger.info(f"📝 Generated filename: {new_filename} (original: {original_filename})")
+        
+        return new_filename
+    
     async def verify_redis_connection(self):
         """Verify Redis connection is working"""
         if not self.redis_client:
@@ -1245,10 +1308,20 @@ class WebhookService:
             "summary": " | ".join(document_analysis.summary_points) if hasattr(document_analysis, 'summary_points') and document_analysis.summary_points else processed_data["brief_summary"]
         }
         
+        # Generate structured filename: patientName_typeOfReport_dateOfReport
+        original_filename = processed_data["filename"]
+        document_type = document_analysis.document_type if hasattr(document_analysis, 'document_type') else "Document"
+        structured_filename = self._generate_document_filename(
+            patient_name=lookup_result["patient_name_to_use"],
+            document_type=document_type,
+            report_date=rd,
+            original_filename=original_filename
+        )
+        
         # Save document to database with all required parameters
         document_id = await db_service.save_document_analysis(
             extraction_result=extraction_result,
-            file_name=processed_data["filename"],
+            file_name=structured_filename,  # New structured filename
             file_size=processed_data["file_size"],
             mime_type=processed_data["mime_type"],
             processing_time_ms=processed_data["processing_time_ms"],
@@ -1269,6 +1342,7 @@ class WebhookService:
             whats_new=whats_new,
             adl_data=adl_data,
             document_summary=document_summary,
+            original_name=original_filename,  # Store original filename
             ai_summarizer_text=processed_data.get("raw_text")
         )
         
