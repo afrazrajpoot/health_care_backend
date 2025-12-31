@@ -86,6 +86,7 @@ model Document {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   ur_denial_reason String?
+  aiSummarizerText String?
 
   // Relations
   summarySnapshot SummarySnapshot?
@@ -277,7 +278,7 @@ model FailDocs {
   fileName     String?
   gcsFileLink  String?
   dob          String?
-  summary      String?  // Stores Document AI summarizer output for manual review
+  aiSummarizerText      String?  // Stores Document AI summarizer output for manual review
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

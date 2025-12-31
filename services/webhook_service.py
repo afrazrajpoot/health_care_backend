@@ -1097,8 +1097,10 @@ class WebhookService:
                 mode=processed_data.get("mode"),
                 # ✅ SAVE THE PARSED TEXT AND SUMMARY
                 document_text=full_document_text,
-                doi=document_analysis.doi if hasattr(document_analysis, 'doi') else None
+                doi=document_analysis.doi if hasattr(document_analysis, 'doi') else None,
+                ai_summarizer_text=brief_summary
             )
+
             
             # ✅ Decrement parse count even for failed documents since they consumed resources
             parse_decremented = await db_service.decrement_parse_count(processed_data["physician_id"])
@@ -1266,7 +1268,8 @@ class WebhookService:
             summary_snapshots=summary_snapshots,
             whats_new=whats_new,
             adl_data=adl_data,
-            document_summary=document_summary
+            document_summary=document_summary,
+            ai_summarizer_text=processed_data.get("raw_text")
         )
         
         # SAVE TO REDIS CACHE (only for successful documents, not for fail documents)
@@ -1348,7 +1351,7 @@ class WebhookService:
                     mode=processed_data.get("mode", "wc"),
                     document_text=text_for_analysis if text_for_analysis else raw_text,
                     doi=None,
-                    summary=f"No author detected in document.\nShort Summary: {short_summary[:200] if short_summary else 'N/A'}..."
+                    ai_summarizer_text=f"No author detected in document.\nShort Summary: {short_summary[:200] if short_summary else 'N/A'}..."
                 )
                 
                 parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
@@ -1383,7 +1386,7 @@ class WebhookService:
                     mode=processed_data.get("mode", "wc"),
                     document_text=text_for_analysis if text_for_analysis else raw_text,
                     doi=None,
-                    summary=f"Internal document detected.\nAuthor: {author_name}\nSource: {author_info.get('author_source', 'N/A')}"
+                    ai_summarizer_text=f"Internal document detected.\nShort Summary: {short_summary[:200] if short_summary else 'N/A'}..."
                 )
                 
                 parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
@@ -1446,7 +1449,7 @@ class WebhookService:
                     mode=processed_data.get("mode", "wc"),
                     document_text=text_for_analysis if text_for_analysis else raw_text,
                     doi=None,
-                    summary=summary_text  # Store enhanced summary with detection details
+                    ai_summarizer_text=summary_text  # Store enhanced summary with detection details
                 )
                 
                 # Decrement parse count
@@ -1570,7 +1573,7 @@ class WebhookService:
                                 mode=processed_data.get("mode", "wc"),
                                 document_text=text_for_analysis if text_for_analysis else raw_text,
                                 doi=document_details.get("doi") if document_details else None,
-                                summary=summary_text
+                                ai_summarizer_text=summary_text
                             )
                             
                             # Delete the document and all related records including treatment history
@@ -1715,7 +1718,8 @@ class WebhookService:
                 blob_path=data.get("blob_path"),
                 mode=mode,
                 document_text=document_text,
-                doi=None
+                doi=None,
+                ai_summarizer_text=result_data.get("raw_text", "")  # Try to get raw_text (summary) from result
             )
             
             # Decrement parse count for failed documents too

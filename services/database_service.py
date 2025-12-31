@@ -201,7 +201,7 @@ class DatabaseService:
             file_hash: Optional[str] = None,
             blob_path: Optional[str] = None,
             mode : Optional[str] = None,
-            summary: Optional[str] = None
+            ai_summarizer_text: Optional[str] = None
         ) -> str:
             """Save a failed document record to the FailDocs table."""
             try:
@@ -228,8 +228,8 @@ class DatabaseService:
                     data["fileHash"] = file_hash
                 if blob_path is not None:
                     data["blobPath"] = blob_path
-                if summary is not None:
-                    data["summary"] = summary
+                if ai_summarizer_text is not None:
+                    data["aiSummarizerText"] = ai_summarizer_text
                 # if mode is not None:
                 #     data["mode"] = mode
                 
@@ -996,7 +996,8 @@ class DatabaseService:
             file_hash: Optional[str] = None,
             mode: Optional[str] = None,
             ur_denial_reason: Optional[str] = None,
-            original_name: Optional[str] = None
+            original_name: Optional[str] = None,
+            ai_summarizer_text: Optional[str] = None
         ) -> str:
             """
             Save document analysis results to the database.
@@ -1037,7 +1038,9 @@ class DatabaseService:
                     "fileName": file_name,
                     "originalName": original_name,
                     "mode": mode,
+                    "mode": mode,
                     "ur_denial_reason": ur_denial_reason,
+                    "aiSummarizerText": ai_summarizer_text,
                     **({"fileHash": file_hash} if file_hash else {}),
                 }
 
