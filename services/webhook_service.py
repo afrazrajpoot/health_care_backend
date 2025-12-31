@@ -737,117 +737,233 @@ class WebhookService:
         
         return (best_match, best_confidence, best_details)
 
-    async def _check_physician_author(self, document_analysis, physician_id: str, uploader_id: str = None) -> dict:
+    def _extract_author_from_short_summary(self, short_summary: str) -> str:
         """
-        Check if the document author is the signed-in physician or a clinic member.
-        Returns a dict with match information.
+        Extract author from short summary.
+        Format: "Report Title | Author Name | Date | ..."
+        After the title, if there's a valid human name, that's the author.
+        """
+        if not short_summary:
+            return None
+        
+        try:
+            parts = short_summary.split("|")
+            if len(parts) >= 2:
+                # Second part after title should be author name
+                potential_author = parts[1].strip()
+                
+                # Validate it looks like a human name (not a date, not body parts, etc.)
+                # A valid name should have at least 2 words and not contain common non-name patterns
+                non_name_patterns = [
+                    r'^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$',  # Date pattern
+                    r'^(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d',  # Month date
+                    r'^body\s*parts?:',  # Body parts label
+                    r'^findings?:',  # Findings label
+                    r'^(lumbar|cervical|thoracic|spine|knee|shoulder|hip|ankle|wrist|elbow)',  # Body part names
+                    r'^\d+$',  # Just numbers
+                ]
+                
+                is_valid_name = True
+                potential_author_lower = potential_author.lower()
+                
+                for pattern in non_name_patterns:
+                    if re.search(pattern, potential_author_lower, re.IGNORECASE):
+                        is_valid_name = False
+                        break
+                
+                # Check if it has at least first and last name (2+ words)
+                name_parts = potential_author.split()
+                if len(name_parts) < 2:
+                    is_valid_name = False
+                
+                if is_valid_name and potential_author:
+                    logger.info(f"✅ Found author in short summary: {potential_author}")
+                    return potential_author
+            
+            return None
+        except Exception as e:
+            logger.error(f"❌ Error extracting author from short summary: {e}")
+            return None
+
+    def _extract_author_from_long_summary(self, long_summary: str) -> str:
+        """
+        Extract author from long summary using pattern matching.
+        Looks for keys like: Author, Signature, Signed by, Electronic signature, etc.
+        """
+        if not long_summary:
+            return None
+        
+        try:
+            # Patterns to look for author information
+            author_patterns = [
+                r'(?:Electronically\s+Signed\s+By|Electronic\s+Signature|Signed\s+By|Signature|Author|Authored\s+By|Prepared\s+By|Report\s+By|Physician|Radiologist|Doctor)[:\s]*([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD))?)',
+                r'-\s*Signature[:\s]*(?:Electronically\s+Signed\s+By[:\s]*)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD))?)',
+                r'(?:Dictated\s+By|Transcribed\s+By)[:\s]*([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD))?)',
+            ]
+            
+            for pattern in author_patterns:
+                match = re.search(pattern, long_summary, re.IGNORECASE | re.MULTILINE)
+                if match:
+                    author = match.group(1).strip()
+                    # Clean up the author name
+                    author = re.sub(r'\s+', ' ', author)
+                    if author and len(author) > 3:
+                        logger.info(f"✅ Found author in long summary: {author}")
+                        return author
+            
+            return None
+        except Exception as e:
+            logger.error(f"❌ Error extracting author from long summary: {e}")
+            return None
+
+    async def _check_physician_author(self, physician_id: str, short_summary: str = None, long_summary: str = None) -> dict:
+        """
+        Check if the document author matches a clinic member.
+        
+        Logic:
+        1. First check short summary for author (format: "Title | Author | Date | ...")
+        2. If not found, check long summary for author keys (Signature, Signed by, etc.)
+        3. If no author found anywhere, return error for manual verification
+        4. If author found, check if they are from our clinic:
+           - If author IS from our clinic = INTERNAL document (cannot parse, fail)
+           - If author is NOT from our clinic = EXTERNAL document (can create tasks)
+        
+        Returns a dict with:
+        - author_found: bool - whether an author was found in the document
+        - author_name: str - the extracted author name
+        - is_clinic_member: bool - whether author is from our clinic
+        - is_external_document: bool - True if document is external (can process)
+        - is_internal_document: bool - True if document is internal (cannot process)
+        - matching_user: User object if matched
+        - error_message: str - error if no author found
         """
         try:
+            logger.info(f"🔍 Checking for document author...")
+            
+            # Step 1: Try to extract author from short summary first
+            author_name = self._extract_author_from_short_summary(short_summary)
+            author_source = "short_summary" if author_name else None
+            
+            # Step 2: If not found in short summary, try long summary
+            if not author_name:
+                logger.info("📝 Author not found in short summary, checking long summary...")
+                author_name = self._extract_author_from_long_summary(long_summary)
+                author_source = "long_summary" if author_name else None
+            
+            # Step 3: If no author found anywhere, return error
+            if not author_name:
+                logger.warning("⚠️ No author found in document summaries")
+                return {
+                    "author_found": False,
+                    "author_name": None,
+                    "is_clinic_member": False,
+                    "is_external_document": False,
+                    "is_internal_document": False,
+                    "matching_user": None,
+                    "error_message": "There is no author in the report, manual verification required",
+                    "author_source": None
+                }
+            
+            logger.info(f"✅ Author found: {author_name} (from {author_source})")
+            
+            # Step 4: Check if author is from our clinic
             prisma = Prisma()
             await prisma.connect()
             
-            # 1. Find the uploader to get their clinic ID
-            # Use uploader_id if provided, otherwise fallback to physician_id
-            search_id = uploader_id if uploader_id else physician_id
-            
-            current_user = await prisma.user.find_first(where={
-                "OR": [
-                    {"id": search_id},
-                    {"physicianId": search_id}
-                ]
+            # Find all physicians in this clinic
+            users = await prisma.user.find_many(where={
+                "physicianId": physician_id,
+                "role": "Physician"
             })
             
-            clinic_id = current_user.physicianId if current_user and current_user.physicianId else physician_id
-            
-            # 2. Find all physicians in this clinic
-            users = await prisma.user.find_many(where={
-                "physicianId": clinic_id,
-                "role": "Physician"
+            # Also check if physician_id itself is a user
+            current_user = await prisma.user.find_first(where={
+                "OR": [
+                    {"id": physician_id},
+                    {"physicianId": physician_id}
+                ]
             })
             
             if current_user and not any(u.id == current_user.id for u in users):
                 users.append(current_user)
             
             await prisma.disconnect()
-
-            consulting_doctor = document_analysis.consulting_doctor or ""
-            all_doctors = getattr(document_analysis, 'all_doctors', []) or []
             
-            # Try to match consulting_doctor
-            matching_user, confidence, match_details = self._find_best_match(consulting_doctor, users)
-            match_source = "consulting_doctor"
-            matched_doctor_name = consulting_doctor
+            # Try to match author with clinic members
+            matching_user, confidence, match_details = self._find_best_match(author_name, users)
             
-            # If no match, try all_doctors
-            if not matching_user:
-                for doctor_name in all_doctors:
-                    if not doctor_name or doctor_name == consulting_doctor:
-                        continue
-                    user_match, conf, details = self._find_best_match(doctor_name, users)
-                    if user_match and conf > confidence:
-                        matching_user = user_match
-                        confidence = conf
-                        match_details = details
-                        match_source = "all_doctors"
-                        matched_doctor_name = doctor_name
-
             result = {
+                "author_found": True,
+                "author_name": author_name,
+                "author_source": author_source,
+                "is_clinic_member": False,
+                "is_external_document": True,  # Default to external (can process)
+                "is_internal_document": False,
                 "matching_user": matching_user,
                 "confidence": confidence,
                 "match_details": match_details,
-                "match_source": match_source,
-                "matched_doctor_name": matched_doctor_name,
-                "is_self_authored": False,
-                "is_clinic_member": False
+                "error_message": None
             }
-
+            
             if matching_user:
+                # Author is from our clinic - this is an INTERNAL document (cannot process)
                 result["is_clinic_member"] = True
-                # Check if document author is the uploader themselves
-                # We compare with uploader_id if available, otherwise fallback to physician_id
-                compare_id = uploader_id if uploader_id else physician_id
-                if matching_user.id == compare_id:
-                    result["is_self_authored"] = True
+                result["is_external_document"] = False
+                result["is_internal_document"] = True
+                logger.warning(f"⚠️ Author '{author_name}' is a clinic member - INTERNAL document (cannot process)")
+            else:
+                # Author is NOT from our clinic - this is an EXTERNAL document (can create tasks)
+                logger.info(f"✅ Author '{author_name}' is NOT a clinic member - EXTERNAL document (can process)")
             
             return result
+            
         except Exception as e:
             logger.error(f"❌ Physician author check failed: {str(e)}")
-            return {"matching_user": None, "is_self_authored": False, "is_clinic_member": False}
+            return {
+                "author_found": False,
+                "author_name": None,
+                "is_clinic_member": False,
+                "is_external_document": False,
+                "is_internal_document": False,
+                "matching_user": None,
+                "error_message": f"Error checking author: {str(e)}",
+                "author_source": None
+            }
 
     async def create_tasks_if_needed(self, document_analysis, document_id: str, physician_id: str, filename: str, processed_data: dict = None) -> int:
-        """Step 3: Create tasks if conditions are met"""
-        logger.info(f"🔧 Creating tasks for document {filename}")
+        """Step 3: Create tasks if conditions are met - ONLY for EXTERNAL documents"""
+        logger.info(f"🔧 Checking document {filename} for task creation...")
         created_tasks = 0
         
         try:
-            # Use the refactored check - pass both physician_id (clinic) and uploader_id
+            # Get summaries for author check
+            report_analyzer_result = processed_data.get("report_analyzer_result", {}) if processed_data else {}
+            short_summary = report_analyzer_result.get("short_summary", "") if isinstance(report_analyzer_result, dict) else ""
+            long_summary = report_analyzer_result.get("long_summary", "") if isinstance(report_analyzer_result, dict) else ""
+            
+            # Check for document author using summaries
             author_info = await self._check_physician_author(
-                document_analysis, 
-                physician_id, 
-                processed_data.get("user_id") if processed_data else None
+                physician_id=physician_id,
+                short_summary=short_summary,
+                long_summary=long_summary
             )
-            matching_user = author_info["matching_user"]
-            confidence = author_info["confidence"]
-            match_details = author_info["match_details"]
-            match_source = author_info["match_source"]
-            matched_doctor_name = author_info["matched_doctor_name"]
             
-            is_internal_document = False
+            # If no author found, cannot process
+            if not author_info.get("author_found"):
+                logger.warning(f"⚠️ {author_info.get('error_message', 'No author found in document')}")
+                return -2  # Return -2 to indicate no author found
             
-            if author_info["is_self_authored"]:
-                logger.warning(f"⚠️ Document author is the signed-in physician themselves. Marking as fail.")
-                return -1
+            author_name = author_info.get("author_name", "Unknown")
             
-            if author_info["is_clinic_member"]:
-                is_internal_document = True
-                logger.info(f"🎯 Final match: User='{matching_user.firstName} {matching_user.lastName}', Confidence={confidence}, Source='{match_source}'")
-                logger.info(f"📋 Document type: INTERNAL (Clinic member matched: {matching_user.id})")
-            else:
-                logger.info(f"📋 Document type: EXTERNAL (No clinic member matched)")
-                if not matched_doctor_name:
-                    matched_doctor_name = "Unknown Physician"
+            # If author is from our clinic (INTERNAL document), cannot process
+            if author_info.get("is_internal_document") or author_info.get("is_clinic_member"):
+                logger.warning(f"⚠️ Document author '{author_name}' is a clinic member - INTERNAL document cannot be processed")
+                return -1  # Return -1 to indicate internal document
             
-            # Generate and create tasks (ALWAYS generate tasks, regardless of match)
+            # EXTERNAL document - can create tasks
+            logger.info(f"✅ Document is EXTERNAL (author: {author_name}) - Creating tasks...")
+            
+            # Generate and create tasks for EXTERNAL documents
             task_creator = TaskCreator()
             document_data = document_analysis.dict()
             document_data["filename"] = filename
@@ -868,24 +984,19 @@ class WebhookService:
             
             logger.info(f"📝 Passing {len(full_text)} characters to task generator (from {'Document AI summarizer' if processed_data.get('raw_text') else 'OCR text'})")
             
-            tasks_result = await task_creator.generate_tasks(document_data, filename, full_text, matched_doctor_name)
+            tasks_result = await task_creator.generate_tasks(document_data, filename, full_text, author_name)
             
-            # Extract tasks
-            internal_tasks = tasks_result.get("internal_tasks", [])
+            # Extract tasks - for external documents we create tasks
+            external_tasks = tasks_result.get("internal_tasks", [])  # Using same key for now
             
-            if not is_internal_document:
-                logger.info(f"📋 Document is EXTERNAL (other physician's report) - Skipping task creation as per requirements")
-                return 0
-
-            logger.info(f"📋 Document is INTERNAL (signed-in physician's report) - Processing {len(internal_tasks)} tasks")
-            all_tasks = internal_tasks
+            logger.info(f"📋 Document is EXTERNAL (author: {author_name}) - Processing {len(external_tasks)} tasks")
 
             # Save tasks to database
             prisma = Prisma()
             await prisma.connect()
             
-            # Process internal tasks
-            for task in internal_tasks:
+            # Process tasks for external documents
+            for task in external_tasks:
                 try:
                     # Ensure task is a dict
                     if not isinstance(task, dict):
@@ -903,6 +1014,16 @@ class WebhookService:
                             logger.warning(f"⚠️ Skipping invalid task type: {type(task)}")
                             continue
                     
+                    # Build quick notes JSON
+                    quick_notes = task.get("quick_notes", {})
+                    if not isinstance(quick_notes, dict):
+                        quick_notes = {"status_update": "", "details": "", "one_line_note": ""}
+                    quick_notes_json = json.dumps({
+                        "status_update": quick_notes.get("status_update", ""),
+                        "details": quick_notes.get("details", f"External document from {author_name}"),
+                        "one_line_note": quick_notes.get("one_line_note", "")
+                    })
+                    
                     mapped_task = {
                         "description": task.get("description"),
                         "department": task.get("department"),
@@ -911,14 +1032,18 @@ class WebhookService:
                         "patient": task.get("patient", "Unknown"),
                         "actions": task.get("actions") if isinstance(task.get("actions"), list) else [],
                         "sourceDocument": task.get("source_document") or filename,
-                        "documentId": document_id,
                         "physicianId": physician_id,
-                        "type": "internal",  # Set type as internal
+                        "type": "external",  # Set type as external
+                        "quickNotes": quick_notes_json,
                     }
+                    
+                    # Connect to document if document_id exists
+                    if document_id:
+                        mapped_task["document"] = {"connect": {"id": document_id}}
                     
                     await prisma.task.create(data=mapped_task)
                     created_tasks += 1
-                    logger.info(f"✅ Created INTERNAL task: {task.get('description', 'Unknown task')}")
+                    logger.info(f"✅ Created EXTERNAL task: {task.get('description', 'Unknown task')}")
                     
                 except Exception as task_err:
                     logger.error(f"❌ Failed to create task: {task_err}")
@@ -926,7 +1051,7 @@ class WebhookService:
             
 
             await prisma.disconnect()
-            logger.info(f"✅ {created_tasks} tasks created successfully")
+            logger.info(f"✅ {created_tasks} tasks created successfully for external document")
             
         except Exception as e:
             logger.error(f"❌ Error in task creation: {str(e)}")
@@ -1190,25 +1315,28 @@ class WebhookService:
             # Step 1: Process document data
             processed_data = await self.process_document_data(data)
             
-            # Step 1.2: Check if author is the signed-in physician themselves
-            # Requirement: If physician is author in parsed document itself, document is fail
+            # Step 1.2: Check if author is from our clinic (INTERNAL document check)
+            # Get summaries for author check
+            report_analyzer_result = processed_data.get("report_analyzer_result", {})
+            short_summary = report_analyzer_result.get("short_summary", "") if isinstance(report_analyzer_result, dict) else ""
+            long_summary = report_analyzer_result.get("long_summary", "") if isinstance(report_analyzer_result, dict) else ""
+            
             author_info = await self._check_physician_author(
-                processed_data["document_analysis"], 
-                processed_data["physician_id"],
-                processed_data.get("user_id")
+                physician_id=processed_data["physician_id"],
+                short_summary=short_summary,
+                long_summary=long_summary
             )
             
-            if author_info["is_self_authored"]:
-                logger.warning(f"⚠️ SELF-AUTHORED DOCUMENT DETECTED: Physician is the author of their own report.")
+            # If no author found in document, save to FailDocs
+            if not author_info.get("author_found"):
+                logger.warning(f"⚠️ NO AUTHOR FOUND: {author_info.get('error_message')}")
                 logger.info("💾 Saving to FailDocs as per requirements...")
                 
-                # Get the original text/summary
                 raw_text = processed_data.get("raw_text", "")
                 text_for_analysis = processed_data.get("text_for_analysis", "")
                 
-                # Save to FailDocs
                 fail_doc_id = await db_service.save_fail_doc(
-                    reason=f"Self-authored document detected - physician cannot upload their own reports as new documents. Author matched: {author_info.get('matched_doctor_name')}",
+                    reason=author_info.get('error_message', "No author found in document - manual verification required"),
                     db=processed_data.get("dob"),
                     claim_number=processed_data.get("claim_number"),
                     patient_name=processed_data.get("patient_name"),
@@ -1220,19 +1348,60 @@ class WebhookService:
                     mode=processed_data.get("mode", "wc"),
                     document_text=text_for_analysis if text_for_analysis else raw_text,
                     doi=None,
-                    summary=f"Self-authored document detected.\nMatched Doctor: {author_info.get('matched_doctor_name')}\nMatch Source: {author_info.get('match_source')}"
+                    summary=f"No author detected in document.\nShort Summary: {short_summary[:200] if short_summary else 'N/A'}..."
                 )
                 
-                # Decrement parse count
                 parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
                 
                 return {
-                    "status": "self_authored_document_fail",
+                    "status": "no_author_found_fail",
                     "document_id": fail_doc_id,
                     "filename": processed_data.get("filename"),
                     "parse_count_decremented": parse_decremented,
-                    "failure_reason": "Self-authored document detected - physician is the author of this report."
+                    "failure_reason": author_info.get('error_message', "No author found in document")
                 }
+            
+            # If author IS from our clinic (INTERNAL document), save to FailDocs
+            if author_info.get("is_internal_document") or author_info.get("is_clinic_member"):
+                author_name = author_info.get("author_name", "Unknown")
+                logger.warning(f"⚠️ INTERNAL DOCUMENT DETECTED: Author '{author_name}' is from our clinic")
+                logger.info("💾 Saving to FailDocs as per requirements - cannot process internal documents...")
+                
+                raw_text = processed_data.get("raw_text", "")
+                text_for_analysis = processed_data.get("text_for_analysis", "")
+                
+                fail_doc_id = await db_service.save_fail_doc(
+                    reason=f"Internal document detected - author '{author_name}' is a clinic member. Cannot process internal documents.",
+                    db=processed_data.get("dob"),
+                    claim_number=processed_data.get("claim_number"),
+                    patient_name=processed_data.get("patient_name"),
+                    physician_id=processed_data.get("physician_id"),
+                    gcs_file_link=processed_data.get("gcs_url"),
+                    file_name=processed_data.get("filename"),
+                    file_hash=processed_data.get("file_hash"),
+                    blob_path=processed_data.get("blob_path"),
+                    mode=processed_data.get("mode", "wc"),
+                    document_text=text_for_analysis if text_for_analysis else raw_text,
+                    doi=None,
+                    summary=f"Internal document detected.\nAuthor: {author_name}\nSource: {author_info.get('author_source', 'N/A')}"
+                )
+                
+                parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
+                
+                return {
+                    "status": "internal_document_fail",
+                    "document_id": fail_doc_id,
+                    "filename": processed_data.get("filename"),
+                    "parse_count_decremented": parse_decremented,
+                    "failure_reason": f"Internal document detected - author '{author_name}' is a clinic member",
+                    "author_info": {
+                        "author_name": author_name,
+                        "author_source": author_info.get("author_source")
+                    }
+                }
+            
+            # EXTERNAL document - author is NOT from our clinic, can proceed with processing
+            logger.info(f"✅ EXTERNAL document confirmed - Author: {author_info.get('author_name')} (not a clinic member)")
             
             # Step 1.5: Check for multiple reports - if detected, save to FailDocs
             if processed_data.get("is_multiple_reports", False):

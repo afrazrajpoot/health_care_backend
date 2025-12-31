@@ -448,23 +448,20 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
                 department = task.get("department", "").lower()
                 description = task.get("description", "").lower()
 
-                if "scheduling" in department:
-                    await db.increment_workflow_stat("schedulingTasks")
-                elif "approvals to schedule" in department:
-                    await db.increment_workflow_stat("approvalsToSchedule")
-                elif "administrative" in department:
-                    await db.increment_workflow_stat("adminTasks")
+                # Map departments to valid workflow stat fields
+                # Valid fields: referralsProcessed, rfasMonitored, qmeUpcoming, payerDisputes, externalDocs, intakes_created
+                if "scheduling" in department or "approvals to schedule" in department:
+                    await db.increment_workflow_stat("referralsProcessed")
                 elif "denial" in department or "appeal" in department:
-                    await db.increment_workflow_stat("authTasks")
-                elif "signature" in department:
-                    await db.increment_workflow_stat("signatureTasks")
+                    await db.increment_workflow_stat("payerDisputes")
+                elif "administrative" in department or "signature" in department:
+                    await db.increment_workflow_stat("externalDocs")
 
+                # Description-based analytics
                 if any(word in description for word in ["rfa", "ur", "imr", "authorization", "denial"]):
                     await db.increment_workflow_stat("rfasMonitored")
                 elif any(word in description for word in ["qme", "ime", "ame"]):
-                    await db.increment_workflow_stat("qmeUpdating")
-                elif any(word in description for word in ["attorney", "legal", "settlement"]):
-                    await db.increment_workflow_stat("legalDocs")
+                    await db.increment_workflow_stat("qmeUpcoming")
 
             await db.disconnect()
 
