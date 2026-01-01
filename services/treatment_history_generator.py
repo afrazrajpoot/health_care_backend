@@ -262,13 +262,23 @@ class TreatmentHistoryGenerator:
     
     async def generate_treatment_history_with_llm(self, patient_name: str, 
                                                  context: str, 
-                                                 current_document_analysis: Any = None) -> Dict[str, List[Dict]]:
+                                                 current_document_analysis: Any = None,
+                                                 max_retries: int = 3) -> Dict[str, List[Dict]]:
         """
-        Use LLM to generate structured treatment history
+        Use LLM to generate structured treatment history with retry logic
         """
-        try:
-            # Prepare prompt for LLM
-            prompt = f"""
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    # Exponential backoff: 2s, 4s, 8s
+                    wait_time = 2 ** (attempt)
+                    logger.info(f"🔄 Retry attempt {attempt + 1}/{max_retries} after {wait_time}s delay...")
+                    await asyncio.sleep(wait_time)
+                
+                # Prepare prompt for LLM
+                prompt = f"""
             You are a medical history analyzer. Create a structured treatment history timeline from the provided document context.
             
             PATIENT: {patient_name}
@@ -287,13 +297,23 @@ class TreatmentHistoryGenerator:
                - Event type (e.g., "MRI", "PT Session", "Medication Change", "Consultation", "Surgery")
                - Details (specific findings, treatments, outcomes)
             4. Group events into logical categories such as:
-               - musculoskeletal_system (for orthopedic, PT, spine, joint issues)
-               - cardiovascular_system (for heart, BP, circulation)
-               - pulmonary_respiratory (for lungs, breathing)
-               - neurological (for brain, nerves, headaches)
-               - gastrointestinal (for stomach, digestion)
-               - metabolic_endocrine (for diabetes, thyroid, hormones)
-               - other_systems (for anything else)
+               - musculoskeletal_system (for orthopedic, PT, spine, joint, bone, muscle, tendon, ligament issues)
+               - cardiovascular_system (for heart, BP, circulation, vascular, artery, vein issues)
+               - pulmonary_respiratory (for lungs, breathing, asthma, COPD, respiratory issues)
+               - neurological (for brain, nerves, headaches, seizures, stroke, neuropathy)
+               - gastrointestinal (for stomach, digestion, liver, intestine, colon, GERD issues)
+               - metabolic_endocrine (for diabetes, thyroid, hormones, adrenal, pituitary issues)
+               - genitourinary_renal (for kidneys, bladder, urinary tract, prostate issues)
+               - reproductive_obstetric_gynecologic (for fertility, pregnancy, menstrual, ovarian, uterine issues)
+               - dermatological (for skin conditions, wounds, burns, rashes, lesions)
+               - ophthalmologic (for eyes, vision, cataracts, glaucoma, retinal issues)
+               - ent_head_neck (for ears, nose, throat, sinuses, hearing, tinnitus issues)
+               - dental_oral (for teeth, gums, jaw, TMJ, oral cavity issues)
+               - hematologic_lymphatic (for blood disorders, anemia, clotting, lymph nodes issues)
+               - immune_allergy (for autoimmune conditions, allergies, immunodeficiency issues)
+               - psychiatric_mental_health (for depression, anxiety, PTSD, cognitive issues)
+               - sleep_disorders (for insomnia, sleep apnea, narcolepsy, circadian rhythm issues)
+               - other_systems (for anything that doesn't fit above categories)
             5. If no specific system is mentioned, use "general_treatments"
             6. Only include information explicitly mentioned in the documents
             7. Format as JSON with system categories as keys and arrays of events as values
@@ -312,75 +332,107 @@ class TreatmentHistoryGenerator:
             }}
             
             Return ONLY valid JSON, no additional text.
-            """
-            
-            # Call Azure OpenAI
-            response = await self.openai_client.chat.completions.create(
-                model=self.deployment_name,  # Use the deployment name from settings
-                messages=[
-                    {"role": "system", "content": "You are a medical data analyst that extracts and structures treatment history information."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.1,
-                max_tokens=2000,
-                response_format={"type": "json_object"}
-            )
-            
-            # Parse response
-            history_json = json.loads(response.choices[0].message.content)
-            
-            # Validate structure
-            if not isinstance(history_json, dict):
-                logger.warning("⚠️ LLM returned non-dict response, creating empty history")
-                return self._get_empty_history_template()
-            
-            # Deduplicate events in each category
-            for category, events in history_json.items():
-                if isinstance(events, list):
-                    history_json[category] = self._deduplicate_events(events)
-            
-            # Ensure all required categories exist
-            required_categories = [
-                "musculoskeletal_system", "cardiovascular_system", 
-                "pulmonary_respiratory", "neurological", "gastrointestinal",
-                "metabolic_endocrine", "other_systems", "general_treatments"
-            ]
-            
-            for category in required_categories:
-                if category not in history_json:
-                    history_json[category] = []
-                elif not isinstance(history_json[category], list):
-                    history_json[category] = []
-            
-            # Sort events in each category by date (newest first)
-            for category in history_json:
-                if isinstance(history_json[category], list):
-                    history_json[category].sort(
-                        key=lambda x: self._parse_date(x.get('date', '')),
-                        reverse=True
-                    )
-            
-            total_events = sum(len(v) for v in history_json.values() if isinstance(v, list))
-            logger.info(f"✅ Generated treatment history with {total_events} events across {len(history_json)} categories")
-            
-            return history_json
-            
-        except Exception as e:
-            logger.error(f"❌ Error generating treatment history with LLM: {str(e)}")
-            return self._get_empty_history_template()
+                """
+                
+                # Call Azure OpenAI
+                response = await self.openai_client.chat.completions.create(
+                    model=self.deployment_name,  # Use the deployment name from settings
+                    messages=[
+                        {"role": "system", "content": "You are a medical data analyst that extracts and structures treatment history information."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.1,
+                    max_tokens=2000,
+                    response_format={"type": "json_object"}
+                )
+                
+                # Parse response
+                history_json = json.loads(response.choices[0].message.content)
+                
+                # Validate structure
+                if not isinstance(history_json, dict):
+                    logger.warning("⚠️ LLM returned non-dict response, creating empty history")
+                    return self._get_empty_history_template()
+                
+                # Deduplicate events in each category
+                for category, events in history_json.items():
+                    if isinstance(events, list):
+                        history_json[category] = self._deduplicate_events(events)
+                
+                # Ensure all required categories exist
+                required_categories = [
+                    "musculoskeletal_system", "cardiovascular_system", 
+                    "pulmonary_respiratory", "neurological", "gastrointestinal",
+                    "metabolic_endocrine", "genitourinary_renal", "reproductive_obstetric_gynecologic",
+                    "dermatological", "ophthalmologic", "ent_head_neck", "dental_oral",
+                    "hematologic_lymphatic", "immune_allergy", "psychiatric_mental_health",
+                    "sleep_disorders", "other_systems", "general_treatments"
+                ]
+                
+                for category in required_categories:
+                    if category not in history_json:
+                        history_json[category] = []
+                    elif not isinstance(history_json[category], list):
+                        history_json[category] = []
+                
+                # Sort events in each category by date (newest first)
+                for category in history_json:
+                    if isinstance(history_json[category], list):
+                        history_json[category].sort(
+                            key=lambda x: self._parse_date(x.get('date', '')),
+                            reverse=True
+                        )
+                
+                total_events = sum(len(v) for v in history_json.values() if isinstance(v, list))
+                logger.info(f"✅ Generated treatment history with {total_events} events across {len(history_json)} categories")
+                
+                return history_json
+                
+            except Exception as e:
+                last_error = e
+                error_msg = str(e).lower()
+                
+                # Check if it's a retryable error (connection, timeout, rate limit)
+                is_retryable = any(err in error_msg for err in [
+                    "connection", "timeout", "rate limit", "429", "503", "502", 
+                    "service unavailable", "gateway", "network", "reset"
+                ])
+                
+                if is_retryable and attempt < max_retries - 1:
+                    logger.warning(f"⚠️ LLM call failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                    continue
+                else:
+                    # Non-retryable error or last attempt
+                    logger.error(f"❌ Error generating treatment history with LLM: {str(e)}")
+                    break
+        
+        # All retries exhausted or non-retryable error
+        logger.error(f"❌ All {max_retries} attempts failed for treatment history generation. Last error: {str(last_error)}")
+        return self._get_empty_history_template()
     
     def _get_empty_history_template(self) -> Dict[str, Dict[str, List]]:
         """Return empty treatment history template with current and archive structure"""
         return {
-            "musculoskeletal_system": {"current": [], "archive": []},
-            "cardiovascular_system": {"current": [], "archive": []},
-            "pulmonary_respiratory": {"current": [], "archive": []},
-            "neurological": {"current": [], "archive": []},
-            "gastrointestinal": {"current": [], "archive": []},
-            "metabolic_endocrine": {"current": [], "archive": []},
-            "other_systems": {"current": [], "archive": []},
-            "general_treatments": {"current": [], "archive": []}
-        }
+        "musculoskeletal_system": {"current": [], "archive": []},
+        "cardiovascular_system": {"current": [], "archive": []},
+        "pulmonary_respiratory": {"current": [], "archive": []},
+        "neurological": {"current": [], "archive": []},
+        "gastrointestinal": {"current": [], "archive": []},
+        "metabolic_endocrine": {"current": [], "archive": []},
+        "genitourinary_renal": {"current": [], "archive": []},
+        "reproductive_obstetric_gynecologic": {"current": [], "archive": []},
+        "dermatological": {"current": [], "archive": []},
+        "ophthalmologic": {"current": [], "archive": []},
+        "ent_head_neck": {"current": [], "archive": []},
+        "dental_oral": {"current": [], "archive": []},
+        "hematologic_lymphatic": {"current": [], "archive": []},
+        "immune_allergy": {"current": [], "archive": []},
+        "psychiatric_mental_health": {"current": [], "archive": []},
+        "sleep_disorders": {"current": [], "archive": []},
+        "other_systems": {"current": [], "archive": []},
+        "general_treatments": {"current": [], "archive": []}
+    }
+
     
     def merge_history_data(self, existing_data: Dict, new_data: Dict) -> Dict:
         """

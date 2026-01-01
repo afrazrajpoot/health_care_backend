@@ -68,11 +68,11 @@ Generate ALL relevant tasks for this category. The system will handle these work
 6. ❌ NEVER create patient notification tasks
 7. ❌ NEVER create duplicate tasks with different wording
 8. ✅ If document is unclear/incomplete, create a task to handle that issue
+9. ✅ ALWAYS create at least one task - external documents require review/acknowledgment
 
 ### **When to Return Empty Arrays:**
-- Document contains no actionable items
-- Document is purely informational with no follow-up needed
-- All actions are already completed and documented
+- NEVER return empty arrays - external documents always need at least a review task
+- Even informational documents need a "Review [document type] for [patient]" task
 
 ### **Understanding Before Creating:**
 Before generating tasks, analyze:
@@ -303,9 +303,10 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
 - Are departments correctly assigned?
 - Are due dates appropriate?
 
-**If no actionable tasks exist:** Return empty array for internal_tasks.
-
-**If document has issues:** Create task like "Clarify missing authorization details in report"
+**IMPORTANT:** NEVER return empty internal_tasks array. External documents ALWAYS need at least one task.
+- If document is informational: Create "Review [document type] for [patient]" task
+- If document has specific actions: Create those specific tasks
+- If document has issues: Create task like "Clarify missing authorization details in report"
 
 {{format_instructions}}
 """
@@ -341,6 +342,8 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
             }
 
             result = chain.invoke(invocation_data)
+            
+            logger.info(f"🤖 LLM raw response: {result}")
 
             # Normalize result
             if isinstance(result, dict):
@@ -349,6 +352,7 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
                 try:
                     tasks_data = result.dict()
                 except Exception:
+                    logger.warning(f"⚠️ Failed to parse LLM result, falling back to empty tasks")
                     tasks_data = {"internal_tasks": []}
 
             # Extract both arrays
@@ -376,7 +380,9 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
 
             # If both arrays are empty, create fallback
             if not validated_internal:
-                fallback = await self._create_fallback_task(document_analysis, source_document)
+                logger.warning(f"⚠️ LLM returned no tasks for document type: {document_type}, patient: {patient_name}")
+                logger.warning(f"⚠️ Full text available: {len(full_text) if full_text else 0} chars")
+                fallback = await self._create_fallback_task(document_analysis, source_document, full_text)
                 validated_internal = fallback  # Put fallback in internal
 
             result_dict = {
@@ -394,7 +400,9 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
 
         except Exception as e:
             logger.error(f"❌ Task generation failed: {str(e)}")
-            fallback = await self._create_fallback_task(document_analysis, source_document)
+            logger.error(f"❌ Document type: {document_analysis.get('document_type', 'Unknown')}")
+            logger.error(f"❌ Full text length: {len(full_text) if full_text else 0}")
+            fallback = await self._create_fallback_task(document_analysis, source_document, full_text)
             return {"internal_tasks": fallback}
 
     def _infer_department(self, description: str, doc_type: str) -> str:
@@ -414,28 +422,195 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
         
         return "Administrative Tasks"
 
-    async def _create_fallback_task(self, document_analysis: dict, source_document: str) -> list[dict]:
-        """Create intelligent fallback task when generation fails."""
+    async def _create_fallback_task(self, document_analysis: dict, source_document: str, full_text: str = "") -> list[dict]:
+        """Create intelligent fallback task when generation fails or returns empty."""
         current_date = datetime.now()
         due_date = (current_date + timedelta(days=2)).strftime("%Y-%m-%d")
         
         doc_type = document_analysis.get("document_type", "document")
         patient = document_analysis.get("patient_name", "Unknown")
+        doc_type_lower = doc_type.lower() if doc_type else ""
+        full_text_lower = (full_text or "").lower()
+        
+        # Intelligent fallback based on document type
+        fallback_mappings = {
+            # Progress Notes - typically need review
+            "progress note": {
+                "description": f"Review progress notes for {patient}",
+                "department": "Administrative Tasks",
+                "details": "Progress notes received from external provider. Review for treatment updates and document findings.",
+                "one_line_note": "Review external progress notes"
+            },
+            "progress report": {
+                "description": f"Review progress report for {patient}",
+                "department": "Administrative Tasks", 
+                "details": "Progress report requires review for clinical updates and any follow-up actions.",
+                "one_line_note": "Review progress report"
+            },
+            # UR/Authorization documents
+            "ur decision": {
+                "description": f"Process UR decision for {patient}",
+                "department": "Denials & Appeals",
+                "details": "Utilization Review decision received. Determine if approved or denied and take appropriate action.",
+                "one_line_note": "Process UR decision"
+            },
+            "authorization": {
+                "description": f"Process authorization for {patient}",
+                "department": "Approvals to Schedule",
+                "details": "Authorization document received. Verify approval status and schedule if approved.",
+                "one_line_note": "Process authorization"
+            },
+            # Imaging/Diagnostic
+            "mri": {
+                "description": f"Review MRI results for {patient}",
+                "department": "Administrative Tasks",
+                "details": "MRI results received. Review findings and document any follow-up recommendations.",
+                "one_line_note": "Review MRI results"
+            },
+            "radiology": {
+                "description": f"Review radiology report for {patient}",
+                "department": "Administrative Tasks",
+                "details": "Radiology report received. Review findings and determine next steps.",
+                "one_line_note": "Review radiology report"
+            },
+            "imaging": {
+                "description": f"Review imaging study for {patient}",
+                "department": "Administrative Tasks",
+                "details": "Imaging study results received. Review and document findings.",
+                "one_line_note": "Review imaging results"
+            },
+            # QME/Legal
+            "qme": {
+                "description": f"Process QME report for {patient}",
+                "department": "Administrative Tasks",
+                "details": "QME report received. Review findings and prepare response if needed.",
+                "one_line_note": "Process QME report"
+            },
+            "ime": {
+                "description": f"Process IME report for {patient}",
+                "department": "Administrative Tasks",
+                "details": "Independent Medical Examination report received. Review and respond as needed.",
+                "one_line_note": "Process IME report"
+            },
+            # Consultation
+            "consultation": {
+                "description": f"Review consultation report for {patient}",
+                "department": "Administrative Tasks",
+                "details": "Consultation report received from specialist. Review recommendations and plan follow-up.",
+                "one_line_note": "Review consultation"
+            },
+            "consult": {
+                "description": f"Review consult report for {patient}",
+                "department": "Administrative Tasks",
+                "details": "Consult report received. Review specialist recommendations.",
+                "one_line_note": "Review consult report"
+            },
+            # Lab/Pathology
+            "lab": {
+                "description": f"Review lab results for {patient}",
+                "department": "Administrative Tasks",
+                "details": "Laboratory results received. Review findings and document any abnormalities.",
+                "one_line_note": "Review lab results"
+            },
+            "pathology": {
+                "description": f"Review pathology report for {patient}",
+                "department": "Administrative Tasks",
+                "details": "Pathology report received. Review findings carefully.",
+                "one_line_note": "Review pathology report"
+            },
+            # Operative/Procedure
+            "operative": {
+                "description": f"Review operative report for {patient}",
+                "department": "Administrative Tasks",
+                "details": "Operative report received. Document procedure details and follow-up care.",
+                "one_line_note": "Review operative report"
+            },
+            "procedure": {
+                "description": f"Review procedure report for {patient}",
+                "department": "Administrative Tasks",
+                "details": "Procedure report received. Review outcome and document findings.",
+                "one_line_note": "Review procedure report"
+            },
+            # Denial related
+            "denial": {
+                "description": f"Process denial for {patient}",
+                "department": "Denials & Appeals",
+                "details": "Denial document received. Evaluate for appeal options and deadline.",
+                "one_line_note": "Process denial"
+            },
+            "eob": {
+                "description": f"Review EOB for {patient}",
+                "department": "Denials & Appeals",
+                "details": "Explanation of Benefits received. Review payment status and any denials.",
+                "one_line_note": "Review EOB"
+            }
+        }
+        
+        # Find matching fallback based on document type
+        fallback_info = None
+        for key, info in fallback_mappings.items():
+            if key in doc_type_lower:
+                fallback_info = info
+                break
+        
+        # If no match by doc type, check full text for clues
+        if not fallback_info and full_text_lower:
+            text_clue_mappings = [
+                (["signature required", "please sign", "sign and return"], {
+                    "description": f"Sign and return document for {patient}",
+                    "department": "Signature Required",
+                    "details": "Document requires signature. Review and sign as needed.",
+                    "one_line_note": "Signature required"
+                }),
+                (["denial", "denied", "not approved"], {
+                    "description": f"Review denial for {patient}",
+                    "department": "Denials & Appeals",
+                    "details": "Document indicates denial. Review and determine appeal options.",
+                    "one_line_note": "Review denial"
+                }),
+                (["approved", "authorization approved"], {
+                    "description": f"Schedule approved service for {patient}",
+                    "department": "Approvals to Schedule",
+                    "details": "Authorization approved. Schedule the approved service.",
+                    "one_line_note": "Schedule approved service"
+                }),
+                (["schedule", "appointment", "follow-up"], {
+                    "description": f"Schedule follow-up for {patient}",
+                    "department": "Scheduling Tasks",
+                    "details": "Document indicates scheduling need. Arrange appropriate appointment.",
+                    "one_line_note": "Schedule follow-up"
+                })
+            ]
+            
+            for keywords, info in text_clue_mappings:
+                if any(kw in full_text_lower for kw in keywords):
+                    fallback_info = info
+                    break
+        
+        # Default fallback if still no match
+        if not fallback_info:
+            fallback_info = {
+                "description": f"Review {doc_type} for {patient}",
+                "department": "Administrative Tasks",
+                "details": f"Document ({doc_type}) requires manual review to determine appropriate actions.",
+                "one_line_note": "Manual review needed"
+            }
         
         fallback_task = {
-            "description": f"Handle {doc_type}",
-            "department": "Administrative Tasks",
+            "description": fallback_info["description"],
+            "department": fallback_info["department"],
             "status": "Pending",
             "due_date": due_date,
             "patient": patient,
             "actions": ["Claim", "Complete"],
             "source_document": source_document or "Unknown",
             "quick_notes": {
-                "details": f"Document requires manual handling to determine appropriate actions.",
-                "one_line_note": "Manual handling needed"
+                "details": fallback_info["details"],
+                "one_line_note": fallback_info["one_line_note"]
             }
         }
         
+        logger.info(f"📋 Created intelligent fallback task: {fallback_info['description']}")
         return [fallback_task]
 
     async def _update_workflow_analytics(self, tasks: list[dict]):

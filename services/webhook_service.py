@@ -858,10 +858,11 @@ class WebhookService:
         
         try:
             # Patterns to look for author information
+            # we only need the author who signed the report, not assistants or transcribers, or prepared by, directed by, etc.
             author_patterns = [
-                r'(?:Electronically\s+Signed\s+By|Electronic\s+Signature|Signed\s+By|Signature|Author|Authored\s+By|Prepared\s+By|Report\s+By|Physician|Radiologist|Doctor)[:\s]*([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD))?)',
-                r'-\s*Signature[:\s]*(?:Electronically\s+Signed\s+By[:\s]*)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD))?)',
-                r'(?:Dictated\s+By|Transcribed\s+By)[:\s]*([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD))?)',
+                r'(?:Electronically\s+Signed\s+By|Electronic\s+Signature|Signed\s+By|Signature)[:\s]*([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD|RN|R\.N\.|LVN|L\.V\.N\.|PA-C))?)',
+                r'-\s*Signature[:\s]*(?:Electronically\s+Signed\s+By[:\s]*)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD|RN|R\.N\.|LVN|L\.V\.N\.|PA-C))?)',
+                r'(?:Approved\s+By|Authenticated\s+By|Verified\s+By)[:\s]*([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD|RN|R\.N\.|LVN|L\.V\.N\.|PA-C))?)',
             ]
             
             for pattern in author_patterns:
