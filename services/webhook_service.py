@@ -612,17 +612,40 @@ class WebhookService:
             # Get document analysis
             document_analysis = processed_data.get("document_analysis")
             
+            # Extract report date from document analysis - NEVER use current date as fallback
+            report_date = None
+            if document_analysis:
+                # Try to get rd (report date) from document analysis
+                if hasattr(document_analysis, 'rd') and document_analysis.rd:
+                    rd_value = str(document_analysis.rd).lower()
+                    if rd_value not in ["not specified", "unknown", "none", ""]:
+                        report_date = document_analysis.rd
+                # Fallback to doi (date of injury) if rd not available
+                if not report_date and hasattr(document_analysis, 'doi') and document_analysis.doi:
+                    doi_value = str(document_analysis.doi).lower()
+                    if doi_value not in ["not specified", "unknown", "none", ""]:
+                        report_date = document_analysis.doi
+            
             # Prepare current document data for history generator
+            # CRITICAL: Only include date if actually extracted from document, NEVER use current date
             current_doc_data = {
                 "short_summary": processed_data.get("brief_summary", ""),
                 "long_summary": processed_data.get("text_for_analysis", ""),
-                "createdAt": datetime.now().isoformat(),
                 "briefSummary": processed_data.get("brief_summary", ""),
                 "whatsNew": json.dumps({
                     "long_summary": processed_data.get("text_for_analysis", ""),
                     "short_summary": processed_data.get("brief_summary", "")
                 }) if processed_data.get("text_for_analysis") else None
             }
+            
+            # Only add date fields if they were actually extracted from the document
+            if report_date:
+                current_doc_data["createdAt"] = report_date
+                current_doc_data["documentDate"] = report_date
+                current_doc_data["date"] = report_date
+                logger.info(f"📅 Using extracted report date for treatment history: {report_date}")
+            else:
+                logger.warning(f"⚠️ No report date found in document - treatment history will use 'Date not specified'")
             
             # Add body part snapshots if available
             if hasattr(document_analysis, 'body_parts_analysis') and document_analysis.body_parts_analysis:

@@ -160,12 +160,16 @@ class TreatmentHistoryGenerator:
     def _parse_date(self, date_str: str) -> datetime:
         """
         Parse date string into datetime for comparison.
-        Returns datetime.min if parsing fails.
+        Returns datetime.min if parsing fails or if date is empty/not specified.
         """
         if not date_str:
             return datetime.min
         
         date_str = str(date_str).strip()
+        
+        # Handle empty strings, "Date not specified" or similar placeholders - should sort to the end
+        if not date_str or date_str.lower() in ["date not specified", "not specified", "unknown", "n/a", "none", ""]:
+            return datetime.min
         
         # Remove any time portion if present
         if 'T' in date_str:
@@ -292,11 +296,20 @@ class TreatmentHistoryGenerator:
             CURRENT DOCUMENT ANALYSIS (if available):
             {str(current_document_analysis) if current_document_analysis else 'Not available'}
             
+            CRITICAL DATE RULES - MUST FOLLOW:
+            - ONLY use dates that are EXPLICITLY mentioned in the documents
+            - NEVER use today's date, current date, or any fallback/default date
+            - NEVER invent, assume, or guess dates
+            - If a date is not explicitly stated in the document, leave the date field empty (empty string "")
+            - If only partial date info exists (e.g., just month or year), use only what is provided (e.g., "March 2025" or "2025")
+            - DO NOT use dates like "01/02/2026" or any current system date as fallback
+            - DO NOT use placeholder text like "Date not specified" or "Unknown" - just leave it empty
+            
             INSTRUCTIONS:
             1. Analyze all provided documents and extract treatment events chronologically (most recent first)
             2. Organize events by body system/organ system categories
             3. For each event, include:
-               - Date (extract from document, use format like "03/2024", "2023", "Q2 2023" if exact date not available)
+               - Date (ONLY from document - leave empty "" if no date found. Use partial dates like "03/2025" or "2023" if only partial date available)
                - Event type (e.g., "MRI", "PT Session", "Medication Change", "Consultation", "Surgery")
                - Details (specific findings, treatments, outcomes)
             4. Group events into logical categories such as:
@@ -328,6 +341,11 @@ class TreatmentHistoryGenerator:
                   "date": "03/10/2025",
                   "event": "MRI Lumbar Spine",
                   "details": "L4–5 disc protrusion, Mild canal stenosis, Consider ESI"
+                }},
+                {{
+                  "date": "",
+                  "event": "Physical Therapy",
+                  "details": "Patient reports improvement with PT sessions"
                 }}
               ],
               "cardiovascular_system": [],
