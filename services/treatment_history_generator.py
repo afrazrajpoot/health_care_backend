@@ -117,7 +117,10 @@ class TreatmentHistoryGenerator:
         # Add current document first if available
         if current_document:
             context_parts.append("=== CURRENT DOCUMENT ===")
-            context_parts.append(f"Date: {current_document.get('createdAt', datetime.now().isoformat())}")
+            # Only include date if it's actually available from the document, don't use current date as fallback
+            doc_date = current_document.get('createdAt') or current_document.get('documentDate') or current_document.get('date')
+            if doc_date:
+                context_parts.append(f"Date: {doc_date}")
             context_parts.append(f"Summary: {current_document.get('short_summary', '')}")
             if current_document.get('long_summary'):
                 context_parts.append(f"Details: {current_document.get('long_summary')[:1000]}...")
@@ -335,6 +338,9 @@ class TreatmentHistoryGenerator:
                 """
                 
                 # Call Azure OpenAI
+                logger.info(f"📤 Calling LLM for treatment history generation (patient: {patient_name})")
+                logger.debug(f"📝 Context length: {len(context)} chars")
+                
                 response = await self.openai_client.chat.completions.create(
                     model=self.deployment_name,  # Use the deployment name from settings
                     messages=[
@@ -346,12 +352,18 @@ class TreatmentHistoryGenerator:
                     response_format={"type": "json_object"}
                 )
                 
+                # Log raw response
+                raw_response = response.choices[0].message.content
+                logger.info(f"📥 LLM Response received (length: {len(raw_response)} chars)")
+                logger.debug(f"📥 Raw LLM Response: {raw_response[:500]}..." if len(raw_response) > 500 else f"📥 Raw LLM Response: {raw_response}")
+                
                 # Parse response
-                history_json = json.loads(response.choices[0].message.content)
+                history_json = json.loads(raw_response)
                 
                 # Validate structure
                 if not isinstance(history_json, dict):
-                    logger.warning("⚠️ LLM returned non-dict response, creating empty history")
+                    logger.warning(f"⚠️ LLM returned non-dict response for patient {patient_name}, type: {type(history_json)}")
+                    logger.warning(f"⚠️ Response content: {raw_response[:300]}")
                     return self._get_empty_history_template()
                 
                 # Deduplicate events in each category
@@ -384,13 +396,26 @@ class TreatmentHistoryGenerator:
                         )
                 
                 total_events = sum(len(v) for v in history_json.values() if isinstance(v, list))
-                logger.info(f"✅ Generated treatment history with {total_events} events across {len(history_json)} categories")
+                logger.info(f"✅ Generated treatment history for patient {patient_name} with {total_events} events across {len(history_json)} categories")
+                
+                # Log categories with events for debugging
+                categories_with_events = {k: len(v) for k, v in history_json.items() if isinstance(v, list) and len(v) > 0}
+                if categories_with_events:
+                    logger.info(f"📊 Events per category: {categories_with_events}")
+                else:
+                    logger.warning(f"⚠️ No events extracted for patient {patient_name}. Context provided: {context[:200]}...")
                 
                 return history_json
                 
             except Exception as e:
                 last_error = e
                 error_msg = str(e).lower()
+                
+                # Log detailed error information
+                import traceback
+                logger.error(f"❌ Treatment history LLM error (attempt {attempt + 1}/{max_retries}) for patient {patient_name}: {str(e)}")
+                logger.error(f"❌ Error type: {type(e).__name__}")
+                logger.error(f"❌ Full traceback: {traceback.format_exc()}")
                 
                 # Check if it's a retryable error (connection, timeout, rate limit)
                 is_retryable = any(err in error_msg for err in [

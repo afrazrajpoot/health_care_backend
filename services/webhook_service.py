@@ -1393,6 +1393,67 @@ class WebhookService:
             # Step 1: Process document data
             processed_data = await self.process_document_data(data)
             
+            # Step 1.1: Check for multiple reports FIRST - if detected, save to FailDocs immediately
+            # This must happen before author check since multi-report docs return early with no analysis
+            if processed_data.get("is_multiple_reports", False):
+                multi_report_info = processed_data.get("multi_report_info", {})
+                confidence = multi_report_info.get("confidence", "unknown")
+                reason = multi_report_info.get("reason", "Multiple reports detected")
+                report_count = multi_report_info.get("report_count_estimate", 2)
+                reports_identified = multi_report_info.get("reports_identified", [])
+                
+                # Get the original text/summary
+                raw_text = processed_data.get("raw_text", "")
+                text_for_analysis = processed_data.get("text_for_analysis", "")
+                
+                # Create enhanced summary with detection details
+                summary_parts = []
+                if raw_text:
+                    summary_parts.append(f"DOCUMENT AI SUMMARY:\n{raw_text}")
+                summary_parts.append(f"\n\n=== MULTI-REPORT DETECTION RESULTS ===")
+                summary_parts.append(f"Confidence: {confidence}")
+                summary_parts.append(f"Reason: {reason}")
+                summary_parts.append(f"Estimated Report Count: {report_count}")
+                if reports_identified:
+                    summary_parts.append(f"Reports Identified: {', '.join(reports_identified)}")
+                summary_text = "\n".join(summary_parts)
+                
+                logger.warning(f"⚠️ MULTIPLE REPORTS DETECTED (confidence: {confidence})")
+                logger.warning(f"   Reason: {reason}")
+                logger.warning(f"   Estimated count: {report_count}")
+                logger.info("💾 Saving to FailDocs for manual review...")
+                
+                # Save to FailDocs with clear reason for multiple reports
+                fail_doc_id = await db_service.save_fail_doc(
+                    reason=f"Multiple documents detected, manual verification needed. Detected {report_count} reports with {confidence} confidence.",
+                    db=processed_data.get("dob"),
+                    claim_number=processed_data.get("claim_number"),
+                    patient_name=processed_data.get("patient_name"),
+                    physician_id=processed_data.get("physician_id"),
+                    gcs_file_link=processed_data.get("gcs_url"),
+                    file_name=processed_data.get("filename"),
+                    file_hash=processed_data.get("file_hash"),
+                    blob_path=processed_data.get("blob_path"),
+                    mode=processed_data.get("mode", "wc"),
+                    document_text=text_for_analysis if text_for_analysis else raw_text,
+                    doi=None,
+                    ai_summarizer_text=summary_text  # Store enhanced summary with detection details
+                )
+                
+                # Decrement parse count
+                parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
+                
+                logger.info(f"✅ Multiple reports document saved to FailDocs with ID: {fail_doc_id}")
+                
+                return {
+                    "status": "multiple_reports_detected",
+                    "document_id": fail_doc_id,
+                    "filename": processed_data.get("filename"),
+                    "parse_count_decremented": parse_decremented,
+                    "failure_reason": f"Multiple documents detected, manual verification needed. {reason}",
+                    "multi_report_info": multi_report_info
+                }
+            
             # Step 1.2: Check if author is from our clinic (INTERNAL document check)
             # Get summaries for author check
             report_analyzer_result = processed_data.get("report_analyzer_result", {})
@@ -1480,66 +1541,6 @@ class WebhookService:
             
             # EXTERNAL document - author is NOT from our clinic, can proceed with processing
             logger.info(f"✅ EXTERNAL document confirmed - Author: {author_info.get('author_name')} (not a clinic member)")
-            
-            # Step 1.5: Check for multiple reports - if detected, save to FailDocs
-            if processed_data.get("is_multiple_reports", False):
-                multi_report_info = processed_data.get("multi_report_info", {})
-                confidence = multi_report_info.get("confidence", "unknown")
-                reason = multi_report_info.get("reason", "Multiple reports detected")
-                report_count = multi_report_info.get("report_count_estimate", 2)
-                reports_identified = multi_report_info.get("reports_identified", [])
-                
-                # Get the original text/summary
-                raw_text = processed_data.get("raw_text", "")
-                text_for_analysis = processed_data.get("text_for_analysis", "")
-                
-                # Create enhanced summary with detection details
-                summary_parts = []
-                if raw_text:
-                    summary_parts.append(f"DOCUMENT AI SUMMARY:\n{raw_text}")
-                summary_parts.append(f"\n\n=== MULTI-REPORT DETECTION RESULTS ===")
-                summary_parts.append(f"Confidence: {confidence}")
-                summary_parts.append(f"Reason: {reason}")
-                summary_parts.append(f"Estimated Report Count: {report_count}")
-                if reports_identified:
-                    summary_parts.append(f"Reports Identified: {', '.join(reports_identified)}")
-                summary_text = "\n".join(summary_parts)
-                
-                logger.warning(f"⚠️ MULTIPLE REPORTS DETECTED (confidence: {confidence})")
-                logger.warning(f"   Reason: {reason}")
-                logger.warning(f"   Estimated count: {report_count}")
-                logger.info("💾 Saving to FailDocs for manual review...")
-                
-                # Save to FailDocs with enhanced summary
-                fail_doc_id = await db_service.save_fail_doc(
-                    reason=f"Multiple reports detected ({report_count} reports) - manual review required. {reason}",
-                    db=processed_data.get("dob"),
-                    claim_number=processed_data.get("claim_number"),
-                    patient_name=processed_data.get("patient_name"),
-                    physician_id=processed_data.get("physician_id"),
-                    gcs_file_link=processed_data.get("gcs_url"),
-                    file_name=processed_data.get("filename"),
-                    file_hash=processed_data.get("file_hash"),
-                    blob_path=processed_data.get("blob_path"),
-                    mode=processed_data.get("mode", "wc"),
-                    document_text=text_for_analysis if text_for_analysis else raw_text,
-                    doi=None,
-                    ai_summarizer_text=summary_text  # Store enhanced summary with detection details
-                )
-                
-                # Decrement parse count
-                parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
-                
-                logger.info(f"✅ Multiple reports document saved to FailDocs with ID: {fail_doc_id}")
-                
-                return {
-                    "status": "multiple_reports_detected",
-                    "document_id": fail_doc_id,
-                    "filename": processed_data.get("filename"),
-                    "parse_count_decremented": parse_decremented,
-                    "failure_reason": f"Multiple reports detected - manual review required. {reason}",
-                    "multi_report_info": multi_report_info
-                }
             
             # DEBUG: Check Redis before patient lookup
             await self.debug_redis_contents("patient_lookup:*")
