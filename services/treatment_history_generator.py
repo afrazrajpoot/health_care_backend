@@ -107,56 +107,6 @@ class TreatmentHistoryGenerator:
             logger.error(f"❌ Error fetching patient documents: {str(e)}")
             return []
     
-    async def extract_treatment_history_from_docs(self, documents: List[Dict], 
-                                                current_document: Dict = None) -> str:
-        """
-        Extract treatment history context from documents for LLM processing
-        """
-        context_parts = []
-        
-        # Add current document first if available
-        if current_document:
-            context_parts.append("=== CURRENT DOCUMENT ===")
-            # Only include date if it's actually available from the document, don't use current date as fallback
-            doc_date = current_document.get('createdAt') or current_document.get('documentDate') or current_document.get('date')
-            if doc_date:
-                context_parts.append(f"Date: {doc_date}")
-            context_parts.append(f"Summary: {current_document.get('short_summary', '')}")
-            if current_document.get('long_summary'):
-                context_parts.append(f"Details: {current_document.get('long_summary')[:1000]}...")
-            
-            # Add body part snapshots if available
-            if current_document.get('bodyPartSnapshots'):
-                context_parts.append("\nBody Part Details:")
-                for snapshot in current_document['bodyPartSnapshots']:
-                    if isinstance(snapshot, dict):
-                        context_parts.append(f"- {snapshot.get('bodyPart') or snapshot.get('condition')}: "
-                                           f"DX: {snapshot.get('dx')}, "
-                                           f"Concern: {snapshot.get('keyConcern')}, "
-                                           f"Next Step: {snapshot.get('nextStep')}")
-        
-        # Add previous documents
-        if documents:
-            context_parts.append("\n=== PREVIOUS DOCUMENTS ===")
-            for i, doc in enumerate(documents, 1):
-                context_parts.append(f"\nDocument {i}:")
-                context_parts.append(f"Date: {doc.get('createdAt')}")
-                context_parts.append(f"Summary: {doc.get('short_summary', '')}")
-                
-                # Add document summary if available
-                if doc.get('documentSummary'):
-                    if isinstance(doc['documentSummary'], dict):
-                        context_parts.append(f"Document Summary: {doc['documentSummary'].get('summary', '')}")
-                
-                # Add key findings from body parts
-                if doc.get('bodyPartSnapshots'):
-                    context_parts.append("Key Findings:")
-                    for snapshot in doc['bodyPartSnapshots']:
-                        if isinstance(snapshot, dict):
-                            context_parts.append(f"- {snapshot.get('dx', 'Unknown')}: {snapshot.get('keyConcern', '')}")
-        
-        return "\n".join(context_parts)
-    
     def _parse_date(self, date_str: str) -> datetime:
         """
         Parse date string into datetime for comparison.
@@ -267,10 +217,125 @@ class TreatmentHistoryGenerator:
         
         return list(unique_events.values())
     
+    async def extract_treatment_history_from_docs(self, documents: List[Dict], 
+                                            current_document: Dict = None) -> str:
+        """
+        Extract treatment history context from documents for LLM processing
+        Enhanced to include more comprehensive medical details
+        """
+        context_parts = []
+        
+        # Add current document first if available
+        if current_document:
+            context_parts.append("=== CURRENT DOCUMENT ===")
+            # Only include date if it's actually available from the document
+            doc_date = current_document.get('createdAt') or current_document.get('documentDate') or current_document.get('date')
+            if doc_date:
+                context_parts.append(f"Date: {doc_date}")
+            
+            # Include both summaries for more context
+            if current_document.get('short_summary'):
+                context_parts.append(f"Summary: {current_document.get('short_summary')}")
+            if current_document.get('long_summary'):
+                context_parts.append(f"Detailed Summary: {current_document.get('long_summary')[:2000]}...")
+            
+            # Include brief summary as fallback
+            if current_document.get('briefSummary') and not current_document.get('short_summary'):
+                context_parts.append(f"Summary: {current_document.get('briefSummary')}")
+            
+            # Add body part snapshots with full details
+            if current_document.get('bodyPartSnapshots'):
+                context_parts.append("\nBody Part Details:")
+                for snapshot in current_document['bodyPartSnapshots']:
+                    if isinstance(snapshot, dict):
+                        parts = []
+                        if snapshot.get('bodyPart') or snapshot.get('condition'):
+                            parts.append(f"Body Part/Condition: {snapshot.get('bodyPart') or snapshot.get('condition')}")
+                        if snapshot.get('dx'):
+                            parts.append(f"Diagnosis: {snapshot.get('dx')}")
+                        if snapshot.get('keyConcern'):
+                            parts.append(f"Key Concern: {snapshot.get('keyConcern')}")
+                        if snapshot.get('nextStep'):
+                            parts.append(f"Next Step: {snapshot.get('nextStep')}")
+                        if snapshot.get('status'):
+                            parts.append(f"Status: {snapshot.get('status')}")
+                        if parts:
+                            context_parts.append("  - " + " | ".join(parts))
+            
+            # Add ADL information if available
+            if current_document.get('adl'):
+                adl = current_document['adl']
+                if isinstance(adl, dict):
+                    context_parts.append("\nActivities of Daily Living:")
+                    if adl.get('limitations'):
+                        context_parts.append(f"Limitations: {adl.get('limitations')}")
+                    if adl.get('restrictions'):
+                        context_parts.append(f"Restrictions: {adl.get('restrictions')}")
+        
+        # Add previous documents with enhanced detail extraction
+        if documents:
+            context_parts.append("\n=== PREVIOUS DOCUMENTS (CHRONOLOGICAL) ===")
+            for i, doc in enumerate(documents, 1):
+                context_parts.append(f"\n--- Document {i} ---")
+                
+                # Date
+                doc_date = doc.get('createdAt') or doc.get('documentDate')
+                if doc_date:
+                    context_parts.append(f"Date: {doc_date}")
+                
+                # Summaries - include both for comprehensive context
+                if doc.get('short_summary'):
+                    context_parts.append(f"Summary: {doc.get('short_summary')}")
+                if doc.get('long_summary'):
+                    # Include more of the long summary for better context
+                    context_parts.append(f"Details: {doc.get('long_summary')[:1500]}...")
+                elif doc.get('briefSummary'):
+                    context_parts.append(f"Summary: {doc.get('briefSummary')}")
+                
+                # Document summary if available
+                if doc.get('documentSummary'):
+                    if isinstance(doc['documentSummary'], dict):
+                        if doc['documentSummary'].get('summary'):
+                            context_parts.append(f"Document Analysis: {doc['documentSummary'].get('summary')}")
+                
+                # Body part findings with full details
+                if doc.get('bodyPartSnapshots'):
+                    context_parts.append("Clinical Findings:")
+                    for snapshot in doc['bodyPartSnapshots']:
+                        if isinstance(snapshot, dict):
+                            finding_parts = []
+                            if snapshot.get('bodyPart') or snapshot.get('condition'):
+                                finding_parts.append(snapshot.get('bodyPart') or snapshot.get('condition'))
+                            if snapshot.get('dx'):
+                                finding_parts.append(f"DX: {snapshot.get('dx')}")
+                            if snapshot.get('keyConcern'):
+                                finding_parts.append(f"Concern: {snapshot.get('keyConcern')}")
+                            if snapshot.get('nextStep'):
+                                finding_parts.append(f"Plan: {snapshot.get('nextStep')}")
+                            if finding_parts:
+                                context_parts.append(f"  • {' - '.join(finding_parts)}")
+                
+                # ADL from previous documents
+                if doc.get('adl'):
+                    adl = doc['adl']
+                    if isinstance(adl, dict) and (adl.get('limitations') or adl.get('restrictions')):
+                        context_parts.append("Functional Status:")
+                        if adl.get('limitations'):
+                            context_parts.append(f"  • Limitations: {adl.get('limitations')}")
+                        if adl.get('restrictions'):
+                            context_parts.append(f"  • Restrictions: {adl.get('restrictions')}")
+        
+        full_context = "\n".join(context_parts)
+        
+        # Log context length for debugging
+        logger.debug(f"📝 Generated context with {len(full_context)} characters from {len(documents)} previous docs + current doc")
+        
+        return full_context
+
     async def generate_treatment_history_with_llm(self, patient_name: str, 
-                                                 context: str, 
-                                                 current_document_analysis: Any = None,
-                                                 max_retries: int = 3) -> Dict[str, List[Dict]]:
+                                                context: str, 
+                                                current_document_analysis: Any = None,
+                                                max_retries: int = 3) -> Dict[str, List[Dict]]:
         """
         Use LLM to generate structured treatment history with retry logic
         """
@@ -284,75 +349,169 @@ class TreatmentHistoryGenerator:
                     logger.info(f"🔄 Retry attempt {attempt + 1}/{max_retries} after {wait_time}s delay...")
                     await asyncio.sleep(wait_time)
                 
-                # Prepare prompt for LLM
+                # Prepare enhanced prompt for LLM
                 prompt = f"""
-            You are a medical history analyzer. Create a structured treatment history timeline from the provided document context.
-            
-            PATIENT: {patient_name}
-            
-            DOCUMENT CONTEXT:
-            {context}
-            
-            CURRENT DOCUMENT ANALYSIS (if available):
-            {str(current_document_analysis) if current_document_analysis else 'Not available'}
-            
-            CRITICAL DATE RULES - MUST FOLLOW:
-            - ONLY use dates that are EXPLICITLY mentioned in the documents
-            - NEVER use today's date, current date, or any fallback/default date
-            - NEVER invent, assume, or guess dates
-            - If a date is not explicitly stated in the document, leave the date field empty (empty string "")
-            - If only partial date info exists (e.g., just month or year), use only what is provided (e.g., "March 2025" or "2025")
-            - DO NOT use dates like "01/02/2026" or any current system date as fallback
-            - DO NOT use placeholder text like "Date not specified" or "Unknown" - just leave it empty
-            
-            INSTRUCTIONS:
-            1. Analyze all provided documents and extract treatment events chronologically (most recent first)
-            2. Organize events by body system/organ system categories
-            3. For each event, include:
-               - Date (ONLY from document - leave empty "" if no date found. Use partial dates like "03/2025" or "2023" if only partial date available)
-               - Event type (e.g., "MRI", "PT Session", "Medication Change", "Consultation", "Surgery")
-               - Details (specific findings, treatments, outcomes)
-            4. Group events into logical categories such as:
-               - musculoskeletal_system (for orthopedic, PT, spine, joint, bone, muscle, tendon, ligament issues)
-               - cardiovascular_system (for heart, BP, circulation, vascular, artery, vein issues)
-               - pulmonary_respiratory (for lungs, breathing, asthma, COPD, respiratory issues)
-               - neurological (for brain, nerves, headaches, seizures, stroke, neuropathy)
-               - gastrointestinal (for stomach, digestion, liver, intestine, colon, GERD issues)
-               - metabolic_endocrine (for diabetes, thyroid, hormones, adrenal, pituitary issues)
-               - genitourinary_renal (for kidneys, bladder, urinary tract, prostate issues)
-               - reproductive_obstetric_gynecologic (for fertility, pregnancy, menstrual, ovarian, uterine issues)
-               - dermatological (for skin conditions, wounds, burns, rashes, lesions)
-               - ophthalmologic (for eyes, vision, cataracts, glaucoma, retinal issues)
-               - ent_head_neck (for ears, nose, throat, sinuses, hearing, tinnitus issues)
-               - dental_oral (for teeth, gums, jaw, TMJ, oral cavity issues)
-               - hematologic_lymphatic (for blood disorders, anemia, clotting, lymph nodes issues)
-               - immune_allergy (for autoimmune conditions, allergies, immunodeficiency issues)
-               - psychiatric_mental_health (for depression, anxiety, PTSD, cognitive issues)
-               - sleep_disorders (for insomnia, sleep apnea, narcolepsy, circadian rhythm issues)
-               - other_systems (for anything that doesn't fit above categories)
-            5. If no specific system is mentioned, use "general_treatments"
-            6. Only include information explicitly mentioned in the documents
-            7. Format as JSON with system categories as keys and arrays of events as values
-            
-            OUTPUT FORMAT EXAMPLE:
-            {{
-              "musculoskeletal_system": [
-                {{
-                  "date": "03/10/2025",
-                  "event": "MRI Lumbar Spine",
-                  "details": "L4–5 disc protrusion, Mild canal stenosis, Consider ESI"
-                }},
-                {{
-                  "date": "",
-                  "event": "Physical Therapy",
-                  "details": "Patient reports improvement with PT sessions"
-                }}
-              ],
-              "cardiovascular_system": [],
-              "pulmonary_respiratory": []
-            }}
-            
-            Return ONLY valid JSON, no additional text.
+    You are a comprehensive medical history analyzer. Your task is to extract ALL treatment events and medical information from the provided documents into a structured timeline. You must be thorough and precise, capturing every significant medical detail without adding any information not present in the documents.
+
+    PATIENT: {patient_name}
+
+    DOCUMENT CONTEXT:
+    {context}
+
+    CURRENT DOCUMENT ANALYSIS (if available):
+    {str(current_document_analysis) if current_document_analysis else 'Not available'}
+
+    === CRITICAL EXTRACTION RULES ===
+
+    1. DATE HANDLING (STRICTLY ENFORCED):
+    - ONLY use dates EXPLICITLY stated in the documents
+    - NEVER use today's date, current date, or system date as fallback
+    - NEVER invent, assume, or guess dates
+    - If no date is mentioned, leave the date field as empty string ""
+    - Accept partial dates (e.g., "March 2025", "2025", "Q1 2024")
+    - DO NOT use placeholder text like "Date not specified" - use empty string ""
+    - Examples of acceptable dates: "03/10/2025", "March 2025", "2025", "03/2025"
+    - Examples of UNACCEPTABLE: "01/02/2026" (if not in document), "Date not specified", "Unknown"
+
+    2. COMPLETENESS - CAPTURE ALL DETAILS:
+    Extract EVERY piece of medical information including:
+    
+    a) DIAGNOSTIC INFORMATION:
+        - All diagnostic test results (MRI, CT, X-ray, ultrasound, blood work, etc.)
+        - Specific findings with measurements (e.g., "3mm disc protrusion at L4-L5")
+        - Severity indicators (mild, moderate, severe)
+        - Comparative changes (improved, worsened, stable, new finding)
+        - Radiologist/specialist interpretations
+    
+    b) SYMPTOMS & COMPLAINTS:
+        - Patient-reported symptoms with location and characteristics
+        - Pain levels/scales if mentioned
+        - Functional limitations (e.g., "difficulty walking", "cannot lift arm")
+        - Symptom progression (onset, duration, frequency)
+    
+    c) TREATMENTS & INTERVENTIONS:
+        - All prescribed medications (name, dosage, frequency if mentioned)
+        - Physical therapy sessions (frequency, specific exercises, progress)
+        - Injections (type, location, dates administered)
+        - Surgical procedures (type, date, outcome)
+        - Alternative treatments (chiropractic, acupuncture, etc.)
+    
+    d) CLINICAL ASSESSMENTS:
+        - Provider observations and examination findings
+        - Diagnosis codes (ICD-10) if mentioned
+        - Treatment plan changes
+        - Specialist referrals and consultations
+        - Work restrictions or activity limitations
+    
+    e) OUTCOMES & PROGRESS:
+        - Treatment effectiveness (improved, no change, worsened)
+        - Return to work status
+        - Functional improvement metrics
+        - Patient satisfaction or concerns
+        - Next steps or recommendations
+
+    3. PRECISION & ACCURACY:
+    - Use EXACT terminology from the documents (medical terms, measurements)
+    - Include specific numbers, percentages, measurements
+    - Preserve medical abbreviations if used in source
+    - Capture both positive findings AND negative findings (e.g., "no evidence of fracture")
+    - Include qualifiers (mild, moderate, severe, chronic, acute)
+
+    4. CONTEXT PRESERVATION:
+    - Link related events (e.g., "Follow-up MRI after ESI injection")
+    - Note causal relationships when mentioned
+    - Include provider recommendations and rationale
+    - Capture patient compliance or non-compliance if noted
+
+    5. NO FABRICATION:
+    - NEVER add information not in the documents
+    - NEVER make clinical inferences or assumptions
+    - NEVER generalize specific findings
+    - If uncertain about a detail, err on the side of verbatim extraction
+
+    === BODY SYSTEM CATEGORIZATION ===
+
+    Organize ALL extracted events into these categories based on the primary body system involved:
+
+    - musculoskeletal_system: bones, joints, spine, muscles, tendons, ligaments, cartilage, orthopedic issues, sports injuries, fractures, arthritis, back pain, neck pain, disc problems, strains, sprains
+
+    - cardiovascular_system: heart, blood vessels, arteries, veins, circulation, blood pressure, cardiac conditions, chest pain, palpitations, vascular diseases
+
+    - pulmonary_respiratory: lungs, airways, breathing, asthma, COPD, bronchitis, pneumonia, shortness of breath, respiratory infections
+
+    - neurological: brain, spinal cord, nerves, headaches, migraines, seizures, stroke, neuropathy, numbness, tingling, cognitive issues, movement disorders
+
+    - gastrointestinal: stomach, intestines, liver, gallbladder, pancreas, esophagus, colon, digestion, GERD, ulcers, IBS, hepatitis, abdominal pain
+
+    - metabolic_endocrine: diabetes, thyroid disorders, hormonal imbalances, metabolic syndrome, adrenal issues, pituitary disorders, obesity
+
+    - genitourinary_renal: kidneys, bladder, urinary tract, prostate, urination issues, kidney stones, UTIs, renal failure
+
+    - reproductive_obstetric_gynecologic: pregnancy, menstrual issues, fertility, ovarian/uterine conditions, pelvic pain, menopause, contraception
+
+    - dermatological: skin conditions, rashes, lesions, wounds, burns, acne, eczema, psoriasis, skin infections, ulcers
+
+    - ophthalmologic: eyes, vision problems, cataracts, glaucoma, retinal issues, eye injuries, visual disturbances
+
+    - ent_head_neck: ears, nose, throat, sinuses, hearing loss, tinnitus, vertigo, sinus infections, voice problems
+
+    - dental_oral: teeth, gums, jaw, TMJ, oral cavity, dental procedures, tooth pain, periodontal disease
+
+    - hematologic_lymphatic: blood disorders, anemia, clotting disorders, lymph nodes, bleeding problems, blood cancers
+
+    - immune_allergy: autoimmune diseases, allergic reactions, immunodeficiency, hypersensitivity, chronic infections
+
+    - psychiatric_mental_health: depression, anxiety, PTSD, bipolar disorder, schizophrenia, cognitive disorders, substance abuse, psychological trauma
+
+    - sleep_disorders: insomnia, sleep apnea, narcolepsy, restless leg syndrome, circadian rhythm disorders
+
+    - other_systems: conditions not fitting above categories
+
+    - general_treatments: multi-system treatments, general wellness, preventive care, or when system is unclear
+
+    === OUTPUT FORMAT ===
+
+    Return ONLY valid JSON with this exact structure:
+
+    {{
+    "musculoskeletal_system": [
+        {{
+        "date": "03/10/2025",
+        "event": "MRI Lumbar Spine",
+        "details": "L4-L5: 3mm posterior disc protrusion with mild canal stenosis. L5-S1: Disc desiccation without herniation. Mild facet arthropathy noted bilaterally. Radiologist recommends correlation with clinical symptoms. ESI considered if conservative treatment fails."
+        }},
+        {{
+        "date": "02/15/2025",
+        "event": "Physical Therapy - Session 8",
+        "details": "Patient reports 40% pain reduction with core strengthening exercises. Improved lumbar ROM: flexion 70°, extension 20°. Able to perform bridging exercises without pain. Continuing 2x/week for 4 more weeks. Added McKenzie exercises."
+        }},
+        {{
+        "date": "",
+        "event": "Orthopedic Consultation",
+        "details": "Orthopedist reviewed imaging, confirmed L4-L5 disc protrusion with radiculopathy. Patient reports shooting pain down right leg (L5 distribution). Recommends trial of oral steroids before considering ESI. Work restrictions: No lifting >10 lbs."
+        }}
+    ],
+    "cardiovascular_system": [],
+    "neurological": [
+        {{
+        "date": "03/10/2025",
+        "event": "Nerve Conduction Study",
+        "details": "Right L5 radiculopathy confirmed. Prolonged F-wave latency. No evidence of peripheral neuropathy. Consistent with lumbar disc compression at L4-L5 level."
+        }}
+    ]
+    }}
+
+    IMPORTANT REMINDERS:
+    - Every significant medical detail must be captured in the "details" field
+    - Use complete sentences with proper medical terminology
+    - Include ALL measurements, test results, and clinical findings
+    - Link related events when mentioned (e.g., "Follow-up to previous MRI dated 01/15/2025")
+    - If a document mentions "no change" or "stable findings", capture this with reference to what is stable
+    - Capture provider names, facility names if mentioned for context
+    - Include patient-reported outcomes and functional status
+    - Note any medication changes, dosage adjustments, or discontinuations
+
+    Return ONLY the JSON object, no additional text or explanation.
                 """
                 
                 # Call Azure OpenAI
@@ -360,13 +519,16 @@ class TreatmentHistoryGenerator:
                 logger.debug(f"📝 Context length: {len(context)} chars")
                 
                 response = await self.openai_client.chat.completions.create(
-                    model=self.deployment_name,  # Use the deployment name from settings
+                    model=self.deployment_name,
                     messages=[
-                        {"role": "system", "content": "You are a medical data analyst that extracts and structures treatment history information."},
+                        {
+                            "role": "system", 
+                            "content": "You are a meticulous medical data analyst specializing in comprehensive treatment history extraction. You extract ALL relevant medical information with precision, never adding information not present in the source documents. You follow date handling rules strictly and organize data by body systems accurately."
+                        },
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.1,
-                    max_tokens=2000,
+                    temperature=0.1,  # Low temperature for consistency
+                    max_tokens=4000,  # Increased for comprehensive details
                     response_format={"type": "json_object"}
                 )
                 
@@ -435,7 +597,7 @@ class TreatmentHistoryGenerator:
                 logger.error(f"❌ Error type: {type(e).__name__}")
                 logger.error(f"❌ Full traceback: {traceback.format_exc()}")
                 
-                # Check if it's a retryable error (connection, timeout, rate limit)
+                # Check if it's a retryable error
                 is_retryable = any(err in error_msg for err in [
                     "connection", "timeout", "rate limit", "429", "503", "502", 
                     "service unavailable", "gateway", "network", "reset"
@@ -445,14 +607,13 @@ class TreatmentHistoryGenerator:
                     logger.warning(f"⚠️ LLM call failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
                     continue
                 else:
-                    # Non-retryable error or last attempt
                     logger.error(f"❌ Error generating treatment history with LLM: {str(e)}")
                     break
         
         # All retries exhausted or non-retryable error
         logger.error(f"❌ All {max_retries} attempts failed for treatment history generation. Last error: {str(last_error)}")
         return self._get_empty_history_template()
-    
+
     def _get_empty_history_template(self) -> Dict[str, Dict[str, List]]:
         """Return empty treatment history template with current and archive structure"""
         return {
