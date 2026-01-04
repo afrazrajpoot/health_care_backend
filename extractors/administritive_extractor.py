@@ -11,6 +11,8 @@ from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTempla
 from langchain_openai import AzureChatOpenAI
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
+from helpers.short_summary_generator import generate_structured_short_summary
+
 
 logger = logging.getLogger("document_ai")
 
@@ -512,117 +514,19 @@ class AdministrativeExtractor:
             # Fallback: Generate a minimal summary
             return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
 
-    def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
         """
-        Generate a precise 30–60 word administrative summary in key-value format.
-        Pipe-delimited, zero hallucination, skips missing fields.
-        Includes Author (report signer) but excludes patient details.
-        """
-
-        logger.info("🎯 Generating 30–60 word administrative structured summary (key-value format)...")
-
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are an administrative and legal-document extraction specialist.
-
-TASK:
-Create a concise, accurate administrative summary using ONLY information explicitly present in the long summary.
-
-STRICT REQUIREMENTS:
-1. Word count MUST be **between 30 and 60 words**.
-2. Output format MUST be EXACTLY:
-
-[Document Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Physical Exam:[value] | Vital Signs:[value] | Medication:[value] | MMI Status:[value] | Work Status:[value] | Restrictions:[value] | Action Items:[value] | Recommendations:[value] | Critical Finding:[value] | Follow-up:[value]
-
-NEW KEY RULES (IMPORTANT):
-- **ONLY include, critical, or clinically significant findings**.
-- **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
-- **If a value is not extracted, omit the ENTIRE key-value pair.**
-- **Never output an empty key, an empty value, or placeholders.**
-- **No duplicate pipes, no empty pipes (no '||').**
-
-FORMAT & RULES:
-- MUST be **30–60 words**.
-- MUST be **ONE LINE**, pipe-delimited, no line breaks.
-- First three fields (Document Title, Author, Date) appear without keys
-- For Author never use Dr. with it
-- All other fields use key-value format: Key:[value].
-- DO NOT include patient details (name, DOB, ID).
-- NEVER fabricate any information or infer abnormalities.
-
-CONTENT PRIORITY (ONLY IF AND PRESENT IN THE SUMMARY):
-1. Document Title
-2. Author
-3. Date
-4. body parts or injury locations
-5. diagnoses
-6. Physical exam (only abnormalities)
-7. Vital signs (only abnormalities)
-8. Medications (only if explicitly listed)
-9. MMI status (only if explicitly stated)
-10. Work status & restrictions (only if given)
-11. Action items (only if they indicate issues)
-12. Critical findings
-13. Follow-up requirements
-14. Recommendations (only if given)
-
-ABSOLUTELY FORBIDDEN (donot include in output, for LLM use only):
-- Normal findings (ignore them entirely for these fields: physical exam, vital signs)
-- assumptions, interpretations, invented medications, or inferred diagnoses
-- placeholder text or "Not provided"
-- narrative writing
-- duplicate pipes or empty pipe fields (e.g., "||")
-- For Author never use Dr. with it
-- any patient details (patient name, DOB, ID)
-
-Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
-""")
-
-
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-LONG ADMINISTRATIVE SUMMARY:
-
-{long_summary}
-
-Now produce a 30–60 word administrative structured summary following ALL rules.
-""")
-
-        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-
-        try:
-            chain = chat_prompt | self.llm
-            response = chain.invoke({"long_summary": long_summary, "doc_type": doc_type})
-            summary = response.content.strip()
-
-            # Clean formatting - only whitespace, no pipe cleaning
-            summary = re.sub(r"\s+", " ", summary).strip()
+        Generate a structured, UI-ready summary from raw_text (Document AI summarizer output).
+        Delegates to the reusable helper function.
+        
+        Args:
+            raw_text: The Document AI summarizer output (primary context)
+            doc_type: Document type
             
-            # Programmatically add missing Date or Author if LLM missed them
-            summary = ensure_date_and_author(summary, long_summary)
-
-            # Word count validation
-            wc = len(summary.split())
-            if wc < 30 or wc > 60:
-                logger.warning(f"⚠️ Administrative summary out of bounds ({wc} words). Auto-correcting...")
-
-                fix_prompt = ChatPromptTemplate.from_messages([
-                    SystemMessagePromptTemplate.from_template(
-                        f"Your prior output contained {wc} words. Rewrite it to be STRICTLY between 30 and 60 words while keeping all facts accurate and key-value pipe-delimited format. DO NOT add fabricated details. Maintain format: [Document Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | etc. DO NOT include patient details."
-                    ),
-                    HumanMessagePromptTemplate.from_template(summary)
-                ])
-                chain2 = fix_prompt | self.llm
-                fixed = chain2.invoke({})
-                summary = re.sub(r"\s+", " ", fixed.content.strip())
-                # Re-ensure date and author after correction
-                summary = ensure_date_and_author(summary, long_summary)
-
-            logger.info(f"✅ Administrative summary generated: {len(summary.split())} words")
-            return summary
-
-        except Exception as e:
-            logger.error(f"❌ Administrative summary generation failed: {e}")
-            return "Summary unavailable due to processing error."
-    
+        Returns:
+            dict: Structured summary with header, findings, recommendations, status
+        """
+        return generate_structured_short_summary(self.llm, raw_text, doc_type)
     
     def _create_admin_fallback_summary(self, long_summary: str, doc_type: str) -> str:
         """Create comprehensive fallback administrative summary directly from long summary"""

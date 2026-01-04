@@ -18,6 +18,7 @@ from langchain_openai import AzureChatOpenAI
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
+from helpers.short_summary_generator import generate_structured_short_summary
 
 logger = logging.getLogger("document_ai")
 
@@ -91,7 +92,7 @@ class ImagingExtractorChained:
             long_summary = clean_long_summary(long_summary)
             
             # Step 2: Generate short summary from long summary (like QME extractor)
-            short_summary = self._generate_short_summary_from_long_summary(long_summary)
+            short_summary = self._generate_short_summary_from_long_summary(long_summary, doc_type)
             
             elapsed_time = time.time() - start_time
             logger.info(f"⚡ Full-context imaging extraction completed in {elapsed_time:.2f}s")
@@ -469,109 +470,12 @@ class ImagingExtractorChained:
         logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
         return cleaned_summary
     
-    def _generate_short_summary_from_long_summary(self, long_summary: str) -> str:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
         """
-        Generate a precise 30–60 word structured imaging summary in key-value format.
-        Zero hallucinations. Pipe-delimited. Skips missing fields.
+        Generate a structured short summary using the centralized helper function.
+        Returns a dictionary with header, content, and raw_summary.
         """
-
-        logger.info("🎯 Generating 30–60 word structured imaging summary (key-value format)...")
-
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-    You are a radiology-report summarization specialist.
-
-    TASK:
-    Produce a concise structured summary of an imaging report using ONLY details explicitly present in the long summary.
-    - **ONLY include, critical, or clinically significant findings**.
-    - **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
-
-    STRICT REQUIREMENTS:
-    1. Word count MUST be **between 30 and 60 words**.
-    2. Output format MUST be EXACTLY:
-
-    [Report Title] | [Radiologist/Physician] | [Study Date] | Body Parts:[value] | Findings:[value] | Impression:[value] | Comparison:[value] | Physical Exam:[value] | Vital Signs:[value] | Critical Finding:[value] | Recommendations:[value]
-
-    FORMAT & RULES:
-    - MUST be **30–60 words**.
-    - MUST be **ONE LINE**, pipe-delimited, no line breaks.
-    - For Author never use "Dr." with it
-    - NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
-    - NEVER fabricate: no invented dates, findings, or recommendations.
-    - NO narrative sentences. Use short factual fragments ONLY.
-    - First three fields (Report Title, Radiologist, Study Date) appear without keys
-    - All other fields use key-value format: Key:[value]
-    - Focus on radiology-specific elements: findings, impressions, comparisons
-
-    CONTENT PRIORITY (only if provided in the long summary):
-    1. Report Title  
-    2. Radiologist  
-    3. Study Date  
-    4. Body parts studied  
-    5. Key imaging findings  
-    6. Radiologist's impression  
-    7. Physical Exam (only abnormal findings if mentioned)  
-    8. Vital Signs (only abnormal values if mentioned)  
-    9. Comparison to prior studies  (if relevant)  
-    10. Critical/urgent findings  
-    11. Recommendations (only if explicitly stated)
-
-    ABSOLUTELY FORBIDDEN:
-    - assumptions, interpretations, or invented findings
-    - For Author never use "Dr." with it
-    - narrative writing
-    - placeholder text or "Not provided"
-    - duplicate pipes or empty pipe fields (e.g., "||")
-    - Including non-radiology fields (medications, work status, etc.)
-
-    Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
-    """)
-
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-    IMAGING REPORT LONG SUMMARY:
-
-    {long_summary}
-
-    Create a strict 30–60 word imaging summary using the required pipe-delimited format.
-    """)
-
-        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-
-        try:
-            chain = chat_prompt | self.llm
-            response = chain.invoke({"long_summary": long_summary})
-
-            summary = response.content.strip()
-            summary = re.sub(r"\s+", " ", summary).strip()
-            
-            # Programmatically add missing Date or Author if LLM missed them
-            summary = ensure_date_and_author(summary, long_summary)
-            
-            # No pipe cleaning - keep pipes as generated
-
-            # Validate 30–60 word requirement
-            wc = len(summary.split())
-            if wc < 30 or wc > 60:
-                logger.warning(f"⚠️ Imaging summary word count out of range: {wc} words. Regenerating...")
-
-                fix_prompt = ChatPromptTemplate.from_messages([
-                    SystemMessagePromptTemplate.from_template(
-                        f"Your prior output was {wc} words. Rewrite it to be between 30–60 words, preserving only factual content, keeping the exact key-value pipe format, and adding NO fabricated details. Maintain format: [Report Title] | [Radiologist] | [Study Date] | Body Parts:[value] | Findings:[value] | etc."
-                    ),
-                    HumanMessagePromptTemplate.from_template(summary)
-                ])
-
-                chain2 = fix_prompt | self.llm
-                fixed = chain2.invoke({})
-                summary = re.sub(r"\s+", " ", fixed.content.strip())
-                # Re-ensure date and author after correction
-                summary = ensure_date_and_author(summary, long_summary)
-
-            logger.info(f"✅ Imaging summary generated: {len(summary.split())} words")
-            return summary
-
-        except Exception as e:
-            logger.error(f"❌ Imaging summary generation failed: {e}")
-            return "Summary unavailable due to processing error."
+        return generate_structured_short_summary(self.llm, raw_text, doc_type)
   
     def _create_comprehensive_fallback_summary(self, long_summary: str) -> str:
         """Create comprehensive fallback short summary directly from long summary"""

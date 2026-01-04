@@ -13,6 +13,7 @@ from langchain_openai import AzureChatOpenAI
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
+from helpers.short_summary_generator import generate_structured_short_summary
 
 logger = logging.getLogger("document_ai")
 
@@ -566,158 +567,21 @@ class FormalMedicalReportExtractor:
         logger.info(f"✅ Injected new HEALTHCARE PROVIDERS section with Author: {verified_author}")
         return long_summary
 
-    def _clean_pipes_from_summary(self, short_summary: str) -> str:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
         """
-        Clean empty pipes from short summary to avoid consecutive pipes or trailing pipes.
+        Generate a structured, UI-ready summary from raw_text (Document AI summarizer output).
+        Delegates to the reusable helper function.
         
         Args:
-            short_summary: The pipe-delimited short summary string
+            raw_text: The Document AI summarizer output (primary context)
+            doc_type: Document type
             
         Returns:
-            Cleaned summary with proper pipe formatting
+            dict: Structured summary with header, findings, recommendations, status
         """
-        if not short_summary or '|' not in short_summary:
-            return short_summary
-        
-        # Split by pipe and clean each part
-        parts = short_summary.split('|')
-        cleaned_parts = []
-        
-        for part in parts:
-            # Remove whitespace and check if part has meaningful content
-            stripped_part = part.strip()
-            # Keep part if it has actual content (not just empty or whitespace)
-            if stripped_part:
-                cleaned_parts.append(stripped_part)
-        
-        # Join back with pipes - only include parts with actual content
-        cleaned_summary = ' . '.join(cleaned_parts)
-        
-        logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
-        return cleaned_summary
+        return generate_structured_short_summary(self.llm, raw_text, doc_type)
     
-    def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
-        """
-        Generate a precise 30–60 word structured medical summary in key-value format.
-        Zero hallucinations, pipe-delimited, skips missing fields.
-        """
 
-        logger.info("🎯 Generating 30–60 word medical structured summary (key-value format)...")
-
-        # ENHANCED: Updated system prompt to ensure author prominence and patient exclusion
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a medical-report summarization specialist.
-
-TASK:
-Create a concise, factual summary of a medical report using ONLY information explicitly present in the long summary.
-- **ONLY include, critical, or clinically significant findings**.
-- **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
-DO NOT include any patient personal details such as name, DOB, DOI, or claim number.
-
-STRICT REQUIREMENTS:
-1. Word count MUST be **between 30 and 60 words**.
-2. Output format MUST be EXACTLY:
-
-[Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Physical Exam:[value] | Vital Signs:[value] | Medication:[value] | MMI Status:[value] | Work Status:[value] | Restrictions:[value] | Treatment Plan:[value] | Recommendations:[value] | Critical Finding:[value] | Follow-up:[value]
-
-KEY RULES:
-- ONLY include critical, or clinically significant findings .
-- For Author never use "Dr." with it
-- If a value is missing or not extractable, omit the ENTIRE key-value pair.
-- NEVER output empty fields or placeholder text.
-- NEVER fabricate dates, meds, restrictions, exam findings, or recommendations.
-- NO narrative sentences; use short factual fragments.
-- First three fields (Report Title, Author, Date) appear without keys.
-- All other fields use key-value format: Key:[value].
-- Critical Finding and Physical Exam details include **only abnormalities or critical observations**.
-- Medications, MMI Status, Work Status, Restrictions, Treatment Progress, Follow-up included **only if explicitly mentioned**.
-
-CONTENT PRIORITY (only if abnormal/critical and present):
-1. Report Title (use {doc_type} if not specified)
-2. Author (use VERIFIED AUTHOR from HEALTHCARE PROVIDERS section; indicate signature type if specified)
-3. Date (Report Date or Procedure Date)
-4. Body Parts (from Procedure/Anatomical Sites)
-5. Diagnosis (Final/Pathological Diagnosis)
-6. Physical Exam (only abnormal findings if mentioned)
-7. Vital Signs (only abnormal values if mentioned)
-8. Medications (Anesthetic/Intraoperative meds if mentioned)
-9. MMI Status (if mentioned)
-10. Work Status / Restrictions (if applicable and mentioned)
-11. Treatment Plan (from Results/Interpretation if mentioned)
-12. Critical Finding (from CRITICAL FINDINGS or abnormal observations if mentioned)
-13. Recommendations (from Recommendations section)
-14. Follow-up plan (from Recommendations)
-
-ABSOLUTELY FORBIDDEN:
-- Normal findings (ignore entirely for Physical Exam and Vital Signs)
-- For Author never use "Dr." with it
-- Assumptions, interpretations, inferred diagnoses
-- Narrative sentences
-- Patient personal details (Name, DOB, DOI, Claim, Employer)
-- Placeholder text or "Not provided"
-- Duplicate or empty pipes (||)
-- Hallucinated or fabricated content
-
-Your final output MUST be between 30–60 words, single-line, pipe-delimited, and include ONLY explicitly provided abnormal or critical findings.
-""")
-
-
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-MEDICAL REPORT LONG SUMMARY:
-
-{long_summary}
-
-Produce a 30–60 word structured medical summary following ALL rules.
-""")
-
-        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-
-        try:
-            chain = chat_prompt | self.llm
-            response = chain.invoke({
-                "doc_type": doc_type,
-                "long_summary": long_summary
-            })
-
-            summary = response.content.strip()
-            summary = re.sub(r"\s+", " ", summary).strip()
-            # Programmatically add missing Date or Author if LLM missed them
-            summary = ensure_date_and_author(summary, long_summary)
-            # Remove pipe cleaning to keep pipes as-is
-            # summary = self._clean_pipes_from_summary(summary)
-
-            # ENHANCED: Post-process to enforce no patient details
-            forbidden_patterns = [r'Name|DOB|DOI|Claim|Employer']
-            for pattern in forbidden_patterns:
-                summary = re.sub(pattern, '', summary, flags=re.IGNORECASE)
-                summary = re.sub(r'\s*\|\s*', '|', summary)  # Clean extra pipes
-
-            # Validate 30–60 word range
-            wc = len(summary.split())
-            if wc < 30 or wc > 60:
-                logger.warning(f"⚠️ Medical summary out of range ({wc} words). Regenerating...")
-
-                fix_prompt = ChatPromptTemplate.from_messages([
-                    SystemMessagePromptTemplate.from_template(
-                        f"Your previous output contained {wc} words. Rewrite it to be **between 30 and 60 words**, keeping all factual content, maintaining the key-value pipe-delimited format, and adding NO invented details. Remember: [Report Title] | [Author] | [Date] | ... EXCLUDE patient details."
-                    ),
-                    HumanMessagePromptTemplate.from_template(summary)
-                ])
-
-                chain2 = fix_prompt | self.llm
-                fixed = chain2.invoke({})
-                summary = re.sub(r"\s+", " ", fixed.content.strip())
-                # No pipe cleaning after regeneration
-                # Programmatically add missing Date or Author if LLM missed them
-                summary = ensure_date_and_author(summary, long_summary)
-
-            logger.info(f"✅ Medical summary generated: {len(summary.split())} words")
-            return summary
-
-        except Exception as e:
-            logger.error(f"❌ Medical summary generation failed: {e}")
-            return "Summary unavailable due to processing error."
-  
     def _create_medical_fallback_summary(self, long_summary: str, doc_type: str) -> str:
         """Create comprehensive fallback medical summary directly from long summary"""
         

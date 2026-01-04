@@ -13,6 +13,7 @@ from langchain_openai import AzureChatOpenAI
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
+from helpers.short_summary_generator import generate_structured_short_summary
 
 logger = logging.getLogger("document_ai")
 
@@ -125,8 +126,8 @@ class ClinicalNoteExtractor:
         # Stage 1.5: Clean the long summary - remove empty fields, placeholders, and instruction text
         long_summary = clean_long_summary(long_summary)
         
-        # Stage 2: Generate short summary from long summary
-        short_summary = self._generate_short_summary_from_long_summary(long_summary, detected_type)
+        # Stage 2: Generate short summary from raw_text using centralized helper
+        short_summary = self._generate_short_summary_from_long_summary(raw_text, detected_type)
         
         logger.info("=" * 80)
         logger.info("✅ CLINICAL NOTE EXTRACTION COMPLETE (DUAL-CONTEXT)")
@@ -573,127 +574,12 @@ class ClinicalNoteExtractor:
         logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
         return cleaned_summary
     
-    def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
         """
-        Generate a precise 30–60 word clinical note summary in key-value format.
-        Pipe-delimited, zero hallucination, skips missing fields.
-        Focuses ONLY on critical findings and abnormal actions (no patient details), includes author ONLY if explicitly signed with type.
-        Starts with Report Title first.
+        Generate a structured short summary using the centralized helper function.
+        Returns a dictionary with header, content, and raw_summary.
         """
-
-        logger.info("🎯 Generating 30–60 word clinical structured summary (critical findings & abnormal actions only, strict author with type, Report Title first)...")
-
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a clinical documentation specialist.
-
-TASK:
-Create a concise, factual clinical summary using ONLY information explicitly present in the long summary.
-- **ONLY include, critical, or clinically significant findings**.
-- **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
-
-STRICT REQUIREMENTS:
-1. Word count MUST be **between 30 and 60 words**.
-2. Output format MUST be EXACTLY:
-
-[Report Title] | Author:[value] | Date:[value] | Diagnosis:[value] | Physical Exam:[value] | Vital Signs:[value] | Critical Findings:[value] | Actions:[value] | Medications:[value] | Work Status:[value] | Recommendation:[value] | Follow-up:[value]
-
-KEY RULES (VERY IMPORTANT):
-- **ONLY include, critical, or clinically significant findings**.
-- **If a value is missing or cannot be extracted, omit the ENTIRE key-value pair.**
-- **Do NOT output empty fields, empty values, or placeholder text.**
- - For Author never use "Dr." with it
-- **Do NOT output double pipes (`||`).**
-- NO hallucination. NO invented findings, meds, or follow-up.
-- MUST be **one single line**, pipe-delimited, no line breaks.
-
-FIELD DEFINITIONS:
-- Report Title: Always include this field first → `: {doc_type}`
-- Author: Only if explicitly signed with signature type
-  ("Signature: Smith" → "Author: Smith")  
-  If there is no signature text, omit the entire field.
-- Critical Findings: Significant clinical findings, worsening conditions, flagged issues.
-- Abnormal Actions: Any abnormal interventions, adverse reactions, therapy responses, compliance issues.
-- Medications: ONLY meds explicitly mentioned; skip if none.
-- Physical Exam: ONLY abnormal exam findings (reduced ROM, weakness, swelling, tenderness, abnormal vitals).
-- Follow-up: ONLY if explicitly stated (return date, re-eval, imaging follow-up, specialist referral).
-
-CONTENT PRIORITY (ONLY IF ABNORMAL AND PRESENT):
-1. Report Title: Always included
-2. Author (only explicit signed)
-3. Critical Findings
-4. objective findings
-5. actions or responses
-6. Medications
-7. Physical Exam ( abnormal only if present)
-8. Follow-up instructions
-9. Vital Signs (abnormal only if present)
-10. Recommendations (if given)
-11. Work Status (if given)
-
-ABSOLUTELY FORBIDDEN:
-- Normal findings for physical exam and vital signs (ignore these fields if all normal)
-- Patient details (name, DOB, demographics)
-- Using provider names as author without explicit signature
-- For Author never use "Dr." with it
-- Assumptions, interpretations, or inferred issues
-- Narrative writing
-- Placeholder text (e.g., “None”, “Not provided”)
-- Duplicate pipes or empty fields
-
-Your final output MUST be between 30–60 words, follow the exact pipe-delimited key-value style, contain ONLY factual abnormal findings explicitly in the summary, and omit any fields not extracted.
-""")
-
-
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-    CLINICAL LONG SUMMARY:
-
-    {long_summary}
-
-    Now produce a 30–60 word structured clinical summary following ALL rules, starting with Report Title, including author ONLY if explicitly signed with type and signing language, focusing only on critical findings and abnormal actions.
-    """)
-
-        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-
-        try:
-            chain = chat_prompt | self.llm
-            response = chain.invoke({
-                "doc_type": doc_type,
-                "long_summary": long_summary
-            })
-            summary = response.content.strip()
-
-            # Normalize whitespace only - no pipe cleaning
-            summary = re.sub(r"\s+", " ", summary).strip()
-            # Programmatically add missing Date or Author if LLM missed them
-            summary = ensure_date_and_author(summary, long_summary)
-
-            # Validate word count
-            wc = len(summary.split())
-            if wc < 30 or wc > 60:
-                logger.warning(f"⚠️ Clinical summary out of range ({wc} words). Attempting auto-fix...")
-
-                fix_prompt = ChatPromptTemplate.from_messages([
-                    SystemMessagePromptTemplate.from_template(
-                        f"Your prior summary contained {wc} words. Rewrite it to be between 30 and 60 words. "
-                        "DO NOT add fabricated details or patient info. Preserve all factual elements including author ONLY if explicit with type and signing language, Report Title first. "
-                        "Maintain key-value pipe-delimited format: Report Title:[value] | Author:[value] | Critical Findings:[value] | Abnormal Actions:[value] (skip missing keys)"
-                    ),
-                    HumanMessagePromptTemplate.from_template(summary)
-                ])
-
-                chain2 = fix_prompt | self.llm
-                fixed = chain2.invoke({})
-                summary = re.sub(r"\s+", " ", fixed.content.strip())
-                # No pipe cleaning after auto-fix
-                # Programmatically add missing Date or Author if LLM missed them
-                summary = ensure_date_and_author(summary, long_summary)
-
-            logger.info(f"✅ Clinical summary generated: {len(summary.split())} words")
-            return self._clean_pipes_from_summary(summary)
-
-        except Exception as e:
-            logger.error(f"❌ Clinical summary generation failed: {e}")
-            return "Summary unavailable due to processing error."
+        return generate_structured_short_summary(self.llm, raw_text, doc_type)
 
     def _create_clinical_fallback_summary(self, long_summary: str, doc_type: str) -> str:
         """Create comprehensive fallback clinical summary directly from long summary"""

@@ -13,6 +13,7 @@ from langchain_openai import AzureChatOpenAI
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
+from helpers.short_summary_generator import generate_structured_short_summary
 
 logger = logging.getLogger("document_ai")
 
@@ -610,155 +611,20 @@ Timeframe for Response: [extracted]
             # Fallback: Generate a minimal summary
             return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
 
-    def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
         """
-        Generate a precise 20-50 word, pipe-delimited actionable summary in key-value format.
-        No hallucination, no assumptions. Missing fields are omitted.
+        Generate a structured, UI-ready summary from raw_text (Document AI summarizer output).
+        Delegates to the reusable helper function.
+        
+        Args:
+            raw_text: The Document AI summarizer output (primary context)
+            doc_type: Document type
+            
+        Returns:
+            dict: Structured summary with header, findings, recommendations, status
         """
-        logger.info("🎯 Generating 20-50 word actionable short summary (key-value format)...")
-
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a medical-legal extraction specialist.
-
-TASK:
-Generate a concise, highly actionable summary from a VERIFIED long medical summary. 
-
-MANDATORY FORMAT - EXACTLY THIS STRUCTURE:
-[Document Type] | [Author] | [Date : value] | [Body Parts] | Decision:[value]
-
-STRICT REQUIREMENTS:
-1. Word count MUST be between **20 and 50 words** (count carefully).
-2. Output format MUST be EXACTLY as shown above.
-3. Use pipe separators (|) between fields.
-4. ONLY include fields that have actual extracted values - omit entire field if missing.
-5. DO NOT fabricate or infer missing data.
-6. Output must be a SINGLE LINE (no line breaks).
-
-FIELD EXTRACTION RULES:
-- **Document Type**: Extract exact type (e.g., "UR Decision", "IMR Appeal", "Authorization")
-- **Author**: Extract VERIFIED signer name from PARTIES section (e.g., "Jane Doe") but never use Dr. with it
-  * If no distinct author found, OMIT this field entirely
-  * Do NOT use generic titles or business names
-- **Date**: Extract decision/document date with key (e.g., "Date : 01/15/2025")
-- **Body Parts**: List affected body parts if mentioned (e.g., "Body Parts : Lumbar Spine, Right Knee")
-  * If no body parts mentioned, OMIT this field
-- **Decision**: Extract decision outcome (e.g., "Decision: APPROVED", "Decision: DENIED", "Decision: PENDING", "Decision: MODIFIED", "Decision: PARTIALLY APPROVED/DENIED (with breakdown or details if available)")
-
-ABSOLUTELY FORBIDDEN:
-- Patient personal details (name, DOB, Member ID, DOI)
-- Invented or placeholder information
-- Empty pipe fields (||)
-- Generic text like "Not provided" or "Unknown"
-- Narrative sentences
-- Word count outside 20-50 range
-
-EXAMPLES:
-✅ GOOD: "UR Decision | Smith | Date : 01/15/2025 | Body Parts : Lumbar Spine | Decision: DENIED | Recommendations: File IMR appeal by 02/01"
-
-✅ GOOD (minimal): "IMR Appeal | Date : 01/20/2025 | Decision: APPROVED | Recommendations: Schedule MRI within 7 days"
-
-❌ BAD: "UR Decision | | | | Decision: DENIED |" (too many empty fields)
-❌ BAD: "This is a UR decision letter that was denied..." (narrative format)
-
-Your final output MUST be 20-50 words, single-line, pipe-delimited, including ONLY extracted information.
-""")
-
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-LONG SUMMARY:
-
-{long_summary}
-
-Generate the summary in EXACTLY this format:
-[Document Type] | [Author] | [Date : value] | [Body Parts] | Decision:[value]
-
-Remember:
-- 20-50 words total
-- Single line
-- Omit fields if not found
-- NO patient details
-- Count words before responding
-""")
-
-        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-        
-        # Retry configuration
-        max_retries = 4
-        retry_delay = 1
-        
-        for attempt in range(max_retries):
-            try:
-                start_time = time.time()
-                
-                logger.info(f"🔄 Attempt {attempt + 1}/{max_retries} for short summary generation...")
-                
-                chain = chat_prompt | self.llm
-                response = chain.invoke({
-                    "doc_type": doc_type,
-                    "long_summary": long_summary
-                })
-                
-                summary = response.content.strip()
-                end_time = time.time()
-                # Programmatically add missing Date or Author if LLM missed them
-                summary = ensure_date_and_author(summary, long_summary)
-                # Clean whitespace and normalize pipes
-                summary = re.sub(r'\s+', ' ', summary).strip()
-                summary = re.sub(r'\s*\|\s*', ' | ', summary)  # Normalize pipe spacing
-                
-                # Remove patient details
-                forbidden_patterns = [r'Patient[:\s]+[^|]+\|?', r'DOB[:\s]+[^|]+\|?', r'Member\s+ID[:\s]+[^|]+\|?', r'DOI[:\s]+[^|]+\|?']
-                for pattern in forbidden_patterns:
-                    summary = re.sub(pattern, '', summary, flags=re.IGNORECASE)
-                
-                # Clean up double pipes
-                summary = re.sub(r'\|\s*\|', '|', summary)
-                summary = re.sub(r'\s+', ' ', summary).strip()
-                
-                word_count = len(summary.split())
-                
-                logger.info(f"⚡ Short summary generated in {end_time - start_time:.2f}s: {word_count} words")
-                logger.info(f"📝 Summary: {summary}")
-                
-                # Validate word count (20-50 words)
-                if 20 <= word_count <= 50:
-                    logger.info("✅ Perfect 20-50 word summary generated!")
-                    return summary
-                else:
-                    logger.warning(f"⚠️ Summary has {word_count} words (expected 20-50), attempt {attempt + 1}")
-                    
-                    if attempt < max_retries - 1:
-                        # Add specific feedback based on word count
-                        if word_count > 50:
-                            feedback = f"Your previous summary had {word_count} words (TOO LONG). Remove less critical details. Target: 20-50 words. Keep ONLY: Document Type, Author (if found), Date, Body Parts (if mentioned), Decision, Recommendations (if given). Use format: [Document Type] | [Author] | [Date : value] | [Body Parts] | Decision:[value] | [Recommendations: value]"
-                        else:
-                            feedback = f"Your previous summary had {word_count} words (TOO SHORT). Add more specific details to reach 20-50 words. Include decision rationale or specific service details. Use format: [Document Type] | [Author] | [Date : value] | [Body Parts] | Decision:[value] | [Recommendations: value]"
-                        
-                        feedback_prompt = SystemMessagePromptTemplate.from_template(
-                            f"{feedback}\n\nCRITICAL: Count words before responding. Output must be 20-50 words, single line, pipe-delimited."
-                        )
-                        chat_prompt = ChatPromptTemplate.from_messages([feedback_prompt, user_prompt])
-                        time.sleep(retry_delay * (attempt + 1))
-                        continue
-                    else:
-                        logger.warning(f"⚠️ Final summary has {word_count} words after {max_retries} attempts")
-                        # Force adjust if close enough
-                        if word_count > 50:
-                            words = summary.split()
-                            summary = ' '.join(words[:50])
-                            logger.info(f"🔧 Force-trimmed to 50 words")
-                        return summary
-                        
-            except Exception as e:
-                logger.error(f"❌ Short summary generation attempt {attempt + 1} failed: {e}")
-                
-                if attempt < max_retries - 1:
-                    logger.info(f"🔄 Retrying in {retry_delay * (attempt + 1)} seconds...")
-                    time.sleep(retry_delay * (attempt + 1))
-                else:
-                    logger.error(f"❌ All {max_retries} attempts failed for short summary generation")
-                    return f"{doc_type} | Decision processing failed"
-        
-        return f"{doc_type} | Decision processing failed"
+        return generate_structured_short_summary(self.llm, raw_text, doc_type)
+   
     def _get_word_count_feedback_prompt(self, actual_word_count: int, doc_type: str) -> SystemMessagePromptTemplate:
         """Get feedback prompt for word count adjustment for decision documents"""
         

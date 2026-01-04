@@ -184,6 +184,37 @@ class WebhookService:
         logger.info(f"📊 Text lengths - Full OCR: {len(text)} chars, Document AI summary: {len(raw_text)} chars")
         logger.info(f"📊 Multiple reports detected (from Document AI): {is_multiple_reports}")
         
+        # 🚨 EARLY EXIT: If Document AI already detected multiple reports, return immediately
+        # Do NOT run any further processing (no ReportAnalyzer, no summaries)
+        if is_multiple_reports:
+            logger.warning("⚠️ MULTIPLE REPORTS DETECTED by Document AI - returning early, skipping all analysis")
+            return {
+                "document_analysis": None,
+                "brief_summary": "",
+                "text_for_analysis": text,
+                "raw_text": raw_text,
+                "report_analyzer_result": {},
+                "patient_name": None,
+                "claim_number": None,
+                "dob": None,
+                "has_patient_name": False,
+                "has_claim_number": False,
+                "physician_id": data.get("physician_id"),
+                "user_id": data.get("user_id"),
+                "filename": data["filename"],
+                "gcs_url": data["gcs_url"],
+                "blob_path": data.get("blob_path"),
+                "file_size": data.get("file_size", 0),
+                "mime_type": data.get("mime_type", "application/octet-stream"),
+                "processing_time_ms": data.get("processing_time_ms", 0),
+                "file_hash": data.get("file_hash"),
+                "result_data": result_data,
+                "document_id": data.get("document_id", "unknown"),
+                "mode": mode,
+                "is_multiple_reports": True,
+                "multi_report_info": multi_report_info
+            }
+        
         # Log if raw_text is missing to help debug
         if not raw_text:
             logger.warning("⚠️ raw_text is empty - Document AI summarizer output not available, will use full OCR text as fallback")
@@ -208,9 +239,9 @@ class WebhookService:
                     multi_report_info = {
                         "is_multiple": True,
                         "confidence": detection_result.get("confidence", "unknown"),
-                        "reason": detection_result.get("reason", "Multiple reports detected in document"),
-                        "report_count_estimate": detection_result.get("report_count_estimate", 2),
-                        "reports_identified": detection_result.get("reports_identified", [])
+                        "reason": detection_result.get("reasoning", "Multiple reports detected in document"),
+                        "report_count_estimate": detection_result.get("report_count", 2),
+                        "reports_identified": detection_result.get("report_types", [])
                     }
                     logger.warning(f"⚠️ MULTIPLE REPORTS DETECTED by MultiReportDetector!")
                     logger.warning(f"   Confidence: {multi_report_info.get('confidence')}")
@@ -1448,7 +1479,7 @@ class WebhookService:
                 
                 # Save to FailDocs with clear reason for multiple reports
                 fail_doc_id = await db_service.save_fail_doc(
-                    reason=f"Multiple documents detected, manual verification needed. Detected {report_count} reports with {confidence} confidence.",
+                    reason=f"Multiple reports detected. Found {report_count} reports with {confidence} confidence. Report types: {', '.join(reports_identified) if reports_identified else 'Unknown'}",
                     db=processed_data.get("dob"),
                     claim_number=processed_data.get("claim_number"),
                     patient_name=processed_data.get("patient_name"),
@@ -1460,7 +1491,7 @@ class WebhookService:
                     mode=processed_data.get("mode", "wc"),
                     document_text=text_for_analysis if text_for_analysis else raw_text,
                     doi=None,
-                    ai_summarizer_text=summary_text  # Store enhanced summary with detection details
+                    ai_summarizer_text=raw_text  # Store raw AI summarizer output directly
                 )
                 
                 # Decrement parse count
@@ -1473,7 +1504,7 @@ class WebhookService:
                     "document_id": fail_doc_id,
                     "filename": processed_data.get("filename"),
                     "parse_count_decremented": parse_decremented,
-                    "failure_reason": f"Multiple documents detected, manual verification needed. {reason}",
+                    "failure_reason": f"Multiple reports detected. {reason}",
                     "multi_report_info": multi_report_info
                 }
             

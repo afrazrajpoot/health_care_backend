@@ -1,19 +1,18 @@
 """
 Simplified Four-LLM Chain Extractor with Conditional Routing
-Version: 4.3 - Enhanced Claim Number Extraction
+Version: 4.4 - Structured Short Summary with Pydantic Validation
 """
 import logging
-from typing import Dict, Optional
+import json
+import re
+from typing import Dict, Optional, List
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 from langchain_core.runnables import RunnableLambda, RunnableBranch
 
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
-
-
-
-
+from helpers.short_summary_generator import generate_structured_short_summary
 
 
 logger = logging.getLogger("document_ai")
@@ -71,8 +70,8 @@ class SimpleExtractor:
             # STEP 1.5: Clean the long summary - remove empty fields, placeholders, and instruction text
             long_summary = clean_long_summary(long_summary)
             
-            # STEP 2: Generate short summary from long summary
-            short_summary = self._generate_short_summary_from_long_summary(long_summary, doc_type)
+            # STEP 2: Generate structured short summary from raw_text (primary context)
+            short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type)
             
             logger.info("=" * 80)
             logger.info("✅ SIMPLE EXTRACTION COMPLETE (2 LLM CALLS ONLY)")
@@ -369,135 +368,20 @@ Before outputting, verify EVERY piece of information:
             # Fallback: Generate a minimal summary
             return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
 
-    def _generate_short_summary_from_long_summary(self, long_summary: str, doc_type: str) -> str:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
         """
-        Generate concise short summary from long summary.
-        Enhanced to handle any document type with available information.
-        Includes author/signer and claim number but excludes patient details.
+        Generate a structured, UI-ready summary from raw_text (Document AI summarizer output).
+        Delegates to the reusable helper function.
+        
+        Args:
+            raw_text: The Document AI summarizer output (primary context)
+            doc_type: Document type
+            
+        Returns:
+            dict: Structured summary with header, findings, recommendations, status
         """
-        logger.info("🎯 Third LLM - Generating short summary...")
-        
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You create CONCISE pipe-delimited summaries for ANY type of medical document.
-- **ONLY include, critical, or clinically significant findings**.
-- **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
-    
+        return generate_structured_short_summary(self.llm, raw_text, doc_type)
 
-ABSOLUTE RULES - NO EXCEPTIONS:
-1. Word count MUST be **between 30 and 60 words**.
-2. Output format MUST be pipe-delimited with ONLY fields that have actual data.
-3. NEVER output a key if you don't have the value.
-4. NEVER output [empty], [unknown], [not provided], [N/A], or ANY placeholder text.
-5. NEVER output empty strings, blank values, or null markers.
-6. If a field has no real value in the text, DO NOT include that field AT ALL.
-7. Skip the entire "Key: Value" segment if no value exists.
-- For Author never use "Dr." with it
-
-
-CRITICAL: If you see terms like "Decision: [empty]" or "Medical Necessity: [empty]" in your output - YOU ARE DOING IT WRONG. Simply don't include those keys.
-
-Possible fields (include ONLY if real data exists; NO need to include patient details like name, DOB, MRN, Claim #, Signature Type etc.):
-   - Report Title
-   - Author
-   - Date
-   - Body Parts
-   - Diagnosis
-   - Physical Exam (only abnormal findings and observations else skip)
-   - Vital Signs (key abnormal findings only else skip)
-   - Lab Results (key abnormal findings)
-   - Imaging Findings (key observations)
-   - Medication
-   - MMI Status
-   - Key Action Items
-   - Work Status
-   - Recommendation
-   - Critical Finding
-   - Urgent Next Steps
-   - Rationale
-   - Treatment Plan
-   - Procedure
-   - Test Results
-
-***FORMAT RULES***
-- Each segment: **Key: Value** (separated by pipes |)
-- If NO VALUE exists → SKIP THE ENTIRE SEGMENT
-- NEVER output: [empty], [unknown], blank spaces as values
-- NEVER produce double pipes (||)
-- ONLY include segments with actual, real data
-- For Author: Include name with credentials if available, e.g., "Author: Dr. Smith, M.D."
-
-EXAMPLES (reference only - adapt to your document):
-                                                                  
-general layout:
-"[Report Title] | [Author] | [Date] | Body Parts: [value] | Diagnosis: [value] | Physical Exam: [value (only abnormal findings and observations else skip)] | Vital Signs: [value (key abnormal findings only else skip)] | Medication: [value] | MMI Status: [value] | Work Status: [value] | Recommendation: [value] | Critical Finding: [value] | Urgent Next Steps: [value] | Rationale: [value] | Treatment Plan: [value]"
-
-Lab Report with complete data:
-"Lab Results | Jones Doe | Date: 10/22/2025 | Critical Finding: Elevated WBC 15.2 (H), Glucose 245 mg/dL (H) | Lab Results: Hemoglobin 12.1, Creatinine 1.2 | Recommendation: Repeat CBC in 1 week, endocrinology consult"
-
-Imaging Report:
-"MRI Report | Lee | Date: 09/15/2025 | Body Parts: L4-L5, L5-S1 | Imaging Findings: Moderate central stenosis L4-L5, broad-based disc herniation L5-S1 | Recommendation: Epidural steroid injection, neurosurgery consultation"
-
-Clinical Note with limited data:
-"Follow-up Visit | Smith | Date: 08/20/2025 | Body Parts: Right knee | Diagnosis: Post-op ACL reconstruction | Work Status: Modified duty"
-
-Notice: Only fields with actual values are included. No [empty] or placeholder fields.
-
-WHAT NOT TO DO:
-❌ "Report | Dr. Smith | Decision: [empty] | Medical Necessity: [empty]"
-✅ "Report | Smith | Date: 04/13/2017 | Diagnosis: Meniscus tear"
-
-FINAL CHECKLIST BEFORE OUTPUT:
-- Does my output contain [empty], [unknown], or any placeholder? → REMOVE THOSE FIELDS
-- Does my output have any keys without real values? → REMOVE THOSE KEYS
-- Is every field populated with actual information from the text? → YES = GOOD
-- Word count between 30-60? → CHECK
-
-Your output must be a SINGLE LINE with ONLY available information in pipe-delimited format.
-""")
-
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-LONG SUMMARY:
-{long_summary}
-
-Create a clean pipe-delimited short summary following these rules:
-1. Include ONLY fields that have actual values (no [empty], no placeholders)
-2. If a field has no data, skip it entirely - don't include the key
-3. Exclude all patient identifying details (name, DOB, MRN, claim number)
-4. Keep between 30-60 words
-5. Single line, pipe-delimited format
-
-Short summary:
-""")
-        
-        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-        
-        try:
-            # Programmatically add missing Date or Author if LLM missed them
-            chain = chat_prompt | self.llm
-            response = chain.invoke({"long_summary": long_summary[:3000]})
-            short_summary = response.content.strip()
-            
-            short_summary = self._clean_short_summary(short_summary)
-            short_summary = self._clean_pipes_from_summary(short_summary)
-            
-            # Additional safety: Remove any segments with [empty] or similar placeholders
-            short_summary = self._remove_empty_segments(short_summary)
-            # Programmatically add missing Date or Author if LLM missed them
-            short_summary = ensure_date_and_author(short_summary, long_summary)
-            word_count = len(short_summary.split())
-            logger.info(f"✅ Short summary: {word_count} words")
-            
-            # Fallback if too long
-            if word_count > 100:
-                words = short_summary.split()
-                short_summary = ' '.join(words[:100]) + "..."
-            
-            return short_summary
-            
-        except Exception as e:
-            logger.error(f"❌ Short summary generation failed: {e}")
-            return self._clean_pipes_from_summary(f"Report Title: {doc_type} | Date: Unknown")
-    
     def _remove_empty_segments(self, text: str) -> str:
         """
         Remove any segments that contain empty values, placeholders, or unwanted markers.

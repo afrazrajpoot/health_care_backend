@@ -16,6 +16,7 @@ from langchain_openai import AzureChatOpenAI
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
+from helpers.short_summary_generator import generate_structured_short_summary
 
 logger = logging.getLogger("document_ai")
 
@@ -70,7 +71,7 @@ class ConsultExtractorChained:
             long_summary = clean_long_summary(long_summary)
             
             # Step 2: Generate short summary from long summary (like QME extractor)
-            short_summary = self._generate_short_summary_from_long_summary(long_summary)
+            short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type)
             
             elapsed_time = time.time() - start_time
             logger.info(f"⚡ Full-context consultation extraction completed in {elapsed_time:.2f}s")
@@ -470,115 +471,12 @@ class ConsultExtractorChained:
         logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
         return cleaned_summary
     
-    def _generate_short_summary_from_long_summary(self, long_summary: str) -> str:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
         """
-        Generate a precise 30–60 word consultation summary in key-value format.
-        Pipe-delimited, zero hallucination, skips missing fields.
+        Generate a structured short summary using the centralized helper function.
+        Returns a dictionary with header, content, and raw_summary.
         """
-
-        logger.info("🎯 Generating 30–60 word consultation structured summary (key-value format)...")
-
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a medical-legal consultation specialist.
-
-TASK:
-Create a concise, factual consultation summary using ONLY information explicitly stated in the long summary.
-- **ONLY include, critical, or clinically significant findings**.
-- **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
-STRICT REQUIREMENTS:
-1. Word count MUST be **between 30 and 60 words**.
-2. Output format MUST be EXACTLY:
-
-[Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Physical Exam:[value] | Vital Signs:[value] | Key Findings:[value] | Medication:[value] | Treatments:[value] | Clinical Assessment:[value] | Plan:[value] | MMI Status:[value] | Work Status:[value] | Critical Finding:[value]
-
-KEY RULES:
-- ONLY include abnormal or critical findings for these fields (physical exam, vital signs).
-- For Author never use "Dr." with it
-- If a value is missing or not extractable, omit the ENTIRE key-value pair.
-- NEVER output empty fields or placeholder text.
-- NEVER fabricate dates, meds, findings, or recommendations.
-- NO narrative sentences; use short factual fragments.
-- First three fields (Report Title, Author, Date) appear without keys.
-- All other fields use key-value format: Key:[value].
-- Key Findings and Physical Exam details include **only abnormalities or critical observations**.
-- Medications, Treatments, Plan, MMI Status, Work Status included only if explicitly stated in the summary.
-
-CONTENT PRIORITY (only if critical and provided):
-1. Report Title  
-2. Author  
-3. Date  
-4. Body Parts  
-5. Diagnosis  
-6. Physical Exam (abnormal only if present)  
-7. Vital Signs (abnormal only if present)  
-8. Key objective findings (abnormal only)  
-9. Treatment plan (given explicit only)
-10. Medications (given explicit only)  
-11. Recommendations (if explicitly stated) or Plan (if explicitly or stated)  
-12. MMI status (if stated)  
-13. Work status (if stated)  
-14. Critical finding
-
-ABSOLUTELY FORBIDDEN:
-- Normal findings (ignore entirely for physical exam and vital signs)
-- For Author never use "Dr." with it
-- Assumptions, interpretations, inferred diagnoses
-- Patient details (name, DOB, claim, MRN, etc.)
-- Narrative writing
-- Placeholder text or "Not provided"
-- Duplicate or empty pipes (||)
-
-Your final output MUST be between 30–60 words, single-line, pipe-delimited, and contain ONLY explicitly provided abnormal or critical information.
-""")
-
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-    CONSULTATION LONG SUMMARY:
-
-    {long_summary}
-
-    Now produce a 30–60 word structured consultation summary following ALL rules.
-    """)
-
-        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-
-        try:
-            chain = chat_prompt | self.llm
-            response = chain.invoke({
-                "long_summary": long_summary
-            })
-            summary = response.content.strip()
-
-            # Normalize whitespace only - no pipe cleaning
-            summary = re.sub(r"\s+", " ", summary).strip()
-            
-            # Programmatically add missing Date or Author if LLM missed them
-            summary = ensure_date_and_author(summary, long_summary)
-
-            # Validate word count
-            wc = len(summary.split())
-            if wc < 30 or wc > 60:
-                logger.warning(f"⚠️ Consultation summary out of range ({wc} words). Fixing...")
-
-                fix_prompt = ChatPromptTemplate.from_messages([
-                    SystemMessagePromptTemplate.from_template(
-                        f"Your previous summary contained {wc} words. Rewrite it to be **between 30 and 60** words. "
-                        "Do NOT add fabricated data. Preserve all factual elements. Maintain the key-value pipe-delimited format: [Report Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | etc."
-                    ),
-                    HumanMessagePromptTemplate.from_template(summary)
-                ])
-
-                chain2 = fix_prompt | self.llm
-                fixed = chain2.invoke({})
-                summary = re.sub(r"\s+", " ", fixed.content.strip())
-                # Re-ensure date and author after correction
-                summary = ensure_date_and_author(summary, long_summary)
-
-            logger.info(f"✅ Consultation summary generated: {len(summary.split())} words")
-            return summary
-
-        except Exception as e:
-            logger.error(f"❌ Consultation summary generation failed: {e}")
-            return "Summary unavailable due to processing error."
+        return generate_structured_short_summary(self.llm, raw_text, doc_type)
  
     def _create_comprehensive_fallback_summary(self, long_summary: str) -> str:
         """Create comprehensive fallback short summary directly from long summary"""

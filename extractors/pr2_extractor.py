@@ -12,6 +12,8 @@ from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTempla
 from langchain_openai import AzureChatOpenAI
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
+from helpers.short_summary_generator import generate_structured_short_summary
+
 logger = logging.getLogger("document_ai")
 
 
@@ -86,7 +88,7 @@ class PR2ExtractorChained:
             long_summary = clean_long_summary(long_summary)
             
             # Stage 2: Generate short summary from long summary (like QME extractor)
-            short_summary = self._generate_short_summary_from_long_summary(long_summary)
+            short_summary = self._generate_short_summary_from_long_summary(long_summary, doc_type)
             
             elapsed_time = time.time() - start_time
             logger.info(f"⚡ Full-context PR-2 extraction completed in {elapsed_time:.2f}s")
@@ -436,124 +438,20 @@ Return Sooner If: [extracted]
         logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
         return cleaned_summary
     
-    def _generate_short_summary_from_long_summary(self, long_summary: str) -> str:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
         """
-        Generate a precise 30–60 word PR-2 structured summary in key-value format.
-        Pipe-delimited, zero hallucination, skips missing fields.
+        Generate a structured, UI-ready summary from raw_text (Document AI summarizer output).
+        Delegates to the reusable helper function.
+        
+        Args:
+            raw_text: The Document AI summarizer output (primary context)
+            doc_type: Document type
+            
+        Returns:
+            dict: Structured summary with header, findings, recommendations, status
         """
-
-        logger.info("🎯 Generating 30–60 word PR-2 structured summary (key-value format)...")
-
-        system_prompt = SystemMessagePromptTemplate.from_template("""
-    You are a Workers' Compensation medical-legal extraction specialist.
-
-    TASK:
-    Create a concise, accurate PR-2 Progress Report summary using ONLY the information explicitly present in the long summary.
-    - **ONLY include, critical, or clinically significant findings**.
-    - **ONLY include abnormalities or pathological findings for physical exam and vital signs (if present). Skip normal findings entirely for these (physical exam, vital signs) fields.**
-    STRICT OUTPUT FORMAT (include fields only when data exists):
-    [Title] | [Author] | [Date] | Body Parts:[value] | Diagnosis:[value] | Physical Exam:[value] | Vital Signs:[value] | Treatment plan:[value] | Auth Requests:[value] | Work Status:[value] | Restrictions:[value] | Meds:[value] | Recommendations:[value] | Follow-up:[value] | Critical Finding:[value]
-
-    FORMAT & RULES:
-    - MUST be **30–60 words**.
-    - MUST be **ONE LINE**, pipe-delimited, no line breaks.
-    - For Author never use "Dr." with it
-    - NEVER include empty fields. If a field is missing, SKIP that key and remove its pipe.
-    - NEVER fabricate: no invented dates, meds, restrictions, exam findings, or recommendations.
-    - NO narrative sentences. Use short factual fragments ONLY.
-
-    IMPORTANT — FIELD DROPPING RULE:
-    - If a value is not explicitly present in the long summary, REMOVE the entire key-value pair completely.
-    - Do NOT output placeholders such as: "not provided", "not included", "not discussed", "not listed", "no abnormalities", "no data", "none".
-    - Only include keys with real extracted values. Omit all others entirely with no empty pipes.
-
-    Use the shortest, clearest key names:
-    • Title = Report title (without key)
-    • Author = MD/DO/PA/NP or signer (without key)  
-    • Date = Visit or exam date (without key)
-    • Body Parts:[value] = anatomical sites only (if given)
-    • Diagnosis:[value] = final diagnosis only (if given)
-    • Physical Exam:[value] = objective exam findings only (if given only if these are abnormal and given)
-    • Vital Signs:[value] = vital signs only (if given only if these are abnormal and given)
-    • Treatment plan:[value] = plan or response (if given)
-    • Work Status:[value] = current status (if given)  
-    • Restrictions:[value] = physical restrictions (if given)  
-    • Meds:[value] = medications explicitly listed (if given)
-    • Recommendations:[value] = recommended actions (if given)
-    • Auth Requests:[value] = items requested for authorization (if given)
-    • Follow-up:[value] = next appointment or instruction (if given)
-    • Critical Finding:[value] = one most clinically important finding (if given)
-
-    CONTENT PRIORITY (only if provided in the long summary):
-    1. Report Title  
-    2. Author  
-    3. Visit Date  
-    4. Body Parts  
-    5. Diagnosis  
-    6. Physical Exam  
-    7. Vital Signs  
-    8. Treatment Plan  
-    9. Authorization Requests  
-    10. Recommendations                                                      
-    11. Work status & restrictions  
-    12. Medications  
-    13. Follow-up plan  
-    14. Critical finding
-
-    ABSOLUTELY FORBIDDEN:
-    - assumptions, interpretations, invented medications, or inferred diagnoses
-    - For Author never use "Dr." with it
-    - narrative writing
-    - placeholder text or "Not provided"
-    - duplicate pipes or empty pipe fields (e.g., "||")
-    - patient details (name, DOB, claim, MRN, etc.)
-    - "not provided" or "not included" or "not discussed" or "not listed" or "no abnormalities" or "no data" or "none"
-                                                                  
-    Your final output MUST be between 30–60 words and follow the exact pipe-delimited style.
-    """)
-
-        user_prompt = HumanMessagePromptTemplate.from_template("""
-    LONG SUMMARY:
-
-    {long_summary}
-
-    Now generate a 30–60 word PR-2 structured summary following ALL rules.
-    """)
-
-        chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-
-        try:
-            chain = chat_prompt | self.llm
-            response = chain.invoke({"long_summary": long_summary})
-            summary = response.content.strip()
-
-            # Clean whitespace only
-            summary = re.sub(r'\s+', ' ', summary).strip()
-            # Programmatically add missing Date or Author if LLM missed them
-            summary = ensure_date_and_author(summary, long_summary)
-            # Word count check
-            wc = len(summary.split())
-            if wc < 30 or wc > 60:
-                logger.warning(f"⚠️ PR-2 summary out of range ({wc} words). Attempting auto-fix.")
-
-                fix_prompt = ChatPromptTemplate.from_messages([
-                    SystemMessagePromptTemplate.from_template(
-                        f"Your previous output contained {wc} words. Rewrite it to be STRICTLY between 30 and 60 words while preserving accuracy and key-value pipe-delimited format. Do NOT add fabricated content."
-                    ),
-                    HumanMessagePromptTemplate.from_template(summary)
-                ])
-
-                chain2 = fix_prompt | self.llm
-                fixed = chain2.invoke({})
-                summary = re.sub(r'\s+', ' ', fixed.content.strip())
-                # Programmatically add missing Date or Author if LLM missed them
-                summary = ensure_date_and_author(summary, long_summary)
-            logger.info(f"✅ PR-2 summary generated: {len(summary.split())} words")
-            return summary
-
-        except Exception as e:
-            logger.error(f"❌ PR-2 short summary generation failed: {e}")
-            return "Summary unavailable due to processing error."
+        return generate_structured_short_summary(self.llm, raw_text, doc_type)
+   
 
     def _create_comprehensive_fallback_summary(self, long_summary: str) -> str:
         """Create comprehensive fallback short summary directly from long summary"""
