@@ -1,17 +1,25 @@
 """
 AdministrativeExtractor - Enhanced Extractor for Administrative and Legal Documents
 Optimized for accuracy using Gemini-style full-document processing with contextual guidance
+Version: 2.0 - With Pydantic Validation for Consistent Output
 """
 import logging
 import re
+import json
 import time
 from typing import Dict, Optional, List
-from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 from helpers.short_summary_generator import generate_structured_short_summary
+from models.long_summary_models import (
+    AdminLongSummary,
+    DoctorInfo,
+    format_admin_long_summary,
+    create_fallback_admin_summary
+)
 
 
 logger = logging.getLogger("document_ai")
@@ -33,6 +41,7 @@ class AdministrativeExtractor:
     def __init__(self, llm: AzureChatOpenAI):
         self.llm = llm
         self.parser = JsonOutputParser()
+        self.admin_summary_parser = PydanticOutputParser(pydantic_object=AdminLongSummary)
         self.verifier = ExtractionVerifier(llm)
         
         # Pre-compile regex for efficiency
@@ -56,7 +65,7 @@ class AdministrativeExtractor:
             'contact_info': re.compile(r'\b(phone|tel|fax|email|@)\s*[:\-]?\s*([^\s,]+)', re.IGNORECASE)
         }
         
-        logger.info("✅ AdministrativeExtractor initialized (Full Context + Context-Aware)")
+        logger.info("✅ AdministrativeExtractor v2.0 initialized with Pydantic Validation")
 
 
     def _detect_admin_type(self, text: str, original_type: str) -> str:
@@ -171,10 +180,14 @@ class AdministrativeExtractor:
         
         PRIMARY SOURCE: raw_text (accurate Document AI summarized context)
         SUPPLEMENTARY: text (full OCR extraction for missing details only)
+        Uses Pydantic validation for consistent, structured output without hallucination.
         """
-        logger.info("🔍 Processing administrative document with DUAL-CONTEXT approach...")
+        logger.info("🔍 Processing administrative document with DUAL-CONTEXT approach + Pydantic validation...")
         logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
         logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        
+        # Get format instructions from Pydantic parser
+        format_instructions = self.admin_summary_parser.get_format_instructions()
         
         # Updated System Prompt with DUAL-CONTEXT PRIORITY
         system_prompt = SystemMessagePromptTemplate.from_template("""
@@ -474,13 +487,27 @@ class AdministrativeExtractor:
     1. PRIMARY SOURCE (accurate context) is your MAIN reference for administrative interpretations
     2. Use FULL TEXT only to supplement specific missing details (contact info, claim numbers, exact dates)
     3. NEVER override primary source administrative context with full text
+
+    📋 OUTPUT FORMAT INSTRUCTIONS:
+    You MUST output your response as a valid JSON object following this exact schema:
+    {format_instructions}
+
+    ⚠️ IMPORTANT JSON RULES:
+    - Use empty string "" for text fields with no data (NOT null, NOT "N/A", NOT "unknown")
+    - Use empty array [] for list fields with no data
+    - Use null ONLY for optional fields like claim_number when not present
+    - For all_doctors_involved: each doctor must have "name" (required), "title" (optional), "role" (optional)
+    - For signature_type: use "physical" or "electronic" or null if not found
+    - For content_type: always use "administrative"
+    - For from_party and to_party: nested objects with name, organization, title fields
+    - For legal_representation: nested object with representative and firm fields
     """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
         
         logger.info(f"📄 PRIMARY SOURCE size: {len(raw_text):,} chars")
         logger.info(f"📄 SUPPLEMENTARY size: {len(text):,} chars")
-        logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach...")
+        logger.info("🤖 Invoking LLM for structured administrative summary with Pydantic validation...")
         
         try:
             # Single LLM call with both sources
@@ -489,19 +516,54 @@ class AdministrativeExtractor:
                 "doc_type": doc_type,
                 "document_actual_context": raw_text,  # PRIMARY: Accurate summarized context
                 "full_document_text": text,           # SUPPLEMENTARY: Full OCR extraction
-                "fallback_date": fallback_date
+                "fallback_date": fallback_date,
+                "format_instructions": format_instructions
             })
             
-            long_summary = result.content.strip()
+            raw_response = result.content.strip()
+            logger.info(f"📝 Raw LLM response length: {len(raw_response)} chars")
             
-            end_time = time.time()
-            # processing_time = time.time() - start_time if 'start_time' in locals() else 0
-            
-            # logger.info(f"⚡ Administrative long summary generated in {processing_time:.2f}s")
-            logger.info(f"✅ Generated long summary: {len(long_summary):,} chars")
-            logger.info("✅ Context priority maintained: PRIMARY source used for administrative findings")
-            
-            return long_summary
+            # Parse and validate with Pydantic
+            try:
+                parsed_summary = self.admin_summary_parser.parse(raw_response)
+                logger.info(f"✅ Pydantic validation successful - content_type: {parsed_summary.content_type}")
+                
+                # Format the validated Pydantic model back to text format
+                long_summary = format_admin_long_summary(parsed_summary)
+                
+                logger.info(f"⚡ Structured administrative long summary generation completed with Pydantic validation")
+                logger.info(f"✅ Generated long summary: {len(long_summary):,} chars")
+                logger.info("✅ Context priority maintained: PRIMARY source used for administrative findings")
+                
+                return long_summary
+                
+            except Exception as parse_error:
+                logger.warning(f"⚠️ Pydantic parsing failed: {parse_error}")
+                logger.warning("⚠️ Falling back to raw LLM output or JSON extraction")
+                
+                # Try to extract JSON from the response and create a fallback
+                try:
+                    # Attempt to find JSON in the response
+                    json_match = re.search(r'\{[\s\S]*\}', raw_response)
+                    if json_match:
+                        json_str = json_match.group()
+                        parsed_dict = json.loads(json_str)
+                        # Create Pydantic model with defaults for missing fields
+                        parsed_summary = AdminLongSummary(**parsed_dict)
+                        long_summary = format_admin_long_summary(parsed_summary)
+                        logger.info("✅ Successfully recovered with JSON extraction fallback")
+                        return long_summary
+                except Exception as json_error:
+                    logger.warning(f"⚠️ JSON extraction fallback failed: {json_error}")
+                
+                # Final fallback: use raw response if it looks like formatted text
+                if "📋" in raw_response or "ADMINISTRATIVE DOCUMENT OVERVIEW" in raw_response:
+                    logger.info("✅ Using raw formatted text response")
+                    return raw_response
+                
+                # Create minimal fallback summary
+                fallback = create_fallback_admin_summary(doc_type, fallback_date)
+                return format_admin_long_summary(fallback)
             
         except Exception as e:
             logger.error(f"❌ Direct administrative document long summary generation failed: {e}", exc_info=True)
@@ -511,8 +573,9 @@ class AdministrativeExtractor:
                 logger.error("❌ Administrative document exceeds GPT-4o 128K context window")
                 logger.error("❌ Consider implementing chunked fallback for very large documents")
             
-            # Fallback: Generate a minimal summary
-            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
+            # Fallback: Generate a minimal summary using Pydantic model
+            fallback = create_fallback_admin_summary(doc_type, fallback_date)
+            return format_admin_long_summary(fallback)
 
     def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
         """

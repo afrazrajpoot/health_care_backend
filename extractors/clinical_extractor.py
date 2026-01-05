@@ -1,21 +1,28 @@
 """
 ClinicalNoteExtractor - Enhanced Extractor for Clinical Progress Notes and Therapy Reports
 Optimized for accuracy using Gemini-style full-document processing with contextual guidance
-Version: 1.3 - Strict Anti-Hallucination for Signatures
+Version: 2.0 - Pydantic Output Validation for Consistent Long Summary
 """
 import logging
 import re
 import time
+import json
 from typing import Dict, Optional, List
-from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
 from helpers.short_summary_generator import generate_structured_short_summary
+from models.long_summary_models import (
+    ClinicalLongSummary,
+    format_clinical_long_summary,
+    create_fallback_clinical_summary
+)
 
 logger = logging.getLogger("document_ai")
+
 
 
 class ClinicalNoteExtractor:
@@ -37,6 +44,9 @@ class ClinicalNoteExtractor:
         self.llm = llm
         self.parser = JsonOutputParser()
         self.verifier = ExtractionVerifier(llm)
+        
+        # Initialize Pydantic parser for structured long summary output
+        self.clinical_summary_parser = PydanticOutputParser(pydantic_object=ClinicalLongSummary)
         
         # Pre-compile regex for efficiency
         self.note_type_patterns = {
@@ -72,7 +82,7 @@ class ClinicalNoteExtractor:
             'sign_block': re.compile(r'(?i)(signature|sign off|attestation|certification|approval)\s*(?:section|block)?[:\-]?\s*(.*?)(?=\n{2,}|\Z)', re.DOTALL)
         }
         
-        logger.info("✅ ClinicalNoteExtractor v1.3 initialized (Full Context + Strict Anti-Hallucination for Signatures)")
+        logger.info("✅ ClinicalNoteExtractor v2.0 initialized (Full Context + Pydantic Output Validation)")
 
     # clinical_extractor.py - UPDATED with dual-context priority
 
@@ -468,33 +478,72 @@ class ClinicalNoteExtractor:
     1. PRIMARY SOURCE (accurate context) is your MAIN reference for clinical interpretations
     2. Use FULL TEXT only to supplement specific missing details (measurements, codes, exact demographics)
     3. NEVER override primary source clinical context with full text
+
+    {format_instructions}
     """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
         
+        # Get format instructions from Pydantic parser
+        format_instructions = self.clinical_summary_parser.get_format_instructions()
+        
         logger.info(f"📄 PRIMARY SOURCE size: {len(raw_text):,} chars")
         logger.info(f"📄 SUPPLEMENTARY size: {len(text):,} chars")
-        logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach...")
+        logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach + Pydantic validation...")
         
         try:
             start_time = time.time()
             
-            # Single LLM call with both sources
+            # Single LLM call with both sources and format instructions
             chain = chat_prompt | self.llm
             result = chain.invoke({
                 "doc_type": doc_type,
                 "document_actual_context": raw_text,  # PRIMARY: Accurate summarized context
                 "full_document_text": text,           # SUPPLEMENTARY: Full OCR extraction
-                "fallback_date": fallback_date
+                "fallback_date": fallback_date,
+                "format_instructions": format_instructions
             })
             
-            long_summary = result.content.strip()
+            raw_response = result.content.strip()
             
             end_time = time.time()
             processing_time = end_time - start_time
             
             logger.info(f"⚡ Clinical long summary generated in {processing_time:.2f}s")
-            logger.info(f"✅ Generated long summary: {len(long_summary):,} chars")
+            logger.info(f"📝 Raw response length: {len(raw_response):,} chars")
+            
+            # Try to parse with Pydantic for validation
+            try:
+                # Try to parse the response as JSON/Pydantic
+                parsed_summary = self.clinical_summary_parser.parse(raw_response)
+                long_summary = format_clinical_long_summary(parsed_summary)
+                logger.info("✅ Pydantic validation successful - using structured output")
+                logger.info(f"✅ Formatted long summary: {len(long_summary):,} chars")
+                
+            except Exception as parse_error:
+                logger.warning(f"⚠️ Pydantic parsing failed: {parse_error}")
+                logger.info("🔄 Attempting JSON extraction fallback...")
+                
+                # Try to extract JSON from the response
+                try:
+                    # Look for JSON block in response
+                    json_match = re.search(r'\{[\s\S]*\}', raw_response)
+                    if json_match:
+                        json_str = json_match.group()
+                        parsed_dict = json.loads(json_str)
+                        parsed_summary = ClinicalLongSummary.model_validate(parsed_dict)
+                        long_summary = format_clinical_long_summary(parsed_summary)
+                        logger.info("✅ JSON extraction fallback successful")
+                    else:
+                        # Use raw response as-is if no JSON found
+                        logger.info("📄 No JSON found, using raw LLM response")
+                        long_summary = raw_response
+                        
+                except Exception as json_error:
+                    logger.warning(f"⚠️ JSON extraction fallback failed: {json_error}")
+                    logger.info("📄 Using raw LLM response as long summary")
+                    long_summary = raw_response
+            
             logger.info("✅ Context priority maintained: PRIMARY source used for clinical findings")
             
             return long_summary
@@ -507,8 +556,10 @@ class ClinicalNoteExtractor:
                 logger.error("❌ Clinical note exceeds GPT-4o 128K context window")
                 logger.error("❌ Consider implementing chunked fallback for very large notes")
             
-            # Fallback: Generate a minimal summary
-            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
+            # Fallback: Create a minimal Pydantic-based summary
+            logger.info("🔄 Creating fallback clinical summary...")
+            fallback_summary = create_fallback_clinical_summary(doc_type, fallback_date)
+            return format_clinical_long_summary(fallback_summary)
 
     def _detect_note_type(self, text: str, original_type: str) -> str:
         """

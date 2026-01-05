@@ -1,18 +1,26 @@
 """
 PR-2 Progress Report Enhanced Extractor - Full Context
 Optimized for accuracy using Gemini-style full-document processing
+Version: 2.0 - With Pydantic Validation for Consistent Output
 """
 import logging
 import re
+import json
 import time
 from typing import Dict, Optional, List
 
-from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 from helpers.short_summary_generator import generate_structured_short_summary
+from models.long_summary_models import (
+    PR2LongSummary,
+    DoctorInfo,
+    format_pr2_long_summary,
+    create_fallback_pr2_summary
+)
 
 logger = logging.getLogger("document_ai")
 
@@ -31,6 +39,7 @@ class PR2ExtractorChained:
     def __init__(self, llm: AzureChatOpenAI):
         self.llm = llm
         self.parser = JsonOutputParser()
+        self.pr2_summary_parser = PydanticOutputParser(pydantic_object=PR2LongSummary)
         self.verifier = ExtractionVerifier(llm)
         
         # Pre-compile regex patterns for PR-2 specific content
@@ -40,7 +49,7 @@ class PR2ExtractorChained:
             'treatment': re.compile(r'\b(pt|physical therapy|injection|medication|therapy|exercise)\b', re.IGNORECASE)
         }
         
-        logger.info("✅ PR2ExtractorChained initialized (Full Context)")
+        logger.info("✅ PR2ExtractorChained v2.0 initialized with Pydantic Validation")
 
     def extract(
         self,
@@ -127,10 +136,12 @@ class PR2ExtractorChained:
         2. SUPPLEMENTARY: text (full OCR extraction for missing details only)
         
         This ensures accurate context preservation while capturing all necessary details.
+        Uses Pydantic validation for consistent, structured output without hallucination.
         """
-        logger.info("🔍 Processing PR-2 document with DUAL-CONTEXT approach...")
-        # logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
-        # logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        logger.info("🔍 Processing PR-2 document with DUAL-CONTEXT approach + Pydantic validation...")
+        
+        # Get format instructions from Pydantic parser
+        format_instructions = self.pr2_summary_parser.get_format_instructions()
         
         # Build system prompt with CLEAR PRIORITY INSTRUCTIONS
         system_prompt = SystemMessagePromptTemplate.from_template("""
@@ -369,6 +380,18 @@ Return Sooner If: [extracted]
 2. "treatment_authorization_request": The MOST CRITICAL field - be specific
 3. "critical_findings": Only 3-5 most actionable items for claims administrator
 4. Empty fields are acceptable if information not stated in document - use [extracted] as placeholder only if truly empty
+
+📋 OUTPUT FORMAT INSTRUCTIONS:
+You MUST output your response as a valid JSON object following this exact schema:
+{format_instructions}
+
+⚠️ IMPORTANT JSON RULES:
+- Use empty string "" for text fields with no data (NOT null, NOT "N/A", NOT "unknown", NOT "[extracted]")
+- Use empty array [] for list fields with no data
+- Use null ONLY for optional fields like claim_number when not present
+- For all_doctors_involved: each doctor must have "name" (required), "title" (optional), "role" (optional)
+- For signature_type: use "physical" or "electronic" or null if not found
+- For content_type: always use "pr2"
 """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
@@ -376,7 +399,7 @@ Return Sooner If: [extracted]
         try:
             start_time = time.time()
             
-            logger.info("🤖 Invoking LLM for direct full-context PR-2 long summary generation...")
+            logger.info("🤖 Invoking LLM for structured PR-2 long summary generation with Pydantic validation...")
             
             # Single LLM call with FULL document context to generate long summary directly
             chain = chat_prompt | self.llm
@@ -384,18 +407,56 @@ Return Sooner If: [extracted]
                 "primary_source": raw_text,
                 "supplementary_source": text,
                 "fallback_date": fallback_date,
-                "doc_type": doc_type
+                "doc_type": doc_type,
+                "format_instructions": format_instructions
             })
             
-            long_summary = result.content.strip()
+            raw_response = result.content.strip()
             
             end_time = time.time()
             processing_time = end_time - start_time
+            logger.info(f"📝 Raw LLM response length: {len(raw_response)} chars in {processing_time:.2f}s")
             
-            logger.info(f"⚡ Direct PR-2 long summary generation completed in {processing_time:.2f}s")
-            logger.info(f"✅ Generated long summary from complete {len(text):,} char document")
-            
-            return long_summary
+            # Parse and validate with Pydantic
+            try:
+                parsed_summary = self.pr2_summary_parser.parse(raw_response)
+                logger.info(f"✅ Pydantic validation successful - content_type: {parsed_summary.content_type}")
+                
+                # Format the validated Pydantic model back to text format
+                long_summary = format_pr2_long_summary(parsed_summary)
+                
+                logger.info(f"⚡ Structured PR-2 long summary generation completed with Pydantic validation")
+                logger.info(f"✅ Generated long summary from complete {len(text):,} char document")
+                
+                return long_summary
+                
+            except Exception as parse_error:
+                logger.warning(f"⚠️ Pydantic parsing failed: {parse_error}")
+                logger.warning("⚠️ Falling back to raw LLM output or JSON extraction")
+                
+                # Try to extract JSON from the response and create a fallback
+                try:
+                    # Attempt to find JSON in the response
+                    json_match = re.search(r'\{[\s\S]*\}', raw_response)
+                    if json_match:
+                        json_str = json_match.group()
+                        parsed_dict = json.loads(json_str)
+                        # Create Pydantic model with defaults for missing fields
+                        parsed_summary = PR2LongSummary(**parsed_dict)
+                        long_summary = format_pr2_long_summary(parsed_summary)
+                        logger.info("✅ Successfully recovered with JSON extraction fallback")
+                        return long_summary
+                except Exception as json_error:
+                    logger.warning(f"⚠️ JSON extraction fallback failed: {json_error}")
+                
+                # Final fallback: use raw response if it looks like formatted text
+                if "📋" in raw_response or "REPORT OVERVIEW" in raw_response:
+                    logger.info("✅ Using raw formatted text response")
+                    return raw_response
+                
+                # Create minimal fallback summary
+                fallback = create_fallback_pr2_summary(doc_type, fallback_date)
+                return format_pr2_long_summary(fallback)
             
         except Exception as e:
             logger.error(f"❌ Direct PR-2 long summary generation failed: {e}", exc_info=True)
@@ -405,8 +466,9 @@ Return Sooner If: [extracted]
                 logger.error("❌ Document exceeds GPT-4o 128K context window")
                 logger.error("❌ Consider implementing chunked fallback for very large documents")
             
-            # Fallback: Generate a minimal summary
-            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
+            # Fallback: Generate a minimal summary using Pydantic model
+            fallback = create_fallback_pr2_summary(doc_type, fallback_date)
+            return format_pr2_long_summary(fallback)
 
     def _clean_pipes_from_summary(self, short_summary: str) -> str:
         """

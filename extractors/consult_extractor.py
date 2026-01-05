@@ -1,15 +1,16 @@
 """
 Specialist Consult Enhanced Extractor - Full Context
 Optimized for accuracy using Gemini-style full-document processing
-8 CRITICAL FIELDS FOCUSED (NO HALLUCINATION, ONLY EXPLICIT INFORMATION)
+Version: 2.0 - With Pydantic Output Validation for Consistent Long Summary
 """
 
 import logging
 import re
+import json
 import time
 from typing import Dict, Optional, List
 
-from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 
@@ -17,6 +18,11 @@ from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 from helpers.short_summary_generator import generate_structured_short_summary
+from models.long_summary_models import (
+    ConsultLongSummary,
+    format_consult_long_summary,
+    create_fallback_consult_summary
+)
 
 logger = logging.getLogger("document_ai")
 
@@ -36,6 +42,7 @@ class ConsultExtractorChained:
     def __init__(self, llm: AzureChatOpenAI):
         self.llm = llm
         self.parser = JsonOutputParser()
+        self.consult_summary_parser = PydanticOutputParser(pydantic_object=ConsultLongSummary)
         self.verifier = ExtractionVerifier(llm)
 
     # consult_extractor.py - UPDATED with dual-context priority
@@ -406,6 +413,8 @@ class ConsultExtractorChained:
     1. PRIMARY SOURCE (accurate context) is your MAIN reference for clinical interpretations
     2. Use FULL TEXT only to supplement specific missing details (measurements, codes, exact dates)
     3. NEVER override primary source clinical context with full text
+
+    {format_instructions}
     """)
 
         # Create prompt template
@@ -414,9 +423,12 @@ class ConsultExtractorChained:
             user_prompt
         ])
         
+        # Get format instructions from Pydantic parser
+        format_instructions = self.consult_summary_parser.get_format_instructions()
+        
         logger.info(f"📄 PRIMARY SOURCE size: {len(raw_text):,} chars")
         logger.info(f"📄 SUPPLEMENTARY size: {len(text):,} chars")
-        logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach...")
+        logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach + Pydantic validation...")
         
         # Invoke LLM with both sources
         try:
@@ -425,20 +437,52 @@ class ConsultExtractorChained:
                 "document_actual_context": raw_text,  # PRIMARY: Accurate summarized context
                 "full_document_text": text,           # SUPPLEMENTARY: Full OCR extraction
                 "fallback_date": fallback_date,
-                "doc_type": doc_type
+                "doc_type": doc_type,
+                "format_instructions": format_instructions
             })
             
-            long_summary = result.content.strip()
+            raw_response = result.content.strip()
+            logger.info(f"📝 Raw LLM response length: {len(raw_response):,} chars")
             
-            logger.info("✅ Generated consultation long summary with DUAL-CONTEXT PRIORITY")
+            # Try to parse with Pydantic for validation
+            try:
+                parsed_summary = self.consult_summary_parser.parse(raw_response)
+                long_summary = format_consult_long_summary(parsed_summary)
+                logger.info("✅ Pydantic validation successful - using structured output")
+                logger.info(f"✅ Formatted long summary: {len(long_summary):,} chars")
+                
+            except Exception as parse_error:
+                logger.warning(f"⚠️ Pydantic parsing failed: {parse_error}")
+                logger.info("🔄 Attempting JSON extraction fallback...")
+                
+                # Try to extract JSON from the response
+                try:
+                    json_match = re.search(r'\{[\s\S]*\}', raw_response)
+                    if json_match:
+                        json_str = json_match.group()
+                        parsed_dict = json.loads(json_str)
+                        parsed_summary = ConsultLongSummary.model_validate(parsed_dict)
+                        long_summary = format_consult_long_summary(parsed_summary)
+                        logger.info("✅ JSON extraction fallback successful")
+                    else:
+                        logger.info("📄 No JSON found, using raw LLM response")
+                        long_summary = raw_response
+                        
+                except Exception as json_error:
+                    logger.warning(f"⚠️ JSON extraction fallback failed: {json_error}")
+                    logger.info("📄 Using raw LLM response as long summary")
+                    long_summary = raw_response
+            
             logger.info("✅ Context priority maintained: PRIMARY source used for clinical findings")
             
             return long_summary
             
         except Exception as e:
             logger.error(f"❌ Direct LLM generation failed: {str(e)}")
-            # Fallback: Generate a minimal summary
-            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
+            # Fallback: Create a minimal Pydantic-based summary
+            logger.info("🔄 Creating fallback consultation summary...")
+            fallback_summary = create_fallback_consult_summary(doc_type, fallback_date)
+            return format_consult_long_summary(fallback_summary)
 
 
     def _clean_pipes_from_summary(self, short_summary: str) -> str:

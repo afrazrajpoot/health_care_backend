@@ -1,12 +1,14 @@
 """
 FormalMedicalReportExtractor - Enhanced Extractor for Comprehensive Medical Reports
 Optimized for accuracy using Gemini-style full-document processing
+Version: 2.0 - With Pydantic Output Validation for Consistent Long Summary
 """
 import logging
 import re
+import json
 import time
 from typing import Dict, Optional, List
-from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 
@@ -14,6 +16,11 @@ from models.data_models import ExtractionResult
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 from helpers.short_summary_generator import generate_structured_short_summary
+from models.long_summary_models import (
+    FormalMedicalLongSummary,
+    format_formal_medical_long_summary,
+    create_fallback_formal_medical_summary
+)
 
 logger = logging.getLogger("document_ai")
 
@@ -33,6 +40,7 @@ class FormalMedicalReportExtractor:
     def __init__(self, llm: AzureChatOpenAI):
         self.llm = llm
         self.parser = JsonOutputParser()
+        self.formal_medical_summary_parser = PydanticOutputParser(pydantic_object=FormalMedicalLongSummary)
         self.verifier = ExtractionVerifier(llm)
         
         # Pre-compile regex for efficiency
@@ -68,7 +76,7 @@ class FormalMedicalReportExtractor:
             'last_provider_sign': re.compile(r'(Provider:\s*)([A-Za-z\s\.,]+?)(?=\s*\(|Massage|\n{2,})', re.IGNORECASE | re.DOTALL)
         }
         
-        logger.info("✅ FormalMedicalReportExtractor initialized (Full Context + Enhanced Signature Extraction)")
+        logger.info("✅ FormalMedicalReportExtractor v2.0 initialized (Full Context + Pydantic Validation)")
 
     # formal_medical_extractor.py - UPDATED with dual-context priority
 
@@ -415,34 +423,70 @@ class FormalMedicalReportExtractor:
     1. PRIMARY SOURCE (accurate context) is your MAIN reference for medical interpretations
     2. Use FULL TEXT only to supplement specific missing details (demographics, codes, signatures)
     3. NEVER override primary source medical context with full text
+
+    {format_instructions}
     """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
         
+        # Get format instructions from Pydantic parser
+        format_instructions = self.formal_medical_summary_parser.get_format_instructions()
+        
         logger.info(f"📄 PRIMARY SOURCE size: {len(raw_text):,} chars")
         logger.info(f"📄 SUPPLEMENTARY size: {len(text):,} chars")
-        logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach...")
+        logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach + Pydantic validation...")
         
         try:
             start_time = time.time()
             
-            # Single LLM call with both sources
+            # Single LLM call with both sources and format instructions
             chain = chat_prompt | self.llm
             result = chain.invoke({
                 "doc_type": doc_type,
                 "document_actual_context": raw_text,  # PRIMARY: Accurate summarized context
                 "full_document_text": text,           # SUPPLEMENTARY: Full OCR extraction
                 "fallback_date": fallback_date,
-                "potential_signatures": "\n".join(potential_signatures) if potential_signatures else "No pre-extracted candidates found."
+                "potential_signatures": "\n".join(potential_signatures) if potential_signatures else "No pre-extracted candidates found.",
+                "format_instructions": format_instructions
             })
             
-            long_summary = result.content.strip()
+            raw_response = result.content.strip()
             
             end_time = time.time()
             processing_time = end_time - start_time
             
             logger.info(f"⚡ Medical long summary generated in {processing_time:.2f}s")
-            logger.info(f"✅ Generated long summary: {len(long_summary):,} chars")
+            logger.info(f"📝 Raw response length: {len(raw_response):,} chars")
+            
+            # Try to parse with Pydantic for validation
+            try:
+                parsed_summary = self.formal_medical_summary_parser.parse(raw_response)
+                long_summary = format_formal_medical_long_summary(parsed_summary)
+                logger.info("✅ Pydantic validation successful - using structured output")
+                logger.info(f"✅ Formatted long summary: {len(long_summary):,} chars")
+                
+            except Exception as parse_error:
+                logger.warning(f"⚠️ Pydantic parsing failed: {parse_error}")
+                logger.info("🔄 Attempting JSON extraction fallback...")
+                
+                # Try to extract JSON from the response
+                try:
+                    json_match = re.search(r'\{[\s\S]*\}', raw_response)
+                    if json_match:
+                        json_str = json_match.group()
+                        parsed_dict = json.loads(json_str)
+                        parsed_summary = FormalMedicalLongSummary.model_validate(parsed_dict)
+                        long_summary = format_formal_medical_long_summary(parsed_summary)
+                        logger.info("✅ JSON extraction fallback successful")
+                    else:
+                        logger.info("📄 No JSON found, using raw LLM response")
+                        long_summary = raw_response
+                        
+                except Exception as json_error:
+                    logger.warning(f"⚠️ JSON extraction fallback failed: {json_error}")
+                    logger.info("📄 Using raw LLM response as long summary")
+                    long_summary = raw_response
+            
             logger.info("✅ Context priority maintained: PRIMARY source used for medical findings")
             
             return long_summary
@@ -455,8 +499,10 @@ class FormalMedicalReportExtractor:
                 logger.error("❌ Medical report exceeds GPT-4o 128K context window")
                 logger.error("❌ Consider implementing chunked fallback for very large reports")
             
-            # Fallback: Generate a minimal summary
-            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
+            # Fallback: Create a minimal Pydantic-based summary
+            logger.info("🔄 Creating fallback formal medical summary...")
+            fallback_summary = create_fallback_formal_medical_summary(doc_type, fallback_date)
+            return format_formal_medical_long_summary(fallback_summary)
 
 
     def _detect_report_type(self, text: str, original_type: str) -> str:

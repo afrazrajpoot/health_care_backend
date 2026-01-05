@@ -1,21 +1,28 @@
 """
 Imaging Reports Enhanced Extractor - 6 Critical Imaging Fields Focused
+Version 2.0 - With Pydantic Output Parser for Consistent Response
 
 Optimized for MRI, X-ray, CT-scan, and other imaging modalities
 Full-context processing with anti-hallucination rules
 NO assumptions, NO self-additions, ONLY explicit information from report
 """
 
+import json
 import logging
 import re
 import time
 from typing import Dict, Optional, List
 
-from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
+from models.long_summary_models import (
+    ImagingLongSummary,
+    format_imaging_long_summary,
+    create_fallback_imaging_summary
+)
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 from helpers.short_summary_generator import generate_structured_short_summary
@@ -40,6 +47,9 @@ class ImagingExtractorChained:
         self.parser = JsonOutputParser()
         self.verifier = ExtractionVerifier(llm)
         
+        # Pydantic parser for structured output
+        self.imaging_summary_parser = PydanticOutputParser(pydantic_object=ImagingLongSummary)
+        
         # Pre-compile regex patterns for imaging specific content
         self.imaging_patterns = {
             'modality': re.compile(r'\b(MRI|CT|X-RAY|XRAY|ULTRASOUND|US|MAMMOGRAM|PET|SPECT|DEXA)\b', re.IGNORECASE),
@@ -48,7 +58,7 @@ class ImagingExtractorChained:
             'finding_severity': re.compile(r'\b(mild|moderate|severe|minimal|marked|advanced|subtle|questionable|probable|likely)\b', re.IGNORECASE)
         }
         
-        logger.info("✅ ImagingExtractorChained initialized (6-Field Imaging Focus)")
+        logger.info("✅ ImagingExtractorChained initialized (6-Field Imaging Focus with Pydantic Parser)")
 
     # imaging_extractor.py - UPDATED with dual-context priority
 
@@ -279,7 +289,9 @@ class ImagingExtractorChained:
     - Patient Details section shows: "Claim Number: 12345-ABC"
     - Full text contains: "Claim #: 12345-ABC" → ✅ VALID - Use "12345-ABC"
 
-    Now analyze this COMPLETE imaging report using the DUAL-CONTEXT PRIORITY approach and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
+    Now analyze this COMPLETE imaging report using the DUAL-CONTEXT PRIORITY approach and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY.
+    
+    {format_instructions}
     """)
 
         # Build user prompt with clear source separation
@@ -299,114 +311,15 @@ class ImagingExtractorChained:
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     Document Type: {doc_type}
-    Report Date: [extracted date of report]
-
-    Generate the long summary in this EXACT STRUCTURED FORMAT using the DUAL-CONTEXT PRIORITY rules:
-
-    📋 IMAGING OVERVIEW
-    --------------------------------------------------
-    Document Type: {doc_type}
-    Exam Date: [from primary, supplement if needed]
-    Exam Type: [from primary]
-    Radiologist: [from primary, check full text signature if unclear]
-    Imaging Center: [from primary]
-    Referring Physician: [from primary]
-
-    Author:
-    hint: check primary source first, then full text signature block (last pages) if unclear
-    • Signature: [extracted name/title if physical or electronic signature present; otherwise omit]
-
-    ## PATIENT INFORMATION
-    - **Name:** [check both sources, use most complete]
-    - **Date of Birth:** [check both sources, use most complete]
-    - **Claim Number:** [check full text headers first, then primary]
-    - **Date of Injury:** [from primary]
-    - **Employer:** [from primary]
-
-    ━━━ CLAIM NUMBER EXTRACTION ━━━
-    - Check FULL TEXT headers/footers FIRST for exact claim numbers
-    - Then check PRIMARY SOURCE if full text unclear
-    - Scan for patterns: "[Claim #XXXXXXXXX]", "Claim Number:", "WC Claim:"
-    - if in the structured raw_text like json formatted dat, if the fileds are first and values then handle the same way to extract the claim number of accurate filed, but most of the time the fields are first and values are second then the claim number will be in the second field
-
-                                                            
-    All Doctors Involved:
-    • [extract from BOTH sources, deduplicate, prefer primary source format]
-
-    ━━━ ALL DOCTORS EXTRACTION ━━━
-    - Extract from BOTH sources (primary + supplementary)
-    - Deduplicate: If same doctor in both, use PRIMARY SOURCE format
-    - Include: radiologist, referring doctor, ordering physician
-
-    🎯 CLINICAL INDICATION
-    --------------------------------------------------
-    [FROM PRIMARY SOURCE for clinical context]
-
-    Clinical Indication: [primary source]
-    Clinical History: [primary source]
-    Chief Complaint: [primary source]
-    Specific Questions: [primary source]
-
-    🔧 TECHNICAL DETAILS
-    --------------------------------------------------
-    [FROM PRIMARY SOURCE for technique context]
-    [Supplement specific parameters from FULL TEXT if missing]
-
-    Study Type: {doc_type}
-    Body Part Imaged: [primary, supplement from full text if more specific]
-    Laterality: [primary, supplement if needed]
-    Contrast Used: [check both sources, use clearest]
-    Contrast Type: [primary, supplement if needed]
-    Prior Studies Available: [primary]
-    Technical Quality: [primary]
-    Limitations: [primary]
-
-    📊 KEY FINDINGS
-    --------------------------------------------------
-    [FROM PRIMARY SOURCE for radiological significance]
-    [Supplement with exact measurements from FULL TEXT if missing]
-
-    Primary Finding:
-    • Description: [primary for context, full text for exact measurements]
-    • Location: [primary for context, full text for precision]
-    • Size: [primary if stated, full text for exact dimensions]
-    • Characteristics: [from primary source]
-    • Acuity: [from primary source]
-
-    Secondary Findings:
-    • [from primary source, supplement measurements from full text]
-
-    Normal Findings:
-    • [from primary source, list up to 5]
-
-    💡 IMPRESSION & CONCLUSION
-    --------------------------------------------------
-    [ALL FROM PRIMARY SOURCE for accurate radiological interpretation]
-
-    Overall Impression: [primary source - radiologist's exact language]
-    Primary Diagnosis: [primary source]
-    Final Diagnostic Statement: [primary source]
-
-    Differential Diagnoses:
-    • [from primary source, list up to 3]
-
-    Clinical Correlation: [primary source]
-
-    📋 RECOMMENDATIONS & FOLLOW-UP
-    --------------------------------------------------
-    [FROM PRIMARY SOURCE for recommendations context]
-
-    Follow-up Recommended: [primary source]
-    Follow-up Modality: [primary source]
-    Follow-up Timing: [primary source]
-    Clinical Correlation Needed: [primary source]
-    Specialist Consultation: [primary source]
 
     ⚠️ MANDATORY EXTRACTION RULES:
     1. PRIMARY SOURCE is your MAIN reference for radiological interpretations
     2. Use FULL TEXT only for exact measurements, demographics, technical parameters if missing
     3. NEVER override primary source radiological context with full text
     4. EMPTY FIELDS ARE ACCEPTABLE - Better than guessed information
+    5. For claim_number: Check FULL TEXT headers/footers FIRST, then PRIMARY SOURCE. Scan for patterns like "[Claim #XXXXXXXXX]", "Claim Number:", "WC Claim:"
+    6. For all_doctors_involved: Extract from BOTH sources, deduplicate, prefer PRIMARY SOURCE format. Include: radiologist, referring doctor, ordering physician
+    7. Check primary source first for radiologist, then full text signature block (last pages) if unclear
     """)
 
         # Create prompt template
@@ -415,21 +328,34 @@ class ImagingExtractorChained:
             user_prompt
         ])
         
+        # Get format instructions from Pydantic parser
+        format_instructions = self.imaging_summary_parser.get_format_instructions()
+        
         logger.info(f"📄 PRIMARY SOURCE size: {len(raw_text):,} chars")
         logger.info(f"📄 SUPPLEMENTARY size: {len(text):,} chars")
-        logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach...")
+        logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach and Pydantic validation...")
         
-        # Invoke LLM with both sources
+        # Invoke LLM with both sources and format instructions
         try:
             chain = prompt | self.llm
             result = chain.invoke({
                 "document_actual_context": raw_text,  # PRIMARY: Accurate summarized context
                 "full_document_text": text,           # SUPPLEMENTARY: Full OCR extraction
                 "doc_type": doc_type,
-                "fallback_date": fallback_date
+                "format_instructions": format_instructions
             })
             
-            long_summary = result.content.strip()
+            response_text = result.content.strip()
+            
+            # Try to parse with Pydantic
+            try:
+                parsed_summary = self.imaging_summary_parser.parse(response_text)
+                long_summary = format_imaging_long_summary(parsed_summary)
+                logger.info("✅ Pydantic parsing successful for imaging long summary")
+            except Exception as parse_error:
+                logger.warning(f"⚠️ Pydantic parsing failed: {str(parse_error)}, trying JSON extraction...")
+                # Fallback: Try to extract JSON from response
+                long_summary = self._extract_json_fallback(response_text, doc_type, fallback_date)
             
             logger.info("✅ Generated imaging long summary with DUAL-CONTEXT PRIORITY")
             logger.info("✅ Context priority maintained: PRIMARY source used for radiological findings")
@@ -439,6 +365,29 @@ class ImagingExtractorChained:
         except Exception as e:
             logger.error(f"❌ Direct LLM generation failed: {str(e)}")
             return self._get_fallback_long_summary(fallback_date, doc_type)
+
+    def _extract_json_fallback(self, response_text: str, doc_type: str, fallback_date: str) -> str:
+        """Fallback method to extract JSON from response text."""
+        try:
+            # Try to find JSON in the response
+            json_match = re.search(r'\{[\s\S]*\}', response_text)
+            if json_match:
+                json_str = json_match.group()
+                json_data = json.loads(json_str)
+                parsed_summary = ImagingLongSummary.model_validate(json_data)
+                return format_imaging_long_summary(parsed_summary)
+        except Exception as json_error:
+            logger.warning(f"⚠️ JSON extraction fallback failed: {str(json_error)}")
+        
+        # If response looks like formatted text (not JSON), return as-is
+        if response_text and not response_text.strip().startswith('{'):
+            logger.info("📝 Using raw LLM response as fallback (non-JSON format)")
+            return response_text
+        
+        # Final fallback: return minimal summary
+        logger.warning("⚠️ All parsing attempts failed, using minimal fallback")
+        fallback_summary = create_fallback_imaging_summary(doc_type, fallback_date)
+        return format_imaging_long_summary(fallback_summary)
 
     def _clean_pipes_from_summary(self, short_summary: str) -> str:
         """

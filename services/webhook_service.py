@@ -854,53 +854,6 @@ class WebhookService:
         
         return (best_match, best_confidence, best_details)
 
-    def _extract_author_from_short_summary(self, short_summary: str) -> str:
-        """
-        Extract author from short summary.
-        Format: "Report Title | Author Name | Date | ..."
-        After the title, if there's a valid human name, that's the author.
-        """
-        if not short_summary:
-            return None
-        
-        try:
-            parts = short_summary.split("|")
-            if len(parts) >= 2:
-                # Second part after title should be author name
-                potential_author = parts[1].strip()
-                
-                # Validate it looks like a human name (not a date, not body parts, etc.)
-                # A valid name should have at least 2 words and not contain common non-name patterns
-                non_name_patterns = [
-                    r'^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$',  # Date pattern
-                    r'^(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d',  # Month date
-                    r'^body\s*parts?:',  # Body parts label
-                    r'^findings?:',  # Findings label
-                    r'^(lumbar|cervical|thoracic|spine|knee|shoulder|hip|ankle|wrist|elbow)',  # Body part names
-                    r'^\d+$',  # Just numbers
-                ]
-                
-                is_valid_name = True
-                potential_author_lower = potential_author.lower()
-                
-                for pattern in non_name_patterns:
-                    if re.search(pattern, potential_author_lower, re.IGNORECASE):
-                        is_valid_name = False
-                        break
-                
-                # Check if it has at least first and last name (2+ words)
-                name_parts = potential_author.split()
-                if len(name_parts) < 2:
-                    is_valid_name = False
-                
-                if is_valid_name and potential_author:
-                    logger.info(f"✅ Found author in short summary: {potential_author}")
-                    return potential_author
-            
-            return None
-        except Exception as e:
-            logger.error(f"❌ Error extracting author from short summary: {e}")
-            return None
 
     def _extract_author_from_long_summary(self, long_summary: str) -> str:
         """
@@ -957,16 +910,8 @@ class WebhookService:
         """
         try:
             logger.info(f"🔍 Checking for document author...")
-            
-            # Step 1: Try to extract author from short summary first
-            author_name = self._extract_author_from_short_summary(short_summary)
-            author_source = "short_summary" if author_name else None
-            
-            # Step 2: If not found in short summary, try long summary
-            if not author_name:
-                logger.info("📝 Author not found in short summary, checking long summary...")
-                author_name = self._extract_author_from_long_summary(long_summary)
-                author_source = "long_summary" if author_name else None
+            author_name = self._extract_author_from_long_summary(long_summary)
+            author_source = "long_summary" if author_name else None
             
             # Step 3: If no author found anywhere, return error
             if not author_name:

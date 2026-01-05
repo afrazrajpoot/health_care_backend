@@ -1,18 +1,24 @@
 """
 Simplified Four-LLM Chain Extractor with Conditional Routing
-Version: 4.4 - Structured Short Summary with Pydantic Validation
+Version: 4.5 - Structured Long Summary with Pydantic Validation
 """
 import logging
 import json
 import re
 from typing import Dict, Optional, List
-from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 from langchain_core.runnables import RunnableLambda, RunnableBranch
 
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 from helpers.short_summary_generator import generate_structured_short_summary
+from models.long_summary_models import (
+    UniversalLongSummary,
+    DoctorInfo,
+    format_universal_long_summary,
+    create_fallback_long_summary
+)
 
 
 logger = logging.getLogger("document_ai")
@@ -29,7 +35,8 @@ class SimpleExtractor:
     def __init__(self, llm: AzureChatOpenAI):
         self.llm = llm
         self.parser = JsonOutputParser()
-        logger.info("✅ SimpleExtractor v4.3 initialized with Enhanced Claim Number Extraction")
+        self.long_summary_parser = PydanticOutputParser(pydantic_object=UniversalLongSummary)
+        logger.info("✅ SimpleExtractor v4.5 initialized with Pydantic Long Summary Validation")
     
     def extract(
         self,
@@ -94,10 +101,12 @@ class SimpleExtractor:
         2. SUPPLEMENTARY: text (full OCR extraction for missing details only)
         
         This ensures accurate context preservation while capturing all necessary details.
+        Uses Pydantic validation for consistent, structured output without hallucination.
         """
-        logger.info("🔍 Processing document with DUAL-CONTEXT approach...")
-        # logger.info(f"   📌 PRIMARY SOURCE (raw_text): {len(raw_text):,} chars (accurate context)")
-        # logger.info(f"   📄 SUPPLEMENTARY (full text): {len(text):,} chars (detail reference)")
+        logger.info("🔍 Processing document with DUAL-CONTEXT approach + Pydantic validation...")
+        
+        # Get format instructions from Pydantic parser
+        format_instructions = self.long_summary_parser.get_format_instructions()
         
         # Build system prompt with CLEAR PRIORITY INSTRUCTIONS
         system_prompt = SystemMessagePromptTemplate.from_template("""
@@ -337,12 +346,24 @@ Before outputting, verify EVERY piece of information:
 - Is this a "typical" or "standard" value I'm adding? → If YES = REMOVE IT
 - Did I fabricate any dates, names, numbers, or findings? → If YES = REMOVE THEM
 **Output ONLY what is explicitly stated in the sources. Leave fields blank rather than guess.**
+
+📋 OUTPUT FORMAT INSTRUCTIONS:
+You MUST output your response as a valid JSON object following this exact schema:
+{format_instructions}
+
+⚠️ IMPORTANT JSON RULES:
+- Use empty string "" for text fields with no data (NOT null, NOT "N/A", NOT "unknown")
+- Use empty array [] for list fields with no data
+- Use null ONLY for optional fields like claim_number when not present
+- For content_type: use "medical" if clinical data present, "administrative" if not
+- For all_doctors_involved: each doctor must have "name" (required), "title" (optional), "role" (optional)
+- For signature_type: use "physical" or "electronic" or null if not found
 """)
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
         
         try:
-            logger.info("🤖 Invoking LLM for direct full-context universal long summary generation with DUAL-CONTEXT...")
+            logger.info("🤖 Invoking LLM for structured long summary generation with Pydantic validation...")
             
             # Single LLM call with DUAL-CONTEXT (primary + supplementary sources)
             chain = chat_prompt | self.llm
@@ -350,23 +371,62 @@ Before outputting, verify EVERY piece of information:
                 "primary_source": raw_text,  # PRIMARY: Document AI summarizer output
                 "supplementary_source": text,  # SUPPLEMENTARY: Full OCR text
                 "doc_type": doc_type,
-                "fallback_date": fallback_date
+                "fallback_date": fallback_date,
+                "format_instructions": format_instructions
             })
             
-            long_summary = result.content.strip()
+            raw_response = result.content.strip()
+            logger.info(f"📝 Raw LLM response length: {len(raw_response)} chars")
             
-            logger.info(f"⚡ Direct universal long summary generation completed with DUAL-CONTEXT")
-            logger.info(f"✅ Generated long summary using:")
-            logger.info(f"   - PRIMARY SOURCE: {len(raw_text):,} chars")
-            logger.info(f"   - SUPPLEMENTARY SOURCE: {len(text):,} chars")
-            
-            return long_summary
+            # Parse and validate with Pydantic
+            try:
+                parsed_summary = self.long_summary_parser.parse(raw_response)
+                logger.info(f"✅ Pydantic validation successful - content_type: {parsed_summary.content_type}")
+                
+                # Format the validated Pydantic model back to text format
+                long_summary = format_universal_long_summary(parsed_summary)
+                
+                logger.info(f"⚡ Structured long summary generation completed with Pydantic validation")
+                logger.info(f"✅ Generated long summary using:")
+                logger.info(f"   - PRIMARY SOURCE: {len(raw_text):,} chars")
+                logger.info(f"   - SUPPLEMENTARY SOURCE: {len(text):,} chars")
+                
+                return long_summary
+                
+            except Exception as parse_error:
+                logger.warning(f"⚠️ Pydantic parsing failed: {parse_error}")
+                logger.warning("⚠️ Falling back to raw LLM output (may contain inconsistencies)")
+                
+                # Try to extract JSON from the response and create a fallback
+                try:
+                    # Attempt to find JSON in the response
+                    json_match = re.search(r'\{[\s\S]*\}', raw_response)
+                    if json_match:
+                        json_str = json_match.group()
+                        parsed_dict = json.loads(json_str)
+                        # Create Pydantic model with defaults for missing fields
+                        parsed_summary = UniversalLongSummary(**parsed_dict)
+                        long_summary = format_universal_long_summary(parsed_summary)
+                        logger.info("✅ Successfully recovered with JSON extraction fallback")
+                        return long_summary
+                except Exception as json_error:
+                    logger.warning(f"⚠️ JSON extraction fallback failed: {json_error}")
+                
+                # Final fallback: use raw response if it looks like formatted text
+                if "📋" in raw_response or "DOCUMENT OVERVIEW" in raw_response:
+                    logger.info("✅ Using raw formatted text response")
+                    return raw_response
+                
+                # Create minimal fallback summary
+                fallback = create_fallback_long_summary(doc_type, fallback_date)
+                return format_universal_long_summary(fallback)
             
         except Exception as e:
             logger.error(f"❌ Direct universal long summary generation failed: {e}", exc_info=True)
             
-            # Fallback: Generate a minimal summary
-            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
+            # Fallback: Generate a minimal summary using Pydantic model
+            fallback = create_fallback_long_summary(doc_type, fallback_date)
+            return format_universal_long_summary(fallback)
 
     def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
         """

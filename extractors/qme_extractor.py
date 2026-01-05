@@ -1,16 +1,23 @@
 """
 QME/AME/IME Enhanced Extractor - Full Context
+Version 2.0 - With Pydantic Output Parser for Consistent Response
 Optimized for accuracy using Gemini-style full-document processing
 """
+import json
 import logging
 import re
 import time
 from typing import Dict, Optional, List
-from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
+from models.long_summary_models import (
+    QMELongSummary,
+    format_qme_long_summary,
+    create_fallback_qme_summary
+)
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 from helpers.short_summary_generator import generate_structured_short_summary
@@ -32,6 +39,7 @@ class QMEExtractorChained:
     def __init__(self, llm: AzureChatOpenAI, mode):
         self.llm = llm
         self.parser = JsonOutputParser()
+        self.qme_summary_parser = PydanticOutputParser(pydantic_object=QMELongSummary)
         self.verifier = ExtractionVerifier(llm)
         self.mode = mode
         # Pre-compile regex for efficiency
@@ -40,7 +48,7 @@ class QMEExtractorChained:
             re.IGNORECASE
         )
         
-        logger.info("✅ QMEExtractorChained initialized (Full Context + Raw Text)")
+        logger.info("✅ QMEExtractorChained v2.0 initialized with Pydantic Validation")
 
     def extract(
         self,
@@ -313,7 +321,16 @@ class QMEExtractorChained:
     - [PRIMARY SOURCE for all recommendations]
     - [FULL TEXT only for additional specific details like test names, frequencies]
 
-    Use markdown formatting with clear headings and bullet points. Be comprehensive but concise.
+    📋 OUTPUT FORMAT INSTRUCTIONS:
+    You MUST output your response as a valid JSON object following this exact schema:
+    {format_instructions}
+    
+    ⚠️ IMPORTANT JSON RULES:
+    - Use empty string "" for text fields with no data (NOT null, NOT "N/A", NOT "unknown")
+    - Use empty array [] for list fields with no data
+    - Use null ONLY for optional fields like claim_number when not present
+    - For all_doctors_involved: each doctor must have "name" (required), "credentials" (optional), "role" (optional)
+    - For content_type: always use "qme"
     """)
 
         # Updated user prompt to clearly separate both sources
@@ -345,31 +362,69 @@ class QMEExtractorChained:
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
         
+        # Get format instructions from Pydantic parser
+        format_instructions = self.qme_summary_parser.get_format_instructions()
+        
         try:
             start_time = time.time()
-            logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach...")
+            logger.info("🤖 Invoking LLM with DUAL-CONTEXT PRIORITY approach and Pydantic validation...")
             logger.info("   📌 Primary: Accurate context from Document AI Summarizer")
             logger.info("   📄 Supplementary: Full OCR text for detail enrichment")
             
-            # Single LLM call with both sources
+            # Single LLM call with both sources and format instructions
             chain = chat_prompt | self.llm
             response = chain.invoke({
                 "document_actual_context": raw_text,  # PRIMARY: Accurate summarized context
                 "full_document_text": text,           # SUPPLEMENTARY: Full OCR extraction
                 "doc_type": doc_type,
-                "fallback_date": fallback_date
+                "fallback_date": fallback_date,
+                "format_instructions": format_instructions
             })
             
-            long_summary = response.content.strip()
+            raw_response = response.content.strip()
             
             end_time = time.time()
             processing_time = end_time - start_time
+            logger.info(f"⚡ LLM response received in {processing_time:.2f}s")
             
-            logger.info(f"⚡ Long summary generated in {processing_time:.2f}s")
-            logger.info(f"✅ Generated long summary: {len(long_summary):,} chars")
-            logger.info("✅ Context priority maintained: PRIMARY source used for clinical findings")
-            
-            return long_summary
+            # Parse and validate with Pydantic
+            try:
+                parsed_summary = self.qme_summary_parser.parse(raw_response)
+                logger.info(f"✅ Pydantic validation successful - content_type: {parsed_summary.content_type}")
+                
+                # Format the validated Pydantic model back to text format
+                long_summary = format_qme_long_summary(parsed_summary)
+                
+                logger.info(f"✅ Generated long summary: {len(long_summary):,} chars")
+                logger.info("✅ Context priority maintained: PRIMARY source used for clinical findings")
+                
+                return long_summary
+                
+            except Exception as parse_error:
+                logger.warning(f"⚠️ Pydantic parsing failed: {parse_error}")
+                logger.warning("⚠️ Falling back to raw LLM output or JSON extraction")
+                
+                # Try to extract JSON from the response
+                try:
+                    json_match = re.search(r'\{[\s\S]*\}', raw_response)
+                    if json_match:
+                        json_str = json_match.group()
+                        parsed_dict = json.loads(json_str)
+                        parsed_summary = QMELongSummary(**parsed_dict)
+                        long_summary = format_qme_long_summary(parsed_summary)
+                        logger.info("✅ Successfully recovered with JSON extraction fallback")
+                        return long_summary
+                except Exception as json_error:
+                    logger.warning(f"⚠️ JSON extraction fallback failed: {json_error}")
+                
+                # Final fallback: use raw response if it looks like formatted text
+                if "##" in raw_response or "PATIENT INFORMATION" in raw_response:
+                    logger.info("✅ Using raw formatted text response")
+                    return raw_response
+                
+                # Create minimal fallback summary
+                fallback = create_fallback_qme_summary(doc_type, fallback_date)
+                return format_qme_long_summary(fallback)
             
         except Exception as e:
             logger.error(f"❌ Long summary generation failed: {e}", exc_info=True)
@@ -377,7 +432,8 @@ class QMEExtractorChained:
             # Check if context length exceeded
             if "context_length_exceeded" in str(e).lower() or "maximum context" in str(e).lower():
                 logger.error("❌ Document exceeds GPT-4o 128K context window")
-                return self._get_fallback_summary(doc_type, fallback_date)
+                fallback = create_fallback_qme_summary(doc_type, fallback_date)
+                return format_qme_long_summary(fallback)
             
             raise
 

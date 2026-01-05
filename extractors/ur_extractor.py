@@ -1,16 +1,23 @@
 """
 DecisionDocumentExtractor - Enhanced Extractor for UR/IMR Decisions, Appeals, Authorizations
+Version 2.0 - With Pydantic Output Parser for Consistent Response
 Optimized for accuracy using Gemini-style full-document processing
 """
+import json
 import logging
 import re
 import time
 from typing import Dict, Optional, List
-from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 
 from models.data_models import ExtractionResult
+from models.long_summary_models import (
+    URLongSummary,
+    format_ur_long_summary,
+    create_fallback_ur_summary
+)
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 from helpers.short_summary_generator import generate_structured_short_summary
@@ -34,6 +41,7 @@ class DecisionDocumentExtractor:
     def __init__(self, llm: AzureChatOpenAI):
         self.llm = llm
         self.parser = JsonOutputParser()
+        self.ur_summary_parser = PydanticOutputParser(pydantic_object=URLongSummary)
         self.verifier = ExtractionVerifier(llm)
         
         # Pre-compile regex for efficiency
@@ -67,7 +75,7 @@ class DecisionDocumentExtractor:
             'last_provider_sign': re.compile(r'(Provider:\s*)([A-Za-z\s\.,]+?)(?=\s*\(|Review|\n{2,})', re.IGNORECASE | re.DOTALL)
         }
         
-        logger.info("✅ DecisionDocumentExtractor initialized (Full Context + Enhanced Signature Extraction)")
+        logger.info("✅ DecisionDocumentExtractor v2.0 initialized with Pydantic Validation")
 
     def extract(
         self,
@@ -419,7 +427,17 @@ If the raw_text contains a "--- PATIENT DETAILS ---" section:
 - It is BETTER to have empty fields than incorrect information
 - CRITICAL: ALWAYS INCLUDE THE AUTHOR FIELD UNDER PARTIES INVOLVED. IF NOT FOUND, STATE "Signer not identified".
 
-Now analyze this COMPLETE {doc_type} decision document and generate a COMPREHENSIVE STRUCTURED LONG SUMMARY with the following EXACT format (use markdown headings and bullet points for clarity):
+📋 OUTPUT FORMAT INSTRUCTIONS:
+You MUST output your response as a valid JSON object following this exact schema:
+{format_instructions}
+
+⚠️ IMPORTANT JSON RULES:
+- Use empty string "" for text fields with no data (NOT null, NOT "N/A", NOT "unknown")
+- Use empty array [] for list fields with no data
+- Use null ONLY for optional fields like claim_case_number when not present
+- For all_doctors_involved: each doctor must have "name" (required), "title" (optional), "role" (optional)
+- For content_type: always use "ur_decision"
+- For partial_decision_breakdown: each item has "service", "decision", "quantity" fields
 """)
 
         # User prompt with DUAL-CONTEXT input
@@ -573,10 +591,13 @@ Timeframe for Response: [extracted]
 
         chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
         
+        # Get format instructions from Pydantic parser
+        format_instructions = self.ur_summary_parser.get_format_instructions()
+        
         try:
             start_time = time.time()
             
-            logger.info("🤖 Invoking LLM for direct full-context decision long summary generation with DUAL-CONTEXT...")
+            logger.info("🤖 Invoking LLM for decision long summary with DUAL-CONTEXT and Pydantic validation...")
             
             # Single LLM call with DUAL-CONTEXT (primary + supplementary sources)
             chain = chat_prompt | self.llm
@@ -585,20 +606,57 @@ Timeframe for Response: [extracted]
                 "primary_source": raw_text,  # PRIMARY: Document AI summarizer output
                 "supplementary_source": text,  # SUPPLEMENTARY: Full OCR text
                 "fallback_date": fallback_date,
-                "potential_signatures": "\n".join(potential_signatures) if potential_signatures else "No pre-extracted candidates found."
+                "potential_signatures": "\n".join(potential_signatures) if potential_signatures else "No pre-extracted candidates found.",
+                "format_instructions": format_instructions
             })
             
-            long_summary = result.content.strip()
+            raw_response = result.content.strip()
             
             end_time = time.time()
             processing_time = end_time - start_time
             
-            logger.info(f"⚡ Direct decision long summary generation completed with DUAL-CONTEXT in {processing_time:.2f}s")
-            logger.info(f"✅ Generated long summary using:")
-            logger.info(f"   - PRIMARY SOURCE: {len(raw_text):,} chars")
-            logger.info(f"   - SUPPLEMENTARY SOURCE: {len(text):,} chars")
+            logger.info(f"⚡ LLM response received in {processing_time:.2f}s")
+            logger.info(f"📝 Raw response length: {len(raw_response)} chars")
             
-            return long_summary
+            # Parse and validate with Pydantic
+            try:
+                parsed_summary = self.ur_summary_parser.parse(raw_response)
+                logger.info(f"✅ Pydantic validation successful - content_type: {parsed_summary.content_type}")
+                
+                # Format the validated Pydantic model back to text format
+                long_summary = format_ur_long_summary(parsed_summary)
+                
+                logger.info(f"✅ Generated long summary: {len(long_summary):,} chars")
+                logger.info(f"   - PRIMARY SOURCE: {len(raw_text):,} chars")
+                logger.info(f"   - SUPPLEMENTARY SOURCE: {len(text):,} chars")
+                
+                return long_summary
+                
+            except Exception as parse_error:
+                logger.warning(f"⚠️ Pydantic parsing failed: {parse_error}")
+                logger.warning("⚠️ Falling back to raw LLM output or JSON extraction")
+                
+                # Try to extract JSON from the response
+                try:
+                    json_match = re.search(r'\{[\s\S]*\}', raw_response)
+                    if json_match:
+                        json_str = json_match.group()
+                        parsed_dict = json.loads(json_str)
+                        parsed_summary = URLongSummary(**parsed_dict)
+                        long_summary = format_ur_long_summary(parsed_summary)
+                        logger.info("✅ Successfully recovered with JSON extraction fallback")
+                        return long_summary
+                except Exception as json_error:
+                    logger.warning(f"⚠️ JSON extraction fallback failed: {json_error}")
+                
+                # Final fallback: use raw response if it looks like formatted text
+                if "📋" in raw_response or "DECISION DOCUMENT OVERVIEW" in raw_response:
+                    logger.info("✅ Using raw formatted text response")
+                    return raw_response
+                
+                # Create minimal fallback summary
+                fallback = create_fallback_ur_summary(doc_type, fallback_date)
+                return format_ur_long_summary(fallback)
             
         except Exception as e:
             logger.error(f"❌ Direct decision long summary generation failed: {e}", exc_info=True)
@@ -608,8 +666,9 @@ Timeframe for Response: [extracted]
                 logger.error("❌ Document exceeds GPT-4o 128K context window")
                 logger.error("❌ Consider implementing chunked fallback for very large documents")
             
-            # Fallback: Generate a minimal summary
-            return f"Fallback long summary for {doc_type} on {fallback_date}: Document processing failed due to {str(e)}"
+            # Fallback: Generate a minimal summary using Pydantic model
+            fallback = create_fallback_ur_summary(doc_type, fallback_date)
+            return format_ur_long_summary(fallback)
 
     def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
         """
