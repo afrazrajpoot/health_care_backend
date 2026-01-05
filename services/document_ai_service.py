@@ -504,8 +504,9 @@ class DocumentAIProcessor:
             logger.info(summary_text)
             logger.info("=" * 80)
             
-            # NEW: Run multi-report detection on summarizer output (using o3-pro AI model)
-            multi_report_result = detect_multiple_reports(summary_text)
+            # TEMPORARILY DISABLED: Run multi-report detection on summarizer output (using o3-pro AI model)
+            # multi_report_result = detect_multiple_reports(summary_text)
+            multi_report_result = {"is_multiple": False}  # Temporary placeholder
             
             # Also log full text comparison for debugging
             if result.text and len(result.text) != len(summary_text):
@@ -513,7 +514,7 @@ class DocumentAIProcessor:
                 logger.info("📄 FULL OCR TEXT (for comparison):")
                 logger.info("=" * 80)
                 logger.info(f"Full text length: {len(result.text)} chars")
-                logger.info(f"First 500 chars: {result.text[:500]}")
+                logger.info(f"First 500 chars: {result.text}")
                 logger.info("=" * 80)
             
             # Extract text using simplified extractor
@@ -952,8 +953,9 @@ class DocumentAIProcessor:
             logger.info(summary_text)
             logger.info("=" * 80)
             
-            # Run multi-report detection on batch summary (using o3-pro AI model)
-            multi_report_result = detect_multiple_reports(summary_text)
+            # TEMPORARILY DISABLED: Run multi-report detection on batch summary (using o3-pro AI model)
+            # multi_report_result = detect_multiple_reports(summary_text)
+            multi_report_result = {"is_multiple": False}  # Temporary placeholder
             
             return ExtractionResult(
                 text=summary_text,
@@ -1119,8 +1121,9 @@ class DocumentAIProcessor:
         logger.info(merged_text)
         logger.info("=" * 80)
         
-        # Run multi-report detection on merged text (using o3-pro AI model)
-        multi_report_result = detect_multiple_reports(merged_text)
+        # TEMPORARILY DISABLED: Run multi-report detection on merged text (using o3-pro AI model)
+        # multi_report_result = detect_multiple_reports(merged_text)
+        multi_report_result = {"is_multiple": False}  # Temporary placeholder
         
         merged_result = ExtractionResult(
             text=merged_raw_text,

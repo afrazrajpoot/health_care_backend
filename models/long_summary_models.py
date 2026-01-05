@@ -73,8 +73,8 @@ class MedicalLongSummary(BaseModel):
 # ============================================================================
 
 class AuthorInfo(BaseModel):
-    """Author/signature information"""
-    signature: str = Field(default="", description="Name/title from signature block - physical or electronic. Leave empty if not found.")
+    """Author/signature information - ONLY the person who signed the report"""
+    signature: str = Field(default="", description="Name/title of the person who SIGNED the report (physical or electronic signature). Must be the actual signer - NOT providers, claim adjusters, requesting physicians, utilization reviewers, or other officials mentioned in the document. Leave empty if no signature found.")
     signature_type: Optional[Literal["physical", "electronic"]] = Field(default=None, description="Type of signature if present")
 
 
@@ -163,7 +163,7 @@ class UniversalLongSummary(BaseModel):
     
     # === ADMINISTRATIVE-SPECIFIC FIELDS ===
     purpose: str = Field(default="", description="Purpose of the document")
-    author_signature: str = Field(default="", description="Author signature name/title")
+    author_signature: str = Field(default="", description="Name/title of the person who SIGNED the report. Must be the actual signer with physical or electronic signature - NOT providers, claim adjusters, requesting physicians, or other officials mentioned in the document.")
     signature_type: Optional[Literal["physical", "electronic"]] = Field(default=None, description="Type of signature")
     referring_party: str = Field(default="", description="Referring party")
     important_dates: str = Field(default="", description="Important dates mentioned")
@@ -382,7 +382,7 @@ class PR2ReportOverview(BaseModel):
     specialty: str = Field(default="", description="Physician's specialty")
     time_since_injury: str = Field(default="", description="Time elapsed since injury")
     time_since_last_visit: str = Field(default="", description="Time since last visit")
-    author_signature: str = Field(default="", description="Signature from signature block - physical or electronic")
+    author_signature: str = Field(default="", description="Name/title of the person who SIGNED the report (physical or electronic signature). Must be the actual signer - NOT providers, claim adjusters, requesting physicians, or other officials.")
     signature_type: Optional[Literal["physical", "electronic"]] = Field(default=None, description="Type of signature")
 
 
@@ -747,7 +747,7 @@ class AdminPartiesInvolved(BaseModel):
     patient_details: str = Field(default="", description="Patient details if applicable")
     from_party: AdminPartyInfo = Field(default_factory=AdminPartyInfo, description="Sender information")
     to_party: AdminPartyInfo = Field(default_factory=AdminPartyInfo, description="Recipient information")
-    author_signature: str = Field(default="", description="Author/signer name from signature block")
+    author_signature: str = Field(default="", description="Name/title of the person who SIGNED the report (physical or electronic signature). Must be the actual signer - NOT providers, claim adjusters, requesting physicians, insurance representatives, or other officials.")
     signature_type: Optional[Literal["physical", "electronic"]] = Field(default=None, description="Type of signature")
     legal_representation: AdminLegalRepresentation = Field(default_factory=AdminLegalRepresentation, description="Legal representation")
     claim_number: Optional[str] = Field(default=None, description="Claim number if present")
@@ -1067,8 +1067,8 @@ class ClinicalOutcomeMeasures(BaseModel):
 
 
 class ClinicalSignatureAuthor(BaseModel):
-    """Signature and author section"""
-    signature: str = Field(default="", description="Signature name/title if physical or electronic signature present")
+    """Signature and author section - ONLY the person who signed the report"""
+    signature: str = Field(default="", description="Name/title of the person who SIGNED the report (physical or electronic signature). Must be the actual signer - NOT providers, claim adjusters, requesting physicians, or other officials mentioned in the document.")
     signature_type: Optional[Literal["physical", "electronic"]] = Field(default=None, description="Type of signature")
 
 
@@ -1347,8 +1347,8 @@ class ConsultWorkStatus(BaseModel):
 
 
 class ConsultSignatureAuthor(BaseModel):
-    """Signature and author section"""
-    signature: str = Field(default="", description="Signature name/title if present")
+    """Signature and author section - ONLY the person who signed the report"""
+    signature: str = Field(default="", description="Name/title of the person who SIGNED the report (physical or electronic signature). Must be the actual signer - NOT providers, claim adjusters, requesting physicians, or other officials mentioned in the document.")
     signature_type: Optional[Literal["physical", "electronic"]] = Field(default=None, description="Type of signature")
 
 
@@ -1587,8 +1587,8 @@ class FormalMedicalProviders(BaseModel):
 
 
 class FormalMedicalSignatureAuthor(BaseModel):
-    """Signature and author section"""
-    signature: str = Field(default="", description="Signature name/title if present")
+    """Signature and author section - ONLY the person who signed the report"""
+    signature: str = Field(default="", description="Name/title of the person who SIGNED the report (physical or electronic signature). Must be the actual signer - NOT providers, claim adjusters, requesting physicians, or other officials mentioned in the document.")
     signature_type: Optional[Literal["physical", "electronic"]] = Field(default=None, description="Type of signature")
 
 
@@ -1869,8 +1869,8 @@ def create_fallback_formal_medical_summary(doc_type: str, fallback_date: str) ->
 # ============================================================================
 
 class ImagingAuthorInfo(BaseModel):
-    """Author/signature information for imaging reports"""
-    signature: str = Field(default="", description="Extracted name/title if physical or electronic signature present")
+    """Author/signature information for imaging reports - ONLY the person who signed the report"""
+    signature: str = Field(default="", description="Name/title of the person who SIGNED the report (physical or electronic signature). Must be the actual signer - NOT referring physicians, ordering providers, technologists, or other officials mentioned in the document.")
 
 
 class ImagingRadiologistInfo(BaseModel):
@@ -2139,8 +2139,8 @@ def create_fallback_imaging_summary(doc_type: str, fallback_date: str) -> Imagin
 # ============================================================================
 
 class QMEAuthorInfo(BaseModel):
-    """Author/signature information for QME reports"""
-    signature: str = Field(default="", description="Extracted name/title from signature block")
+    """Author/signature information for QME reports - ONLY the person who signed the report"""
+    signature: str = Field(default="", description="Name/title of the person who SIGNED the QME report (physical or electronic signature). Must be the actual signer/evaluating physician who signed - NOT providers, claim adjusters, requesting physicians, defense attorneys, applicant attorneys, or other officials mentioned in the document.")
 
 
 class QMEDoctorInfo(BaseModel):
@@ -2411,8 +2411,8 @@ def create_fallback_qme_summary(doc_type: str, fallback_date: str) -> QMELongSum
 # ============================================================================
 
 class URAuthorInfo(BaseModel):
-    """Author/signature information for UR decision documents"""
-    signature: str = Field(default="", description="Extracted name/title from signature block (physical or electronic)")
+    """Author/signature information for UR decision documents - ONLY the person who signed the report"""
+    signature: str = Field(default="", description="Name/title of the person who SIGNED the UR decision document (physical or electronic signature). Must be the actual signer/reviewing physician who signed - NOT requesting providers, claim adjusters, utilization review organizations, insurance representatives, or other officials mentioned in the document.")
 
 
 class URDoctorInfo(BaseModel):
