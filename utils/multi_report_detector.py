@@ -1,11 +1,12 @@
 """
-Simplified Multi-Report Detector using Azure OpenAI.
-Relies on LLM reasoning to accurately detect multiple reports from summary.
+Robust Multi-Report Detector with multiple detection strategies.
+Uses ensemble approach for consistent and reliable detection.
 """
 
 import logging
 import json
-from typing import Dict, Any
+import re
+from typing import Dict, Any, List, Tuple
 from langchain_openai import AzureChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
@@ -21,11 +22,49 @@ class MultiReportDetectionResult(BaseModel):
     confidence: str = Field(description="Confidence level: 'high', 'medium', or 'low'")
     reasoning: str = Field(description="Step-by-step reasoning explaining the decision")
     report_count: int = Field(description="Number of separate reports identified")
-    report_types: list = Field(default_factory=list, description="Types of reports found (e.g., QME, PR2, AME)")
+    report_types: list = Field(default_factory=list, description="Types of reports found")
+    detection_method: str = Field(default="hybrid", description="Method used for detection")
 
 
 class MultiReportDetector:
-    """Detects if a document contains multiple separate reports using LLM reasoning"""
+    """Detects if a document contains multiple separate reports using multiple strategies"""
+    
+    # Known report type patterns
+    REPORT_TYPE_PATTERNS = {
+        'QME': r'\b(?:QME|Qualified Medical Evaluation|Q\.M\.E\.)\b',
+        'PQME': r'\b(?:PQME|Panel Qualified Medical Evaluation|P\.Q\.M\.E\.)\b',
+        'AME': r'\b(?:AME|Agreed Medical Evaluation|A\.M\.E\.)\b',
+        'PR-2': r'\b(?:PR-2|PR2|Progress Report|P\.R\.\s*2)\b',
+        'PR-3': r'\b(?:PR-3|PR3|P\.R\.\s*3)\b',
+        'PR-4': r'\b(?:PR-4|PR4|P\.R\.\s*4)\b',
+        'IME': r'\b(?:IME|Independent Medical Evaluation|I\.M\.E\.)\b',
+        'DFR': r'\b(?:DFR|Doctor First Report|D\.F\.R\.)\b',
+    }
+    
+    # Phrases that indicate separate report sections
+    SEPARATION_INDICATORS = [
+        r'document contains (?:two|three|multiple|several) (?:separate )?reports?',
+        r'first (?:section|part|report) is .{0,50}second (?:section|part|report) is',
+        r'followed by (?:a |an )?(?:separate |another |second )?(?:QME|PR-2|PR-3|PR-4|AME|IME)',
+        r'combined with (?:a |an )?(?:QME|PR-2|PR-3|PR-4|AME|IME)',
+        r'includes both (?:a |an )?(?:QME|PR-2|PR-3|PR-4|AME|IME).{0,50}and (?:a |an )?(?:QME|PR-2|PR-3|PR-4|AME|IME)',
+        r'separate patient information (?:sections?|blocks?)',
+        r'two distinct reports?',
+        r'multiple report types?',
+    ]
+    
+    # Phrases that indicate single report (references/reviews)
+    SINGLE_REPORT_INDICATORS = [
+        r'reviewed? (?:the )?(?:previous|prior|earlier)',
+        r'referenced? (?:the )?(?:previous|prior|earlier)',
+        r'based on (?:the )?(?:previous|prior|earlier)',
+        r'according to (?:the )?(?:previous|prior|earlier)',
+        r'discussed? (?:in |by )?(?:Dr\.|Doctor)',
+        r'mentioned? in the',
+        r'records? reviewed?',
+        r'medical history',
+        r'treatment history',
+    ]
     
     def __init__(self):
         """Initialize with Azure OpenAI model"""
@@ -45,121 +84,214 @@ class MultiReportDetector:
         self.parser = JsonOutputParser(pydantic_object=MultiReportDetectionResult)
         logger.info(f"✅ MultiReportDetector initialized with deployment: {deployment_name}")
 
-    SYSTEM_PROMPT = """You are an expert at analyzing medical document summaries to determine if they contain multiple separate reports or just a single report.
+    def _pattern_based_detection(self, text: str) -> Tuple[bool, float, str, List[str]]:
+        """
+        Pattern-based detection using regex and heuristics.
+        
+        Returns:
+            (is_multiple, confidence_score, reasoning, report_types)
+        """
+        text_lower = text.lower()
+        
+        # Step 1: Find all report types mentioned
+        found_types = []
+        for report_type, pattern in self.REPORT_TYPE_PATTERNS.items():
+            if re.search(pattern, text, re.IGNORECASE):
+                found_types.append(report_type)
+        
+        # Step 2: Check for separation indicators
+        separation_count = 0
+        separation_matches = []
+        for pattern in self.SEPARATION_INDICATORS:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            if matches:
+                separation_count += len(matches)
+                separation_matches.extend(matches)
+        
+        # Step 3: Check for single report indicators
+        single_report_count = 0
+        for pattern in self.SINGLE_REPORT_INDICATORS:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            if matches:
+                single_report_count += len(matches)
+        
+        # Step 4: Special handling for QME/AME/PQME
+        is_qme_type = any(rt in found_types for rt in ['QME', 'PQME', 'AME'])
+        
+        # Decision logic
+        if separation_count >= 2:
+            # Strong evidence of multiple reports
+            confidence = 0.9 if separation_count >= 3 else 0.75
+            reasoning = f"Pattern detection found {separation_count} strong indicators of separate reports: {separation_matches[:2]}"
+            return True, confidence, reasoning, found_types
+        
+        elif separation_count == 1 and len(found_types) >= 2:
+            # Moderate evidence: one separator + multiple types
+            if is_qme_type and single_report_count > separation_count:
+                # QME likely reviewing other reports
+                confidence = 0.8
+                reasoning = f"QME/AME report likely reviewing other evaluations (found {single_report_count} reference indicators)"
+                return False, confidence, reasoning, found_types
+            else:
+                confidence = 0.7
+                reasoning = f"Found separation indicator and {len(found_types)} different report types"
+                return True, confidence, reasoning, found_types
+        
+        elif len(found_types) >= 3 and single_report_count > len(found_types):
+            # Multiple types mentioned but many references - likely single report
+            confidence = 0.75
+            reasoning = f"Found {len(found_types)} report types but {single_report_count} reference indicators suggest single report reviewing others"
+            return False, confidence, reasoning, found_types
+        
+        else:
+            # Default to single report
+            confidence = 0.6
+            reasoning = f"Pattern analysis suggests single report (types found: {found_types})"
+            return False, confidence, reasoning, found_types
 
-## YOUR TASK
-Analyze the provided summary and determine if it describes:
-- **SINGLE REPORT**: One document that may reference or mention other reports
-- **MULTIPLE REPORTS**: Two or more complete separate reports combined into one document
+    SIMPLIFIED_SYSTEM_PROMPT = """You are a medical document analyzer. Your task is to determine if a document summary describes ONE report or MULTIPLE SEPARATE reports.
 
-## CRITICAL RULE - QME/PQME/AME REPORTS ARE ALWAYS SINGLE REPORTS
-**IMPORTANT**: Qualified Medical Evaluations (QME), Panel Qualified Medical Evaluations (PQME), and Agreed Medical Evaluations (AME) should ALWAYS be treated as a SINGLE REPORT, even if:
-- They reference or discuss evaluations by multiple physicians (Dr. Banks, Dr. Franc, Dr. Akmakjian, etc.)
-- They mention multiple QME dates or previous QME findings
-- They review or summarize multiple prior QME/AME evaluations
-- They contain sections discussing different doctors' opinions or findings
+## KEY RULES:
 
-These comprehensive evaluation reports typically REVIEW and REFERENCE prior evaluations as part of a single comprehensive medical evaluation. The mentions of multiple physicians or prior evaluations are PART OF the evaluation process, not separate reports.
+1. **MULTIPLE REPORTS means**: The document contains 2+ complete, separate reports of DIFFERENT types (e.g., QME + PR-2)
 
-Only count a QME/PQME/AME as multiple reports if the document explicitly contains COMPLETELY SEPARATE QME/PQME/AME reports with their own distinct headers, patient information sections, and different report types (e.g., a QME combined with a PR-2).
+2. **SINGLE REPORT means**: One report that may reference or review other reports
 
-## KEY INDICATORS OF MULTIPLE REPORTS
+3. **QME/AME/PQME** that discuss multiple doctors' evaluations = SINGLE REPORT (it's reviewing others)
 
-**Strong indicators of MULTIPLE separate reports:**
-1. **Different Report Types Combined**: Summary explicitly mentions distinct report type sections like "The document contains a QME report followed by a PR-2 report" (different types, not multiple of same type)
-2. **Multiple Patient Info Sections**: Summary indicates separate patient information blocks for different reports
-3. **Sequential Report Structure with Different Types**: Summary describes document structure like "First section is QME report, second section is PR-2 report"
+4. **Strong indicators of MULTIPLE**:
+   - "Document contains a QME report AND a PR-2 report"
+   - "First section is [Type A], second section is [Type B]"
+   - "Two separate patient information sections"
 
-**NOT indicators of multiple reports:**
-1. **Multiple Physicians Mentioned in QME/AME**: A QME/AME discussing or referencing evaluations by Dr. A, Dr. B, Dr. C is still ONE report
-2. **Multiple QME Dates**: References to prior QME evaluations within a QME report are part of that single report
-3. **References to Other Reports**: "Reviewed the previous PR-2" or "Based on Dr. Smith's QME" - these are just CITATIONS
-4. **Records Reviewed Section**: Listing of documents reviewed as part of the evaluation
-5. **Medical History**: References to prior treatments, evaluations, or medical records
-6. **Follow-up Dates**: Multiple dates within the same evaluation report
+5. **NOT indicators of multiple**:
+   - "Reviewed the previous PR-2"
+   - "Dr. Smith's QME was considered"
+   - "Based on earlier evaluations"
 
-## DECISION PROCESS
+## YOUR TASK:
+1. Identify report types mentioned
+2. Determine if they are ACTUAL separate reports or just REFERENCES
+3. Count ACTUAL separate reports only
+4. Make a clear decision
 
-**Step 1: Check for QME/PQME/AME**
-If the primary document is a QME, PQME, or AME:
-- It is a SINGLE report unless combined with a completely different report type (like PR-2)
-- Multiple physician references, prior evaluation dates, or discussions of other doctors' findings are PART of the single report
+Respond with valid JSON only:
+{format_instructions}"""
 
-**Step 2: Identify Report Type Mentions**
-List all medical report types mentioned (QME, PR-2, PR-4, AME, IME, DFR, etc.)
+    USER_PROMPT = """Analyze this summary:
 
-**Step 3: Determine Context**
-For each mention, is it:
-- A: An actual separate report section in this document (different report type)?
-- B: A reference/citation to another document?
-- C: Part of the medical history/records reviewed?
-
-**Step 4: Count Actual Reports**
-Count only the "A" items (actual separate report sections with different types)
-
-**Step 5: Make Decision**
-- If count = 1: is_multiple = false
-- If count ≥ 2: is_multiple = true
-
-## EXAMPLES
-
-**EXAMPLE 1 - SINGLE QME REPORT (with multiple physician references)**
-Summary: "This QME report discusses evaluations by multiple physicians including Dr. Banks, Dr. Franc, Dr. Akmakjian, and Dr. Baum. Each physician's QME findings are reviewed and analyzed. The document also references PR-2 progress reports from Dr. Calhoun and Dr. Rosario."
-
-Analysis:
-- Primary report type: QME
-- Multiple physicians mentioned: Yes, but this is PART of the QME evaluation process
-- PR-2 references: These are CITED/REVIEWED documents, not separate report sections
-- Decision: is_multiple = FALSE
-- Reasoning: "Single QME report that reviews and discusses multiple prior physician evaluations. The references to other QMEs and PR-2 reports are part of the comprehensive evaluation, not separate reports included in the document."
-
-**EXAMPLE 2 - SINGLE REPORT (references others)**
-Summary: "This is a QME report evaluating the patient on 03/15/2024. The doctor reviewed the patient's PR-2 from 01/10/2024 and the previous AME by Dr. Smith dated 12/05/2023. Based on these records and current examination..."
-
-Analysis:
-- Report types mentioned: QME, PR-2, AME
-- Context: QME is the main report (A), PR-2 is referenced (B), AME is referenced (B)
-- Actual reports: 1 (only the QME)
-- Decision: is_multiple = FALSE
-- Reasoning: "Single QME report that references two other reports (PR-2 and AME). The PR-2 and AME are cited as reviewed documents, not included as separate reports."
-
-**EXAMPLE 3 - MULTIPLE REPORTS (different report types combined)**
-Summary: "This document contains two separate reports. The first section is a Qualified Medical Evaluation (QME) dated 02/15/2024 conducted by Dr. Johnson with its own patient information and examination findings. The second section is a Progress Report PR-2 dated 03/20/2024 conducted by Dr. Williams with a separate patient information section and treatment recommendations."
-
-Analysis:
-- Report types mentioned: QME, PR-2
-- Context: QME is actual report section (A), PR-2 is actual report section (A) - DIFFERENT TYPES
-- Actual reports: 2 (both QME and PR-2 as separate sections)
-- Decision: is_multiple = TRUE
-- Reasoning: "Document contains two distinct report sections of DIFFERENT types: a QME from 02/15/2024 and a PR-2 from 03/20/2024. Each has its own structure, date, and physician."
-
-**EXAMPLE 4 - SINGLE REPORT (with history)**
-Summary: "PR-2 Progress Report dated 04/10/2024. Patient was initially evaluated via QME on 01/15/2024. Current examination shows improvement. Records reviewed include: previous QME report, PR-2 from 02/20/2024, imaging studies."
-
-Analysis:
-- Report types mentioned: PR-2, QME
-- Context: PR-2 is main report (A), QME is historical reference (C), previous PR-2 is reviewed record (B)
-- Actual reports: 1 (only current PR-2)
-- Decision: is_multiple = FALSE
-- Reasoning: "Single PR-2 report that references prior evaluations as part of patient history and records reviewed. No separate report sections present."
-
-## OUTPUT FORMAT
-Respond ONLY with valid JSON matching this structure:
-{format_instructions}
-
-Be decisive and clear in your reasoning. Focus on whether the document actually CONTAINS multiple reports of DIFFERENT TYPES, not whether it MENTIONS or REVIEWS multiple reports/evaluations."""
-
-    USER_PROMPT = """Analyze this document summary and determine if it contains multiple separate reports:
-
-## DOCUMENT SUMMARY:
 {summary_text}
 
-## YOUR ANALYSIS:
-Provide your response in the JSON format specified."""
+Provide your analysis as JSON."""
+
+    def _llm_based_detection(self, text: str) -> Dict[str, Any]:
+        """
+        LLM-based detection with simplified prompt.
+        
+        Returns:
+            dict with detection results
+        """
+        try:
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", self.SIMPLIFIED_SYSTEM_PROMPT),
+                ("human", self.USER_PROMPT)
+            ])
+            
+            chain = prompt | self.llm | self.parser
+            
+            # Truncate if needed
+            max_chars = 12000
+            truncated = text[:max_chars]
+            
+            result = chain.invoke({
+                "summary_text": truncated,
+                "format_instructions": self.parser.get_format_instructions()
+            })
+            
+            if isinstance(result, dict):
+                return result
+            return result.dict()
+            
+        except Exception as e:
+            logger.error(f"❌ LLM detection failed: {str(e)}")
+            return None
+
+    def _ensemble_decision(
+        self,
+        pattern_result: Tuple[bool, float, str, List[str]],
+        llm_result: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Combine pattern-based and LLM-based results for final decision.
+        """
+        pattern_is_multiple, pattern_confidence, pattern_reasoning, pattern_types = pattern_result
+        
+        # If LLM failed, use pattern-based only
+        if llm_result is None:
+            confidence_map = {0.9: "high", 0.8: "high", 0.75: "high", 0.7: "medium", 0.6: "medium"}
+            return {
+                "is_multiple": pattern_is_multiple,
+                "confidence": confidence_map.get(pattern_confidence, "low"),
+                "reasoning": f"[Pattern-based only] {pattern_reasoning}",
+                "report_count": len(pattern_types) if pattern_is_multiple else 1,
+                "report_types": pattern_types,
+                "detection_method": "pattern_only"
+            }
+        
+        # Both methods available - use voting with confidence weighting
+        llm_is_multiple = llm_result.get("is_multiple", False)
+        llm_confidence_str = llm_result.get("confidence", "medium")
+        
+        # Convert confidence strings to scores
+        confidence_scores = {"high": 0.9, "medium": 0.7, "low": 0.5}
+        llm_confidence = confidence_scores.get(llm_confidence_str, 0.7)
+        
+        # Agreement check
+        if pattern_is_multiple == llm_is_multiple:
+            # Both agree - high confidence
+            final_confidence = max(pattern_confidence, llm_confidence)
+            confidence_str = "high" if final_confidence >= 0.8 else "medium"
+            
+            combined_reasoning = f"Both methods agree. Pattern: {pattern_reasoning}. LLM: {llm_result.get('reasoning', '')}"
+            
+            return {
+                "is_multiple": pattern_is_multiple,
+                "confidence": confidence_str,
+                "reasoning": combined_reasoning,
+                "report_count": llm_result.get("report_count", len(pattern_types) if pattern_is_multiple else 1),
+                "report_types": llm_result.get("report_types", pattern_types),
+                "detection_method": "ensemble_agreement"
+            }
+        else:
+            # Disagreement - use higher confidence method
+            if pattern_confidence > llm_confidence:
+                confidence_str = "medium"  # Reduce confidence due to disagreement
+                reasoning = f"Methods disagree (using pattern-based). Pattern: {pattern_reasoning}. LLM: {llm_result.get('reasoning', '')}"
+                
+                return {
+                    "is_multiple": pattern_is_multiple,
+                    "confidence": confidence_str,
+                    "reasoning": reasoning,
+                    "report_count": len(pattern_types) if pattern_is_multiple else 1,
+                    "report_types": pattern_types,
+                    "detection_method": "ensemble_pattern_priority"
+                }
+            else:
+                confidence_str = "medium"  # Reduce confidence due to disagreement
+                reasoning = f"Methods disagree (using LLM). Pattern: {pattern_reasoning}. LLM: {llm_result.get('reasoning', '')}"
+                
+                return {
+                    "is_multiple": llm_is_multiple,
+                    "confidence": confidence_str,
+                    "reasoning": reasoning,
+                    "report_count": llm_result.get("report_count", 1),
+                    "report_types": llm_result.get("report_types", pattern_types),
+                    "detection_method": "ensemble_llm_priority"
+                }
 
     def detect_multiple_reports(self, summary_text: str) -> Dict[str, Any]:
         """
-        Analyze document summary to detect multiple reports using LLM reasoning.
+        Analyze document summary using ensemble approach.
         
         Args:
             summary_text: The summarizer output to analyze
@@ -174,51 +306,45 @@ Provide your response in the JSON format specified."""
                 "confidence": "high",
                 "reasoning": "Document too short to contain multiple reports",
                 "report_count": 1,
-                "report_types": []
+                "report_types": [],
+                "detection_method": "length_check"
             }
         
         try:
-            logger.info("🔍 Analyzing document for multiple reports...")
+            logger.info("🔍 Starting multi-strategy detection...")
             logger.info(f"📝 Summary length: {len(summary_text)} characters")
             
-            # Create prompt and chain
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", self.SYSTEM_PROMPT),
-                ("human", self.USER_PROMPT)
-            ])
+            # Strategy 1: Pattern-based detection
+            logger.info("🔎 Running pattern-based detection...")
+            pattern_result = self._pattern_based_detection(summary_text)
+            pattern_is_multiple, pattern_conf, pattern_reason, pattern_types = pattern_result
+            logger.info(f"   Pattern result: {pattern_is_multiple} (confidence: {pattern_conf:.2f})")
             
-            chain = prompt | self.llm | self.parser
-            
-            # Truncate if needed
-            max_chars = 15000
-            truncated = summary_text[:max_chars]
-            if len(summary_text) > max_chars:
-                logger.info(f"⚠️ Truncated from {len(summary_text)} to {max_chars} chars")
-            
-            # Run analysis
-            result = chain.invoke({
-                "summary_text": truncated,
-                "format_instructions": self.parser.get_format_instructions()
-            })
-            
-            # Normalize result
-            if isinstance(result, dict):
-                detection_result = result
+            # Strategy 2: LLM-based detection
+            logger.info("🤖 Running LLM-based detection...")
+            llm_result = self._llm_based_detection(summary_text)
+            if llm_result:
+                logger.info(f"   LLM result: {llm_result.get('is_multiple')} (confidence: {llm_result.get('confidence')})")
             else:
-                detection_result = result.dict()
+                logger.warning("   LLM detection failed, using pattern-based only")
             
-            # Log results
+            # Strategy 3: Ensemble decision
+            logger.info("🎯 Making ensemble decision...")
+            final_result = self._ensemble_decision(pattern_result, llm_result)
+            
+            # Log final results
             logger.info("=" * 80)
-            logger.info("📊 MULTI-REPORT DETECTION RESULTS:")
+            logger.info("📊 FINAL DETECTION RESULTS:")
             logger.info("=" * 80)
-            logger.info(f"   Multiple Reports: {detection_result.get('is_multiple', False)}")
-            logger.info(f"   Confidence: {detection_result.get('confidence', 'unknown')}")
-            logger.info(f"   Report Count: {detection_result.get('report_count', 1)}")
-            logger.info(f"   Report Types: {detection_result.get('report_types', [])}")
-            logger.info(f"   Reasoning: {detection_result.get('reasoning', 'No reasoning provided')}")
+            logger.info(f"   Multiple Reports: {final_result['is_multiple']}")
+            logger.info(f"   Confidence: {final_result['confidence']}")
+            logger.info(f"   Report Count: {final_result['report_count']}")
+            logger.info(f"   Report Types: {final_result['report_types']}")
+            logger.info(f"   Detection Method: {final_result['detection_method']}")
+            logger.info(f"   Reasoning: {final_result['reasoning'][:200]}...")
             logger.info("=" * 80)
             
-            return detection_result
+            return final_result
             
         except Exception as e:
             logger.error(f"❌ Detection failed: {str(e)}")
@@ -230,7 +356,8 @@ Provide your response in the JSON format specified."""
                 "confidence": "low",
                 "reasoning": f"Detection failed: {str(e)}",
                 "report_count": 1,
-                "report_types": []
+                "report_types": [],
+                "detection_method": "error_fallback"
             }
 
 
@@ -258,7 +385,8 @@ def get_multi_report_detector() -> MultiReportDetector:
                         "confidence": "low",
                         "reasoning": "Detector initialization failed",
                         "report_count": 1,
-                        "report_types": []
+                        "report_types": [],
+                        "detection_method": "initialization_failed"
                     }
             _detector_instance = DummyDetector()
     

@@ -866,10 +866,22 @@ class WebhookService:
         try:
             # Patterns to look for author information
             # we only need the author who signed the report, not assistants or transcribers, or prepared by, directed by, etc.
+            # Pattern for name: optional Dr./title prefix + First name + optional middle + Last name + optional credentials
+            name_pattern = r'(?:Dr\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD|RN|R\.N\.|LVN|L\.V\.N\.|PA-C))?)'
+            
             author_patterns = [
-                r'(?:Electronically\s+Signed\s+By|Electronic\s+Signature|Signed\s+By|Signature)[:\s]*([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD|RN|R\.N\.|LVN|L\.V\.N\.|PA-C))?)',
-                r'-\s*Signature[:\s]*(?:Electronically\s+Signed\s+By[:\s]*)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD|RN|R\.N\.|LVN|L\.V\.N\.|PA-C))?)',
-                r'(?:Approved\s+By|Authenticated\s+By|Verified\s+By)[:\s]*([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD|RN|R\.N\.|LVN|L\.V\.N\.|PA-C))?)',
+                # Pattern for "• Signature:" format (used by Pydantic formatted summaries)
+                r'[•\-]\s*Signature[:\s]*' + name_pattern,
+                # Pattern for various signature labels
+                r'(?:Electronically\s+Signed\s+By|Electronic\s+Signature|Signed\s+By|Signature)[:\s]*' + name_pattern,
+                # Pattern for "- Signature:" format  
+                r'-\s*Signature[:\s]*(?:Electronically\s+Signed\s+By[:\s]*)?' + name_pattern,
+                # Pattern for approval labels
+                r'(?:Approved\s+By|Authenticated\s+By|Verified\s+By)[:\s]*' + name_pattern,
+                # Pattern for "Evaluating Physician:" (used by QME)
+                r'(?:Evaluating\s+Physician|Examining\s+Physician|QME\s+Physician)[:\s]*' + name_pattern,
+                # Pattern for "Reviewer:" (used by UR)
+                r'(?:Reviewing\s+Physician|Reviewer)[:\s]*' + name_pattern,
             ]
             
             for pattern in author_patterns:
@@ -1473,6 +1485,9 @@ class WebhookService:
                 raw_text = processed_data.get("raw_text", "")
                 text_for_analysis = processed_data.get("text_for_analysis", "")
                 
+                # Handle short_summary being either a string or dict
+                short_summary_text = short_summary.get('raw_summary', str(short_summary)) if isinstance(short_summary, dict) else (short_summary or 'N/A')
+                
                 fail_doc_id = await db_service.save_fail_doc(
                     reason=author_info.get('error_message', "No author found in document - manual verification required"),
                     db=processed_data.get("dob"),
@@ -1486,7 +1501,7 @@ class WebhookService:
                     mode=processed_data.get("mode", "wc"),
                     document_text=text_for_analysis if text_for_analysis else raw_text,
                     doi=None,
-                    ai_summarizer_text=f"No author detected in document.\nShort Summary: {short_summary[:200] if short_summary else 'N/A'}..."
+                    ai_summarizer_text=f"No author detected in document.\nShort Summary: {short_summary_text[:200] if short_summary_text else 'N/A'}..."
                 )
                 
                 parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
@@ -1508,6 +1523,9 @@ class WebhookService:
                 raw_text = processed_data.get("raw_text", "")
                 text_for_analysis = processed_data.get("text_for_analysis", "")
                 
+                # Handle short_summary being either a string or dict
+                short_summary_text_internal = short_summary.get('raw_summary', str(short_summary)) if isinstance(short_summary, dict) else (short_summary or 'N/A')
+                
                 fail_doc_id = await db_service.save_fail_doc(
                     reason=f"Internal document detected - author '{author_name}' is a clinic member. Cannot process internal documents.",
                     db=processed_data.get("dob"),
@@ -1521,7 +1539,7 @@ class WebhookService:
                     mode=processed_data.get("mode", "wc"),
                     document_text=text_for_analysis if text_for_analysis else raw_text,
                     doi=None,
-                    ai_summarizer_text=f"Internal document detected.\nShort Summary: {short_summary[:200] if short_summary else 'N/A'}..."
+                    ai_summarizer_text=f"Internal document detected.\nShort Summary: {short_summary_text_internal[:200] if short_summary_text_internal else 'N/A'}..."
                 )
                 
                 parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
