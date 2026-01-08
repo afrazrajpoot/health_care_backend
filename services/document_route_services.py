@@ -192,7 +192,9 @@ class DocumentExtractorService:
                 },
                 summary="",
                 comprehensive_analysis=None,
-                document_id=f"endpoint_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                document_id=f"endpoint_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                # ✅ Pass metadata with patient_details from Document AI
+                metadata=document_result.metadata if hasattr(document_result, 'metadata') else {}
             )
             
             processing_time = (datetime.now() - document_start_time).total_seconds() * 1000

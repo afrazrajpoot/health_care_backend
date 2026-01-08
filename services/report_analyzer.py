@@ -119,37 +119,26 @@ class ReportAnalyzer:
         
         logger.info("✅ ReportAnalyzer initialized (Dictionary-based type matching)")
 
-    def compare_with_previous_documents(
-        self,
-        current_raw_text: str
-    ) -> Dict[str, str]:
-        """
-        Main extraction pipeline - returns dictionary with both summaries.
-        """
-        try:
-            # extract_document returns dict with both summaries
-            # Pass current_raw_text as both parameters (Document AI summarizer output as primary)
-            result_dict = self.extract_document(text=current_raw_text, raw_text=current_raw_text)
-            # Return the dictionary directly (no bullet points)
-            return result_dict
-        except Exception as e:
-            logger.error(f"❌ Extraction pipeline failed: {e}")
-            fallback_date = datetime.now().strftime("%m/%d/%y")
-            error_msg = f"{fallback_date}: Extraction failed - manual review required"
-            return {
-                "long_summary": error_msg,
-                "short_summary": error_msg
-            }
 
-    def extract_document(self, text: str, raw_text: str) -> Dict[str, str]:
+    def extract_document(self, text: str, raw_text: str, doc_type_result: Dict[str, Any] = None) -> Dict[str, str]:
         """
         Optimized pipeline - returns dictionary with both summaries.
+        
+        Args:
+            text: The summarizer output text
+            raw_text: The raw document text (used as fallback for detection)
+            doc_type_result: Optional pre-detected document type result to avoid redundant LLM calls
         """
         fallback_date = datetime.now().strftime("%m/%d/%y")
         
         try:
-            # Stage 1: Detect document type
-            detection_result = detect_document_type(text)
+            # Stage 1: Use pre-detected type if available, otherwise detect
+            if doc_type_result and isinstance(doc_type_result, dict) and doc_type_result.get("doc_type"):
+                detection_result = doc_type_result
+                logger.info(f"📄 Using pre-detected document type: {detection_result.get('doc_type')} (Conf: {detection_result.get('confidence', 0.0)})")
+            else:
+                # Detect document type using summarizer output first, raw_text as fallback
+                detection_result = detect_document_type(summarizer_output=raw_text, raw_text=text)
             
             # Get the detected document type string (FIXED: dictionary access)
             # Using .get() with fallback to avoid KeyError if key is missing
@@ -368,81 +357,3 @@ Be brief and focus on key medical-legal points."""
             if len(long_summary) > 100:
                 return long_summary[:97] + "..."
             return long_summary
-
-    def format_whats_new_as_highlights(self, bullet_points: List[str]) -> List[str]:
-        """
-        Format bullet points as highlights (for backward compatibility).
-        """
-        return bullet_points if bullet_points else [
-            "• No significant new findings identified in current document"
-        ]
-
-    def get_structured_extraction(self, text: str) -> Dict[str, Any]:
-        """
-        Get full structured extraction as dictionary (for API/storage).
-        """
-        try:
-            # Get additional metadata (FIXED: dictionary access)
-            detection_result = detect_document_type(text)
-            
-            # Ensure we handle both dict and object returns just in case
-            if isinstance(detection_result, dict):
-                doc_type_str = detection_result.get("doc_type", "Unknown")
-                is_standard_type = detection_result.get("is_standard_type", False)
-            else:
-                doc_type_str = getattr(detection_result, "doc_type", "Unknown")
-                is_standard_type = getattr(detection_result, "is_standard_type", False)
-
-            # Get both summaries
-            summaries_dict = self.extract_document(text=text, raw_text=text)
-
-            return {
-                "document_type": doc_type_str,
-                "is_standard_type": is_standard_type,
-                "long_summary": summaries_dict.get("long_summary", ""),
-                "short_summary": summaries_dict.get("short_summary", ""),
-                "extracted_at": datetime.now().isoformat(),
-                "text_length": len(text)
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Structured extraction failed: {e}")
-            fallback_date = datetime.now().strftime("%m/%d/%y")
-            return {
-                "document_type": "Unknown",
-                "is_standard_type": False,
-                "long_summary": f"{fallback_date}: Extraction failed",
-                "short_summary": f"{fallback_date}: Extraction failed",
-                "error": str(e)
-            }
-
-    def get_extraction_metadata(self, text: str) -> Dict[str, Any]:
-        """
-        Get extraction metadata without full processing (useful for validation).
-        """
-        try:
-            # FIXED: dictionary access
-            detection_result = detect_document_type(text)
-            
-            if isinstance(detection_result, dict):
-                doc_type_str = detection_result.get("doc_type", "Unknown")
-                is_standard_type = detection_result.get("is_standard_type", False)
-            else:
-                doc_type_str = getattr(detection_result, "doc_type", "Unknown")
-                is_standard_type = getattr(detection_result, "is_standard_type", False)
-            
-            return {
-                "document_type": doc_type_str,
-                "is_standard_type": is_standard_type,
-                "detected_at": datetime.now().isoformat(),
-                "text_length": len(text),
-                "preview": text[:200] + "..." if len(text) > 200 else text
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Metadata extraction failed: {e}")
-            return {
-                "document_type": "Unknown",
-                "is_standard_type": False,
-                "error": str(e)
-            }

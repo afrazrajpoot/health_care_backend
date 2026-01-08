@@ -13,7 +13,6 @@ from datetime import timezone
 from services.webhook_service import WebhookService
 from services.document_route_services import DocumentExtractorService
 from services.get_document_services import DocumentAggregationService
-from utils.document_splitter import get_document_splitter
 from utils.page_extractor import get_page_extractor
 from utils.document_detector import detect_document_type
 from services.report_analyzer import ReportAnalyzer
@@ -453,17 +452,22 @@ async def split_and_process_document(request: Request):
                 
                 logger.info(f"🔍 Processing and saving report {idx + 1}/{total_reports}: {report_title} (pages {start_page}-{end_page})")
                 
-                # Step 2a: Detect document type
-                doc_type_result = detect_document_type(report_text)
+                # Step 2a: Detect document type ONCE and reuse
+                # Uses summarizer output (raw_text) first, falls back to full text if confidence is low
+                doc_type_result = await loop.run_in_executor(
+                    llm_executor,
+                    lambda: detect_document_type(summarizer_output=raw_text if raw_text else report_text, raw_text=report_text)
+                )
                 doc_type = doc_type_result.get("doc_type", "Unknown")
                 doc_confidence = doc_type_result.get("confidence", 0.0)
                 
                 logger.info(f"   Document type detected: {doc_type} (confidence: {doc_confidence})")
                 
                 # Step 2b: Extract using ReportAnalyzer (routes to appropriate extractor)
-                # Use raw_text (Document AI summary) if available, otherwise use full text
+                # Pass pre-detected doc_type_result to avoid redundant detection
                 report_result = await loop.run_in_executor(
-                    llm_executor, report_analyzer.extract_document, report_text, raw_text
+                    llm_executor, 
+                    lambda: report_analyzer.extract_document(report_text, raw_text, doc_type_result=doc_type_result)
                 )
                 long_summary = report_result.get("long_summary", "")
                 short_summary = report_result.get("short_summary", "")
@@ -472,7 +476,7 @@ async def split_and_process_document(request: Request):
                 analysis_task = loop.run_in_executor(
                     llm_executor,
                     lambda: enhanced_analyzer.extract_document_data_with_reasoning(
-                        long_summary, None, None, mode
+                        long_summary, None, None, mode,
                     )
                 )
                 

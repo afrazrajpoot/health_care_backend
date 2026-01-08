@@ -78,7 +78,7 @@ class SimpleExtractor:
             long_summary = clean_long_summary(long_summary)
             
             # STEP 2: Generate structured short summary from raw_text (primary context)
-            short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type)
+            short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type, long_summary)
             
             logger.info("=" * 80)
             logger.info("✅ SIMPLE EXTRACTION COMPLETE (2 LLM CALLS ONLY)")
@@ -428,7 +428,7 @@ You MUST output your response as a valid JSON object following this exact schema
             fallback = create_fallback_long_summary(doc_type, fallback_date)
             return format_universal_long_summary(fallback)
 
-    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str, long_summary: str) -> dict:
         """
         Generate a structured, UI-ready summary from raw_text (Document AI summarizer output).
         Delegates to the reusable helper function.
@@ -440,7 +440,7 @@ You MUST output your response as a valid JSON object following this exact schema
         Returns:
             dict: Structured summary with header, findings, recommendations, status
         """
-        return generate_structured_short_summary(self.llm, raw_text, doc_type)
+        return generate_structured_short_summary(self.llm, raw_text, doc_type, long_summary)
 
     def _remove_empty_segments(self, text: str) -> str:
         """

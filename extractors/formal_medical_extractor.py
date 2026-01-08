@@ -142,7 +142,7 @@ class FormalMedicalReportExtractor:
         long_summary = clean_long_summary(long_summary)
         
         # Stage 2: Generate short summary from long summary
-        short_summary = self._generate_short_summary_from_long_summary(long_summary, detected_type)
+        short_summary = self._generate_short_summary_from_long_summary(raw_text, detected_type, long_summary)
         
         logger.info("=" * 80)
         logger.info("✅ FORMAL MEDICAL REPORT EXTRACTION COMPLETE (DUAL-CONTEXT)")
@@ -613,7 +613,7 @@ class FormalMedicalReportExtractor:
         logger.info(f"✅ Injected new HEALTHCARE PROVIDERS section with Author: {verified_author}")
         return long_summary
 
-    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str, long_summary: str) -> dict:
         """
         Generate a structured, UI-ready summary from raw_text (Document AI summarizer output).
         Delegates to the reusable helper function.
@@ -621,11 +621,12 @@ class FormalMedicalReportExtractor:
         Args:
             raw_text: The Document AI summarizer output (primary context)
             doc_type: Document type
+            long_summary: Detailed reference context
             
         Returns:
-            dict: Structured summary with header, findings, recommendations, status
+            dict: Structured summary with header and UI-ready items
         """
-        return generate_structured_short_summary(self.llm, raw_text, doc_type)
+        return generate_structured_short_summary(self.llm, raw_text, doc_type, long_summary)
     
 
     def _create_medical_fallback_summary(self, long_summary: str, doc_type: str) -> str:

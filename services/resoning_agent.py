@@ -12,7 +12,6 @@ from datetime import datetime, timedelta
 import re, json
 import logging
 
-# Removed import: from utils.document_detector import detect_document_type
 from config.settings import CONFIG
 
 logger = logging.getLogger("document_ai")
@@ -258,22 +257,38 @@ date
     - Format: Include titles and credentials as they appear (e.g., "Dr. John Smith, MD", "Jane Doe, DO").
     - If no doctors found, leave list empty [].
     """
+    
     def extract_document_data_with_reasoning(
         self,
         document_text: str,
         page_zones: Optional[Dict[str, Dict[str, str]]] = None,
         raw_text: Optional[str] = None,
-        mode: Optional[str] = "wc"
+        mode: Optional[str] = "wc",
+        pre_extracted_patient_details: Optional[Dict[str, Any]] = None
     ) -> DocumentAnalysis:
         """
-        FIXED: MODE-AWARE extraction with ALL template variables passed
+        MODE-AWARE extraction with pre-extracted patient details support.
+        
+        Args:
+            document_text: The document text to analyze
+            page_zones: Optional page zones for signature extraction
+            raw_text: Optional raw text
+            mode: "wc" for Workers Comp or "gm" for General Medicine
+            pre_extracted_patient_details: Patient details pre-extracted from Document AI
+                Keys: patient_name, dob, doi, claim_number, date_of_report
         """
         try:
             logger.info(f"🚀 Starting MODE-AWARE extraction (Mode: {mode})...")
+            
+            # Log pre-extracted patient details if provided
+            if pre_extracted_patient_details:
+                logger.info("📋 Pre-extracted patient details received from Document AI:")
+                for key, value in pre_extracted_patient_details.items():
+                    if value:
+                        logger.info(f"   - {key}: {value}")
             # print(document_text,'document text')
             # NOTE: Report date extraction is handled by LLM from document context
             # OPTIMIZATION: Removed redundant separate detection call
-            # detected_doc_type = self.detect_document_type(document_text)
             detected_doc_type = "Unknown - Please Identify from text"
 
             # Extract signature context
@@ -325,6 +340,65 @@ date
             result = chain.invoke(invocation_data)
 
             analysis = DocumentAnalysis(**result)
+            
+            # ✅ Override LLM results with pre-extracted patient details if available
+            # Pre-extracted values from Document AI (AI + Layout Parser) are more reliable
+            if pre_extracted_patient_details:
+                logger.info("🔄 Overriding LLM results with pre-extracted patient details...")
+                
+                # Override patient_name if pre-extracted and LLM returned "Not specified" or empty
+                pre_patient_name = pre_extracted_patient_details.get("patient_name")
+                if pre_patient_name and (
+                    not analysis.patient_name or 
+                    str(analysis.patient_name).lower() in ["not specified", "unknown", "n/a", ""]
+                ):
+                    logger.info(f"   📝 patient_name: '{analysis.patient_name}' → '{pre_patient_name}'")
+                    analysis.patient_name = pre_patient_name
+                
+                # Override dob if pre-extracted and LLM returned empty
+                pre_dob = pre_extracted_patient_details.get("dob")
+                if pre_dob and (
+                    not analysis.dob or 
+                    str(analysis.dob).lower() in ["not specified", "unknown", "n/a", ""]
+                ):
+                    logger.info(f"   📝 dob: '{analysis.dob}' → '{pre_dob}'")
+                    analysis.dob = pre_dob
+                
+                # Override doi if pre-extracted and LLM returned empty
+                pre_doi = pre_extracted_patient_details.get("doi")
+                if pre_doi and (
+                    not analysis.doi or 
+                    str(analysis.doi).lower() in ["not specified", "unknown", "n/a", ""]
+                ):
+                    logger.info(f"   📝 doi: '{analysis.doi}' → '{pre_doi}'")
+                    analysis.doi = pre_doi
+                
+                # Override claim_number if pre-extracted and LLM returned empty
+                pre_claim = pre_extracted_patient_details.get("claim_number")
+                if pre_claim and (
+                    not analysis.claim_number or 
+                    str(analysis.claim_number).lower() in ["not specified", "unknown", "n/a", ""]
+                ):
+                    logger.info(f"   📝 claim_number: '{analysis.claim_number}' → '{pre_claim}'")
+                    analysis.claim_number = pre_claim
+                
+                # Override rd (report date) if pre-extracted and LLM returned empty
+                pre_rd = pre_extracted_patient_details.get("date_of_report")
+                if pre_rd and (
+                    not analysis.rd or 
+                    str(analysis.rd).lower() in ["not specified", "unknown", "n/a", ""]
+                ):
+                    logger.info(f"   📝 rd (report date): '{analysis.rd}' → '{pre_rd}'")
+                    analysis.rd = pre_rd
+                
+                # Override consulting_doctor (author) if pre-extracted and LLM returned empty
+                pre_author = pre_extracted_patient_details.get("author")
+                if pre_author and (
+                    not analysis.consulting_doctor or 
+                    str(analysis.consulting_doctor).lower() in ["not specified", "unknown", "n/a", ""]
+                ):
+                    logger.info(f"   📝 consulting_doctor: '{analysis.consulting_doctor}' → '{pre_author}'")
+                    analysis.consulting_doctor = pre_author
             
             # Set verified flag
             analysis.verified = True
@@ -412,7 +486,6 @@ date
         except Exception as e:
             logger.error(f"❌ {mode.upper()} summary generation failed: {str(e)}")
             return f"{mode.upper()} brief summary unavailable"
-
 
     def create_fallback_analysis(self, mode: str = "wc") -> DocumentAnalysis:
         """Create mode-aware fallback analysis when extraction fails"""

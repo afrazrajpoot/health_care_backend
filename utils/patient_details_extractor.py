@@ -90,6 +90,26 @@ class PatientDetailsExtractor:
         r'\bRCN\s*:\s*',   # RCN: (Record Control Number)
     ]
     
+    # Author/Signature patterns for extracting document author
+    AUTHOR_PATTERNS = [
+        r'electronically\s+signed\s+by[:\s]*',           # "Electronically Signed By:"
+        r'electronic\s+signature[:\s]*',                  # "Electronic Signature:"
+        r'signed\s+by[:\s]*',                             # "Signed by:"
+        r'signature[:\s]*',                               # "Signature:"
+        r'dictated\s+by[:\s]*',                           # "Dictated by:"
+        r'prepared\s+by[:\s]*',                           # "Prepared by:"
+        r'authored\s+by[:\s]*',                           # "Authored by:"
+        r'report\s+by[:\s]*',                             # "Report by:"
+        r'examined\s+by[:\s]*',                           # "Examined by:"
+        r'evaluating\s+physician[:\s]*',                  # "Evaluating Physician:"
+        r'examining\s+physician[:\s]*',                   # "Examining Physician:"
+        r'qme\s+physician[:\s]*',                         # "QME Physician:"
+        r'reviewing\s+physician[:\s]*',                   # "Reviewing Physician:"
+        r'approved\s+by[:\s]*',                           # "Approved by:"
+        r'authenticated\s+by[:\s]*',                      # "Authenticated by:"
+        r'verified\s+by[:\s]*',                           # "Verified by:"
+    ]
+    
     # Date format patterns
     DATE_FORMATS = [
         r'\b\d{1}[-/]\d{1,2}[-/]\d{1,2}[-/]\d{4}\b',  # 4-part with leading zero: 0-4-05-1955 or 0/4/05/1955
@@ -150,9 +170,221 @@ class PatientDetailsExtractor:
         for p in self.NON_CLAIM_PATTERNS:
             self.non_claim_regex.append(re.compile(p, re.IGNORECASE))
         
+        # Compile author/signature patterns
+        self.author_regex = []
+        for p in self.AUTHOR_PATTERNS:
+            self.author_regex.append(re.compile(p, re.IGNORECASE))
+        
         self.date_formats = [re.compile(p, re.IGNORECASE) for p in self.DATE_FORMATS]
         self.claim_number_formats = [re.compile(p) for p in self.CLAIM_NUMBER_PATTERNS]
     
+    def extract_from_summarizer_ai(self, summary_text: str) -> Dict[str, Optional[str]]:
+        """
+        Extract patient details from summarizer output using AI.
+        This is the PRIMARY extraction method - faster and more accurate than regex.
+        
+        Args:
+            summary_text: The document summarizer output text
+            
+        Returns:
+            Dictionary with patient_name, dob, doi, claim_number, date_of_report
+        """
+        result = {
+            "patient_name": None,
+            "dob": None,
+            "doi": None,
+            "claim_number": None,
+            "date_of_report": None,
+            "author": None
+        }
+        
+        if not summary_text or len(summary_text.strip()) < 50:
+            logger.warning("⚠️ Summary text too short for AI extraction")
+            return result
+        
+        try:
+            # Check if Azure OpenAI is configured
+            if not CONFIG.get("azure_openai_api_key") or not CONFIG.get("azure_openai_endpoint"):
+                logger.warning("⚠️ Azure OpenAI not configured, skipping AI extraction from summarizer")
+                return result
+            
+            logger.info("🤖 Extracting patient details from summarizer using AI...")
+            
+            # Initialize Azure OpenAI client
+            llm = AzureChatOpenAI(
+                azure_endpoint=CONFIG.get("azure_openai_endpoint"),
+                api_key=CONFIG.get("azure_openai_api_key"),
+                deployment_name=CONFIG.get("azure_openai_deployment"),
+                api_version=CONFIG.get("azure_openai_api_version"),
+                temperature=0.0,
+                timeout=60
+            )
+            
+            # Create extraction prompt optimized for summarizer output
+            system_message = """You are a medical document analysis expert specialized in extracting patient information from medical report summaries.
+
+TASK: Extract patient details from the document summary provided.
+
+EXTRACTION RULES:
+1. **Patient Name**: Look for the patient/applicant/injured worker's full name. Usually mentioned as "evaluation of [Name]" or "patient [Name]" or "Re: [Name]".
+2. **Date of Birth (DOB)**: Look for explicit DOB, date of birth, birth date. May also calculate from age if evaluation date is given (e.g., "64-year-old" evaluated on "May 5, 2017" means born around 1953).
+3. **Date of Injury (DOI)**: Look for injury date, accident date, incident date, date of loss. Usually described as "injury on [date]" or "industrial injury on [date]".
+4. **Claim Number**: Look for claim #, claim number, case number, WC claim, file number. Must be an alphanumeric identifier, NOT a random number sequence.
+5. **Date of Report/Evaluation**: Look for examination date, evaluation date, report date. Usually "evaluation on [date]" or "examined on [date]".
+6. **Author**: Identify the author of the report if mentioned. Author will only be the person (could be anyone like PA, Physician, Nurse) but make 100% sure that who signed the report. either handwritten or electronically i.e (• The report was electronically signed by Glenn Hananouchi, MD).
+
+IMPORTANT:
+- Return ONLY what you can clearly identify from the text
+- Use null for fields you cannot find with confidence
+- For dates, use format: YYYY-MM-DD when possible, otherwise use the exact format from the document
+- Patient name should be the actual full name, not a description
+
+Return a JSON object with these exact keys:
+{
+  "patient_name": "Full Name or null",
+  "dob": "Date or null",
+  "doi": "Date or null", 
+  "claim_number": "Claim ID or null",
+  "date_of_report": "Date or null",
+  "author": "Author or null",
+  "confidence": "high/medium/low",
+  "extraction_notes": "Brief notes on what was found"
+}"""
+
+            human_message = f"""Extract patient details from this medical document summary:
+
+---
+{summary_text}
+---
+
+Return ONLY the JSON object, no additional text."""
+
+            messages = [
+                SystemMessage(content=system_message),
+                HumanMessage(content=human_message)
+            ]
+            
+            response = llm.invoke(messages)
+            response_text = response.content
+            
+            # Extract JSON from response
+            json_match = re.search(r'```(?:json)?\s*(\{[^`]+\})\s*```', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # Try to find JSON without code blocks
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text, re.DOTALL)
+                json_str = json_match.group(0) if json_match else None
+            
+            if json_str:
+                extracted = json.loads(json_str)
+                
+                # Map to result
+                result["patient_name"] = extracted.get("patient_name") if extracted.get("patient_name") not in [None, "null", "None", ""] else None
+                result["dob"] = extracted.get("dob") if extracted.get("dob") not in [None, "null", "None", ""] else None
+                result["doi"] = extracted.get("doi") if extracted.get("doi") not in [None, "null", "None", ""] else None
+                result["claim_number"] = extracted.get("claim_number") if extracted.get("claim_number") not in [None, "null", "None", ""] else None
+                result["date_of_report"] = extracted.get("date_of_report") if extracted.get("date_of_report") not in [None, "null", "None", ""] else None
+                result["author"] = extracted.get("author") if extracted.get("author") not in [None, "null", "None", ""] else None
+                
+                confidence = extracted.get("confidence", "unknown")
+                notes = extracted.get("extraction_notes", "")
+                
+                logger.info("=" * 60)
+                logger.info("🤖 AI EXTRACTION FROM SUMMARIZER RESULTS:")
+                logger.info("=" * 60)
+                logger.info(f"  Patient Name: {result['patient_name']}")
+                logger.info(f"  DOB: {result['dob']}")
+                logger.info(f"  DOI: {result['doi']}")
+                logger.info(f"  Claim Number: {result['claim_number']}")
+                logger.info(f"  Date of Report: {result['date_of_report']}")
+                logger.info(f"  Author: {result['author']}")
+                logger.info(f"  Confidence: {confidence}")
+                logger.info(f"  Notes: {notes}")
+                logger.info("=" * 60)
+                
+                return result
+            else:
+                logger.warning("⚠️ Could not parse AI response JSON")
+                return result
+                
+        except Exception as e:
+            logger.error(f"❌ AI extraction from summarizer failed: {str(e)}")
+            import traceback
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return result
+    
+    def extract_with_fallback(
+        self, 
+        summary_text: str, 
+        document_dict: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Optional[str]]:
+        """
+        Smart extraction that tries AI first, then falls back to layout parser for missing fields.
+        
+        Strategy:
+        1. First: Extract from summarizer using AI (fast, accurate)
+        2. If all fields found: Return immediately
+        3. If some fields missing: Use layout parser extraction to fill gaps
+        4. Merge: Combine both results, preferring AI results
+        
+        Args:
+            summary_text: The document summarizer output text
+            document_dict: Optional layout parser JSON for fallback extraction
+            
+        Returns:
+            Dictionary with patient_name, dob, doi, claim_number, date_of_report
+        """
+        logger.info("🔍 Starting smart patient details extraction...")
+        
+        # Step 1: Try AI extraction from summarizer first
+        ai_result = self.extract_from_summarizer_ai(summary_text)
+        
+        # Check which fields are found
+        ai_fields_found = {k: v for k, v in ai_result.items() if v is not None and k != 'date_of_report'}
+        ai_missing_fields = [k for k in ['patient_name', 'dob', 'doi', 'claim_number', 'author'] if ai_result.get(k) is None]
+        
+        logger.info(f"📊 AI extraction found {len(ai_fields_found)} fields: {list(ai_fields_found.keys())}")
+        
+        # Step 2: If all required fields found, return AI result
+        if not ai_missing_fields:
+            logger.info("✅ All patient details found via AI extraction - skipping layout parser")
+            return ai_result
+        
+        logger.info(f"⚠️ AI extraction missing fields: {ai_missing_fields}")
+        
+        # Step 3: Fall back to layout parser for missing fields
+        if document_dict:
+            logger.info("🔄 Falling back to layout parser extraction for missing fields...")
+            layout_result = self.extract_from_layout_json(document_dict)
+            
+            # Step 4: Merge results - AI results take priority, layout fills gaps
+            merged_result = {
+                "patient_name": ai_result.get("patient_name") or layout_result.get("patient_name"),
+                "dob": ai_result.get("dob") or layout_result.get("dob"),
+                "doi": ai_result.get("doi") or layout_result.get("doi"),
+                "claim_number": ai_result.get("claim_number") or layout_result.get("claim_number"),
+                "author": ai_result.get("author") or layout_result.get("author"),
+                "date_of_report": ai_result.get("date_of_report")  # Only from AI
+            }
+            
+            # Log merge results
+            logger.info("=" * 60)
+            logger.info("🔗 MERGED PATIENT DETAILS (AI + Layout Parser):")
+            logger.info("=" * 60)
+            for field in ['patient_name', 'dob', 'doi', 'claim_number', 'author']:
+                ai_val = ai_result.get(field)
+                layout_val = layout_result.get(field)
+                merged_val = merged_result.get(field)
+                source = "AI" if ai_val else ("Layout" if layout_val else "Not found")
+                logger.info(f"  {field}: {merged_val} (source: {source})")
+            logger.info("=" * 60)
+            
+            return merged_result
+        else:
+            logger.warning("⚠️ No layout parser data available for fallback extraction")
+            return ai_result
+
     def extract_from_layout_json(self, document_dict: Dict[str, Any]) -> Dict[str, Optional[str]]:
         """
         Extract patient details from layout parser JSON.
@@ -161,13 +393,14 @@ class PatientDetailsExtractor:
             document_dict: Full Document AI Layout Parser output
             
         Returns:
-            Dictionary with patient_name, dob, doi, claim_number
+            Dictionary with patient_name, dob, doi, claim_number, author
         """
         result = {
             "patient_name": None,
             "dob": None,
             "doi": None,
-            "claim_number": None
+            "claim_number": None,
+            "author": None
         }
         
         # Extract all text blocks with their context
@@ -190,6 +423,7 @@ class PatientDetailsExtractor:
         result["dob"] = self._extract_dob(blocks)
         result["doi"] = self._extract_doi(blocks)
         result["claim_number"] = self._extract_claim_number(blocks)
+        result["author"] = self._extract_author(blocks)
         
         # 🆕 LLM Validation: Verify extracted details using first 2000 words
         result = self._validate_with_llm(result, blocks)
@@ -200,6 +434,7 @@ class PatientDetailsExtractor:
         logger.info(f"  DOB: {result['dob']}")
         logger.info(f"  DOI: {result['doi']}")
         logger.info(f"  Claim: {result['claim_number']}")
+        logger.info(f"  Author: {result['author']}")
         
         return result
     
@@ -857,6 +1092,120 @@ class PatientDetailsExtractor:
         
         return None
     
+    def _extract_author(self, blocks: List[Dict[str, Any]]) -> Optional[str]:
+        """
+        Extract document author/signer from layout parser blocks.
+        Looks for patterns like "Electronically Signed By:", "Signature:", etc.
+        
+        Args:
+            blocks: List of text blocks from document
+            
+        Returns:
+            Author name if found, None otherwise
+        """
+        candidates = []
+        
+        for i, block in enumerate(blocks):
+            text = block.get('text', '')
+            if not text:
+                continue
+            
+            # Check each author pattern
+            for regex in self.author_regex:
+                match = regex.search(text)
+                if match:
+                    # Extract the name after the pattern
+                    after_pattern = text[match.end():].strip()
+                    
+                    # Try to extract name from the remaining text
+                    # Pattern: "Name, Credentials Date Time" or just "Name, Credentials"
+                    # Example: "Hananouchi, Glenn, MD 11-21-2025 10:57:48 AM"
+                    
+                    # First, try to extract name with credentials
+                    name_match = re.match(
+                        r'^([A-Za-z]+(?:[-\'\s][A-Za-z]+)*,\s*[A-Za-z]+(?:[-\'\s][A-Za-z]+)*(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|D\.P\.M\.|NP|PA|PA-C|RN|LVN|PMHNP|PMHNP-BC|PhD))?)',
+                        after_pattern
+                    )
+                    
+                    if name_match:
+                        author_name = name_match.group(1).strip()
+                        # Clean up trailing punctuation
+                        author_name = re.sub(r'[,\s]+$', '', author_name)
+                        
+                        if len(author_name) > 3 and self._is_valid_author_name(author_name):
+                            confidence = 0.95 if 'electronically' in text.lower() or 'signed' in text.lower() else 0.85
+                            candidates.append({
+                                'value': author_name,
+                                'confidence': confidence,
+                                'source': 'signature_pattern'
+                            })
+                            logger.info(f"🔍 Found author candidate: '{author_name}' from pattern '{match.group()}'")
+                            continue
+                    
+                    # Alternative: Try standard "First Last, Credentials" format
+                    name_match = re.match(
+                        r'^([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|D\.P\.M\.|NP|PA|PA-C|RN|LVN|PMHNP|PMHNP-BC|PhD))?)',
+                        after_pattern
+                    )
+                    
+                    if name_match:
+                        author_name = name_match.group(1).strip()
+                        author_name = re.sub(r'[,\s]+$', '', author_name)
+                        
+                        if len(author_name) > 3 and self._is_valid_author_name(author_name):
+                            confidence = 0.90 if 'electronically' in text.lower() or 'signed' in text.lower() else 0.80
+                            candidates.append({
+                                'value': author_name,
+                                'confidence': confidence,
+                                'source': 'signature_pattern_standard'
+                            })
+                            logger.info(f"🔍 Found author candidate (standard): '{author_name}'")
+        
+        if candidates:
+            best = max(candidates, key=lambda x: x['confidence'])
+            logger.info(f"✅ Author extracted: {best['value']} (confidence: {best['confidence']}, source: {best['source']})")
+            return best['value']
+        
+        return None
+    
+    def _is_valid_author_name(self, name: str) -> bool:
+        """
+        Validate that the extracted text looks like a valid author name.
+        
+        Args:
+            name: The extracted name string
+            
+        Returns:
+            True if it looks like a valid name, False otherwise
+        """
+        if not name or len(name) < 3:
+            return False
+        
+        # Must contain at least one letter
+        if not re.search(r'[a-zA-Z]', name):
+            return False
+        
+        # Should not be too long (likely a sentence)
+        if len(name) > 80:
+            return False
+        
+        # Should not be a generic title or organization
+        invalid_names = [
+            'medical group', 'health services', 'clinic', 'hospital', 
+            'physician', 'surgeon', 'doctor', 'pharmacist', 'radiologist',
+            'department', 'facility', 'center', 'institute', 'association'
+        ]
+        name_lower = name.lower()
+        if any(invalid in name_lower for invalid in invalid_names):
+            return False
+        
+        # Should have at least two name parts (first + last or last + first)
+        parts = re.findall(r'[A-Za-z]+', name)
+        if len(parts) < 2:
+            return False
+        
+        return True
+    
     def _is_valid_name(self, text: str) -> bool:
         """Validate that text looks like a name"""
         if not text or len(text) < 2:
@@ -1153,6 +1502,9 @@ Validate these details and return the JSON."""
                         result[key] = original_value
                     else:
                         result[key] = None
+                
+                # Preserve author from original extraction (not validated by LLM)
+                result['author'] = extracted_data.get('author')
                 
                 return result
             else:

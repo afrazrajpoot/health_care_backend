@@ -137,17 +137,35 @@ TEXT:
 # 3. Detector function with title override
 # --------------------------
 
-def detect_document_type(text: str) -> dict:
+# Confidence threshold for using summarizer output directly
+HIGH_CONFIDENCE_THRESHOLD = 0.75
+
+def detect_document_type(summarizer_output: str = None, raw_text: str = None) -> dict:
     """
     Detects the most suitable document type using GPT-4o with context reasoning.
-    Returns dict: {"doc_type": "...", "confidence": ..., "reasoning": "..."}
+    Returns dict: {"doc_type": "...", "confidence": ..., "reasoning": "...", "source": "summarizer"|"raw_text"}
+    
+    OPTIMIZED: Accepts both summarizer_output and raw_text.
+    - First tries with summarizer_output (shorter, more focused)
+    - If confidence >= 0.75, uses that result directly
+    - Otherwise, falls back to raw_text for better context
     
     If document doesn't match predefined types, returns the actual document title.
     """
+    # Handle backward compatibility - if only one positional arg passed, use it as summarizer_output
+    logger.info(f"Received inputs - summarizer_output : {summarizer_output}")
+    if summarizer_output is None and raw_text is None:
+        raise ValueError("At least one of summarizer_output or raw_text must be provided")
+    
+    # If only raw_text provided, use it as the primary text
+    primary_text = summarizer_output if summarizer_output else raw_text
+    fallback_text = raw_text if (summarizer_output and raw_text and summarizer_output != raw_text) else None
+    
     logger.info("=" * 80)
     logger.info("Starting document type detection")
-    logger.info(f"Input text length: {len(text)} characters")
-    logger.info(f"Text preview (first 200 chars): {text[:200]}...")
+    logger.info(f"Primary text (summarizer) length: {len(primary_text) if primary_text else 0} characters")
+    logger.info(f"Fallback text (raw) length: {len(fallback_text) if fallback_text else 0} characters")
+    logger.info(f"Text preview (first 200 chars): {primary_text[:200] if primary_text else 'N/A'}...")
     
     try:
         model = AzureChatOpenAI(
@@ -165,17 +183,41 @@ def detect_document_type(text: str) -> dict:
             ("human", HUMAN_PROMPT.strip())
         ]).partial(format_instructions=parser.get_format_instructions())
 
-        chain_input = {"text": text[:8000]}  # cap text length for efficiency
+        # First attempt with primary text (summarizer output)
+        chain_input = {"text": primary_text[:8000]}  # cap text length for efficiency
         logger.info(f"Capped text length for LLM: {len(chain_input['text'])} characters")
 
-        logger.info("Formatting prompt and invoking model...")
+        logger.info("Formatting prompt and invoking model with summarizer output...")
         messages = prompt.format_prompt(**chain_input).to_messages()
-        response = model.invoke(messages)  # Use .invoke() instead of calling directly
+        response = model.invoke(messages)
         
         logger.info(f"Raw LLM response: {response.content}")
         
         result = parser.parse(response.content)
         result = result.model_dump()
+        result["source"] = "summarizer"
+        
+        # Check if confidence is high enough or if we have no fallback
+        if result["confidence"] >= HIGH_CONFIDENCE_THRESHOLD or fallback_text is None:
+            logger.info(f"✅ High confidence ({result['confidence']}) from summarizer output - using directly")
+        else:
+            # Low confidence - try with raw_text for better context
+            logger.info(f"⚠️ Low confidence ({result['confidence']}) from summarizer - trying raw text...")
+            
+            chain_input_raw = {"text": fallback_text[:8000]}
+            messages_raw = prompt.format_prompt(**chain_input_raw).to_messages()
+            response_raw = model.invoke(messages_raw)
+            
+            result_raw = parser.parse(response_raw.content)
+            result_raw = result_raw.model_dump()
+            result_raw["source"] = "raw_text"
+            
+            # Use whichever has higher confidence
+            if result_raw["confidence"] > result["confidence"]:
+                logger.info(f"✅ Raw text gave better confidence ({result_raw['confidence']} vs {result['confidence']})")
+                result = result_raw
+            else:
+                logger.info(f"✅ Summarizer output still better ({result['confidence']} vs {result_raw['confidence']})")
 
         logger.info("=" * 80)
         logger.info("DOCUMENT TYPE DETECTION RESULT")
@@ -183,6 +225,7 @@ def detect_document_type(text: str) -> dict:
         logger.info(f'📝 Document type: {result["doc_type"]}')
         logger.info(f'📊 Confidence: {result["confidence"]}')
         logger.info(f'💡 Reasoning: {result["reasoning"]}')
+        logger.info(f'📄 Source: {result["source"]}')
         logger.info("=" * 80)
 
         print(f'📝 Document type: {result["doc_type"]}')

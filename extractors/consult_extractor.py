@@ -78,7 +78,7 @@ class ConsultExtractorChained:
             long_summary = clean_long_summary(long_summary)
             
             # Step 2: Generate short summary from long summary (like QME extractor)
-            short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type)
+            short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type, long_summary)
             
             elapsed_time = time.time() - start_time
             logger.info(f"⚡ Full-context consultation extraction completed in {elapsed_time:.2f}s")
@@ -515,12 +515,12 @@ class ConsultExtractorChained:
         logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
         return cleaned_summary
     
-    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str, long_summary: str) -> dict:
         """
         Generate a structured short summary using the centralized helper function.
-        Returns a dictionary with header, content, and raw_summary.
+        Returns a dictionary with header, content, and UI-ready items.
         """
-        return generate_structured_short_summary(self.llm, raw_text, doc_type)
+        return generate_structured_short_summary(self.llm, raw_text, doc_type, long_summary)
  
     def _create_comprehensive_fallback_summary(self, long_summary: str) -> str:
         """Create comprehensive fallback short summary directly from long summary"""

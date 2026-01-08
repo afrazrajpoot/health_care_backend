@@ -97,7 +97,7 @@ class PR2ExtractorChained:
             long_summary = clean_long_summary(long_summary)
             
             # Stage 2: Generate short summary from long summary (like QME extractor)
-            short_summary = self._generate_short_summary_from_long_summary(long_summary, doc_type)
+            short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type, long_summary)
             
             elapsed_time = time.time() - start_time
             logger.info(f"⚡ Full-context PR-2 extraction completed in {elapsed_time:.2f}s")
@@ -500,7 +500,7 @@ You MUST output your response as a valid JSON object following this exact schema
         logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
         return cleaned_summary
     
-    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str, long_summary: str) -> dict:
         """
         Generate a structured, UI-ready summary from raw_text (Document AI summarizer output).
         Delegates to the reusable helper function.
@@ -508,11 +508,12 @@ You MUST output your response as a valid JSON object following this exact schema
         Args:
             raw_text: The Document AI summarizer output (primary context)
             doc_type: Document type
+            long_summary: Detailed reference context
             
         Returns:
-            dict: Structured summary with header, findings, recommendations, status
+            dict: Structured summary with header and UI-ready items
         """
-        return generate_structured_short_summary(self.llm, raw_text, doc_type)
+        return generate_structured_short_summary(self.llm, raw_text, doc_type, long_summary)
    
 
     def _create_comprehensive_fallback_summary(self, long_summary: str) -> str:

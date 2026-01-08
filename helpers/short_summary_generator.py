@@ -1,11 +1,11 @@
 """
 Structured Short Summary Generator
-Reusable helper for generating UI-ready, severity-classified medical summaries.
+Reusable helper for generating UI-ready, clickable medical summaries with collapsed/expanded views.
 """
 import logging
 import json
 import re
-from typing import Dict, List, Literal
+from typing import Dict, List, Literal, Set
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
@@ -14,27 +14,137 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger("document_ai")
 
 
-# ============== Pydantic Models for Structured Short Summary ==============
+# ============== Report-Type Field Eligibility Matrix ==============
 
-class Finding(BaseModel):
-    """A single clinical finding with severity indicator"""
-    label: str = Field(description="Brief label for the finding")
-    value: str = Field(description="Description of the finding in past tense")
-    indicator: Literal["danger", "warning", "normal"] = Field(
-        description="Severity indicator: danger=urgent, warning=notable, normal=reassuring"
-    )
+REPORT_FIELD_MATRIX: Dict[str, Dict] = {
+    # Med-Legal Reports (QME family)
+    "QME": {
+        "allowed": {
+            "findings", "physical_exam",
+            "medications", "recommendations", "rationale",
+            "mmi_status", "work_status"
+        }
+    },
+    "AME": {"inherit": "QME"},
+    "PQME": {"inherit": "QME"},
+    "IME": {"inherit": "QME"},
+    
+    # Consult Reports
+    "CONSULT": {
+        "allowed": {
+            "findings",
+            "physical_exam", "medications", "recommendations"
+        }
+    },
+    "PAIN MANAGEMENT": {"inherit": "CONSULT"},
+    "PROGRESS NOTE": {"inherit": "CONSULT"},
+    "OFFICE VISIT": {"inherit": "CONSULT"},
+    "CLINIC NOTE": {"inherit": "CONSULT"},
+    
+    # Imaging Reports
+    "MRI": {
+        "allowed": {"findings", }
+    },
+    "CT": {"inherit": "MRI"},
+    "X-RAY": {"inherit": "MRI"},
+    "XRAY": {"inherit": "MRI"},
+    "ULTRASOUND": {"inherit": "MRI"},
+    "EMG": {"inherit": "MRI"},
+    "PET SCAN": {"inherit": "MRI"},
+    "BONE SCAN": {"inherit": "MRI"},
+    "DEXA SCAN": {"inherit": "MRI"},
+    
+    # Utilization Review
+    "UR": {
+        "allowed": {"recommendations", "rationale"}
+    },
+    "IMR": {"inherit": "UR"},
+    "PEER REVIEW": {"inherit": "UR"},
+    
+    # Therapy Notes
+    "PHYSICAL THERAPY": {
+        "allowed": {"findings", "recommendations"}
+    },
+    "OCCUPATIONAL THERAPY": {"inherit": "PHYSICAL THERAPY"},
+    "CHIROPRACTIC": {"inherit": "PHYSICAL THERAPY"},
+    
+    # Surgical Reports
+    "SURGERY REPORT": {
+        "allowed": {"findings", "recommendations"}
+    },
+    "OPERATIVE NOTE": {"inherit": "SURGERY REPORT"},
+    "POST-OP": {"inherit": "SURGERY REPORT"},
+    
+    # PR-2 Reports
+    "PR-2": {
+        "allowed": {"findings", "recommendations", "work_status"}
+    },
+    "PR2": {"inherit": "PR-2"},
+    
+    # Labs & Diagnostics
+    "LABS": {
+        "allowed": {"findings", "recommendations"}
+    },
+    "PATHOLOGY": {"inherit": "LABS"},
+    
+    # Default for unmatched types
+    "DEFAULT": {
+        "allowed": {"findings", "recommendations"}
+    }
+}
 
 
-class Recommendation(BaseModel):
-    """A workflow recommendation (not treatment)"""
-    label: str = Field(description="Brief label for the recommendation")
-    value: str = Field(description="Workflow action in past tense")
+def resolve_allowed_fields(doc_type: str) -> Set[str]:
+    """
+    Resolve the allowed fields for a document type, handling inheritance.
+    
+    Args:
+        doc_type: The document type string
+        
+    Returns:
+        Set of allowed field names
+    """
+    doc_key = doc_type.upper().replace("-", " ").replace("_", " ").strip()
+    
+    # Direct lookup
+    if doc_key in REPORT_FIELD_MATRIX:
+        matrix = REPORT_FIELD_MATRIX[doc_key]
+    else:
+        # Try partial matching
+        matched = None
+        for key in REPORT_FIELD_MATRIX:
+            if key in doc_key or doc_key in key:
+                matched = key
+                break
+        matrix = REPORT_FIELD_MATRIX.get(matched, REPORT_FIELD_MATRIX["DEFAULT"])
+    
+    # Handle inheritance
+    if "inherit" in matrix:
+        parent_key = matrix["inherit"]
+        return resolve_allowed_fields(parent_key)
+    
+    return matrix.get("allowed", set())
 
 
-class Status(BaseModel):
-    """Contextual status or metadata"""
-    label: str = Field(description="Brief label for the status")
-    value: str = Field(description="Status value")
+# ============== Pydantic Models for UI-Ready Summary ==============
+
+class UIFact(BaseModel):
+    """
+    A UI-clickable summary field with collapsed and expanded views.
+    Used for generating clickable UI elements that expand on user interaction.
+    """
+    field: Literal[
+        "findings",
+        "physical_exam",
+        "vital_signs",
+        "medications",
+        "recommendations",
+        "rationale",
+        "mmi_status",
+        "work_status"
+    ] = Field(description="The type of UI field")
+    collapsed: str = Field(description="Short, high-level, one-line summary for collapsed view")
+    expanded: str = Field(description="Expanded, still attributed description for expanded view")
 
 
 class SummaryHeader(BaseModel):
@@ -50,16 +160,17 @@ class SummaryHeader(BaseModel):
 
 
 class SummaryContent(BaseModel):
-    """Content section of the structured summary"""
-    findings: List[Finding] = Field(default_factory=list, description="Clinical findings with severity")
-    recommendations: List[Recommendation] = Field(default_factory=list, description="Workflow recommendations")
-    status: List[Status] = Field(default_factory=list, description="Contextual status items")
+    """
+    UI-driven summary content with clickable fields.
+    Each item represents a collapsible UI element.
+    """
+    items: List[UIFact] = Field(default_factory=list, description="List of UI-ready fact items")
 
 
 class StructuredShortSummary(BaseModel):
-    """Complete structured short summary for UI display"""
+    """Complete structured short summary for UI display with clickable elements"""
     header: SummaryHeader = Field(description="Header information")
-    summary: SummaryContent = Field(description="Summary content with findings, recommendations, status")
+    summary: SummaryContent = Field(description="Summary content with UI-ready items")
 
 
 # ============== Helper Functions ==============
@@ -75,9 +186,7 @@ def create_fallback_structured_summary(doc_type: str) -> dict:
             "disclaimer": "This summary references an external document and is for workflow purposes only. It does not constitute medical advice."
         },
         "summary": {
-            "findings": [],
-            "recommendations": [],
-            "status": []
+            "items": []
         }
     }
 
@@ -185,109 +294,369 @@ def ensure_header_fields(structured_summary: dict, doc_type: str, raw_text: str)
     if not header.get("disclaimer"):
         header["disclaimer"] = "This summary references an external document and is for workflow purposes only. It does not constitute medical advice."
     
-    # Ensure summary section exists
+    # Ensure summary section exists with items array
     if "summary" not in structured_summary:
         structured_summary["summary"] = {
-            "findings": [],
-            "recommendations": [],
-            "status": []
+            "items": []
         }
+    elif "items" not in structured_summary["summary"]:
+        structured_summary["summary"]["items"] = []
     
     return structured_summary
 
 
-def validate_indicators(structured_summary: dict) -> dict:
+def filter_disallowed_fields(structured_summary: dict, allowed_fields: Set[str]) -> dict:
     """
-    Validate and normalize severity indicators in findings.
-    Ensures all indicators are one of: danger, warning, normal
-    """
-    valid_indicators = {"danger", "warning", "normal"}
+    Filter out any UI fields that are not allowed for the document type.
+    This is a defensive measure to ensure compliance.
     
-    if "summary" in structured_summary and "findings" in structured_summary["summary"]:
-        findings = structured_summary["summary"]["findings"]
-        for finding in findings:
-            if isinstance(finding, dict):
-                indicator = finding.get("indicator", "").lower()
-                if indicator not in valid_indicators:
-                    # Default to warning for unknown indicators
-                    finding["indicator"] = "warning"
+    Args:
+        structured_summary: The structured summary dict
+        allowed_fields: Set of allowed field names
+        
+    Returns:
+        Filtered structured summary
+    """
+    if "summary" in structured_summary and "items" in structured_summary["summary"]:
+        structured_summary["summary"]["items"] = [
+            item for item in structured_summary["summary"]["items"]
+            if item.get("field") in allowed_fields
+        ]
+    return structured_summary
+
+
+def validate_ui_items(structured_summary: dict) -> dict:
+    """
+    Validate UI items have required fields (collapsed, expanded).
+    Removes invalid items and ensures proper structure.
+    """
+    valid_fields = {
+        "findings", "physical_exam",
+        "vital_signs", "medications", "recommendations", "rationale",
+        "mmi_status", "work_status"
+    }
+    
+    if "summary" in structured_summary and "items" in structured_summary["summary"]:
+        items = structured_summary["summary"]["items"]
+        validated_items = []
+        
+        for item in items:
+            if isinstance(item, dict):
+                field = item.get("field", "").lower()
+                collapsed = item.get("collapsed", "").strip()
+                expanded = item.get("expanded", "").strip()
+                
+                # Skip items without required fields or invalid field types
+                if field not in valid_fields:
+                    continue
+                if not collapsed or not expanded:
+                    continue
+                
+                # Normalize field name
+                item["field"] = field
+                validated_items.append(item)
+        
+        structured_summary["summary"]["items"] = validated_items
     
     return structured_summary
 
 
-def generate_structured_short_summary(llm: AzureChatOpenAI, raw_text: str, doc_type: str) -> dict:
+def deduplicate_fields(structured_summary: dict) -> dict:
     """
-    Generate a structured, UI-ready summary from raw_text (Document AI summarizer output).
-    Output is reference-only, past-tense, severity-classified, and EMR-safe.
+    Ensure each field type appears only once.
+    If duplicates exist, consolidate them into a single item.
+    """
+    if "summary" not in structured_summary or "items" not in structured_summary["summary"]:
+        return structured_summary
+    
+    items = structured_summary["summary"]["items"]
+    field_map = {}  # field_name -> consolidated item
+    
+    for item in items:
+        field = item.get("field", "")
+        if not field:
+            continue
+            
+        if field not in field_map:
+            # First occurrence - store as is
+            field_map[field] = {
+                "field": field,
+                "collapsed": item.get("collapsed", ""),
+                "expanded": item.get("expanded", "")
+            }
+        else:
+            # Duplicate - consolidate by appending to expanded
+            existing = field_map[field]
+            new_expanded = item.get("expanded", "")
+            if new_expanded and new_expanded not in existing["expanded"]:
+                existing["expanded"] = existing["expanded"].rstrip(". ") + ". " + new_expanded
+            logger.warning(f"⚠️ Consolidated duplicate field '{field}' into single item")
+    
+    # Convert back to list, maintaining a logical order
+    field_order = [
+        "findings", "physical_exam",
+        "vital_signs", "medications", "recommendations", "rationale",
+        "mmi_status", "work_status"
+    ]
+    
+    deduplicated_items = []
+    for field in field_order:
+        if field in field_map:
+            deduplicated_items.append(field_map[field])
+    
+    # Add any fields not in the standard order
+    for field, item in field_map.items():
+        if field not in field_order:
+            deduplicated_items.append(item)
+    
+    structured_summary["summary"]["items"] = deduplicated_items
+    return structured_summary
+
+
+def generate_structured_short_summary(llm: AzureChatOpenAI, raw_text: str, doc_type: str, long_summary: str) -> dict:
+    """
+    Generate a structured, UI-ready summary with clickable collapsed/expanded fields.
+    Output is reference-only, past-tense, and EMR-safe.
     
     Args:
         llm: Azure OpenAI LLM instance
         raw_text: The Document AI summarizer output (primary context)
         doc_type: Document type
+        long_summary: Detailed reference context
         
     Returns:
-        dict: Structured summary with header, findings, recommendations, status
+        dict: Structured summary with header and UI-ready items
     """
-    logger.info("🎯 Generating structured summary with Pydantic validation...")
+    logger.info("🎯 Generating UI-ready structured summary...")
+    
+    # Resolve allowed fields for this document type
+    allowed_fields = resolve_allowed_fields(doc_type)
+    logger.info(f"📋 Allowed fields for {doc_type}: {allowed_fields}")
     
     # Create Pydantic output parser for consistent response structure
     pydantic_parser = PydanticOutputParser(pydantic_object=StructuredShortSummary)
 
     system_prompt = SystemMessagePromptTemplate.from_template("""
-You generate STRUCTURED, REFERENCE-ONLY medical summaries for workflow intelligence.
+You are a COURT REPORTER, not a clinician.
 
-ABSOLUTE RULES — NO EXCEPTIONS:
-1. Output MUST be valid JSON only. No prose, no markdown.
-2. Use PAST TENSE only (e.g., "was noted", "were reported").
-3. ALL content must be clearly REFERENCED from external documents.
-4. DO NOT diagnose, prescribe, or issue medical decisions.
-5. DO NOT include patient identifiers (name, DOB, MRN, phone, claim number).
-6. DO NOT restate full report text — abstract only.
-7. No dosages, exam measurements, or orders.
-8. Severity is ATTENTION-BASED, not clinical judgment.
+You extract and reformat content from EXTERNAL medical or legal documents.
+You do NOT author medical conclusions.
+You do NOT interpret findings.
+You do NOT make clinical judgments.
 
-SEVERITY INDICATORS (required for each finding):
-- "danger" → High-attention or potentially urgent finding
-- "warning" → Chronic, degenerative, notable, or follow-up finding
-- "normal" → Explicitly negative or reassuring finding
+CORE PRINCIPLE:
+DocLatch must sound like a court reporter documenting what was said, NOT a clinician concluding what is true.
 
-OUTPUT STRUCTURE (STRICT):
+🚨 CRITICAL FIELD RULES (HIGHEST PRIORITY):
+1. EACH FIELD TYPE CAN ONLY APPEAR ONCE in the output
+2. If multiple items belong to the same field type, CONSOLIDATE them into ONE item
+3. ONLY use field names from the allowed list provided
+4. Use the CORRECT field type for the content:
+   - "findings" = Clinical observations, test results, abnormalities, diagnoses
+   - "recommendations" = Treatment plans, follow-up, referrals
+   - "medications" = Drugs prescribed or referenced
+   - "physical_exam" = Physical examination findings
+   - "vital_signs" = Vital sign measurements
+   - "rationale" = Clinical reasoning documented
+   - "mmi_status" = Maximum Medical Improvement status
+   - "work_status" = Work restrictions or capacity
+
+MANDATORY LANGUAGE RULES (NO EXCEPTIONS):
+✅ ALLOWED VERBS ONLY:
+- documented, described, referenced, reported, noted, indicated, stated, listed, mentioned
+
+❌ FORBIDDEN VERBS (cause authorship leakage):
+- identified, consistent with, demonstrates, confirms, shows, reveals, suggests
+
+✅ ATTRIBUTION PATTERNS:
+- "The [document type] documented..."
+- "The report described..."
+- "[Condition] was noted in the report..."
+- "As documented in the [document type]..."
+
+TENSE & VOICE:
+- Past tense only (was documented, were noted, was described)
+- Never present tense declarations
+- Attribution must be clear in EVERY statement
+
+PRIVACY:
+- No patient identifiers (name, DOB, MRN, phone, claim number)
+- Dates in YYYY-MM-DD format only
+
+UI FIELD STRUCTURE:
+Each field contains:
+1. collapsed → One-line summary with attribution (high-signal)
+2. expanded → Consolidated detail covering ALL relevant info for that field type
+
+🔹 SPECIAL FORMAT FOR physical_exam AND medications:
+These fields use BULLET POINT format in expanded (NOT paragraph prose):
+- collapsed = Brief summary line
+- expanded = Simple bullet points, one finding/medication per line
+- NO paragraph text, NO verbose descriptions
+- Each bullet is a short, scannable item
+
+EXAMPLE - physical_exam (BULLET FORMAT):
+{{
+  "field": "physical_exam",
+  "collapsed": "Reduced strength and positive provocative tests were noted",
+  "expanded": "• Reduced right shoulder abduction strength\n• Pain with supraspinatus testing\n• Positive Spurling's maneuver on left\n• Limited cervical rotation and extension"
+}}
+
+EXAMPLE - medications (BULLET FORMAT):
+{{
+  "field": "medications",
+  "collapsed": "Pain and nerve medications were documented",
+  "expanded": "• Gabapentin 300 mg three times daily\n• Meloxicam 15 mg once daily\n• Topical diclofenac twice daily\n• Cyclobenzaprine 10 mg at bedtime"
+}}
+
+❌ WRONG (paragraph style for these fields):
+"The report documented gabapentin 300 mg three times daily for leg tingling, with NSAIDs noted to cause stomach discomfort..."
+
+✅ CORRECT (bullet points):
+"• Gabapentin 300 mg three times daily\n• NSAIDs (stomach discomfort noted)\n• Muscle relaxants for sleep"
+
+CONSOLIDATION EXAMPLE (CORRECT):
+If source has multiple findings like disc degeneration, facet arthrosis, and anterolisthesis:
+✅ ONE "findings" item consolidating all (CONCISE - max 3 lines):
+{{
+  "field": "findings",
+  "collapsed": "Degenerative disc disease and structural changes were documented",
+  "expanded": "The report documented disc degeneration at L2-3, facet arthrosis at L5-S1, and Grade 1 anterolisthesis of L4 on L5. No acute fracture was noted."
+}}
+
+❌ WRONG - Too verbose:
+"The X-ray report documented diffuse disc degeneration at multiple levels, most pronounced at L2-3, along with bilateral facet arthrosis particularly at L5-S1. Additionally, Grade 1 anterolisthesis of L4 on L5 was noted secondary to facet arthrosis. Mild degenerative changes in the SI joints and marginal spurring from L3-L5 were also observed. The vertebral bodies appeared intact with no acute fracture identified."
+
+✅ CORRECT - Concise:
+"The report documented disc degeneration at L2-3, facet arthrosis at L5-S1, and Grade 1 anterolisthesis. No acute fracture was noted."
+
+❌ WRONG - Multiple items with same field:
+[
+  {{"field": "findings", "collapsed": "Disc degeneration noted..."}},
+  {{"field": "findings", "collapsed": "Facet arthrosis documented..."}},
+  {{"field": "findings", "collapsed": "Anterolisthesis reported..."}}
+]
+
+OUTPUT STRUCTURE:
 {format_instructions}
 
 HEADER RULES:
-- Title must reflect document type and body region.
-- Author must be name + credentials if present (no "Dr." prefix).
-- date must be in YYYY-MM-DD format. If not found, leave empty string.
-- Disclaimer must appear EXACTLY ONCE and scope the entire summary.
+- Title must reflect document type and body region
+- Author must be name + credentials if present (no "Dr." prefix)
+- Date must be in YYYY-MM-DD format. If not found, use empty string
+- Disclaimer appears EXACTLY ONCE
 
-FINDINGS RULES:
-- Include ONLY clinically significant or explicitly stated findings.
-- Use short, bullet-ready sentences in past tense.
-- Avoid numbers unless explicitly meaningful (e.g., Grade 1).
-- Each finding MUST have an indicator (danger/warning/normal).
-
-RECOMMENDATIONS:
-- WORKFLOW ONLY (review, follow-up, scheduling context).
-- NEVER treatment or prescribing instructions.
-
-STATUS:
-- Metadata or contextual facts only (exam type, comparison availability).
-
-FINAL CHECK:
-- JSON only
-- Past tense
-- Reference-only
-- No placeholders
-- No patient identifiers
+Output valid JSON only.
 """)
 
     user_prompt = HumanMessagePromptTemplate.from_template("""
-DOCUMENT CONTEXT (Primary Source):
+DOCUMENT TYPE:
+{doc_type}
+
+ALLOWED UI FIELDS FOR THIS REPORT TYPE (use ONLY these field names):
+{allowed_fields}
+
+SOURCE DOCUMENT (External):
 {raw_text}
 
-DOCUMENT TYPE: {doc_type}
+REFERENCE CONTEXT:
+{long_summary}
 
-Generate the structured JSON summary following ALL rules above. Output ONLY valid JSON.
+TASK:
+Generate UI-ready fields following these STRICT rules:
+
+🚨 CRITICAL: ONE ITEM PER FIELD TYPE
+- Each field name (findings, recommendations, etc.) can appear AT MOST ONCE
+- Consolidate ALL related content into ONE item per field type
+- Use ONLY field names from the allowed list above
+
+FIELD CATEGORIZATION GUIDE:
+- "findings" → All clinical observations, test results, abnormalities, imaging findings, diagnoses
+- "recommendations" → Treatment plans, follow-up instructions, referrals
+- "medications" → All drugs referenced with dosages if available
+- "physical_exam" → Physical examination findings
+- "mmi_status" → MMI determination (med-legal reports only)
+- "work_status" → Work restrictions/capacity (med-legal reports only)
+
+FORMAT FOR EACH ITEM:
+- collapsed = One-line summary (include ALL key points for that field type)
+- expanded = Format depends on field type:
+
+🔹 FOR physical_exam AND medications → USE BULLET POINTS:
+  • One item per line
+  • Short, scannable entries
+  • Include dosages for medications
+  • NO paragraph prose
+  
+🔹 FOR findings, recommendations, rationale, mmi_status, work_status → USE CONCISE PARAGRAPH:
+  • Maximum 1-3 lines (50-100 words)
+  • High-signal, key points only
+  • NO exhaustive detail or repetition
+  • Attribution language required
+  • Prioritize: diagnosis, key abnormalities, actionable items
+
+EXAMPLE - findings (CORRECT CONCISE FORMAT):
+{{
+  "field": "findings",
+  "collapsed": "Right foot pain and diminished sensation were documented",
+  "expanded": "The consultation documented persistent right foot pain following a work-related injury, with diminished sensation in the superficial peroneal nerve distribution. MRI and X-rays showed no structural pathology."
+}}
+
+EXAMPLE - recommendations (CORRECT CONCISE FORMAT):
+{{
+  "field": "recommendations",
+  "collapsed": "Electrodiagnostics and pain management were recommended",
+  "expanded": "The report recommended electrodiagnostic studies and pain management referral. No surgical indication was noted."
+}}
+
+❌ WRONG - Too verbose findings:
+"The consultation report documented diffuse right dorsal and plantar foot pain persisting since a work-related dog attack on 2024-04-18. Occasional radiation of pain down the leg and into the foot was noted. Subjectively diminished sensation in the superficial peroneal nerve distribution over the dorsum of the right foot was described, specifically involving the medial and intermediate cutaneous nerves. Imaging findings included an unremarkable MRI..."
+
+✅ CORRECT - Concise findings:
+"The report documented persistent right foot pain with diminished sensation in the peroneal nerve distribution. Imaging showed no structural pathology."
+
+EXAMPLE - physical_exam (CORRECT BULLET FORMAT):
+{{
+  "field": "physical_exam",
+  "collapsed": "Muscle spasm and reduced motion were noted",
+  "expanded": "• Cervical spine tightness and spasm\n• Reduced rotation and extension\n• Positive Spurling's maneuver (left arm)\n• Limited lumbar flexion due to pain\n• Positive straight leg raise (left)\n• Reduced sensation L5 dermatome"
+}}
+
+EXAMPLE - medications (CORRECT BULLET FORMAT):
+{{
+  "field": "medications",
+  "collapsed": "Gabapentin and NSAIDs were referenced",
+  "expanded": "• Gabapentin 300 mg three times daily\n• Pregabalin (potential transition)\n• NSAIDs (stomach discomfort noted)\n• Muscle relaxants for sleep"
+}}
+
+EXAMPLE FOR X-RAY (allowed: findings):
+
+CORRECT OUTPUT (CONCISE):
+{{
+  "items": [
+    {{
+      "field": "findings",
+      "collapsed": "Degenerative changes were documented",
+      "expanded": "The X-ray documented disc degeneration at L2-3, facet arthrosis at L5-S1, and Grade 1 anterolisthesis. No acute fracture was noted."
+    }}
+  ]
+}}
+
+WRONG OUTPUT (duplicates):
+{{
+  "items": [
+    {{"field": "findings", "collapsed": "Disc degeneration noted..."}},
+    {{"field": "findings", "collapsed": "Facet arthrosis documented..."}},
+    {{"field": "findings", "collapsed": "No fracture observed..."}}
+  ]
+}}
+
+ATTRIBUTION REQUIREMENTS:
+✅ Use past tense exclusively
+✅ Include attribution language in every statement
+✅ Start expanded text with "The [document type]..." pattern
+
+Output JSON only.
 """)
 
     chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
@@ -295,11 +664,14 @@ Generate the structured JSON summary following ALL rules above. Output ONLY vali
     try:
         # Truncate raw_text if too long (keep most relevant content)
         truncated_text = raw_text[:8000] if len(raw_text) > 8000 else raw_text
+        truncated_long_summary = long_summary[:4000] if len(long_summary) > 4000 else long_summary
         
         chain = chat_prompt | llm
         response = chain.invoke({
             "raw_text": truncated_text,
+            "long_summary": truncated_long_summary,
             "doc_type": doc_type,
+            "allowed_fields": list(allowed_fields),
             "format_instructions": pydantic_parser.get_format_instructions()
         })
         
@@ -317,9 +689,18 @@ Generate the structured JSON summary following ALL rules above. Output ONLY vali
         # Hard safety checks (non-LLM)
         structured_summary = remove_patient_identifiers(structured_summary)
         structured_summary = ensure_header_fields(structured_summary, doc_type, raw_text)
-        structured_summary = validate_indicators(structured_summary)
+        structured_summary = validate_ui_items(structured_summary)
+        
+        # HARD FILTER — drop disallowed fields (defensive)
+        structured_summary = filter_disallowed_fields(structured_summary, allowed_fields)
+        
+        # DEDUPLICATE — ensure each field type appears only once
+        structured_summary = deduplicate_fields(structured_summary)
+        
+        # Post-process to ensure attribution compliance
+        structured_summary = enforce_attribution_compliance(structured_summary)
 
-        logger.info("✅ Structured summary generated successfully")
+        logger.info(f"✅ UI-ready summary generated with {len(structured_summary.get('summary', {}).get('items', []))} items")
         return structured_summary
 
     except json.JSONDecodeError as je:
@@ -330,3 +711,41 @@ Generate the structured JSON summary following ALL rules above. Output ONLY vali
     except Exception as e:
         logger.error(f"❌ Structured summary generation failed: {e}")
         return create_fallback_structured_summary(doc_type)
+
+
+def enforce_attribution_compliance(structured_summary: dict) -> dict:
+    """
+    Post-LLM enforcement layer to catch any attribution violations.
+    This is a defensive safety check.
+    """
+    forbidden_phrases = [
+        'consistent with',
+        'identified',
+        'demonstrates',
+        'confirms',
+        'shows',
+        'reveals',
+        'suggests'
+    ]
+    
+    # Check all text fields recursively
+    def check_and_warn(text: str, location: str) -> None:
+        if not text:
+            return
+        text_lower = text.lower()
+        for phrase in forbidden_phrases:
+            if phrase in text_lower:
+                logger.warning(f"⚠️ Attribution violation detected in {location}: '{phrase}'")
+                # In production, you might want to reject or auto-fix here
+    
+    # Check summary items
+    if 'summary' in structured_summary and 'items' in structured_summary['summary']:
+        for idx, item in enumerate(structured_summary['summary']['items']):
+            check_and_warn(item.get('collapsed', ''), f"item[{idx}].collapsed")
+            check_and_warn(item.get('expanded', ''), f"item[{idx}].expanded")
+    
+    return structured_summary
+
+
+
+
