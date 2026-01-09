@@ -201,7 +201,7 @@ async def update_fail_document(request: Request):
 @router.get('/document')
 async def get_document(
     patient_name: str,
-    dob: str,
+    dob: Optional[str] = None,
     physicianId: Optional[str] = None,
     claim_number: Optional[str] = None
 ):

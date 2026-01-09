@@ -24,7 +24,7 @@ class DocumentAggregationService:
     async def get_aggregated_document(
         self,
         patient_name: str,
-        dob: str,
+        dob: Optional[str] = None,
         physician_id: Optional[str] = None,
         claim_number: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -36,7 +36,7 @@ class DocumentAggregationService:
         logger.info(f"📄 Fetching aggregated document for patient: {patient_name}")
 
         # Parse date strings using helper
-        dob_date = self._parse_date(dob, "Date of Birth")
+        dob_date = self._parse_date(dob, "Date of Birth") if dob else None
 
         # Get all documents (includes bodyPartSnapshots via relation, matched by patient details)
         document_data = await self.db_service.get_document_by_patient_details(
@@ -110,7 +110,7 @@ class DocumentAggregationService:
 
     async def _get_treatment_history(self,
                                    patient_name: str,
-                                   dob: str,
+                                   dob: Optional[str],
                                    claim_number: Optional[str],
                                    physician_id: Optional[str]) -> Dict[str, Any]:
         """
