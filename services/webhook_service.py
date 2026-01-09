@@ -1961,16 +1961,34 @@ class WebhookService:
             # ✅ STORE THE ACTUAL REPORT ANALYZER RESULT
             long_summary = report_result.get("long_summary", "")
             short_summary = report_result.get("short_summary", "")
+            logger.info(f"✅ ReportAnalyzer long summary in author: {author}")
             
-            # ✅ If author provided by user, inject it into long_summary as "Signature:" field
+            # ✅ If author provided by user, replace or inject it into long_summary as "Signature:" field
             if author and str(author).strip().lower() not in ["not specified", "unknown", "none", ""]:
-                # Add signature line to long summary if not already present
-                if "signature:" not in long_summary.lower():
-                    signature_line = f"\n\n• Signature: {author.strip()}"
-                    long_summary = long_summary + signature_line
+                import re
+                # Replace existing signature line or add new one
+                signature_pattern = r'•\s*Signature:.*?(?=\n•|\n\n|$)'
+                signature_line = f"• Signature: {author.strip()}"
+                
+                if re.search(signature_pattern, long_summary, re.IGNORECASE | re.DOTALL):
+                    # Replace existing signature
+                    long_summary = re.sub(signature_pattern, signature_line, long_summary, flags=re.IGNORECASE | re.DOTALL)
+                    logger.info(f"✅ Replaced existing signature with: {author}")
+                else:
+                    # Add new signature line
+                    long_summary = long_summary + f"\n\n{signature_line}"
                     logger.info(f"✅ Injected author into long_summary: {author}")
+                
+                # Update the report_result dictionary to reflect the modified long_summary
+                report_result["long_summary"] = long_summary
+                
+                # ✅ Also update the author field in short_summary header
+                if isinstance(short_summary, dict) and 'header' in short_summary:
+                    short_summary['header']['author'] = author.strip()
+                    report_result["short_summary"] = short_summary
+                    logger.info(f"✅ Updated short_summary header author: {author}")
             
-            logger.info(f"✅ Generated long summary: {len(long_summary)} chars")
+            logger.info(f"✅ Generated long summary: {long_summary}")
             logger.info(f"✅ Generated short summary: {short_summary}")
             
             # Use EnhancedReportAnalyzer for detailed analysis
@@ -1980,7 +1998,7 @@ class WebhookService:
             analysis_task = asyncio.create_task(
                 asyncio.to_thread(
                     analyzer.extract_document_data_with_reasoning, 
-                    long_summary,    # Use summary for analysis
+                    long_summary,    # Use summary with injected author
                     None,            # page_zones
                     None,            # raw_text  
                     mode             # mode
@@ -2015,6 +2033,8 @@ class WebhookService:
             if author and str(author).strip().lower() not in ["not specified", "unknown", "none", ""]:
                 document_analysis.consulting_doctor = author.strip()
                 logger.info(f"✅ Overridden consulting_doctor (author): {author}")
+
+            logger.info(f"author detected : {author}")
 
             # Prepare processed_data similar to process_document_data
             processed_data = {
