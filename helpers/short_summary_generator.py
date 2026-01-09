@@ -422,6 +422,7 @@ def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
     - Contains generic phrases like "No specific X were documented"
     - Contains "not found", "not available", "not specified"
     - Is just a placeholder with no real clinical content
+    - Contains incomplete sentences (e.g., "The at MMI", "The from work")
     """
     if "summary" not in structured_summary or "items" not in structured_summary["summary"]:
         return structured_summary
@@ -436,6 +437,16 @@ def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
         r"^no\s+\w+\s*\.?$",  # Just "No X" or "No X."
     ]
     
+    # Incomplete sentence patterns that indicate malformed text
+    incomplete_patterns = [
+        r"^the\s+(at|from|to|in|on|for|with|was|is)\s+\w+",  # "The at MMI", "The from work", etc.
+        r"\b(patient|report|document)\s+(at|from|to)\s+(the|a)\s*$",  # Incomplete phrases
+        r"^(at|from|to|in|on)\s+\w+\s*$",  # Just preposition + word
+        r"\bthe\s+the\b",  # Duplicate "the"
+        r"^was\s+\w+\s*$",  # Just "was [word]"
+        r"^is\s+\w+\s*$",  # Just "is [word]"
+    ]
+    
     items = structured_summary["summary"]["items"]
     filtered_items = []
     
@@ -447,6 +458,20 @@ def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
         # Check if collapsed or expanded is too short or empty
         if not collapsed or not expanded or len(collapsed) < 10 or len(expanded) < 15:
             logger.info(f"🗑️ Removed empty field '{field}' (too short or empty)")
+            continue
+        
+        # Check for incomplete sentences
+        is_incomplete = False
+        for text, label in [(collapsed, "collapsed"), (expanded, "expanded")]:
+            for pattern in incomplete_patterns:
+                if re.search(pattern, text, re.IGNORECASE):
+                    logger.warning(f"🗑️ Removed field '{field}' with incomplete {label} text: '{text[:50]}...'")
+                    is_incomplete = True
+                    break
+            if is_incomplete:
+                break
+        
+        if is_incomplete:
             continue
         
         # Check for generic patterns in both collapsed and expanded
@@ -466,7 +491,7 @@ def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
         filtered_items.append(item)
     
     structured_summary["summary"]["items"] = filtered_items
-    logger.info(f"✅ Filtered to {len(filtered_items)} meaningful fields (removed {len(items) - len(filtered_items)} empty/generic)")
+    logger.info(f"✅ Filtered to {len(filtered_items)} meaningful fields (removed {len(items) - len(filtered_items)} empty/generic/incomplete)")
     return structured_summary
 
 
@@ -530,6 +555,18 @@ MANDATORY LANGUAGE RULES (NO EXCEPTIONS):
 - "The report described..."
 - "[Condition] was noted in the report..."
 - "As documented in the [document type]..."
+
+🚨 COMPLETE SENTENCE REQUIREMENTS:
+- EVERY sentence MUST be grammatically complete and meaningful
+- NEVER write incomplete fragments like "The at MMI" or "The from work"
+- ALWAYS include the subject (patient, report, document) AND complete verb phrase
+- Examples of COMPLETE sentences:
+  ✅ "The patient is at maximum medical improvement (MMI)"
+  ✅ "The report documented that the patient is off from work"
+  ✅ "The patient cannot return to work at this time"
+  ❌ "The at MMI" (INCOMPLETE - missing subject and verb)
+  ❌ "The from work" (INCOMPLETE - meaningless fragment)
+  ❌ "The return to work at this time" (INCOMPLETE - missing subject and verb)
 
 TENSE & VOICE:
 - Past tense only (was documented, were noted, was described)
@@ -610,6 +647,91 @@ EXAMPLE - MRI Knee (CORRECT concise format):
   "field": "findings",
   "collapsed": "Meniscal tear, cartilage loss, ligament changes, and effusion were documented",
   "expanded": "The MRI documented meniscal tear with post-meniscectomy changes, moderate medial compartment cartilage loss with osteophytes, and ACL degeneration. A large effusion with synovitis was noted."
+}}
+
+� CRITICAL: ALL FIELDS REQUIRE COMPLETE, MEANINGFUL SENTENCES
+Every field (findings, recommendations, medications, physical_exam, mmi_status, work_status, etc.) MUST have:
+- Grammatically complete sentences in BOTH collapsed AND expanded
+- Clear subject (patient, report, document, etc.)
+- Complete verb phrase
+- Meaningful content that makes sense when read aloud
+
+✅ COMPLETE SENTENCE CHECKLIST (APPLIES TO ALL FIELDS):
+- Include proper subject: "The patient", "The report documented", "The MRI showed", etc.
+- Include complete verb phrase: "documented", "was noted", "were described", etc.
+- NEVER write fragments like "The at", "The from", "The with", "The and"
+- NEVER omit the subject or verb
+- Every sentence must be understandable without context
+- Read it aloud - if it sounds incomplete or meaningless, rewrite it
+
+EXAMPLE - findings (CORRECT):
+{{
+  "field": "findings",
+  "collapsed": "Bilateral knee osteoarthritis and meniscal injuries were documented",
+  "expanded": "The MRI documented bilateral knee osteoarthritis with moderate cartilage loss. Meniscal tears were noted in both knees."
+}}
+
+❌ WRONG - findings (INCOMPLETE):
+{{
+  "field": "findings",
+  "collapsed": "Bilateral knee osteoarthritis and meniscal injuries",  ← INCOMPLETE! Missing verb
+  "expanded": "The and meniscal injuries were documented."  ← MEANINGLESS! Missing subject
+}}
+
+EXAMPLE - recommendations (CORRECT):
+{{
+  "field": "recommendations",
+  "collapsed": "MRI, injections, and pain management were recommended",
+  "expanded": "The report recommended MRI of the knee, corticosteroid injections, and pain management referral. No surgical indication was noted."
+}}
+
+❌ WRONG - recommendations (INCOMPLETE):
+{{
+  "field": "recommendations",
+  "collapsed": "MRI, injections, and pain management",  ← INCOMPLETE! Missing verb
+  "expanded": "The recommended MRI and injections."  ← INCOMPLETE! Missing subject
+}}
+
+EXAMPLE - mmi_status (CORRECT):
+{{
+  "field": "mmi_status",
+  "collapsed": "The patient is at maximum medical improvement (MMI)",
+  "expanded": "The report indicated that the patient is at maximum medical improvement (MMI) due to ongoing symptoms and the need for further treatment."
+}}
+
+❌ WRONG - mmi_status (INCOMPLETE):
+{{
+  "field": "mmi_status",
+  "collapsed": "The at MMI",  ← INCOMPLETE! Missing "patient is"
+  "expanded": "The report indicated that the at maximum medical improvement..."  ← MEANINGLESS!
+}}
+
+EXAMPLE - work_status (CORRECT):
+{{
+  "field": "work_status",
+  "collapsed": "The patient is off from work with restrictions",
+  "expanded": "The report documented that the patient cannot return to work at this time. Work restrictions included no lifting, climbing, or kneeling."
+}}
+
+❌ WRONG - work_status (INCOMPLETE):
+{{
+  "field": "work_status",
+  "collapsed": "The from work",  ← INCOMPLETE! Missing "patient is off"
+  "expanded": "The report documented that the return to work at this time."  ← MEANINGLESS!
+}}
+
+EXAMPLE - physical_exam (CORRECT with bullets):
+{{
+  "field": "physical_exam",
+  "collapsed": "Reduced strength and positive provocative tests were noted",
+  "expanded": "• Reduced right shoulder abduction strength\n• Pain with supraspinatus testing\n• Positive Spurling's maneuver on left\n• Limited cervical rotation and extension"
+}}
+
+❌ WRONG - physical_exam (INCOMPLETE):
+{{
+  "field": "physical_exam",
+  "collapsed": "Reduced strength and positive tests",  ← VAGUE! What tests?
+  "expanded": "• Reduced right shoulder\n• Pain with testing\n• Positive maneuver"  ← INCOMPLETE! Each bullet must be complete
 }}
 
 ❌ WRONG - User's verbose example to avoid:
