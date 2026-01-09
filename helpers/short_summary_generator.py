@@ -413,6 +413,63 @@ def deduplicate_fields(structured_summary: dict) -> dict:
     return structured_summary
 
 
+def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
+    """
+    Filter out fields that have no meaningful content or generic "not found" messages.
+    
+    Removes items where:
+    - Text is too short or empty
+    - Contains generic phrases like "No specific X were documented"
+    - Contains "not found", "not available", "not specified"
+    - Is just a placeholder with no real clinical content
+    """
+    if "summary" not in structured_summary or "items" not in structured_summary["summary"]:
+        return structured_summary
+    
+    # Generic phrases that indicate no meaningful content
+    generic_patterns = [
+        r"no\s+specific\s+\w+\s+were?\s+(documented|noted|described|found)",
+        r"no\s+\w+\s+were?\s+(documented|noted|described|found)",
+        r"not\s+(found|available|specified|documented|noted)",
+        r"none\s+(documented|noted|described|found)",
+        r"(recommendations?|findings?|medications?|exam)\s+not\s+",
+        r"^no\s+\w+\s*\.?$",  # Just "No X" or "No X."
+    ]
+    
+    items = structured_summary["summary"]["items"]
+    filtered_items = []
+    
+    for item in items:
+        collapsed = item.get("collapsed", "").strip()
+        expanded = item.get("expanded", "").strip()
+        field = item.get("field", "")
+        
+        # Check if collapsed or expanded is too short or empty
+        if not collapsed or not expanded or len(collapsed) < 10 or len(expanded) < 15:
+            logger.info(f"🗑️ Removed empty field '{field}' (too short or empty)")
+            continue
+        
+        # Check for generic patterns in both collapsed and expanded
+        is_generic = False
+        text_to_check = f"{collapsed} {expanded}".lower()
+        
+        for pattern in generic_patterns:
+            if re.search(pattern, text_to_check, re.IGNORECASE):
+                logger.info(f"🗑️ Removed generic field '{field}': contains '{pattern}'")
+                is_generic = True
+                break
+        
+        if is_generic:
+            continue
+        
+        # Keep this item
+        filtered_items.append(item)
+    
+    structured_summary["summary"]["items"] = filtered_items
+    logger.info(f"✅ Filtered to {len(filtered_items)} meaningful fields (removed {len(items) - len(filtered_items)} empty/generic)")
+    return structured_summary
+
+
 def generate_structured_short_summary(llm: AzureChatOpenAI, raw_text: str, doc_type: str, long_summary: str) -> dict:
     """
     Generate a structured, UI-ready summary with clickable collapsed/expanded fields.
@@ -524,11 +581,39 @@ If source has multiple findings like disc degeneration, facet arthrosis, and ant
   "expanded": "The report documented disc degeneration at L2-3, facet arthrosis at L5-S1, and Grade 1 anterolisthesis of L4 on L5. No acute fracture was noted."
 }}
 
-❌ WRONG - Too verbose:
+🚨 CRITICAL EXPANDED TEXT LENGTH LIMITS:
+- findings: MAX 2-3 sentences (40-60 words)
+- recommendations: MAX 2-3 sentences  
+- physical_exam: Bullet points only (5-8 bullets max)
+- medications: Bullet points only (list only)
+- rationale: MAX 2-3 sentences
+- ALL OTHER FIELDS: MAX 2-3 sentences
+
+EXPANDED WRITING RULES FOR "findings":
+✅ CORRECT STYLE (concise, high-level summary):
+"The MRI documented meniscal tear, moderate cartilage loss, and ACL degeneration. A large effusion with synovitis was noted."
+
+❌ WRONG - Too verbose with excessive detail:
 "The X-ray report documented diffuse disc degeneration at multiple levels, most pronounced at L2-3, along with bilateral facet arthrosis particularly at L5-S1. Additionally, Grade 1 anterolisthesis of L4 on L5 was noted secondary to facet arthrosis. Mild degenerative changes in the SI joints and marginal spurring from L3-L5 were also observed. The vertebral bodies appeared intact with no acute fracture identified."
 
-✅ CORRECT - Concise:
+✅ CORRECT - Concise summary without excessive anatomical detail:
 "The report documented disc degeneration at L2-3, facet arthrosis at L5-S1, and Grade 1 anterolisthesis. No acute fracture was noted."
+
+🔹 For imaging reports (MRI, CT, X-Ray):
+- Group related findings into categories (e.g., "meniscal pathology", "cartilage changes", "ligament status")
+- Use summary language, NOT detailed anatomical descriptions
+- Skip negative findings unless clinically significant
+- 2-3 sentences maximum
+
+EXAMPLE - MRI Knee (CORRECT concise format):
+{{
+  "field": "findings",
+  "collapsed": "Meniscal tear, cartilage loss, ligament changes, and effusion were documented",
+  "expanded": "The MRI documented meniscal tear with post-meniscectomy changes, moderate medial compartment cartilage loss with osteophytes, and ACL degeneration. A large effusion with synovitis was noted."
+}}
+
+❌ WRONG - User's verbose example to avoid:
+"The MRI report documented truncation and tearing of the medial meniscus body, consistent with partial post-meniscectomy versus persistent tear. Moderate cartilage loss with osteophyte formation was noted in the medial compartment, and mild cartilage loss with osteophytes in the lateral compartment. Increased T2 signal in the anterior cruciate ligament was described, consistent with mucinous degeneration and/or partial tear, unchanged from prior imaging. A moderate to large effusion with synovitis and marked edema in the prepatellar and prepatellar tendon soft tissues were also documented..."
 
 ❌ WRONG - Multiple items with same field:
 [
@@ -569,6 +654,9 @@ Generate UI-ready fields following these STRICT rules:
 - Each field name (findings, recommendations, etc.) can appear AT MOST ONCE
 - Consolidate ALL related content into ONE item per field type
 - Use ONLY field names from the allowed list above
+- ⚠️ IMPORTANT: If a field type has NO meaningful content in the source document, EXCLUDE it entirely from the output
+- DO NOT create placeholder items with generic "No specific X were documented" messages
+- Only include fields that have actual clinical content to report
 
 FIELD CATEGORIZATION GUIDE:
 - "findings" → All clinical observations, test results, abnormalities, imaging findings, diagnoses
@@ -696,6 +784,9 @@ Output JSON only.
         
         # DEDUPLICATE — ensure each field type appears only once
         structured_summary = deduplicate_fields(structured_summary)
+        
+        # FILTER EMPTY/GENERIC FIELDS — remove fields with no meaningful content
+        structured_summary = filter_empty_or_generic_fields(structured_summary)
         
         # Post-process to ensure attribution compliance
         structured_summary = enforce_attribution_compliance(structured_summary)

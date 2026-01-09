@@ -178,7 +178,7 @@ class DocumentAIProcessor:
             logger.info("=" * 80)
             
             # Run multi-report detection
-            multi_report_result = detect_multiple_reports(summary_text)
+            # multi_report_result = detect_multiple_reports(summary_text)
             
             # Log full text comparison for debugging
             if result.text and len(result.text) != len(summary_text):
@@ -242,8 +242,8 @@ class DocumentAIProcessor:
                 confidence=1.0,
                 success=True,
                 metadata={"patient_details": patient_details} if patient_details else {},
-                is_multiple_reports=multi_report_result.get("is_multiple", False),
-                multi_report_info=multi_report_result
+                # is_multiple_reports=multi_report_result.get("is_multiple", False),
+                # multi_report_info=multi_report_result
             )
             
             # ✅ Log metadata for debugging
@@ -523,7 +523,7 @@ class DocumentAIProcessor:
             logger.info("=" * 80)
             
             # Run multi-report detection
-            multi_report_result = detect_multiple_reports(summary_text)
+            # multi_report_result = detect_multiple_reports(summary_text)
             
             return ExtractionResult(
                 text=summary_text,
@@ -538,8 +538,8 @@ class DocumentAIProcessor:
                 confidence=1.0,
                 success=True,
                 metadata={"patient_details": patient_details} if patient_details else {},
-                is_multiple_reports=multi_report_result.get("is_multiple", False),
-                multi_report_info=multi_report_result
+                # is_multiple_reports=multi_report_result.get("is_multiple", False),
+                # multi_report_info=multi_report_result
             )
             
         except Exception as e:

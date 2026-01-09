@@ -433,7 +433,7 @@ class DocumentAIProcessor:
             logger.info("=" * 80)
             
             # NEW: Run multi-report detection on summarizer output (using o3-pro AI model)
-            multi_report_result = detect_multiple_reports(summary_text)
+            # multi_report_result = detect_multiple_reports(summary_text)
             
             # Also log full text comparison for debugging
             if result.text and len(result.text) != len(summary_text):
@@ -569,8 +569,8 @@ class DocumentAIProcessor:
                 confidence=1.0,
                 success=True,
                 metadata={"patient_details": patient_details} if patient_details else {},
-                is_multiple_reports=multi_report_result.get("is_multiple", False),
-                multi_report_info=multi_report_result
+                # is_multiple_reports=multi_report_result.get("is_multiple", False),
+                # multi_report_info=multi_report_result
             )
             
             logger.info("📊 Extraction summary:")
@@ -881,7 +881,7 @@ class DocumentAIProcessor:
             logger.info("=" * 80)
             
             # Run multi-report detection on batch summary (using o3-pro AI model)
-            multi_report_result = detect_multiple_reports(summary_text)
+            # multi_report_result = detect_multiple_reports(summary_text)
             
             return ExtractionResult(
                 text=summary_text,
@@ -896,8 +896,8 @@ class DocumentAIProcessor:
                 confidence=1.0,
                 success=True,
                 metadata={"patient_details": patient_details} if patient_details else {},
-                is_multiple_reports=multi_report_result.get("is_multiple", False),
-                multi_report_info=multi_report_result
+                # is_multiple_reports=multi_report_result.get("is_multiple", False),
+                # multi_report_info=multi_report_result
             )
             
         except Exception as e:
@@ -1048,7 +1048,7 @@ class DocumentAIProcessor:
         logger.info("=" * 80)
         
         # Run multi-report detection on merged text (using o3-pro AI model)
-        multi_report_result = detect_multiple_reports(merged_text)
+        # multi_report_result = detect_multiple_reports(merged_text)
         
         merged_result = ExtractionResult(
             text=merged_raw_text,
@@ -1063,8 +1063,8 @@ class DocumentAIProcessor:
             confidence=1.0,
             success=True,
             metadata={"patient_details": patient_details} if patient_details else {},
-            is_multiple_reports=multi_report_result.get("is_multiple", False),
-            multi_report_info=multi_report_result
+            # is_multiple_reports=multi_report_result.get("is_multiple", False),
+            # multi_report_info=multi_report_result
         )
         
         return merged_result

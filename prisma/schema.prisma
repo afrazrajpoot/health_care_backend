@@ -278,6 +278,7 @@ model FailDocs {
   fileName     String?
   gcsFileLink  String?
   dob          String?
+  author       String?  // Document author/signer
   aiSummarizerText      String?  // Stores Document AI summarizer output for manual review
   
   createdAt DateTime @default(now())

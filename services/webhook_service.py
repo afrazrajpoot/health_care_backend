@@ -245,68 +245,68 @@ class WebhookService:
         
         # 🔍 Check for multiple reports using MultiReportDetector
         # Use raw_text (Document AI summary) if available, otherwise use full OCR text
-        text_to_check = raw_text if raw_text else text
-        if text_to_check and len(text_to_check.strip()) > 50:
-            try:
-                logger.info("🔍 Running MultiReportDetector to check for multiple reports in document...")
-                detector = get_multi_report_detector()
-                loop = asyncio.get_event_loop()
-                detection_result = await loop.run_in_executor(
-                    LLM_EXECUTOR, 
-                    detector.detect_multiple_reports, 
-                    text_to_check
-                )
+        # text_to_check = raw_text if raw_text else text
+        # if text_to_check and len(text_to_check.strip()) > 50:
+        #     try:
+        #         logger.info("🔍 Running MultiReportDetector to check for multiple reports in document...")
+        #         detector = get_multi_report_detector()
+        #         loop = asyncio.get_event_loop()
+        #         detection_result = await loop.run_in_executor(
+        #             LLM_EXECUTOR, 
+        #             detector.detect_multiple_reports, 
+        #             text_to_check
+        #         )
                 
-                # If multiple reports detected, override the flags and return early
-                if detection_result.get("is_multiple", False):
-                    is_multiple_reports = True
-                    multi_report_info = {
-                        "is_multiple": True,
-                        "confidence": detection_result.get("confidence", "unknown"),
-                        "reason": detection_result.get("reasoning", "Multiple reports detected in document"),
-                        "report_count_estimate": detection_result.get("report_count", 2),
-                        "reports_identified": detection_result.get("report_types", [])
-                    }
-                    logger.warning(f"⚠️ MULTIPLE REPORTS DETECTED by MultiReportDetector!")
-                    logger.warning(f"   Confidence: {multi_report_info.get('confidence')}")
-                    logger.warning(f"   Reason: {multi_report_info.get('reason')}")
-                    logger.warning(f"   Estimated count: {multi_report_info.get('report_count_estimate')}")
-                    logger.info("⏭️ Skipping further processing - will save to FailDocs")
+        #         # If multiple reports detected, override the flags and return early
+        #         if detection_result.get("is_multiple", False):
+        #             is_multiple_reports = True
+        #             multi_report_info = {
+        #                 "is_multiple": True,
+        #                 "confidence": detection_result.get("confidence", "unknown"),
+        #                 "reason": detection_result.get("reasoning", "Multiple reports detected in document"),
+        #                 "report_count_estimate": detection_result.get("report_count", 2),
+        #                 "reports_identified": detection_result.get("report_types", [])
+        #             }
+        #             logger.warning(f"⚠️ MULTIPLE REPORTS DETECTED by MultiReportDetector!")
+        #             logger.warning(f"   Confidence: {multi_report_info.get('confidence')}")
+        #             logger.warning(f"   Reason: {multi_report_info.get('reason')}")
+        #             logger.warning(f"   Estimated count: {multi_report_info.get('report_count_estimate')}")
+        #             logger.info("⏭️ Skipping further processing - will save to FailDocs")
                     
-                    # Return early with minimal data - save resources by not running expensive analyzers
-                    return {
-                        "document_analysis": None,
-                        "brief_summary": "",
-                        "text_for_analysis": text,
-                        "raw_text": raw_text,
-                        "report_analyzer_result": {},
-                        "patient_name": None,
-                        "claim_number": None,
-                        "dob": None,
-                        "has_patient_name": False,
-                        "has_claim_number": False,
-                        "physician_id": data.get("physician_id"),
-                        "user_id": data.get("user_id"),
-                        "filename": data["filename"],
-                        "gcs_url": data["gcs_url"],
-                        "blob_path": data.get("blob_path"),
-                        "file_size": data.get("file_size", 0),
-                        "mime_type": data.get("mime_type", "application/octet-stream"),
-                        "processing_time_ms": data.get("processing_time_ms", 0),
-                        "file_hash": data.get("file_hash"),
-                        "result_data": result_data,
-                        "document_id": data.get("document_id", "unknown"),
-                        "mode": mode,
-                        "is_multiple_reports": is_multiple_reports,
-                        "multi_report_info": multi_report_info
-                    }
-                else:
-                    logger.info("✅ MultiReportDetector: Single report confirmed")
+        #             # Return early with minimal data - save resources by not running expensive analyzers
+        #             return {
+        #                 "document_analysis": None,
+        #                 "brief_summary": "",
+        #                 "text_for_analysis": text,
+        #                 "raw_text": raw_text,
+        #                 "report_analyzer_result": {},
+        #                 "patient_name": None,
+        #                 "claim_number": None,
+        #                 "dob": None,
+        #                 "has_patient_name": False,
+        #                 "has_claim_number": False,
+        #                 "physician_id": data.get("physician_id"),
+        #                 "user_id": data.get("user_id"),
+        #                 "filename": data["filename"],
+        #                 "gcs_url": data["gcs_url"],
+        #                 "blob_path": data.get("blob_path"),
+        #                 "file_size": data.get("file_size", 0),
+        #                 "mime_type": data.get("mime_type", "application/octet-stream"),
+        #                 "processing_time_ms": data.get("processing_time_ms", 0),
+        #                 "file_hash": data.get("file_hash"),
+        #                 "result_data": result_data,
+        #                 "document_id": data.get("document_id", "unknown"),
+        #                 "mode": mode,
+        #                 "is_multiple_reports": is_multiple_reports,
+        #                 "multi_report_info": multi_report_info
+        #             }
+        #         else:
+        #             logger.info("✅ MultiReportDetector: Single report confirmed")
                     
-            except Exception as e:
-                logger.error(f"❌ Multi-report detection failed: {str(e)}")
-                # Continue processing even if detection fails
-                logger.warning("⚠️ Continuing with document processing despite detection error")
+        #     except Exception as e:
+        #         logger.error(f"❌ Multi-report detection failed: {str(e)}")
+        #         # Continue processing even if detection fails
+        #         logger.warning("⚠️ Continuing with document processing despite detection error")
         
         # OPTIMIZED: Detect document type ONCE and reuse result
         # Uses summarizer output first, falls back to raw_text if confidence is low
@@ -910,12 +910,19 @@ class WebhookService:
         """
         if not long_summary:
             return None
-        
+        logger.info(f"🔍 Extracting author from long summary... {long_summary[:400]}")  # Log first 100 chars for context
         try:
             # Patterns to look for author information
             # we only need the author who signed the report, not assistants or transcribers, or prepared by, directed by, etc.
-            # Pattern for name: optional Dr./title prefix + First name + optional middle + Last name + optional credentials
-            name_pattern = r'(?:Dr\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD|RN|R\.N\.|LVN|L\.V\.N\.|PA-C))?)'
+            
+            # Pattern for name - handles both "FirstName LastName" and "LastName, FirstName" formats
+            # Captures the full name including credentials
+            # Examples: "John Smith, MD", "Smith, John, MD", "Dr. John Smith", "John A. Smith, M.D."
+            name_pattern_forward = r'(?:Dr\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD|RN|R\.N\.|LVN|L\.V\.N\.|PA-C))?)'
+            name_pattern_reverse = r'([A-Z][a-z]+,\s+[A-Z][a-z]+(?:\s+[A-Z]\.?)?(?:,?\s*(?:MD|M\.D\.|DO|D\.O\.|DC|D\.C\.|DPM|NP|PA|PhD|RN|R\.N\.|LVN|L\.V\.N\.|PA-C))?)'
+            
+            # Combined pattern that tries both formats
+            name_pattern = f'(?:{name_pattern_reverse}|{name_pattern_forward})'
             
             author_patterns = [
                 # Pattern for "• Signature:" format (used by Pydantic formatted summaries)
@@ -930,17 +937,26 @@ class WebhookService:
                 r'(?:Evaluating\s+Physician|Examining\s+Physician|QME\s+Physician)[:\s]*' + name_pattern,
                 # Pattern for "Reviewer:" (used by UR)
                 r'(?:Reviewing\s+Physician|Reviewer)[:\s]*' + name_pattern,
+                # Pattern for "Radiologist:" field (common in imaging reports)
+                r'(?:Radiologist)[:\s]*' + name_pattern,
             ]
             
             for pattern in author_patterns:
                 match = re.search(pattern, long_summary, re.IGNORECASE | re.MULTILINE)
                 if match:
-                    author = match.group(1).strip()
-                    # Clean up the author name
-                    author = re.sub(r'\s+', ' ', author)
-                    if author and len(author) > 3:
-                        logger.info(f"✅ Found author in long summary: {author}")
-                        return author
+                    # Get the first non-None group (either group 1 or 2 depending on which pattern matched)
+                    author = None
+                    for group in match.groups():
+                        if group:
+                            author = group.strip()
+                            break
+                    
+                    if author:
+                        # Clean up the author name
+                        author = re.sub(r'\s+', ' ', author)
+                        if len(author) > 3:
+                            logger.info(f"✅ Found author in long summary: {author}")
+                            return author
             
             return None
         except Exception as e:

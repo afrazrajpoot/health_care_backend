@@ -201,7 +201,8 @@ class DatabaseService:
             file_hash: Optional[str] = None,
             blob_path: Optional[str] = None,
             mode : Optional[str] = None,
-            ai_summarizer_text: Optional[str] = None
+            ai_summarizer_text: Optional[str] = None,
+            author: Optional[str] = None
         ) -> str:
             """Save a failed document record to the FailDocs table."""
             try:
@@ -230,6 +231,8 @@ class DatabaseService:
                     data["blobPath"] = blob_path
                 if ai_summarizer_text is not None:
                     data["aiSummarizerText"] = ai_summarizer_text
+                if author is not None:
+                    data["author"] = author
                 # if mode is not None:
                 #     data["mode"] = mode
                 

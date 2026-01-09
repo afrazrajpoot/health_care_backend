@@ -346,48 +346,45 @@ date
             if pre_extracted_patient_details:
                 logger.info("🔄 Overriding LLM results with pre-extracted patient details...")
                 
+                # Helper function to check if a value is invalid/placeholder
+                def is_invalid_value(value):
+                    if not value:
+                        return True
+                    value_str = str(value).lower().strip()
+                    # Check for common placeholder patterns
+                    return (
+                        value_str in ["not specified", "unknown", "n/a", "", "none"] or
+                        value_str.startswith("00/00/") or  # Catches 00/00/0000, 00/00/00, etc.
+                        value_str == "0000-00-00"
+                    )
+                
                 # Override patient_name if pre-extracted and LLM returned "Not specified" or empty
                 pre_patient_name = pre_extracted_patient_details.get("patient_name")
-                if pre_patient_name and (
-                    not analysis.patient_name or 
-                    str(analysis.patient_name).lower() in ["not specified", "unknown", "n/a", ""]
-                ):
+                if pre_patient_name and is_invalid_value(analysis.patient_name):
                     logger.info(f"   📝 patient_name: '{analysis.patient_name}' → '{pre_patient_name}'")
                     analysis.patient_name = pre_patient_name
                 
-                # Override dob if pre-extracted and LLM returned empty
+                # Override dob if pre-extracted and LLM returned empty or placeholder
                 pre_dob = pre_extracted_patient_details.get("dob")
-                if pre_dob and (
-                    not analysis.dob or 
-                    str(analysis.dob).lower() in ["not specified", "unknown", "n/a", ""]
-                ):
+                if pre_dob and is_invalid_value(analysis.dob):
                     logger.info(f"   📝 dob: '{analysis.dob}' → '{pre_dob}'")
                     analysis.dob = pre_dob
                 
-                # Override doi if pre-extracted and LLM returned empty
+                # Override doi if pre-extracted and LLM returned empty or placeholder
                 pre_doi = pre_extracted_patient_details.get("doi")
-                if pre_doi and (
-                    not analysis.doi or 
-                    str(analysis.doi).lower() in ["not specified", "unknown", "n/a", ""]
-                ):
+                if pre_doi and is_invalid_value(analysis.doi):
                     logger.info(f"   📝 doi: '{analysis.doi}' → '{pre_doi}'")
                     analysis.doi = pre_doi
                 
                 # Override claim_number if pre-extracted and LLM returned empty
                 pre_claim = pre_extracted_patient_details.get("claim_number")
-                if pre_claim and (
-                    not analysis.claim_number or 
-                    str(analysis.claim_number).lower() in ["not specified", "unknown", "n/a", ""]
-                ):
+                if pre_claim and is_invalid_value(analysis.claim_number):
                     logger.info(f"   📝 claim_number: '{analysis.claim_number}' → '{pre_claim}'")
                     analysis.claim_number = pre_claim
                 
-                # Override rd (report date) if pre-extracted and LLM returned empty
+                # Override rd (report date) if pre-extracted and LLM returned empty or placeholder
                 pre_rd = pre_extracted_patient_details.get("date_of_report")
-                if pre_rd and (
-                    not analysis.rd or 
-                    str(analysis.rd).lower() in ["not specified", "unknown", "n/a", ""]
-                ):
+                if pre_rd and is_invalid_value(analysis.rd):
                     logger.info(f"   📝 rd (report date): '{analysis.rd}' → '{pre_rd}'")
                     analysis.rd = pre_rd
                 
@@ -411,7 +408,7 @@ date
             logger.info(f"   - REPORT DATE (rd): {analysis.rd}")  # Log the extracted report date
             logger.info(f"   - DOB: {analysis.dob}")
             logger.info(f"   - DOI: {analysis.doi}")
-            logger.info(f"   - CONSULTING DOCTOR: {analysis.consulting_doctor}")
+            logger.info(f"   - Author: {analysis.consulting_doctor}")
             logger.info(f"   - ALL DOCTORS: {analysis.all_doctors if analysis.all_doctors else '[]'}")
             logger.info(f"   - Confidence: {analysis.extraction_confidence:.2f}")
 
