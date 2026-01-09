@@ -910,7 +910,7 @@ class WebhookService:
         """
         if not long_summary:
             return None
-        logger.info(f"🔍 Extracting author from long summary... {long_summary[:400]}")  # Log first 100 chars for context
+        logger.info(f"🔍 Extracting author from long summary... {long_summary[:800]}")  # Log first 100 chars for context
         try:
             # Patterns to look for author information
             # we only need the author who signed the report, not assistants or transcribers, or prepared by, directed by, etc.
@@ -1921,6 +1921,7 @@ class WebhookService:
         doi = updated_fields.get("doi") or fail_doc.doi
         claim_number = updated_fields.get("claim_number") or fail_doc.claimNumber
         patient_name = updated_fields.get("patient_name") or fail_doc.patientName
+        author = updated_fields.get("author") or fail_doc.author  # ✅ Get author from client or fail_doc
         physician_id = fail_doc.physicianId
         filename = fail_doc.fileName
         gcs_url = fail_doc.gcsFileLink
@@ -1960,6 +1961,14 @@ class WebhookService:
             # ✅ STORE THE ACTUAL REPORT ANALYZER RESULT
             long_summary = report_result.get("long_summary", "")
             short_summary = report_result.get("short_summary", "")
+            
+            # ✅ If author provided by user, inject it into long_summary as "Signature:" field
+            if author and str(author).strip().lower() not in ["not specified", "unknown", "none", ""]:
+                # Add signature line to long summary if not already present
+                if "signature:" not in long_summary.lower():
+                    signature_line = f"\n\n• Signature: {author.strip()}"
+                    long_summary = long_summary + signature_line
+                    logger.info(f"✅ Injected author into long_summary: {author}")
             
             logger.info(f"✅ Generated long summary: {len(long_summary)} chars")
             logger.info(f"✅ Generated short summary: {short_summary}")
@@ -2001,6 +2010,11 @@ class WebhookService:
             if updated_fields.get("claim_number") and str(updated_fields["claim_number"]).lower() != "not specified":
                 document_analysis.claim_number = updated_fields["claim_number"]
                 logger.info(f"✅ Overridden claim_number: {updated_fields['claim_number']}")
+            
+            # ✅ Override consulting_doctor (author) if provided by user
+            if author and str(author).strip().lower() not in ["not specified", "unknown", "none", ""]:
+                document_analysis.consulting_doctor = author.strip()
+                logger.info(f"✅ Overridden consulting_doctor (author): {author}")
 
             # Prepare processed_data similar to process_document_data
             processed_data = {

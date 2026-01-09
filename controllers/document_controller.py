@@ -151,7 +151,8 @@ async def update_fail_document(request: Request):
             "dob": data.get("dob"),
             "doi": data.get("doi"),
             "claim_number": data.get("claim_number"),
-            "patient_name": data.get("patient_name")
+            "patient_name": data.get("patient_name"),
+            "author": data.get("author")
         }
 
         db_service = await get_database_service()

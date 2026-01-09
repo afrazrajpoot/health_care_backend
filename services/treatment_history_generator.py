@@ -467,8 +467,6 @@ class TreatmentHistoryGenerator:
 
     - other_systems: conditions not fitting above categories
 
-    - general_treatments: multi-system treatments, general wellness, preventive care, or when system is unclear
-
     === OUTPUT FORMAT ===
 
     Return ONLY valid JSON with this exact structure:
@@ -558,7 +556,7 @@ class TreatmentHistoryGenerator:
                     "metabolic_endocrine", "genitourinary_renal", "reproductive_obstetric_gynecologic",
                     "dermatological", "ophthalmologic", "ent_head_neck", "dental_oral",
                     "hematologic_lymphatic", "immune_allergy", "psychiatric_mental_health",
-                    "sleep_disorders", "other_systems", "general_treatments"
+                    "sleep_disorders", "other_systems"
                 ]
                 
                 for category in required_categories:
@@ -634,7 +632,6 @@ class TreatmentHistoryGenerator:
         "psychiatric_mental_health": {"current": [], "archive": []},
         "sleep_disorders": {"current": [], "archive": []},
         "other_systems": {"current": [], "archive": []},
-        "general_treatments": {"current": [], "archive": []}
     }
 
     
