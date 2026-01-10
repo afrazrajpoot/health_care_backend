@@ -439,12 +439,14 @@ def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
     
     # Incomplete sentence patterns that indicate malformed text
     incomplete_patterns = [
-        r"^the\s+(at|from|to|in|on|for|with|was|is)\s+\w+",  # "The at MMI", "The from work", etc.
+        r"^the\s+(at|from|to|in|on|for|with|was|is|yet|temporary|permanent|off)\s+",  # "The at MMI", "The yet at", "The temporary", etc.
+        r"^the\s+\w+\s+(at|from|to|in|on)\s+",  # "The patient at", "The report from"
         r"\b(patient|report|document)\s+(at|from|to)\s+(the|a)\s*$",  # Incomplete phrases
         r"^(at|from|to|in|on)\s+\w+\s*$",  # Just preposition + word
         r"\bthe\s+the\b",  # Duplicate "the"
-        r"^was\s+\w+\s*$",  # Just "was [word]"
-        r"^is\s+\w+\s*$",  # Just "is [word]"
+        r"^the\s+(is|are|was|were)\s*$",  # Just "The is/are/was/were"
+        r"^the\s+\w+\s+disability",  # "The temporary disability" without verb
+        r"^the\s+(not\s+)?yet\s+at",  # "The yet at", "The not yet at"
     ]
     
     items = structured_summary["summary"]["items"]
@@ -544,6 +546,8 @@ When the document contains specific decision or status terms, you MUST include t
 - "certified", "supported", "not supported"
 - "at MMI", "not at MMI", "permanent and stationary"
 - "temporarily disabled", "permanently disabled"
+dizynec@mailinator.com
+
 
 EXAMPLE - Preserving Decision Terms (CORRECT):
 Source: "The request for lumbar MRI is DENIED as not medically necessary."
@@ -586,17 +590,31 @@ MANDATORY LANGUAGE RULES (NO EXCEPTIONS):
 - "[Condition] was noted in the report..."
 - "As documented in the [document type]..."
 
-🚨 COMPLETE SENTENCE REQUIREMENTS:
+🚨 COMPLETE SENTENCE REQUIREMENTS (APPLIES TO BOTH COLLAPSED AND EXPANDED):
 - EVERY sentence MUST be grammatically complete and meaningful
-- NEVER write incomplete fragments like "The at MMI" or "The from work"
+- NEVER write incomplete fragments like "The at MMI", "The yet at", "The temporary disability"
 - ALWAYS include the subject (patient, report, document) AND complete verb phrase
-- Examples of COMPLETE sentences:
-  ✅ "The patient is at maximum medical improvement (MMI)"
+- Collapsed text is a SENTENCE, not a phrase - it needs subject + verb + object
+
+Examples of COMPLETE collapsed sentences:
+  ✅ "The patient is not yet at maximum medical improvement (MMI)"
+  ✅ "The patient is on temporary total disability (TTD)"
   ✅ "The report documented that the patient is off from work"
   ✅ "The patient cannot return to work at this time"
-  ❌ "The at MMI" (INCOMPLETE - missing subject and verb)
-  ❌ "The from work" (INCOMPLETE - meaningless fragment)
-  ❌ "The return to work at this time" (INCOMPLETE - missing subject and verb)
+  
+Examples of INCOMPLETE collapsed sentences (NEVER DO THIS):
+  ❌ "The yet at Maximum Medical Improvement (MMI)" (MISSING "patient is not")
+  ❌ "The temporary total disability (TTD)" (MISSING "patient is on")
+  ❌ "The at MMI" (MISSING "patient is")
+  ❌ "The from work" (MEANINGLESS fragment)
+  ❌ "The return to work at this time" (MISSING subject and verb)
+
+🔴 CRITICAL FIX PATTERNS FOR COLLAPSED TEXT:
+- "The yet at..." → MUST BE "The patient is not yet at..."
+- "The temporary..." → MUST BE "The patient is on temporary..." OR "The patient has temporary..."
+- "The permanent..." → MUST BE "The patient is permanently..." OR "The patient has permanent..."
+- "The at..." → MUST BE "The patient is at..." OR "The report documented that the patient is at..."
+- "The from..." → MUST BE "The patient is off from..." OR "The report documented that the patient is from..."
 
 TENSE & VOICE:
 - Past tense only (was documented, were noted, was described)
@@ -725,8 +743,15 @@ EXAMPLE - recommendations (CORRECT):
 EXAMPLE - mmi_status (CORRECT):
 {{
   "field": "mmi_status",
-  "collapsed": "The patient is at maximum medical improvement (MMI)",
-  "expanded": "The report indicated that the patient is at maximum medical improvement (MMI) due to ongoing symptoms and the need for further treatment."
+  "collapsed": "The patient is not yet at maximum medical improvement (MMI)",
+  "expanded": "The report indicated that the patient is not yet at maximum medical improvement (MMI) due to ongoing symptoms and the need for further treatment."
+}}
+
+❌ WRONG - mmi_status (INCOMPLETE collapsed):
+{{
+  "field": "mmi_status",
+  "collapsed": "The yet at Maximum Medical Improvement (MMI)",  ← WRONG! Missing "patient is not"
+  "expanded": "The report indicated that the yet at maximum medical improvement..."  ← MEANINGLESS!
 }}
 
 ❌ WRONG - mmi_status (INCOMPLETE):
@@ -739,8 +764,15 @@ EXAMPLE - mmi_status (CORRECT):
 EXAMPLE - work_status (CORRECT):
 {{
   "field": "work_status",
-  "collapsed": "The patient is off from work with restrictions",
-  "expanded": "The report documented that the patient cannot return to work at this time. Work restrictions included no lifting, climbing, or kneeling."
+  "collapsed": "The patient is on temporary total disability (TTD)",
+  "expanded": "The report documented that the patient is on temporary total disability (TTD) due to work restrictions, including no use of the left arm. Return to work is contingent upon employer accommodations."
+}}
+
+❌ WRONG - work_status (INCOMPLETE collapsed):
+{{
+  "field": "work_status",
+  "collapsed": "The temporary total disability (TTD)",  ← WRONG! Missing "patient is on"
+  "expanded": "The report documented that the temporary total disability due to work restrictions..."  ← MEANINGLESS!
 }}
 
 ❌ WRONG - work_status (INCOMPLETE):
