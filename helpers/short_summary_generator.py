@@ -546,7 +546,6 @@ When the document contains specific decision or status terms, you MUST include t
 - "certified", "supported", "not supported"
 - "at MMI", "not at MMI", "permanent and stationary"
 - "temporarily disabled", "permanently disabled"
-dizynec@mailinator.com
 
 
 EXAMPLE - Preserving Decision Terms (CORRECT):
