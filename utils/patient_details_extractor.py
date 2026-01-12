@@ -199,15 +199,22 @@ class PatientDetailsExtractor:
             "date_of_report": None,
             "author": None
         }
-        logger.info(f"🔍 Attempting patient details extraction from summarizer using AI with signature_info: {signature_info}")
+        logger.info(f"🔍 Attempting patient details extraction from summarizer using AI: {signature_info}")
         
         # Extract signature author for use in prompt and as fallback
         signature_author = signature_info.get("author") if signature_info else None
         signature_confidence = signature_info.get("confidence") if signature_info else None
         signature_evidence = signature_info.get("evidence") if signature_info else None
+        signature_full_text = signature_info.get("full_extracted_text", "") if signature_info else ""
         
         if signature_author:
             logger.info(f"✍️ Signature info available for AI: {signature_author} (confidence: {signature_confidence})")
+            logger.info(f"✍️ Evidence: {signature_evidence}")
+            logger.info("=" * 60)
+            logger.info("📄 FULL SIGNATURE TEXT BEING SENT TO AI:")
+            logger.info("=" * 60)
+            logger.info(signature_full_text[:1000] if signature_full_text else "No full text available")
+            logger.info("=" * 60)
         
         if not summary_text or len(summary_text.strip()) < 50:
             logger.warning("⚠️ Summary text too short for AI extraction")
@@ -357,15 +364,9 @@ class PatientDetailsExtractor:
     "extraction_notes": "Brief notes on what was found"
     }"""
 
-            # Build signature context for the prompt
+            # Build signature context for the prompt (use already extracted values from above)
             signature_context = ""
-            signature_full_text = ""
-            if signature_info:
-                signature_author = signature_info.get("author")
-                signature_confidence = signature_info.get("confidence")
-                signature_evidence = signature_info.get("evidence")
-                signature_full_text = signature_info.get("full_extracted_text", "")
-                
+            if signature_info and signature_full_text:
                 signature_context = f"""
 
 **SIGNATURE EXTRACTION HINT:**
@@ -377,7 +378,9 @@ A regex-based signature extractor has identified a potential author from the raw
 **FULL SIGNATURE BLOCK TEXT (500 words from signature location):**
 {signature_full_text}
 
-Use this signature block text as the PRIMARY source for author identification. This text contains the actual signature area of the document including the matched pattern and surrounding context.
+IMPORTANT: The text above contains the actual signature block from the document. Look for the REAL person's name (not just "Claims Examiner" or job titles). 
+For example, if you see "Sincerely, Claims Examiner Natalie Rocha", the author is "Natalie Rocha", NOT "Claims Examiner".
+Use this signature block text as the PRIMARY source for author identification.
 """
 
             human_message = f"""Extract patient details from this medical document summary.

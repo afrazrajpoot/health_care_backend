@@ -198,7 +198,7 @@ class SignatureExtractor:
             - context: Surrounding text
             - pattern_type: Type of pattern matched
         """
-        signature_blocks = cls.extract_signature_blocks(text, context_words=250)
+        signature_blocks = cls.extract_signature_blocks(text, context_words=500)
         
         if not signature_blocks:
             return None
