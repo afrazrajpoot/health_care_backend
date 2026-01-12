@@ -178,13 +178,15 @@ class PatientDetailsExtractor:
         self.date_formats = [re.compile(p, re.IGNORECASE) for p in self.DATE_FORMATS]
         self.claim_number_formats = [re.compile(p) for p in self.CLAIM_NUMBER_PATTERNS]
     
-    def extract_from_summarizer_ai(self, summary_text: str) -> Dict[str, Optional[str]]:
+    def extract_from_summarizer_ai(self, summary_text: str, signature_info: Optional[Dict[str, Any]] = None) -> Dict[str, Optional[str]]:
         """
         Extract patient details from summarizer output using AI.
         This is the PRIMARY extraction method - faster and more accurate than regex.
         
         Args:
             summary_text: The document summarizer output text
+            signature_info: Optional signature extraction result from extract_author_signature.
+                           Used to provide additional context for author detection and as fallback.
             
         Returns:
             Dictionary with patient_name, dob, doi, claim_number, date_of_report
@@ -197,6 +199,15 @@ class PatientDetailsExtractor:
             "date_of_report": None,
             "author": None
         }
+        logger.info(f"🔍 Attempting patient details extraction from summarizer using AI with signature_info: {signature_info}")
+        
+        # Extract signature author for use in prompt and as fallback
+        signature_author = signature_info.get("author") if signature_info else None
+        signature_confidence = signature_info.get("confidence") if signature_info else None
+        signature_evidence = signature_info.get("evidence") if signature_info else None
+        
+        if signature_author:
+            logger.info(f"✍️ Signature info available for AI: {signature_author} (confidence: {signature_confidence})")
         
         if not summary_text or len(summary_text.strip()) < 50:
             logger.warning("⚠️ Summary text too short for AI extraction")
@@ -223,41 +234,159 @@ class PatientDetailsExtractor:
             # Create extraction prompt optimized for summarizer output
             system_message = """You are a medical document analysis expert specialized in extracting patient information from medical report summaries.
 
-TASK: Extract patient details from the document summary provided.
+    TASK: Extract patient details from the document summary provided.
 
-EXTRACTION RULES:
-1. **Patient Name**: Look for the patient/applicant/injured worker's full name. Usually mentioned as "evaluation of [Name]" or "patient [Name]" or "Re: [Name]".
-2. **Date of Birth (DOB)**: Look for explicit DOB, date of birth, birth date. May also calculate from age if evaluation date is given (e.g., "64-year-old" evaluated on "May 5, 2017" means born around 1953).
-3. **Date of Injury (DOI)**: Look for injury date, accident date, incident date, date of loss. Usually described as "injury on [date]" or "industrial injury on [date]".
-4. **Claim Number**: Look for claim #, claim number, case number, WC claim, file number. Must be an alphanumeric identifier, NOT a random number sequence.
-5. **Date of Report/Evaluation**: Look for examination date, evaluation date, report date. Usually "evaluation on [date]" or "examined on [date]".
-6. **Author**: Identify the author of the report if mentioned. Author will only be the person (could be anyone like PA, Physician, Nurse) but make 100% sure that who signed the report. either handwritten or electronically i.e (• The report was electronically signed by Glenn Hananouchi, MD).
+    EXTRACTION RULES:
+    1. **Patient Name**: Look for the patient/applicant/injured worker's full name. Usually mentioned as "evaluation of [Name]" or "patient [Name]" or "Re: [Name]".
 
-IMPORTANT:
-- Return ONLY what you can clearly identify from the text
-- Use null for fields you cannot find with confidence
-- For dates, use format: YYYY-MM-DD when possible, otherwise use the exact format from the document
-- Patient name should be the actual full name, not a description
+    2. **Date of Birth (DOB)**: Look for explicit DOB, date of birth, birth date. May also calculate from age if evaluation date is given (e.g., "64-year-old" evaluated on "May 5, 2017" means born around 1953).
 
-Return a JSON object with these exact keys:
-{
-  "patient_name": "Full Name or null",
-  "dob": "Date or null",
-  "doi": "Date or null", 
-  "claim_number": "Claim ID or null",
-  "date_of_report": "Date or null",
-  "author": "Author or null",
-  "confidence": "high/medium/low",
-  "extraction_notes": "Brief notes on what was found"
-}"""
+    3. **Date of Injury (DOI)**: Look for injury date, accident date, incident date, date of loss. Usually described as "injury on [date]" or "industrial injury on [date]".
 
-            human_message = f"""Extract patient details from this medical document summary:
+    4. **Claim Number**: Look for claim #, claim number, case number, WC claim, file number. Must be an alphanumeric identifier, NOT a random number sequence.
 
----
-{summary_text}
----
+    5. **Date of Report/Evaluation**: Look for examination date, evaluation date, report date. Usually "evaluation on [date]" or "examined on [date]".
 
-Return ONLY the JSON object, no additional text."""
+    6. **Author (CRITICAL - READ CAREFULLY)**:
+    
+    **REASONING PROCESS FOR AUTHOR IDENTIFICATION:**
+    You MUST reason through the following steps IN ORDER before identifying the author:
+    
+    Step 1: IDENTIFY THE DOCUMENT TYPE
+    - Is this a consultation report, evaluation, medical examination, treatment note, imaging report, etc.?
+    - The document type helps determine who the author should be
+    
+    Step 2: LOOK FOR EXPLICIT AUTHORSHIP INDICATORS (HIGHEST PRIORITY)
+    These are DEFINITIVE signals of authorship:
+    ✅ "Electronically signed by [Name]"
+    ✅ "Digitally signed by [Name]"
+    ✅ "[Name], MD (signature)" or "Signed: [Name]"
+    ✅ "Prepared by [Name]" in signature block
+    ✅ "Respectfully submitted, [Name]"
+    ✅ Document letterhead with provider name at top/bottom
+    ✅ "This report is authored by [Name]"
+    
+    Step 3: LOOK FOR STRONG AUTHORSHIP SIGNALS (HIGH PRIORITY)
+    ✅ "Examination performed by [Name]"
+    ✅ "Evaluation conducted by [Name]"
+    ✅ "Report prepared by [Name]"
+    ✅ "[Name] performed the examination and prepared this report"
+    ✅ First-person narrative from a specific provider (e.g., "I examined the patient..." followed by name)
+    
+    Step 4: CONTEXTUAL ANALYSIS
+    - Who is the PRIMARY examiner/evaluator in this document?
+    - Who is providing the clinical opinion/interpretation?
+    - Distinguish between:
+        * Report author (the person writing/signing the report) ← THIS IS WHAT YOU WANT
+        * Referring provider (sent the patient)
+        * Treating provider (ongoing care provider)
+        * Previous examiners (mentioned in history)
+        * Consultants mentioned in passing
+        * Administrative staff (schedulers, coordinators)
+    
+    Step 5: VERIFY LOGICAL CONSISTENCY
+    - Does the identified author match the document type?
+        * Radiologist for imaging reports
+        * Orthopedist for orthopedic evaluations
+        * IME physician for IME reports
+    - Is the author's specialty/credentials mentioned?
+    - Is there a signature block or attestation?
+    
+    **EXCLUSION RULES - DO NOT identify as author:**
+    ❌ Referring physicians (unless they are also the report author)
+    ❌ Previous treating providers mentioned in patient history
+    ❌ Consultants whose opinions are referenced but didn't write this report
+    ❌ Administrative staff (case managers, coordinators, schedulers)
+    ❌ Other patients or family members mentioned
+    ❌ Generic references like "the provider stated" without a specific name
+    ❌ Names mentioned only in: patient history, previous records, appointment scheduling, or referral context
+    
+    **CONFIDENCE THRESHOLDS:**
+    - If you cannot identify explicit authorship signals (Steps 2-3) → return null
+    - If multiple people are mentioned but authorship is ambiguous → return null
+    - If only indirect mentions exist (Step 4 alone) → return null UNLESS there's strong contextual evidence
+    
+    **EXAMPLES:**
+    
+    ✅ CORRECT AUTHOR IDENTIFICATION:
+    Text: "The report was electronically signed by Glenn Hananouchi, MD"
+    → Author: "Glenn Hananouchi, MD"
+    Reason: Explicit signature statement (Step 2)
+    
+    Text: "Examination performed by Dr. Sarah Chen, Board Certified Orthopedic Surgeon. [detailed findings]. Respectfully submitted, Sarah Chen, MD"
+    → Author: "Sarah Chen, MD"
+    Reason: Examination performed + signature block (Steps 2-3)
+    
+    Text: "I examined Mr. Smith on 3/15/2024... [detailed findings]. John Martinez, MD, FAAOS"
+    → Author: "John Martinez, MD"
+    Reason: First-person examination + credentials in signature position (Steps 3-4)
+    
+    ❌ INCORRECT AUTHOR IDENTIFICATION:
+    Text: "Patient was referred by Dr. Johnson for evaluation. Dr. Smith evaluated the patient."
+    → DO NOT use "Dr. Johnson" (referring provider, not author)
+    → Possible author: "Dr. Smith" (examiner) - but ONLY if there's a signature or clear authorship statement
+    
+    Text: "Patient reports previous treatment by Dr. Williams. Case managed by Lisa Brown, RN."
+    → DO NOT use either (one is previous provider, one is case manager)
+    → Author: null
+    
+    Text: "Appointment scheduled with orthopedics. Patient seen in clinic."
+    → Author: null (no specific author identified)
+    
+    Text: "According to Dr. Lee's notes from 2023, the patient had surgery. Current evaluation shows..."
+    → DO NOT use "Dr. Lee" (previous provider mentioned in history)
+    → Author: null (unless current evaluator is explicitly identified elsewhere)
+
+    IMPORTANT:
+    - Return ONLY what you can clearly identify from the text
+    - Use null for fields you cannot find with confidence
+    - For dates, use format: YYYY-MM-DD when possible, otherwise use the exact format from the document
+    - Patient name should be the actual full name, not a description
+    - Author extraction requires explicit evidence - when in doubt, return null
+
+    Return a JSON object with these exact keys:
+    {
+    "patient_name": "Full Name or null",
+    "dob": "Date or null",
+    "doi": "Date or null", 
+    "claim_number": "Claim ID or null",
+    "date_of_report": "Date or null",
+    "author": "Author name with credentials or null",
+    "author_reasoning": "Brief explanation of how author was identified (Step number and evidence)",
+    "confidence": "high/medium/low",
+    "extraction_notes": "Brief notes on what was found"
+    }"""
+
+            # Build signature context for the prompt
+            signature_context = ""
+            if signature_author:
+                signature_context = f"""
+
+**SIGNATURE EXTRACTION HINT:**
+A regex-based signature extractor has identified a potential author from the raw document text:
+- Extracted Author: {signature_author}
+- Confidence: {signature_confidence}
+- Evidence: {signature_evidence}
+
+Use this as additional context. If you cannot find a better author through your analysis, and the signature confidence is 'high' or 'medium', you may use this extracted author.
+"""
+
+            human_message = f"""Extract patient details from this medical document summary.
+
+    CRITICAL: For the author field, you MUST follow the 5-step reasoning process in the system instructions. Think step-by-step:
+    1. What type of document is this?
+    2. Are there explicit authorship signals (signature, "signed by", "prepared by")?
+    3. Are there strong authorship signals (examination performed by, evaluation by)?
+    4. Who is the primary examiner vs. other mentioned people?
+    5. Does the identified author make logical sense for this document type?{signature_context}
+
+    Document Summary:
+    ---
+    primary source {summary_text}
+    secondary source {signature_info}
+    ---
+
+    Return ONLY the JSON object, no additional text."""
 
             messages = [
                 SystemMessage(content=system_message),
@@ -287,8 +416,14 @@ Return ONLY the JSON object, no additional text."""
                 result["date_of_report"] = extracted.get("date_of_report") if extracted.get("date_of_report") not in [None, "null", "None", ""] else None
                 result["author"] = extracted.get("author") if extracted.get("author") not in [None, "null", "None", ""] else None
                 
+                # Use signature author as fallback if AI didn't find author
+                if not result["author"] and signature_author and signature_confidence in ['high', 'medium']:
+                    logger.info(f"✍️ Using signature extractor fallback for author: {signature_author}")
+                    result["author"] = signature_author
+                
                 confidence = extracted.get("confidence", "unknown")
                 notes = extracted.get("extraction_notes", "")
+                author_reasoning = extracted.get("author_reasoning", "")
                 
                 logger.info("=" * 60)
                 logger.info("🤖 AI EXTRACTION FROM SUMMARIZER RESULTS:")
@@ -299,6 +434,8 @@ Return ONLY the JSON object, no additional text."""
                 logger.info(f"  Claim Number: {result['claim_number']}")
                 logger.info(f"  Date of Report: {result['date_of_report']}")
                 logger.info(f"  Author: {result['author']}")
+                if author_reasoning:
+                    logger.info(f"  Author Reasoning: {author_reasoning}")
                 logger.info(f"  Confidence: {confidence}")
                 logger.info(f"  Notes: {notes}")
                 logger.info("=" * 60)
@@ -317,7 +454,8 @@ Return ONLY the JSON object, no additional text."""
     def extract_with_fallback(
         self, 
         summary_text: str, 
-        document_dict: Optional[Dict[str, Any]] = None
+        document_dict: Optional[Dict[str, Any]] = None,
+        signature_info: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Optional[str]]:
         """
         Smart extraction that tries AI first, then falls back to layout parser for missing fields.
@@ -331,14 +469,15 @@ Return ONLY the JSON object, no additional text."""
         Args:
             summary_text: The document summarizer output text
             document_dict: Optional layout parser JSON for fallback extraction
+            signature_info: Optional signature extraction result for author detection
             
         Returns:
             Dictionary with patient_name, dob, doi, claim_number, date_of_report
         """
         logger.info("🔍 Starting smart patient details extraction...")
         
-        # Step 1: Try AI extraction from summarizer first
-        ai_result = self.extract_from_summarizer_ai(summary_text)
+        # Step 1: Try AI extraction from summarizer first (pass signature_info for author detection)
+        ai_result = self.extract_from_summarizer_ai(summary_text, signature_info=signature_info)
         
         # Check which fields are found
         ai_fields_found = {k: v for k, v in ai_result.items() if v is not None and k != 'date_of_report'}

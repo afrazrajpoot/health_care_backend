@@ -37,6 +37,7 @@ from utils.document_helpers import (
     merge_extraction_results,
     extract_summary_from_result
 )
+from utils.signature_extractor import extract_author_signature
 
 logger = logging.getLogger("document_ai")
 
@@ -189,8 +190,17 @@ class DocumentAIProcessor:
                 logger.info(f"First 500 chars: {result.text[:500]}")
                 logger.info("=" * 80)
             
-            # Extract text using simplified extractor
-            layout_data = extract_text_from_summarizer(result)
+            # Extract author signature from document text
+            # Use raw OCR text (result.text) for better signature detection as it contains full document content
+            raw_document_text = result.text or summary_text
+            signature_info = extract_author_signature(raw_document_text)
+            if signature_info:
+                logger.info(f"✍️ Signature extracted - Author: {signature_info.get('author')}, Confidence: {signature_info.get('confidence')}")
+            else:
+                logger.info("⚠️ No author signature found in document")
+            
+            # Extract text using simplified extractor (pass signature info for author detection)
+            layout_data = extract_text_from_summarizer(result, signature_info=signature_info)
             layout_data["layout_preserved"] = summary_text
             layout_data["raw_text"] = summary_text
             layout_data["structured_document"]["metadata"]["summary_chars"] = len(summary_text)
@@ -312,16 +322,23 @@ class DocumentAIProcessor:
         1. First: Try AI extraction from summarizer output (fast, accurate)
         2. If all fields found: Skip layout parser entirely
         3. If some fields missing: Use layout parser to fill gaps
-        4. Merge: Combine results for completeness
+        4. Use signature extractor as fallback for author if still missing
+        5. Merge: Combine results for completeness
         """
         patient_details = {}
         
         # Get patient extractor instance
         patient_extractor = get_patient_extractor()
         
-        # Step 1: Try AI extraction from summarizer first
+        # Get signature info from layout_data if available (extracted earlier)
+        signature_info = layout_data.get("signature_info")
+        signature_author = signature_info.get("author") if signature_info else None
+        if signature_author:
+            logger.info(f"✍️ Signature author available for fallback: {signature_author} ({signature_info.get('confidence')} confidence)")
+        
+        # Step 1: Try AI extraction from summarizer first (pass signature_info for author detection)
         logger.info("🤖 Step 1: Attempting AI extraction from summarizer output...")
-        ai_result = patient_extractor.extract_from_summarizer_ai(summary_text)
+        ai_result = patient_extractor.extract_from_summarizer_ai(summary_text, signature_info=signature_info)
         
         # Check which fields are found by AI
         ai_fields_found = [k for k in ['patient_name', 'dob', 'doi', 'claim_number', 'author'] if ai_result.get(k)]
@@ -367,25 +384,28 @@ class DocumentAIProcessor:
                 # Extract from layout parser
                 layout_patient_details = patient_extractor.extract_from_layout_json(document_dict)
                 
-                # Step 4: Merge results - AI takes priority, layout fills gaps
+                # Step 4: Merge results - AI takes priority, layout fills gaps, signature as final fallback for author
                 patient_details = {
                     "patient_name": ai_result.get("patient_name") or layout_patient_details.get("patient_name"),
                     "dob": ai_result.get("dob") or layout_patient_details.get("dob"),
                     "doi": ai_result.get("doi") or layout_patient_details.get("doi"),
                     "claim_number": ai_result.get("claim_number") or layout_patient_details.get("claim_number"),
-                    "author": ai_result.get("author") or layout_patient_details.get("author"),
+                    "author": ai_result.get("author") or layout_patient_details.get("author") or signature_author,
                     "date_of_report": ai_result.get("date_of_report")  # Only from AI
                 }
                 
                 # Log merge results
                 logger.info("=" * 60)
-                logger.info("🔗 MERGED PATIENT DETAILS (AI + Layout Parser):")
+                logger.info("🔗 MERGED PATIENT DETAILS (AI + Layout Parser + Signature):")
                 logger.info("=" * 60)
                 for field in ['patient_name', 'dob', 'doi', 'claim_number', 'author']:
                     ai_val = ai_result.get(field)
                     layout_val = layout_patient_details.get(field)
                     merged_val = patient_details.get(field)
-                    source = "AI" if ai_val else ("Layout" if layout_val else "Not found")
+                    if field == 'author':
+                        source = "AI" if ai_val else ("Layout" if layout_val else ("Signature" if signature_author and merged_val == signature_author else "Not found"))
+                    else:
+                        source = "AI" if ai_val else ("Layout" if layout_val else "Not found")
                     logger.info(f"  {field}: {merged_val} (source: {source})")
                 logger.info("=" * 60)
                 
@@ -461,10 +481,15 @@ class DocumentAIProcessor:
             patient_details = {}
             patient_extractor = get_patient_extractor()
             
-            # Step 1: Try AI extraction from summarizer first
-            ai_result = patient_extractor.extract_from_summarizer_ai(summary_text)
-            ai_fields_found = [k for k in ['patient_name', 'dob', 'doi', 'claim_number'] if ai_result.get(k)]
-            ai_missing_fields = [k for k in ['patient_name', 'dob', 'doi', 'claim_number'] if not ai_result.get(k)]
+            # Extract author signature from summary text for batch processing
+            signature_info = extract_author_signature(summary_text)
+            if signature_info:
+                logger.info(f"✍️ Signature extracted - Author: {signature_info.get('author')}, Confidence: {signature_info.get('confidence')}")
+            
+            # Step 1: Try AI extraction from summarizer first (pass signature_info for author detection)
+            ai_result = patient_extractor.extract_from_summarizer_ai(summary_text, signature_info=signature_info)
+            ai_fields_found = [k for k in ['patient_name', 'dob', 'doi', 'claim_number', 'author'] if ai_result.get(k)]
+            ai_missing_fields = [k for k in ['patient_name', 'dob', 'doi', 'claim_number', 'author'] if not ai_result.get(k)]
             
             logger.info(f"📊 AI extraction found {len(ai_fields_found)}/4 fields: {ai_fields_found}")
             

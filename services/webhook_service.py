@@ -680,7 +680,9 @@ class WebhookService:
     async def create_treatment_history(self, 
                                     processed_data: dict, 
                                     lookup_result: dict,
-                                    document_id: str = None) -> dict:
+                                    document_id: str = None,
+                                    ai_summarizer_text: str = ""
+                                    ) -> dict:
         """Step 3.5: Create or update treatment history"""
         logger.info(f"🔄 Creating treatment history for {lookup_result.get('patient_name_to_use')}")
         
@@ -757,7 +759,7 @@ class WebhookService:
             only_current = existing_history is not None
             if only_current:
                 logger.info(f"🔄 Treatment history exists for {lookup_result.get('patient_name_to_use')}, generating new entries for archive/merge")
-            
+            logger.info(f"📝 Generating treatment history for patient: {ai_summarizer_text}")
             # Create treatment history
             treatment_history = await history_generator.generate_treatment_history(
                 patient_name=lookup_result.get("patient_name_to_use"),
@@ -765,9 +767,10 @@ class WebhookService:
                 claim_number=lookup_result.get("claim_to_save"),
                 physician_id=processed_data.get("physician_id"),
                 current_document_id=document_id,
-                current_document_analysis=document_analysis,
+                current_document_analysis=ai_summarizer_text,
                 current_document_data=current_doc_data,
                 only_current=only_current
+                
             )
             
             # ✅ Step 3.6: Save treatment history to database (Moved from TreatmentHistoryGenerator)
@@ -1649,7 +1652,8 @@ class WebhookService:
                 treatment_history = await self.create_treatment_history(
                     processed_data=processed_data,
                     lookup_result=lookup_result,
-                    document_id=save_result["document_id"]
+                    document_id=save_result["document_id"],
+                    ai_summarizer_text=processed_data.get("raw_text", "")
                 )
                 logger.info(f"✅ Treatment history created with {sum(len(v) for v in treatment_history.values())} total events across {len(treatment_history)} categories")
             else:

@@ -3,6 +3,7 @@ from typing import List, Optional, Any, Dict
 from datetime import datetime
 import traceback
 import os
+import logging
 from datetime import datetime
 from fastapi import HTTPException, UploadFile, File, Query
 from prisma import Prisma
@@ -11,6 +12,9 @@ from datetime import datetime
 
 # Create Prisma client instance
 db = Prisma()
+
+# Module level logger
+logger = logging.getLogger(__name__)
 
 
 async def check_subscription(
@@ -321,15 +325,37 @@ def is_same_patient(name1: str, dob1: Optional[str], claim1: Optional[str],
     return False
     
 
-def extract_text_from_summarizer(document) -> Dict[str, Any]:
+def extract_text_from_summarizer(document, signature_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Extract text from summarizer response.
     Summarizer returns clean, organized text with natural paragraph structure.
+    
+    Args:
+        document: The Document AI summarizer response
+        signature_info: Optional author signature info extracted using extract_author_signature.
+                       Used as fallback for author detection if AI summarizer doesn't find it.
     """
     summarized_text = document.text or ""
     
     # Extract page count if available
     page_count = len(document.pages) if document.pages else 0
+    
+    # Build metadata with signature info if available
+    metadata = {
+        "has_summary": True,
+        "total_chars": len(summarized_text)
+    }
+    
+    # Add signature/author info to metadata if available
+    if signature_info:
+        metadata["signature_extracted"] = True
+        metadata["signature_author"] = signature_info.get("author")
+        metadata["signature_confidence"] = signature_info.get("confidence")
+        metadata["signature_evidence"] = signature_info.get("evidence")
+        metadata["signature_pattern_type"] = signature_info.get("pattern_type")
+        logger.info(f"✍️ Signature info added to metadata: {signature_info.get('author')} ({signature_info.get('confidence')} confidence)")
+    else:
+        metadata["signature_extracted"] = False
     
     # Build simple structure for compatibility with existing code
     return {
@@ -342,11 +368,9 @@ def extract_text_from_summarizer(document) -> Dict[str, Any]:
                 "summarized": True
             },
             "pages": [],
-            "metadata": {
-                "has_summary": True,
-                "total_chars": len(summarized_text)
-            }
-        }
+            "metadata": metadata
+        },
+        "signature_info": signature_info  # Include full signature info for downstream use
     }
 
 

@@ -332,12 +332,14 @@ class TreatmentHistoryGenerator:
         
         return full_context
 
+    
     async def generate_treatment_history_with_llm(self, patient_name: str, 
-                                                context: str, 
-                                                current_document_analysis: Any = None,
-                                                max_retries: int = 3) -> Dict[str, List[Dict]]:
+                                            context: str, 
+                                            current_document_analysis: Any = None,
+                                            max_retries: int = 3) -> Dict[str, List[Dict]]:
         """
-        Use LLM to generate structured treatment history with retry logic
+        Use LLM to generate structured treatment history with retry logic.
+        Follows DocLatch Treatment History Timeline canonical specification.
         """
         last_error = None
         
@@ -351,7 +353,7 @@ class TreatmentHistoryGenerator:
                 
                 # Prepare enhanced prompt for LLM
                 prompt = f"""
-    You are a comprehensive medical history analyzer. Your task is to extract ALL treatment events and medical information from the provided documents into a structured timeline. You must be thorough and precise, capturing every significant medical detail without adding any information not present in the documents.
+    You are a medical document extraction system. Your ONLY task is to extract explicitly documented events from external medical documents into a chronological timeline. You MUST NOT interpret, infer, summarize, or generate any content not explicitly present in the source documents.
 
     PATIENT: {patient_name}
 
@@ -361,155 +363,173 @@ class TreatmentHistoryGenerator:
     CURRENT DOCUMENT ANALYSIS (if available):
     {str(current_document_analysis) if current_document_analysis else 'Not available'}
 
-    === CRITICAL EXTRACTION RULES ===
+    === CRITICAL RULES (MANDATORY) ===
 
-    1. DATE HANDLING (STRICTLY ENFORCED):
+    🔴 RULE 1: NO FABRICATION - ZERO TOLERANCE
+    - Extract ONLY what is explicitly documented
+    - NEVER infer, assume, or generate details
+    - NEVER summarize in your own words
+    - NEVER add clinical reasoning or interpretation
+    - If a detail is not explicitly stated → DO NOT include it
+    - When in doubt → EXCLUDE the information
+
+    🔴 RULE 2: DATE HANDLING (STRICTLY ENFORCED)
     - ONLY use dates EXPLICITLY stated in the documents
-    - NEVER use today's date, current date, or system date as fallback
-    - NEVER invent, assume, or guess dates
-    - If no date is mentioned, leave the date field as empty string ""
-    - Accept partial dates (e.g., "March 2025", "2025", "Q1 2024")
-    - DO NOT use placeholder text like "Date not specified" - use empty string ""
-    - Examples of acceptable dates: "03/10/2025", "March 2025", "2025", "03/2025"
-    - Examples of UNACCEPTABLE: "01/02/2026" (if not in document), "Date not specified", "Unknown"
+    - NEVER use today's date, current date, or system date
+    - NEVER guess or approximate dates
+    - If NO date is mentioned → use empty string ""
+    - Acceptable date formats: "03/10/2025", "March 2025", "2025", "Q1 2024"
+    - DO NOT use: "Date not specified", "Unknown", placeholder text
+    - DO NOT use dates from document receipt/processing
 
-    2. COMPLETENESS - CAPTURE ALL DETAILS:
-    Extract EVERY piece of medical information including:
-    
-    a) DIAGNOSTIC INFORMATION:
-        - All diagnostic test results (MRI, CT, X-ray, ultrasound, blood work, etc.)
-        - Specific findings with measurements (e.g., "3mm disc protrusion at L4-L5")
-        - Severity indicators (mild, moderate, severe)
-        - Comparative changes (improved, worsened, stable, new finding)
-        - Radiologist/specialist interpretations
-    
-    b) SYMPTOMS & COMPLAINTS:
-        - Patient-reported symptoms with location and characteristics
-        - Pain levels/scales if mentioned
-        - Functional limitations (e.g., "difficulty walking", "cannot lift arm")
-        - Symptom progression (onset, duration, frequency)
-    
-    c) TREATMENTS & INTERVENTIONS:
-        - All prescribed medications (name, dosage, frequency if mentioned)
-        - Physical therapy sessions (frequency, specific exercises, progress)
-        - Injections (type, location, dates administered)
-        - Surgical procedures (type, date, outcome)
-        - Alternative treatments (chiropractic, acupuncture, etc.)
-    
-    d) CLINICAL ASSESSMENTS:
-        - Provider observations and examination findings
-        - Diagnosis codes (ICD-10) if mentioned
-        - Treatment plan changes
-        - Specialist referrals and consultations
-        - Work restrictions or activity limitations
-    
-    e) OUTCOMES & PROGRESS:
-        - Treatment effectiveness (improved, no change, worsened)
-        - Return to work status
-        - Functional improvement metrics
-        - Patient satisfaction or concerns
-        - Next steps or recommendations
+    🔴 RULE 3: SOURCE ATTRIBUTION (MANDATORY)
+    - Every entry MUST include document source
+    - Format: "Source: [Document Type] dated [Document Date]"
+    - Example: "Source: Orthopedic consult report dated 11/12/2025"
+    - If document type unclear → use "External document dated [date]"
 
-    3. PRECISION & ACCURACY:
-    - Use EXACT terminology from the documents (medical terms, measurements)
-    - Include specific numbers, percentages, measurements
-    - Preserve medical abbreviations if used in source
-    - Capture both positive findings AND negative findings (e.g., "no evidence of fracture")
-    - Include qualifiers (mild, moderate, severe, chronic, acute)
+    🔴 RULE 4: LANGUAGE REQUIREMENTS
+    - Use ONLY past tense or present-perfect tense
+    - Use neutral, factual, descriptive language
+    - State what was "documented", "noted", "referenced", "completed"
+    - NEVER use: recommended, planned, required, indicated, needed, failed, succeeded, appropriate, unnecessary
 
-    4. CONTEXT PRESERVATION:
-    - Link related events (e.g., "Follow-up MRI after ESI injection")
-    - Note causal relationships when mentioned
-    - Include provider recommendations and rationale
-    - Capture patient compliance or non-compliance if noted
+    🔴 RULE 5: EXTRACTION SCOPE
+    Extract ONLY these types of documented events:
+    - Diagnostic tests completed (with explicit results if stated)
+    - Consultations documented (with explicit findings if stated)
+    - Treatments administered/completed
+    - Utilization review decisions
+    - Therapy courses completed
+    - Surgical procedures performed
+    - Medication changes documented
 
-    5. NO FABRICATION:
-    - NEVER add information not in the documents
-    - NEVER make clinical inferences or assumptions
-    - NEVER generalize specific findings
-    - If uncertain about a detail, err on the side of verbatim extraction
+    DO NOT extract:
+    - Treatment plans or future recommendations
+    - Clinical reasoning or interpretation
+    - Physician opinions about appropriateness
+    - Hypothetical scenarios ("if patient fails...")
+    - Internal EMR documentation
+
+    === VERBATIM EXTRACTION RULES ===
+
+    When extracting details:
+    1. Use exact medical terminology from source
+    2. Include specific measurements/values ONLY if explicitly stated
+    3. Preserve exact phrasing for diagnoses and findings
+    4. If a finding has qualifiers (mild, moderate, severe) → include them ONLY if stated
+    5. Do NOT paraphrase medical findings
+    6. Do NOT combine information from multiple sentences into interpretations
+
+    Example - CORRECT extraction:
+    Document states: "MRI shows 3mm disc protrusion at L4-L5"
+    Extract: "MRI documented 3mm disc protrusion at L4-L5"
+
+    Example - INCORRECT extraction:
+    Document states: "MRI shows 3mm disc protrusion at L4-L5"
+    Extract: "Patient has significant disc herniation requiring surgical evaluation"
+    (This adds interpretation, severity judgment, and treatment direction not stated)
 
     === BODY SYSTEM CATEGORIZATION ===
 
-    Organize ALL extracted events into these categories based on the primary body system involved:
+    Organize events into these categories based on PRIMARY body system:
 
-    - musculoskeletal_system: bones, joints, spine, muscles, tendons, ligaments, cartilage, orthopedic issues, sports injuries, fractures, arthritis, back pain, neck pain, disc problems, strains, sprains
-
-    - cardiovascular_system: heart, blood vessels, arteries, veins, circulation, blood pressure, cardiac conditions, chest pain, palpitations, vascular diseases
-
-    - pulmonary_respiratory: lungs, airways, breathing, asthma, COPD, bronchitis, pneumonia, shortness of breath, respiratory infections
-
-    - neurological: brain, spinal cord, nerves, headaches, migraines, seizures, stroke, neuropathy, numbness, tingling, cognitive issues, movement disorders
-
-    - gastrointestinal: stomach, intestines, liver, gallbladder, pancreas, esophagus, colon, digestion, GERD, ulcers, IBS, hepatitis, abdominal pain
-
-    - metabolic_endocrine: diabetes, thyroid disorders, hormonal imbalances, metabolic syndrome, adrenal issues, pituitary disorders, obesity
-
-    - genitourinary_renal: kidneys, bladder, urinary tract, prostate, urination issues, kidney stones, UTIs, renal failure
-
-    - reproductive_obstetric_gynecologic: pregnancy, menstrual issues, fertility, ovarian/uterine conditions, pelvic pain, menopause, contraception
-
-    - dermatological: skin conditions, rashes, lesions, wounds, burns, acne, eczema, psoriasis, skin infections, ulcers
-
-    - ophthalmologic: eyes, vision problems, cataracts, glaucoma, retinal issues, eye injuries, visual disturbances
-
-    - ent_head_neck: ears, nose, throat, sinuses, hearing loss, tinnitus, vertigo, sinus infections, voice problems
-
-    - dental_oral: teeth, gums, jaw, TMJ, oral cavity, dental procedures, tooth pain, periodontal disease
-
-    - hematologic_lymphatic: blood disorders, anemia, clotting disorders, lymph nodes, bleeding problems, blood cancers
-
-    - immune_allergy: autoimmune diseases, allergic reactions, immunodeficiency, hypersensitivity, chronic infections
-
-    - psychiatric_mental_health: depression, anxiety, PTSD, bipolar disorder, schizophrenia, cognitive disorders, substance abuse, psychological trauma
-
-    - sleep_disorders: insomnia, sleep apnea, narcolepsy, restless leg syndrome, circadian rhythm disorders
-
+    - musculoskeletal_system: bones, joints, spine, muscles, tendons, ligaments, orthopedic conditions
+    - cardiovascular_system: heart, blood vessels, circulation, cardiac conditions
+    - pulmonary_respiratory: lungs, airways, breathing disorders
+    - neurological: brain, spinal cord, nerves, headaches, neuropathy
+    - gastrointestinal: stomach, intestines, liver, digestive system
+    - metabolic_endocrine: diabetes, thyroid, hormonal disorders
+    - genitourinary_renal: kidneys, bladder, urinary system
+    - reproductive_obstetric_gynecologic: pregnancy, menstrual, fertility, pelvic conditions
+    - dermatological: skin conditions, wounds, rashes
+    - ophthalmologic: eyes, vision conditions
+    - ent_head_neck: ears, nose, throat, sinuses
+    - dental_oral: teeth, gums, jaw, oral cavity
+    - hematologic_lymphatic: blood disorders, lymph system
+    - immune_allergy: autoimmune diseases, allergic reactions
+    - psychiatric_mental_health: mental health conditions, psychological disorders
+    - sleep_disorders: sleep-related conditions
     - other_systems: conditions not fitting above categories
 
     === OUTPUT FORMAT ===
 
-    Return ONLY valid JSON with this exact structure:
+    Return ONLY valid JSON with this EXACT structure:
 
     {{
     "musculoskeletal_system": [
         {{
-        "date": "03/10/2025",
-        "event": "MRI Lumbar Spine",
-        "details": "L4-L5: 3mm posterior disc protrusion with mild canal stenosis. L5-S1: Disc desiccation without herniation. Mild facet arthropathy noted bilaterally. Radiologist recommends correlation with clinical symptoms. ESI considered if conservative treatment fails."
+        "date": "11/12/2025",
+        "event_type": "Orthopedic consultation documented",
+        "details": "Shoulder pathology documented. Injection therapy referenced as treatment option. Surgical intervention referenced as contingent option.",
+        "source": "Orthopedic consult report dated 11/12/2025",
+        "author": "Consulting orthopedist"
         }},
         {{
-        "date": "02/15/2025",
-        "event": "Physical Therapy - Session 8",
-        "details": "Patient reports 40% pain reduction with core strengthening exercises. Improved lumbar ROM: flexion 70°, extension 20°. Able to perform bridging exercises without pain. Continuing 2x/week for 4 more weeks. Added McKenzie exercises."
+        "date": "11/22/2025",
+        "event_type": "Utilization review decision received",
+        "details": "Injection request denied. Rationale documented: insufficient objective findings per UR determination.",
+        "source": "UR determination dated 11/22/2025",
+        "author": "UR physician"
         }},
         {{
         "date": "",
-        "event": "Orthopedic Consultation",
-        "details": "Orthopedist reviewed imaging, confirmed L4-L5 disc protrusion with radiculopathy. Patient reports shooting pain down right leg (L5 distribution). Recommends trial of oral steroids before considering ESI. Work restrictions: No lifting >10 lbs."
+        "event_type": "Physical therapy course completed",
+        "details": "Therapy course completed per facility documentation.",
+        "source": "Physical therapy discharge summary",
+        "author": "Treating facility"
         }}
     ],
-    "cardiovascular_system": [],
     "neurological": [
         {{
         "date": "03/10/2025",
-        "event": "Nerve Conduction Study",
-        "details": "Right L5 radiculopathy confirmed. Prolonged F-wave latency. No evidence of peripheral neuropathy. Consistent with lumbar disc compression at L4-L5 level."
+        "event_type": "Nerve conduction study completed",
+        "details": "Right L5 radiculopathy documented. Prolonged F-wave latency noted.",
+        "source": "NCS report dated 03/10/2025",
+        "author": "Neurologist"
         }}
-    ]
+    ],
+    "cardiovascular_system": [],
+    "pulmonary_respiratory": []
     }}
 
-    IMPORTANT REMINDERS:
-    - Every significant medical detail must be captured in the "details" field
-    - Use complete sentences with proper medical terminology
-    - Include ALL measurements, test results, and clinical findings
-    - Link related events when mentioned (e.g., "Follow-up to previous MRI dated 01/15/2025")
-    - If a document mentions "no change" or "stable findings", capture this with reference to what is stable
-    - Capture provider names, facility names if mentioned for context
-    - Include patient-reported outcomes and functional status
-    - Note any medication changes, dosage adjustments, or discontinuations
+    === FIELD DEFINITIONS ===
 
-    Return ONLY the JSON object, no additional text or explanation.
+    - date: Exact date from document (empty string "" if not stated)
+    - event_type: Type of documented event (consultation documented, test completed, decision received, etc.)
+    - details: VERBATIM extraction of documented findings/outcomes (NO interpretation)
+    - source: Document type and date
+    - author: External source author (orthopedist, radiologist, UR physician, facility)
+
+    === QUALITY CHECKLIST ===
+
+    Before returning JSON, verify:
+    □ Every date is from source document or empty string
+    □ Every entry has source attribution
+    □ Language is past tense and factual
+    □ No interpretive or predictive language used
+    □ No fabricated details included
+    □ Details match verbatim or near-verbatim from source
+    □ Author is external source, never treating physician
+    □ No treatment plans or recommendations included
+
+    === CRITICAL REMINDERS ===
+
+    ✅ DOCUMENT what was done, when, by whom
+    ✅ USE past tense: "documented", "completed", "received", "noted"
+    ✅ EXTRACT verbatim findings when present
+    ✅ ATTRIBUTE every entry to source document
+
+    ❌ NEVER interpret or infer
+    ❌ NEVER use: "recommended", "should", "planned", "indicated"
+    ❌ NEVER fabricate measurements or findings
+    ❌ NEVER combine sources into conclusions
+    ❌ NEVER add clinical reasoning
+
+    If a document contains NO extractable events → return empty arrays
+    If uncertain about extraction → EXCLUDE the information
+
+    Return ONLY the JSON object, no additional text.
                 """
                 
                 # Call Azure OpenAI
@@ -521,12 +541,12 @@ class TreatmentHistoryGenerator:
                     messages=[
                         {
                             "role": "system", 
-                            "content": "You are a meticulous medical data analyst specializing in comprehensive treatment history extraction. You extract ALL relevant medical information with precision, never adding information not present in the source documents. You follow date handling rules strictly and organize data by body systems accurately."
+                            "content": "You are a strict medical document extraction system. You extract ONLY explicitly documented events from external medical documents with zero fabrication, zero interpretation, and zero summarization. You follow the DocLatch Treatment History Timeline specification exactly. You NEVER infer, assume, or generate content not explicitly present in source documents."
                         },
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.1,  # Low temperature for consistency
-                    max_tokens=4000,  # Increased for comprehensive details
+                    temperature=0.0,  # Zero temperature for strict extraction
+                    max_tokens=4000,
                     response_format={"type": "json_object"}
                 )
                 
@@ -543,6 +563,25 @@ class TreatmentHistoryGenerator:
                     logger.warning(f"⚠️ LLM returned non-dict response for patient {patient_name}, type: {type(history_json)}")
                     logger.warning(f"⚠️ Response content: {raw_response[:300]}")
                     return self._get_empty_history_template()
+                
+                # Validate required fields in each entry
+                for category, events in history_json.items():
+                    if isinstance(events, list):
+                        validated_events = []
+                        for event in events:
+                            # Check required fields
+                            if not isinstance(event, dict):
+                                logger.warning(f"⚠️ Skipping invalid event (not a dict): {event}")
+                                continue
+                            
+                            required_fields = ['date', 'event_type', 'details', 'source', 'author']
+                            if all(field in event for field in required_fields):
+                                validated_events.append(event)
+                            else:
+                                missing = [f for f in required_fields if f not in event]
+                                logger.warning(f"⚠️ Skipping event missing required fields {missing}: {event}")
+                        
+                        history_json[category] = validated_events
                 
                 # Deduplicate events in each category
                 for category, events in history_json.items():
