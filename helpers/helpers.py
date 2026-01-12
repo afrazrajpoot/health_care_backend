@@ -236,25 +236,43 @@ def normalize_dob(dob: Optional[Any]) -> Optional[str]:
     if not dob or str(dob).lower() in ["not specified", "unknown", "n/a", "na", ""]:
         return None
     
+    dob_str = str(dob).strip()
+    
+    # Handle invalid/placeholder dates (00/00/0000, 0000-00-00, etc.)
+    invalid_patterns = [
+        "00/00/0000", "0000-00-00", "00-00-0000", "0000/00/00",
+        "00/00/00", "00-00-00", "0/0/0", "0-0-0",
+        "01/01/0001", "0001-01-01", "1/1/1", "1-1-1",
+        "01/01/1900", "1900-01-01",  # Common placeholder dates
+    ]
+    if dob_str in invalid_patterns or dob_str.startswith("00") or dob_str.startswith("0000"):
+        logger.debug(f"⚠️ Invalid/placeholder DOB detected: '{dob_str}' - treating as None")
+        return None
+    
     # If it's already a datetime object
     if isinstance(dob, datetime):
         return dob.strftime("%Y-%m-%d")
     
     # Try ISO format first
     try:
-        return datetime.fromisoformat(str(dob)).strftime("%Y-%m-%d")
+        return datetime.fromisoformat(dob_str).strftime("%Y-%m-%d")
     except:
         pass
     
     # Try common formats
     for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d", "%m-%d-%Y"):
         try:
-            return datetime.strptime(str(dob), fmt).strftime("%Y-%m-%d")
+            parsed = datetime.strptime(dob_str, fmt)
+            # Validate the parsed date is reasonable (year > 1900)
+            if parsed.year < 1900:
+                logger.debug(f"⚠️ DOB year too old: {parsed.year} - treating as None")
+                return None
+            return parsed.strftime("%Y-%m-%d")
         except:
             pass
     
     # Return as-is if parsing fails (for manual review)
-    return str(dob) if dob else None
+    return dob_str if dob else None
 
 def is_same_patient(name1: str, dob1: Optional[str], claim1: Optional[str],
                    name2: str, dob2: Optional[str], claim2: Optional[str]) -> bool:

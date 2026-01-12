@@ -359,16 +359,25 @@ class PatientDetailsExtractor:
 
             # Build signature context for the prompt
             signature_context = ""
-            if signature_author:
+            signature_full_text = ""
+            if signature_info:
+                signature_author = signature_info.get("author")
+                signature_confidence = signature_info.get("confidence")
+                signature_evidence = signature_info.get("evidence")
+                signature_full_text = signature_info.get("full_extracted_text", "")
+                
                 signature_context = f"""
 
 **SIGNATURE EXTRACTION HINT:**
 A regex-based signature extractor has identified a potential author from the raw document text:
 - Extracted Author: {signature_author}
 - Confidence: {signature_confidence}
-- Evidence: {signature_evidence}
+- Evidence (matched pattern): {signature_evidence}
 
-Use this as additional context. If you cannot find a better author through your analysis, and the signature confidence is 'high' or 'medium', you may use this extracted author.
+**FULL SIGNATURE BLOCK TEXT (500 words from signature location):**
+{signature_full_text}
+
+Use this signature block text as the PRIMARY source for author identification. This text contains the actual signature area of the document including the matched pattern and surrounding context.
 """
 
             human_message = f"""Extract patient details from this medical document summary.
@@ -382,8 +391,7 @@ Use this as additional context. If you cannot find a better author through your 
 
     Document Summary:
     ---
-    primary source {summary_text}
-    secondary source {signature_info}
+    {summary_text}
     ---
 
     Return ONLY the JSON object, no additional text."""

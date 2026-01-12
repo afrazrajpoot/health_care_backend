@@ -71,14 +71,14 @@ class SignatureExtractor:
         return cls._compiled_patterns
     
     @classmethod
-    def extract_signature_blocks(cls, text: str, context_words: int = 250) -> List[Dict[str, any]]:
+    def extract_signature_blocks(cls, text: str, context_words: int = 500) -> List[Dict[str, any]]:
         """
         Extract signature blocks and surrounding context from text.
         
         Args:
             text: Full document text
             context_words: Number of words to extract after the signature indicator
-                          (default 250 words = ~200-300 words of context)
+                          (default 500 words for comprehensive context)
         
         Returns:
             List of dictionaries containing:
@@ -218,11 +218,15 @@ class SignatureExtractor:
         # Determine confidence based on pattern type and position
         confidence = cls._determine_confidence(best_match)
         
+        # Build full extracted text: matched text + context (for AI processing)
+        full_extracted_text = f"{best_match['match_text']}\n{best_match['context']}"
+        
         return {
             'author': author,
             'confidence': confidence,
             'evidence': best_match['match_text'],
-            'context': best_match['context'][:200],  # First 200 chars of context
+            'context': best_match['context'],  # Full context (500 words)
+            'full_extracted_text': full_extracted_text,  # Evidence + context combined for AI
             'pattern_type': best_match['pattern_type'],
             'position_in_document': best_match['position']
         }
@@ -308,13 +312,13 @@ class SignatureExtractor:
 
 
 # Convenience function for quick extraction
-def extract_author_signature(text: str, context_words: int = 250) -> Optional[Dict[str, any]]:
+def extract_author_signature(text: str, context_words: int = 500) -> Optional[Dict[str, any]]:
     """
     Quick function to extract author signature from document text.
     
     Args:
         text: Full document text
-        context_words: Number of words of context to extract (default 250)
+        context_words: Number of words of context to extract (default 500)
     
     Returns:
         Dictionary with author info or None if not found
@@ -326,16 +330,40 @@ def extract_author_signature(text: str, context_words: int = 250) -> Optional[Di
         >>>     print(f"Confidence: {result['confidence']}")
         >>>     print(f"Evidence: {result['evidence']}")
     """
-    return SignatureExtractor.extract_author_from_text(text)
+    logger.info("=" * 60)
+    logger.info("🔍 SIGNATURE EXTRACTOR - extract_author_signature called")
+    logger.info(f"📄 Input text length: {len(text) if text else 0} chars")
+    
+    result = SignatureExtractor.extract_author_from_text(text)
+    
+    logger.info("=" * 60)
+    logger.info("📋 SIGNATURE EXTRACTOR RESULT:")
+    logger.info("=" * 60)
+    if result:
+        logger.info(f"  ✅ Author found: {result.get('author')}")
+        logger.info(f"  🎯 Confidence: {result.get('confidence')}")
+        logger.info(f"  📝 Evidence (matched pattern): {result.get('evidence')}")
+        logger.info(f"  🏷️ Pattern type: {result.get('pattern_type')}")
+        logger.info(f"  📍 Position: {result.get('position_in_document')}")
+        logger.info("=" * 60)
+        logger.info("📖 FULL EXTRACTED TEXT (evidence + next 500 words - sent to AI):")
+        logger.info("=" * 60)
+        logger.info(result.get('full_extracted_text', ''))
+        logger.info("=" * 60)
+    else:
+        logger.info("  ❌ No author signature found")
+    logger.info("=" * 60)
+    
+    return result
 
 
-def extract_all_signature_blocks(text: str, context_words: int = 250) -> List[Dict[str, any]]:
+def extract_all_signature_blocks(text: str, context_words: int = 500) -> List[Dict[str, any]]:
     """
     Extract all signature blocks from document for analysis/debugging.
     
     Args:
         text: Full document text
-        context_words: Number of words of context to extract (default 250)
+        context_words: Number of words of context to extract (default 500)
     
     Returns:
         List of all signature blocks found, sorted by priority
@@ -348,52 +376,3 @@ def extract_all_signature_blocks(text: str, context_words: int = 250) -> List[Di
         >>>     print("---")
     """
     return SignatureExtractor.extract_signature_blocks(text, context_words)
-
-
-# Example usage and testing
-# if __name__ == "__main__":
-#     # Test with sample medical document text
-#     sample_text = """
-#     MEDICAL EVALUATION REPORT
-    
-#     Patient: John Doe
-#     Date of Evaluation: March 15, 2024
-    
-#     FINDINGS:
-#     The patient presented with complaints of lower back pain...
-#     [extensive medical findings here]
-    
-#     RECOMMENDATIONS:
-#     Based on the examination, I recommend...
-    
-#     Respectfully submitted,
-#     Sarah Johnson, MD
-#     Board Certified Orthopedic Surgeon
-    
-#     The report was electronically signed by Sarah Johnson, MD on March 15, 2024.
-#     """
-    
-#     # Extract author
-#     result = extract_author_signature(sample_text)
-    
-#     if result:
-#         print(f"Author: {result['author']}")
-#         print(f"Confidence: {result['confidence']}")
-#         print(f"Evidence: {result['evidence']}")
-#         print(f"Pattern Type: {result['pattern_type']}")
-#         print(f"\nContext Preview:\n{result['context'][:150]}...")
-#     else:
-#         print("No author signature found")
-    
-#     # Extract all blocks for debugging
-#     print("\n" + "="*60)
-#     print("ALL SIGNATURE BLOCKS:")
-#     print("="*60)
-    
-#     all_blocks = extract_all_signature_blocks(sample_text)
-#     for i, block in enumerate(all_blocks, 1):
-#         print(f"\nBlock {i}:")
-#         print(f"  Match: {block['match_text']}")
-#         print(f"  Type: {block['pattern_type']}")
-#         print(f"  Priority: {block['priority']}")
-#         print(f"  Context: {block['context'][:100]}...")
