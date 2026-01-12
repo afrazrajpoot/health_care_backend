@@ -332,7 +332,7 @@ def extract_author_signature(text: str, context_words: int = 500) -> Optional[Di
     """
     logger.info("=" * 60)
     logger.info("🔍 SIGNATURE EXTRACTOR - extract_author_signature called")
-    logger.info(f"📄 Input text length: {len(text) if text else 0} chars")
+    logger.info(f"📄 Input text: {text}")
     
     result = SignatureExtractor.extract_author_from_text(text)
     

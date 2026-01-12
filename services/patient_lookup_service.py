@@ -328,18 +328,20 @@ class EnhancedPatientLookup:
         
         logger.info(f"🔍 Performing enhanced patient lookup for physician: {physician_id}")
         
-        # 🚨 CRITICAL: Check if both DOB and claim number are not specified
+        # 🚨 CRITICAL: Check if patient name, DOB, and claim number are not specified
+        patient_name_not_specified = self.is_bad_field(patient_name)
         dob_not_specified = self.is_bad_field(processed_data["dob"])
         claim_not_specified = self.is_bad_field(claim_number)
         
-        # If both DOB AND claim number are not specified, skip lookup
-        if dob_not_specified and claim_not_specified:
-            logger.warning("🚨 SKIPPING PATIENT LOOKUP: Both DOB and claim number are not specified")
+        # Only skip lookup if ALL identifying fields are missing (name, DOB, and claim)
+        # If patient name is available, we can still try to lookup/match
+        if patient_name_not_specified and dob_not_specified and claim_not_specified:
+            logger.warning("🚨 SKIPPING PATIENT LOOKUP: Patient name, DOB, and claim number are all not specified")
             
             return {
                 "lookup_data": None,
                 "document_status": "failed",
-                "pending_reason": "Missing both DOB and claim number - cannot identify patient",
+                "pending_reason": "Missing patient name, DOB, and claim number - cannot identify patient",
                 "patient_name_to_use": patient_name or "Not specified",
                 "claim_to_save": claim_number or "Not specified", 
                 "document_analysis": document_analysis,
@@ -347,6 +349,16 @@ class EnhancedPatientLookup:
                 "previous_docs_updated": 0,
                 "lookup_skipped": True
             }
+        
+        # Log which fields we have for lookup
+        available_fields = []
+        if not patient_name_not_specified:
+            available_fields.append(f"name='{patient_name}'")
+        if not dob_not_specified:
+            available_fields.append(f"dob='{processed_data['dob']}'")
+        if not claim_not_specified:
+            available_fields.append(f"claim='{claim_number}'")
+        logger.info(f"📋 Patient lookup with available fields: {', '.join(available_fields)}")
         
         # ✅ Continue with enhanced patient lookup
         redis_ok = await self.verify_redis_connection()

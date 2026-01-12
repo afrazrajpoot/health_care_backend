@@ -481,13 +481,11 @@ class DocumentAIProcessor:
             patient_details = {}
             patient_extractor = get_patient_extractor()
             
-            # Extract author signature from summary text for batch processing
-            signature_info = extract_author_signature(summary_text)
-            if signature_info:
-                logger.info(f"✍️ Signature extracted - Author: {signature_info.get('author')}, Confidence: {signature_info.get('confidence')}")
+            # Note: Batch processing doesn't have raw OCR text for signature extraction
+            # Author detection will rely on AI extraction from summary text only
             
-            # Step 1: Try AI extraction from summarizer first (pass signature_info for author detection)
-            ai_result = patient_extractor.extract_from_summarizer_ai(summary_text, signature_info=signature_info)
+            # Step 1: Try AI extraction from summarizer first
+            ai_result = patient_extractor.extract_from_summarizer_ai(summary_text, signature_info=None)
             ai_fields_found = [k for k in ['patient_name', 'dob', 'doi', 'claim_number', 'author'] if ai_result.get(k)]
             ai_missing_fields = [k for k in ['patient_name', 'dob', 'doi', 'claim_number', 'author'] if not ai_result.get(k)]
             
