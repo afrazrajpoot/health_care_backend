@@ -153,7 +153,7 @@ def detect_document_type(summarizer_output: str = None, raw_text: str = None) ->
     If document doesn't match predefined types, returns the actual document title.
     """
     # Handle backward compatibility - if only one positional arg passed, use it as summarizer_output
-    logger.info(f"Received inputs - summarizer_output : {summarizer_output}")
+    # logger.info(f"Received inputs - summarizer_output : {summarizer_output}")
     if summarizer_output is None and raw_text is None:
         raise ValueError("At least one of summarizer_output or raw_text must be provided")
     

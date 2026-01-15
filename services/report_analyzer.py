@@ -162,8 +162,6 @@ class ReportAnalyzer:
             )
             
             logger.info(f"✅ Extraction complete")
-            # logger.info(f"   Long summary: {len(result_dict.get('long_summary', ''))} chars")
-            # logger.info(f"   Short summary: {result_dict.get('short_summary', '')}")
             
             return result_dict
             

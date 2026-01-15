@@ -1,3 +1,4 @@
+import re
 from fastapi import File, UploadFile, HTTPException, Query
 from typing import List, Optional, Any, Dict
 from datetime import datetime
@@ -129,6 +130,22 @@ def serialize_payload(payload: dict) -> dict:
 # ============================
 # 🔵 Normalization Helpers
 # ============================
+
+def clean_name_string(name: Optional[str]) -> str:
+    """
+    Cleans name string: removes titles, credentials, special chars, extra spaces.
+    Preserves word order.
+    """
+    if not name:
+        return ""
+    name = str(name)
+    # Combined regex for titles/suffixes
+    pattern = r'\b(Dr\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?|Doctor|M\.?D\.?|D\.?O\.?|D\.?P\.?M\.?|D\.?C\.?|N\.?P\.?|P\.?A\.?|QME|Sr\.?|Jr\.?|II|III|IV)\b'
+    
+    name = re.sub(pattern, '', name, flags=re.IGNORECASE)
+    name = name.replace(',', ' ').replace('.', ' ')
+    name = re.sub(r'[^\w\s-]', '', name) # Keep hyphens, remove other punctuation
+    return ' '.join(name.split()).lower()
 
 def normalize_name(name: Optional[str]) -> str:
     """

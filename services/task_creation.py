@@ -34,7 +34,7 @@ class TaskCreationResult(BaseModel):
 
 # ------------------ TASK CREATOR ------------------
 class TaskCreator:
-    """Universal AI task generator that separates internal and external tasks."""
+    """Universal AI task generator with deduplication and context-aware task creation."""
     
     def __init__(self):
         self.llm = AzureChatOpenAI(
@@ -46,104 +46,196 @@ class TaskCreator:
             timeout=90,
         )
         self.parser = JsonOutputParser(pydantic_object=TaskCreationResult)
+        self.db = DatabaseService()
 
     SYSTEM_PROMPT = """
 You are an expert healthcare operations AI using OpenAI O3 reasoning to create high-quality, actionable tasks from medical documents.
 
-Generate internal_tasks array:
-1. **internal_tasks**: Tasks for OUR clinic's workflow
+## 🚨 CRITICAL ANTI-DUPLICATION RULES
 
-Generate ALL relevant tasks for this category. The system will handle these workflows.
+### **NEVER Create Generic Review Tasks**
+❌ FORBIDDEN: "Review [document type] for [patient]"
+❌ FORBIDDEN: "Review progress notes for [patient]"
+❌ FORBIDDEN: "Review report for [patient]"
+❌ FORBIDDEN: "Process [document type] for [patient]"
 
----
+These generic tasks provide NO VALUE and will be rejected.
 
-## 📋 TASK GENERATION PRINCIPLES
+### **Only Create Tasks When:**
+1. ✅ Document explicitly requests a specific action (schedule, sign, appeal, authorize)
+2. ✅ Clinical findings require physician decision or intervention
+3. ✅ Authorization/denial requires response with specific deadline
+4. ✅ Missing critical information that blocks workflow (patient ID, auth number, etc.)
 
-### **Critical Rules:**
-1. ✅ Generate tasks for internal actions when applicable
-2. ✅ Use plain, simple English - avoid medical jargon in descriptions
-3. ✅ Create only genuinely actionable tasks
-4. ✅ Each task must be distinct - NO duplicates
-5. ❌ NEVER create EMR chart upload tasks
-6. ❌ NEVER create patient notification tasks
-7. ❌ NEVER create duplicate tasks with different wording
-8. ✅ If document is unclear/incomplete, create a task to handle that issue
-9. ✅ ALWAYS create at least one task - external documents require review/acknowledgment
-
-### **When to Return Empty Arrays:**
-- NEVER return empty arrays - external documents always need at least a review task
-- Even informational documents need a "Review [document type] for [patient]" task
-
-### **Understanding Before Creating:**
-Before generating tasks, analyze:
-- What actions does OUR clinic need to take? → internal_tasks
-- Are there missing/unclear items that need clarification? → Create clarification task
-- Is this task genuinely different from others, or a duplicate?
+### **If Document is Purely Informational:**
+Return EMPTY array `{{"internal_tasks": []}}` - do NOT create placeholder review tasks.
 
 ---
 
-## 🏢 INTERNAL TASKS (internal_tasks array)
+## 📋 TASK SPECIFICITY REQUIREMENTS
 
-Generate when document requires OUR clinic to:
-- Schedule procedures/appointments in our facility
-- Review clinical findings requiring our physician's decision
-- Submit authorization requests from our clinic
-- Handle denials/appeals for our services
-- Sign documents (settlement agreements, QME attestations, authorization forms)
-- Manage medications/treatment plans for our patients
-- Follow up on our diagnostic studies
-- Complete administrative tasks in our workflow
+### **Scheduling Tasks - MUST Include:**
+- **What body part/area**: "lumbar spine", "right knee", "cervical region"
+- **What procedure**: "MRI", "physical therapy", "epidural injection"
+- **Any constraints**: "with contrast", "bilateral", "12 sessions"
 
-**Examples:**
-- "Schedule MRI at our facility for John Smith"
-- "Review abnormal lab results for Maria Garcia"
-- "Submit authorization request for physical therapy"
-- "Sign settlement agreement for Robert Lee"
-- "Appeal denied authorization for our services"
+**Example:**
+✅ "Schedule lumbar spine MRI with contrast for John Smith"
+❌ "Schedule MRI for John Smith" (missing body part)
+
+### **Denial/Appeal Tasks - MUST Include:**
+- **What was denied**: specific service, procedure, medication
+- **Why task matters**: "to restore treatment", "required for surgery clearance"
+- **Actionable hint**: body part, diagnosis code, missing documentation
+
+**Example:**
+✅ "Appeal denied lumbar epidural injection - prior conservative care documented"
+❌ "Appeal denial for John Smith" (missing what was denied and why)
+
+### **Signature Tasks - MUST Include:**
+- **Document type**: "settlement agreement", "QME attestation", "auth form"
+- **Return method**: exact fax/email/address
+- **Deadline**: if specified in document
+
+**Example:**
+✅ "Sign QME attestation for Jane Doe - fax to (555) 123-4567 by 1/20"
+❌ "Sign document for Jane Doe" (missing document type and return method)
 
 ---
 
+## 🔍 DUPLICATE DETECTION LOGIC
 
-## 🖊️ SIGNATURE REQUIRED TASKS
+Before creating ANY task, check against these patterns:
 
-**Detection:** Generate signature task when document contains:
-- "Signature required" / "Please sign and return"
-- Visible signature lines with labels
-- "Return to:" followed by fax/email/address
-- Settlement agreements (C&R)
-- QME/AME attestations
-- Prior authorization forms requiring signature
-- Legal documents requiring attestation
+### **Pattern 1: Same Patient + Same Action + Same Target**
+- "Schedule MRI for John Smith" = "Book MRI for John Smith" → DUPLICATE
+- "Appeal denied therapy" = "File appeal for therapy denial" → DUPLICATE
 
-**Signature Task Format:**
-```json
-{{
-  "description": "Sign and return [document type] for [Patient Name]",
-  "department": "Signature Required",
-  "quick_notes": {{
-    "details": "Document requires [signature type]. Return via [method] to [recipient]. Deadline: [date].",
-    "one_line_note": "[Document type] signature needed"
-  }}
-}}
+### **Pattern 2: Generic vs Specific (Keep Specific)**
+- If you have "Schedule lumbar MRI" → DO NOT also create "Schedule imaging"
+- If you have "Appeal denied injection" → DO NOT also create "Review denial"
+
+### **Pattern 3: Parent Task Covers Child Tasks**
+- If "Schedule 12 PT sessions" exists → DO NOT create "Schedule PT follow-up"
+- If "Sign and return settlement" exists → DO NOT create "Review settlement"
+
+---
+
+## 🎯 TASK GENERATION DECISION TREE
+
+**Step 1: Analyze Document Purpose**
+```
+Is this document requesting a specific action?
+├─ YES → Go to Step 2
+└─ NO → Is it purely informational?
+    ├─ YES → Return empty array {{"internal_tasks": []}}
+    └─ NO → Go to Step 2
 ```
 
-**Return Methods to Extract:**
-- Fax: Include exact number
-- Email: Include exact address
-- Mail: Include complete address
-- Portal: Include system name
+**Step 2: Identify Specific Actions**
+```
+What specific actions are requested?
+├─ Schedule → Extract: body part, procedure, constraints
+├─ Sign → Extract: document type, return method, deadline
+├─ Appeal → Extract: denied service, reason, deadline
+├─ Authorize → Extract: service, diagnosis, urgency
+└─ Clarify → ONLY if missing critical data blocks workflow
+```
+
+**Step 3: Check for Duplicates**
+```
+For each task:
+1. Does this exact action already exist for this patient?
+   ├─ YES → Skip this task
+   └─ NO → Continue
+2. Is this a generic version of a specific task?
+   ├─ YES → Skip this task
+   └─ NO → Continue
+3. Does a parent task already cover this?
+   ├─ YES → Skip this task
+   └─ NO → Create task
+```
+
+---
+
+## ✅ VALID TASK EXAMPLES
+
+### **Scheduling Tasks (with specificity):**
+```json
+{
+  "description": "Schedule lumbar spine MRI with contrast for John Smith",
+  "department": "Approvals to Schedule",
+  "quick_notes": {
+    "details": "Authorization approved for MRI L-spine. Schedule within 2 weeks per auth requirements.",
+    "one_line_note": "MRI L-spine approved - schedule ASAP"
+  }
+}
+```
+
+### **Appeal Tasks (with context):**
+```json
+{
+  "description": "Appeal denied lumbar epidural injection for Maria Garcia",
+  "department": "Denials & Appeals",
+  "quick_notes": {
+    "details": "Denial reason: insufficient conservative care. Have documented 8 weeks PT and medication trials. Deadline: 1/25.",
+    "one_line_note": "ESI denied - PT documented, appeal by 1/25"
+  }
+}
+```
+
+### **Signature Tasks (with details):**
+```json
+{
+  "description": "Sign settlement agreement for Robert Lee - return via fax",
+  "department": "Signature Required",
+  "quick_notes": {
+    "details": "C&R settlement agreement requires signature. Fax to (555) 123-4567 attn: Claims Adjuster by 1/22.",
+    "one_line_note": "Settlement signature - fax by 1/22"
+  }
+}
+```
+
+---
+
+## 🚫 INVALID TASK EXAMPLES (DO NOT CREATE)
+
+❌ **Generic Review Tasks:**
+```json
+{
+  "description": "Review progress notes for John Smith",  // NO VALUE
+  "department": "Administrative Tasks"
+}
+```
+
+❌ **Missing Specificity:**
+```json
+{
+  "description": "Schedule MRI for patient",  // Missing body part
+  "department": "Scheduling Tasks"
+}
+```
+
+❌ **Duplicate of Existing:**
+```json
+// If "Schedule lumbar MRI" exists, DO NOT create:
+{
+  "description": "Book imaging study",  // Duplicate
+  "department": "Scheduling Tasks"
+}
+```
 
 ---
 
 ## 🏥 DEPARTMENT ROUTING
 
-| Department | Route When |
-|------------|------------|
-| **Signature Required** | Document requires physician/provider signature |
-| **Denials & Appeals** | RFA tracking, UR denials, IMR filing, authorization appeals, EOB denials |
-| **Approvals to Schedule** | Authorization approved and needs appointment scheduling |
-| **Scheduling Tasks** | Follow-up visits, general appointment booking, procedure scheduling |
-| **Administrative Tasks** | Legal correspondence, compliance docs, QME admin, attorney letters, credentialing, external referral tracking |
+| Department | Route When | Requirements |
+|------------|------------|--------------|
+| **Signature Required** | Document has signature line + return instructions | Must include: doc type, return method, deadline |
+| **Denials & Appeals** | Explicit denial with appeal deadline | Must include: denied service, reason, deadline |
+| **Approvals to Schedule** | Authorization approved + needs scheduling | Must include: service, body part, timeframe |
+| **Scheduling Tasks** | Follow-up or non-authorized scheduling | Must include: appointment type, reason |
+| **Administrative Tasks** | Legal docs, records requests, QME coordination | Must include: specific action needed |
 
 ---
 
@@ -152,84 +244,42 @@ Generate when document requires OUR clinic to:
 | Context | Due Date | Reason |
 |---------|----------|--------|
 | STAT/Critical | Same day | Immediate attention |
-| Abnormal findings | +1 day | Urgent clinical review |
-| Legal deadline | 3 days before | Processing time |
-| UR denial response | +3 days | Regulatory timeline |
+| Denial response deadline | 3 days before deadline | Processing time |
 | Approved authorization | +2 days | Prompt service |
-| Standard review | +2 days | Normal workflow |
+| Signature with deadline | 2 days before deadline | Review + return time |
+| Standard scheduling | +2 days | Normal workflow |
 | Routine follow-up | +7 days | Non-urgent |
-
----
-
-## ✅ TASK QUALITY STANDARDS
-
-### **Task Description Format:**
-- **Length:** 5-15 words maximum
-- **Language:** Plain English, no jargon
-- **Pattern:** [Action] + [What/Who] + [Key Detail if needed]
-
-**Examples of Good Descriptions:**
-- ✅ "Schedule MRI for John Smith"
-- ✅ "Review abnormal liver test for Maria Garcia"
-- ✅ "Appeal denied therapy for Robert Lee"
-- ✅ "Sign settlement agreement for Jane Doe"
-- ✅ "Obtain records from ABC Clinic"
-
-**Examples of Bad Descriptions:**
-- ❌ "Review elevated ALT (150) from 1/15 labs" (too technical)
-- ❌ "Coordinate authorized orthopedic consultation" (jargon)
-- ❌ "Assess FCE functional capacity recommendations" (abbreviations)
-
-### **Quick Notes Guidelines:**
-- **details:** 1-2 sentences explaining WHY this matters and specific actions
-- **one_line_note:** Under 50 characters for dashboard display
-
-### **Duplicate Prevention:**
-Check each new task against existing tasks:
-- Same patient + same action + same target = DUPLICATE (don't create)
-- Different wording but same meaning = DUPLICATE (don't create)
-- Similar tasks that could be combined = COMBINE into one task
-
----
-
-## 🚫 TASKS TO NEVER CREATE
-
-**Absolutely Never Generate:**
-1. ❌ "Update EMR with patient chart"
-2. ❌ "Upload document to electronic health record"
-3. ❌ "Notify patient about results" 
-4. ❌ "Call patient to inform them"
-5. ❌ "Update patient file in system"
-6. ❌ Tasks that are exact duplicates with different wording
-
-**When Document is Unclear:**
-Instead of skipping, create a clarification task:
-- ✅ "Clarify missing patient information in report"
-- ✅ "Verify authorization number for claim"
-- ✅ "Confirm procedure date with referring provider"
 
 ---
 
 ## 📤 OUTPUT FORMAT
 
+**If document has actionable items:**
 ```json
-{{
+{
   "internal_tasks": [
-    {{
-      "description": "Simple action in plain English",
+    {
+      "description": "[Specific action] + [what/body part] + [for patient]",
       "department": "Exact department name",
       "status": "Pending",
       "due_date": "YYYY-MM-DD",
       "patient": "Exact patient name",
       "actions": ["Claim", "Complete"],
-      "source_document": "{{{{source_document}}}}",
-      "quick_notes": {{
-        "details": "Why this matters and what to do (1-2 sentences)",
-        "one_line_note": "Short dashboard summary (under 50 chars)"
-      }}
-    }}
+      "source_document": "{{source_document}}",
+      "quick_notes": {
+        "details": "Why this matters + specific context (deadline, body part, reason)",
+        "one_line_note": "Short summary with key detail (under 50 chars)"
+      }
+    }
   ]
-}}
+}
+```
+
+**If document is purely informational:**
+```json
+{
+  "internal_tasks": []
+}
 ```
 
 ---
@@ -237,18 +287,18 @@ Instead of skipping, create a clarification task:
 ## 🎯 QUALITY CHECKLIST
 
 Before generating output, verify:
-1. ✅ Did I identify ALL distinct actions in the document?
-2. ✅ Are internal tasks correctly identified?
-3. ✅ Is each description in simple, plain English?
-4. ✅ Are there any duplicate tasks (same meaning, different words)?
-5. ✅ Did I avoid EMR upload and patient notification tasks?
-6. ✅ Are department assignments correct for each workflow?
-7. ✅ Are due dates appropriate for urgency?
-8. ✅ Do quick_notes explain WHY each task matters?
-9. ✅ If document is unclear, did I create clarification task?
-10. ✅ Can staff immediately understand what to do?
+1. ✅ Did I check if this document requires ANY action at all?
+2. ✅ If no actions needed, did I return empty array?
+3. ✅ Does each task description include specific details (body part, service, reason)?
+4. ✅ Did I check for duplicates against existing tasks?
+5. ✅ Did I avoid creating generic "Review [document]" tasks?
+6. ✅ Are scheduling tasks specific about what's being scheduled?
+7. ✅ Do appeal tasks explain what was denied and why it matters?
+8. ✅ Do signature tasks include return method and deadline?
+9. ✅ Can staff immediately understand the specific action needed?
+10. ✅ Did I eliminate redundant or overlapping tasks?
 
-**Remember:** Use O3 reasoning to deeply understand the document before creating tasks. Quality over quantity.
+**Remember:** Quality over quantity. Empty array is better than useless generic tasks.
 """
     
     def create_prompt(self, patient_name: str, source_document: str, matched_doctor_name: str) -> ChatPromptTemplate:
@@ -261,6 +311,9 @@ FULL DOCUMENT TEXT:
 DOCUMENT ANALYSIS (Structured Extraction):
 {{document_analysis}}
 
+EXISTING TASKS FOR THIS PATIENT:
+{{existing_tasks}}
+
 SOURCE DOCUMENT: {{source_document}}
 TODAY'S DATE: {{current_date}}
 PATIENT: {{patient_name}}
@@ -268,56 +321,104 @@ MATCHED DOCTOR: {{matched_doctor_name}}
 
 **TASK GENERATION INSTRUCTIONS:**
 
-Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
+Using OpenAI O3 reasoning, analyze this document and determine if ANY actionable tasks are needed.
 
-1. **internal_tasks**: All tasks OUR clinic must perform
+**CRITICAL: Review existing tasks above. DO NOT create duplicates or similar tasks.**
 
-**Think through step-by-step:**
+**🚫 ANTI-PATTERN CHECK (PERFORM FIRST):**
+- Does your task start with "Review", "Process", "Analyze"? **DROP IT immediately.**
+- Is the task just "Review [Report Type]"? **DROP IT.**
+- UNLESS it is "Review and Sign" or "Review for Surgery Clearance" (specific goal).
 
-**Step 1: Understand the Document**
-- What type of document is this?
-- What is the primary purpose?
-- What actions are explicitly requested?
-- What actions are implicitly needed?
+**Step 1: Is This Document Actionable?**
+- Does it explicitly request scheduling, signing, appealing, or authorizing?
+- Does it contain clinical findings requiring physician decision?
+- Is critical information missing that blocks our workflow?
 
-**Step 2: Identify Internal Actions**
-- What must OUR clinic do directly?
-- What scheduling is needed at our facility?
-- What clinical reviews are required?
-- What authorizations must we submit?
-- What signatures are needed?
-- What administrative tasks are ours?
+**If NO to all above → Return empty array: {{"internal_tasks": []}}**
 
+**Step 2: Extract Specific Action Details**
+For each action needed, you MUST include specific details in the description:
+- **Scheduling**: 
+    - WHAT: Body part? Procedure/Service? (e.g., "Lumbar MRI", "PT for Right Knee")
+    - DETAILS: Contrast? Number of sessions?
+- **Appeals / Denials**: 
+    - WHAT: What was denied? (e.g., "Cervical Epidural", "Tylenol prescription")
+    - WHY: Hint/Guidance for appeal (e.g., "Provide conservative care notes", "Attach MRI report")
+- **Signatures**: 
+    - WHAT: Specific document? (e.g., "QME Attestation", "C&R Agreement")
+    - HOW: Fax number? Email?
+- **Other**: What specific action? Why does it matter?
 
-**Step 4: Check for Issues**
-- Is any information missing or unclear?
-- If yes, create clarification task
+**Step 3: Deduplication Check**
+Before adding ANY task:
+1. Check EXISTING TASKS above - does similar task exist?
+2. Check your own generated tasks - any duplicates?
+3. Is this a generic version of a specific task?
+4. If YES to any → DO NOT create this task
 
-**Step 5: Eliminate Duplicates**
-- Review all tasks - any duplicates with different wording?
-- Combine similar tasks into single, clear action
+**Step 4: Validate Specificity (Self-Correction)**
+- "Schedule MRI" -> ❌ REJECT. Fix to: "Schedule Lumbar Spine MRI w/ Contrast"
+- "Appeal Denial" -> ❌ REJECT. Fix to: "Appeal Denial for Right Knee Surgery - Submit PT notes"
+- "Review Report" -> ❌ REJECT. (Unless explicit physician review requested for specific clearance).
 
-**Step 6: Validate Quality**
-- Is each description in plain English?
-- Can staff understand immediately what to do?
-- Are departments correctly assigned?
-- Are due dates appropriate?
+**If task is vague or generic → DO NOT create it**
 
-**IMPORTANT:** NEVER return empty internal_tasks array. External documents ALWAYS need at least one task.
-- If document is informational: Create "Review [document type] for [patient]" task
-- If document has specific actions: Create those specific tasks
-- If document has issues: Create task like "Clarify missing authorization details in report"
+**Step 5: Final Quality Check**
+- Can staff execute this without asking "what exactly do I do?"
+- Does this provide value beyond just acknowledging the document exists?
+- Is this genuinely different from existing tasks?
+
+**If NO to any → DO NOT create this task**
 
 {{format_instructions}}
 """
         
         return ChatPromptTemplate.from_messages([
             SystemMessagePromptTemplate.from_template(self.SYSTEM_PROMPT),
-            HumanMessagePromptTemplate.from_template(user_template, template_format="jinja2"),
+            HumanMessagePromptTemplate.from_template(user_template),  # Removed template_format="jinja2" to avoid conflict
         ])
 
+    async def _get_existing_tasks(self, patient_name: str) -> str:
+        """Fetch existing tasks for the patient to prevent duplicates."""
+        try:
+            await self.db.connect()
+            # Query tasks for this patient using Prisma ORM via DB service accessor (or direct if exposed)
+            # Since DatabaseService wraps Prisma but doesn't expose a generic 'query' method for collections like Mongo,
+            # we need to use the prisma client directly if available or add a method.
+            # Assuming 'task' table exists in schema.
+            
+            if not self.db.prisma:
+                 return "Unable to access database."
+
+            tasks = await self.db.prisma.task.find_many(
+                where={
+                    "patient": {"contains": patient_name, "mode": "insensitive"},
+                    "status": {"not": "Completed"}
+                }
+            )
+            
+            await self.db.disconnect()
+            
+            if not tasks:
+                return "No existing tasks for this patient."
+            
+            # Format existing tasks for context
+            task_list = []
+            for task in tasks:
+                # Access attributes directly from Prisma object
+                desc = getattr(task, 'description', 'Unknown')
+                dept = getattr(task, 'department', 'Unknown')
+                task_list.append(f"- {desc} ({dept})")
+            
+            return "\n".join(task_list)
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch existing tasks: {str(e)}")
+            # Don't crash creation if fetch fails, just return empty context
+            return "Unable to retrieve existing tasks (Database Error)."
+
     async def generate_tasks(self, document_analysis: dict, source_document: str = "", full_text: str = "", matched_doctor_name: str = "") -> dict:
-        """Generate internal_tasks array."""
+        """Generate internal_tasks array with deduplication."""
         try:
             current_date = datetime.now()
             patient_name = document_analysis.get("patient_name", "Unknown")
@@ -326,6 +427,10 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
             logger.info(f"🔍 Analyzing document: {source_document} ({document_type})")
             logger.info(f"📝 Full text length: {len(full_text) if full_text else 0} characters")
             logger.info(f"👨‍⚕️ Matched doctor: {matched_doctor_name if matched_doctor_name else 'Not specified'}")
+
+            # Get existing tasks for deduplication
+            existing_tasks = await self._get_existing_tasks(patient_name)
+            logger.info(f"📋 Existing tasks retrieved for deduplication check")
 
             prompt = self.create_prompt(patient_name, source_document, matched_doctor_name)
             chain = prompt | self.llm | self.parser
@@ -338,6 +443,7 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
                 "patient_name": patient_name,
                 "matched_doctor_name": matched_doctor_name or "Not specified",
                 "full_text": full_text if full_text else "Not available",
+                "existing_tasks": existing_tasks,
                 "format_instructions": self.parser.get_format_instructions()
             }
 
@@ -355,7 +461,7 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
                     logger.warning(f"⚠️ Failed to parse LLM result, falling back to empty tasks")
                     tasks_data = {"internal_tasks": []}
 
-            # Extract both arrays
+            # Extract tasks
             internal_tasks = tasks_data.get("internal_tasks", [])
             
             # Validate departments
@@ -367,43 +473,119 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
                 "Administrative Tasks"
             ]
             
-            # Validate internal tasks
+            # Validate and deduplicate tasks
             validated_internal = []
+            seen_task_signatures = set()
+            
             for task in internal_tasks:
                 if not task.get("description"):
                     continue
+                
+                # Create task signature for deduplication
+                task_signature = self._create_task_signature(task)
+                
+                # Skip if duplicate
+                if task_signature in seen_task_signatures:
+                    logger.info(f"⚠️ Skipping duplicate task: {task['description']}")
+                    continue
+                
+                # Skip if generic review task
+                if self._is_generic_review_task(task.get("description", "")):
+                    logger.info(f"⚠️ Skipping generic review task: {task['description']}")
+                    continue
+                
+                # Validate department
                 if task.get("department") not in valid_departments:
                     task["department"] = self._infer_department(task.get("description", ""), document_type)
+                
+                seen_task_signatures.add(task_signature)
                 validated_internal.append(task)
             
-            # Validate external tasks
-
-            # If both arrays are empty, create fallback
-            if not validated_internal:
-                logger.warning(f"⚠️ LLM returned no tasks for document type: {document_type}, patient: {patient_name}")
-                logger.warning(f"⚠️ Full text available: {len(full_text) if full_text else 0} chars")
+            # Only create fallback if document truly requires action
+            if not validated_internal and self._requires_fallback(document_type, full_text):
+                logger.warning(f"⚠️ Creating fallback for actionable document: {document_type}")
                 fallback = await self._create_fallback_task(document_analysis, source_document, full_text)
-                validated_internal = fallback  # Put fallback in internal
+                validated_internal = fallback
+            elif not validated_internal:
+                logger.info(f"✅ No tasks needed for informational document: {document_type}")
 
             result_dict = {
                 "internal_tasks": validated_internal
             }
 
             if validated_internal:
+                logger.info(f"✅ Generated {len(validated_internal)} tasks:")
                 logger.info(f"   Internal: {[t['description'] for t in validated_internal]}")
 
             # Update analytics for all tasks
-            all_tasks = validated_internal
-            await self._update_workflow_analytics(all_tasks)
+            if validated_internal:
+                await self._update_workflow_analytics(validated_internal)
 
             return result_dict
 
         except Exception as e:
             logger.error(f"❌ Task generation failed: {str(e)}")
             logger.error(f"❌ Document type: {document_analysis.get('document_type', 'Unknown')}")
-            logger.error(f"❌ Full text length: {len(full_text) if full_text else 0}")
-            fallback = await self._create_fallback_task(document_analysis, source_document, full_text)
-            return {"internal_tasks": fallback}
+            # Only create fallback if truly needed
+            if self._requires_fallback(document_analysis.get('document_type', ''), full_text):
+                fallback = await self._create_fallback_task(document_analysis, source_document, full_text)
+                return {"internal_tasks": fallback}
+            return {"internal_tasks": []}
+
+    def _create_task_signature(self, task: dict) -> str:
+        """Create unique signature for task deduplication."""
+        # Normalize description for comparison
+        desc = task.get("description", "").lower()
+        patient = task.get("patient", "").lower()
+        department = task.get("department", "").lower()
+        
+        # Remove common words for better matching
+        common_words = ["the", "a", "an", "for", "to", "and", "or", "in", "on", "at"]
+        desc_words = [w for w in desc.split() if w not in common_words]
+        
+        # Create signature from key components
+        signature = f"{patient}:{department}:{' '.join(sorted(desc_words[:5]))}"
+        return signature
+
+    def _is_generic_review_task(self, description: str) -> bool:
+        """Detect generic review tasks that should be avoided."""
+        desc_lower = description.lower()
+        
+        # Forbidden patterns
+        forbidden_patterns = [
+            "review progress note",
+            "review report for",
+            "process report for",
+            "review document for",
+            "review progress report",
+            "process progress note",
+            "manual review needed"
+        ]
+        
+        return any(pattern in desc_lower for pattern in forbidden_patterns)
+
+    def _requires_fallback(self, doc_type: str, full_text: str) -> bool:
+        """Determine if document type requires fallback task or can be empty."""
+        doc_type_lower = (doc_type or "").lower()
+        full_text_lower = (full_text or "").lower()
+        
+        # Documents that truly require action
+        actionable_indicators = [
+            "signature required",
+            "please sign",
+            "denial",
+            "denied",
+            "appeal",
+            "authorization approved",
+            "schedule",
+            "appointment",
+            "urgent",
+            "stat"
+        ]
+        
+        # Check if any actionable indicators present
+        return any(indicator in full_text_lower or indicator in doc_type_lower 
+                  for indicator in actionable_indicators)
 
     def _infer_department(self, description: str, doc_type: str) -> str:
         """Quick fallback department inference."""
@@ -423,7 +605,7 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
         return "Administrative Tasks"
 
     async def _create_fallback_task(self, document_analysis: dict, source_document: str, full_text: str = "") -> list[dict]:
-        """Create intelligent fallback task when generation fails or returns empty."""
+        """Create intelligent fallback task ONLY when truly needed."""
         current_date = datetime.now()
         due_date = (current_date + timedelta(days=2)).strftime("%Y-%m-%d")
         
@@ -432,213 +614,86 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
         doc_type_lower = doc_type.lower() if doc_type else ""
         full_text_lower = (full_text or "").lower()
         
-        # Intelligent fallback based on document type
+        # Only create specific, actionable fallback tasks
         fallback_mappings = {
-            # Progress Notes - typically need review
-            "progress note": {
-                "description": f"Review progress notes for {patient}",
-                "department": "Administrative Tasks",
-                "details": "Progress notes received from external provider. Review for treatment updates and document findings.",
-                "one_line_note": "Review external progress notes"
-            },
-            "progress report": {
-                "description": f"Review progress report for {patient}",
-                "department": "Administrative Tasks", 
-                "details": "Progress report requires review for clinical updates and any follow-up actions.",
-                "one_line_note": "Review progress report"
-            },
-            # UR/Authorization documents
-            "ur decision": {
-                "description": f"Process UR decision for {patient}",
+            "denial": {
+                "description": f"Evaluate denial response options for {patient}",
                 "department": "Denials & Appeals",
-                "details": "Utilization Review decision received. Determine if approved or denied and take appropriate action.",
-                "one_line_note": "Process UR decision"
+                "details": "Denial received. Review denial reason, supporting documentation, and determine if appeal is warranted.",
+                "one_line_note": "Evaluate denial for appeal"
             },
             "authorization": {
-                "description": f"Process authorization for {patient}",
+                "description": f"Verify authorization status for {patient}",
                 "department": "Approvals to Schedule",
                 "details": "Authorization document received. Verify approval status and schedule if approved.",
-                "one_line_note": "Process authorization"
-            },
-            # Imaging/Diagnostic
-            "mri": {
-                "description": f"Review MRI results for {patient}",
-                "department": "Administrative Tasks",
-                "details": "MRI results received. Review findings and document any follow-up recommendations.",
-                "one_line_note": "Review MRI results"
-            },
-            "radiology": {
-                "description": f"Review radiology report for {patient}",
-                "department": "Administrative Tasks",
-                "details": "Radiology report received. Review findings and determine next steps.",
-                "one_line_note": "Review radiology report"
-            },
-            "imaging": {
-                "description": f"Review imaging study for {patient}",
-                "department": "Administrative Tasks",
-                "details": "Imaging study results received. Review and document findings.",
-                "one_line_note": "Review imaging results"
-            },
-            # QME/Legal
-            "qme": {
-                "description": f"Process QME report for {patient}",
-                "department": "Administrative Tasks",
-                "details": "QME report received. Review findings and prepare response if needed.",
-                "one_line_note": "Process QME report"
-            },
-            "ime": {
-                "description": f"Process IME report for {patient}",
-                "department": "Administrative Tasks",
-                "details": "Independent Medical Examination report received. Review and respond as needed.",
-                "one_line_note": "Process IME report"
-            },
-            # Consultation
-            "consultation": {
-                "description": f"Review consultation report for {patient}",
-                "department": "Administrative Tasks",
-                "details": "Consultation report received from specialist. Review recommendations and plan follow-up.",
-                "one_line_note": "Review consultation"
-            },
-            "consult": {
-                "description": f"Review consult report for {patient}",
-                "department": "Administrative Tasks",
-                "details": "Consult report received. Review specialist recommendations.",
-                "one_line_note": "Review consult report"
-            },
-            # Lab/Pathology
-            "lab": {
-                "description": f"Review lab results for {patient}",
-                "department": "Administrative Tasks",
-                "details": "Laboratory results received. Review findings and document any abnormalities.",
-                "one_line_note": "Review lab results"
-            },
-            "pathology": {
-                "description": f"Review pathology report for {patient}",
-                "department": "Administrative Tasks",
-                "details": "Pathology report received. Review findings carefully.",
-                "one_line_note": "Review pathology report"
-            },
-            # Operative/Procedure
-            "operative": {
-                "description": f"Review operative report for {patient}",
-                "department": "Administrative Tasks",
-                "details": "Operative report received. Document procedure details and follow-up care.",
-                "one_line_note": "Review operative report"
-            },
-            "procedure": {
-                "description": f"Review procedure report for {patient}",
-                "department": "Administrative Tasks",
-                "details": "Procedure report received. Review outcome and document findings.",
-                "one_line_note": "Review procedure report"
-            },
-            # Denial related
-            "denial": {
-                "description": f"Process denial for {patient}",
-                "department": "Denials & Appeals",
-                "details": "Denial document received. Evaluate for appeal options and deadline.",
-                "one_line_note": "Process denial"
-            },
-            "eob": {
-                "description": f"Review EOB for {patient}",
-                "department": "Denials & Appeals",
-                "details": "Explanation of Benefits received. Review payment status and any denials.",
-                "one_line_note": "Review EOB"
+                "one_line_note": "Verify auth and schedule"
             }
         }
         
-        # Find matching fallback based on document type
-        fallback_info = None
+        # Check for signature requirements
+        if any(kw in full_text_lower for kw in ["signature required", "please sign", "sign and return"]):
+            return [{
+                "description": f"Sign and return document for {patient}",
+                "department": "Signature Required",
+                "status": "Pending",
+                "due_date": due_date,
+                "patient": patient,
+                "actions": ["Claim", "Complete"],
+                "source_document": source_document or "Unknown",
+                "quick_notes": {
+                    "details": "Document requires signature. Review document for signature location and return instructions.",
+                    "one_line_note": "Signature needed"
+                }
+            }]
+        
+        # Find matching specific fallback
         for key, info in fallback_mappings.items():
-            if key in doc_type_lower:
-                fallback_info = info
-                break
+            if key in doc_type_lower or key in full_text_lower:
+                fallback_task = {
+                    "description": info["description"],
+                    "department": info["department"],
+                    "status": "Pending",
+                    "due_date": due_date,
+                    "patient": patient,
+                    "actions": ["Claim", "Complete"],
+                    "source_document": source_document or "Unknown",
+                    "quick_notes": {
+                        "details": info["details"],
+                        "one_line_note": info["one_line_note"]
+                    }
+                }
+                
+                logger.info(f"📋 Created specific fallback task: {info['description']}")
+                return [fallback_task]
         
-        # If no match by doc type, check full text for clues
-        if not fallback_info and full_text_lower:
-            text_clue_mappings = [
-                (["signature required", "please sign", "sign and return"], {
-                    "description": f"Sign and return document for {patient}",
-                    "department": "Signature Required",
-                    "details": "Document requires signature. Review and sign as needed.",
-                    "one_line_note": "Signature required"
-                }),
-                (["denial", "denied", "not approved"], {
-                    "description": f"Review denial for {patient}",
-                    "department": "Denials & Appeals",
-                    "details": "Document indicates denial. Review and determine appeal options.",
-                    "one_line_note": "Review denial"
-                }),
-                (["approved", "authorization approved"], {
-                    "description": f"Schedule approved service for {patient}",
-                    "department": "Approvals to Schedule",
-                    "details": "Authorization approved. Schedule the approved service.",
-                    "one_line_note": "Schedule approved service"
-                }),
-                (["schedule", "appointment", "follow-up"], {
-                    "description": f"Schedule follow-up for {patient}",
-                    "department": "Scheduling Tasks",
-                    "details": "Document indicates scheduling need. Arrange appropriate appointment.",
-                    "one_line_note": "Schedule follow-up"
-                })
-            ]
-            
-            for keywords, info in text_clue_mappings:
-                if any(kw in full_text_lower for kw in keywords):
-                    fallback_info = info
-                    break
-        
-        # Default fallback if still no match
-        if not fallback_info:
-            fallback_info = {
-                "description": f"Review {doc_type} for {patient}",
-                "department": "Administrative Tasks",
-                "details": f"Document ({doc_type}) requires manual review to determine appropriate actions.",
-                "one_line_note": "Manual review needed"
-            }
-        
-        fallback_task = {
-            "description": fallback_info["description"],
-            "department": fallback_info["department"],
-            "status": "Pending",
-            "due_date": due_date,
-            "patient": patient,
-            "actions": ["Claim", "Complete"],
-            "source_document": source_document or "Unknown",
-            "quick_notes": {
-                "details": fallback_info["details"],
-                "one_line_note": fallback_info["one_line_note"]
-            }
-        }
-        
-        logger.info(f"📋 Created intelligent fallback task: {fallback_info['description']}")
-        return [fallback_task]
+        # If truly unclear, return empty rather than generic review
+        logger.info(f"ℹ️ No fallback needed for informational document: {doc_type}")
+        return []
 
     async def _update_workflow_analytics(self, tasks: list[dict]):
         """Update workflow analytics based on generated tasks."""
         try:
-            db = DatabaseService()
-            await db.connect()
+            await self.db.connect()
 
             for task in tasks:
                 department = task.get("department", "").lower()
                 description = task.get("description", "").lower()
 
                 # Map departments to valid workflow stat fields
-                # Valid fields: referralsProcessed, rfasMonitored, qmeUpcoming, payerDisputes, externalDocs, intakes_created
                 if "scheduling" in department or "approvals to schedule" in department:
-                    await db.increment_workflow_stat("referralsProcessed")
+                    await self.db.increment_workflow_stat("referralsProcessed")
                 elif "denial" in department or "appeal" in department:
-                    await db.increment_workflow_stat("payerDisputes")
+                    await self.db.increment_workflow_stat("payerDisputes")
                 elif "administrative" in department or "signature" in department:
-                    await db.increment_workflow_stat("externalDocs")
+                    await self.db.increment_workflow_stat("externalDocs")
 
                 # Description-based analytics
                 if any(word in description for word in ["rfa", "ur", "imr", "authorization", "denial"]):
-                    await db.increment_workflow_stat("rfasMonitored")
+                    await self.db.increment_workflow_stat("rfasMonitored")
                 elif any(word in description for word in ["qme", "ime", "ame"]):
-                    await db.increment_workflow_stat("qmeUpcoming")
+                    await self.db.increment_workflow_stat("qmeUpcoming")
 
-            await db.disconnect()
+            await self.db.disconnect()
 
         except Exception as e:
             logger.error(f"❌ Analytics update failed: {str(e)}")

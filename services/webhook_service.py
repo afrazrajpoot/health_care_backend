@@ -5,10 +5,11 @@ from fastapi import HTTPException
 from datetime import datetime
 from typing import Dict, Any
 from models.schemas import ExtractionResult
+from models.data_models import DocumentAnalysis
+from helpers.helpers import clean_name_string
 from services.database_service import get_database_service
 from services.report_analyzer import ReportAnalyzer
 from services.task_creation import TaskCreator
-from services.resoning_agent import EnhancedReportAnalyzer
 from services.patient_lookup_service import EnhancedPatientLookup
 from utils.multi_report_detector import get_multi_report_detector
 from utils.document_detector import detect_document_type
@@ -189,6 +190,102 @@ class WebhookService:
             logger.error(f"❌ Redis test failed: {e}")
             return False
     
+
+    async def _generate_concise_brief_summary(self, raw_summary_text: str, document_type: str = "Medical Document") -> str:
+        """
+        Uses LLM to transform the raw summarizer output into a concise, accurate professional summary.
+        Focuses on factual extraction without adding interpretations or missing critical details.
+        """
+        if not raw_summary_text or len(raw_summary_text) < 10:
+            return "Summary not available"
+
+        try:
+            logger.info("🤖 Generating concise brief summary using LLM...")
+            
+            from langchain_core.prompts import ChatPromptTemplate
+            from langchain_openai import AzureChatOpenAI
+            from config.settings import CONFIG
+
+            llm = AzureChatOpenAI(
+                azure_endpoint=CONFIG.get("azure_openai_endpoint"),
+                api_key=CONFIG.get("azure_openai_api_key"),
+                deployment_name=CONFIG.get("azure_openai_deployment"),
+                api_version=CONFIG.get("azure_openai_api_version"),
+                temperature=0.0,  # Zero temperature for maximum factual accuracy
+                timeout=30
+            )
+
+            system_template = """You are a medical documentation assistant specialized in accurate information extraction.
+
+    CRITICAL RULES:
+    1. Extract ONLY information explicitly stated in the raw summary - DO NOT infer, assume, or add any details
+    2. If critical information is present, include it even if it makes the summary longer
+    3. Preserve ALL specific medical details: diagnoses, medications (with dosages), test results, dates, measurements
+    4. Use the EXACT medical terminology from the source - do not paraphrase medical terms
+    5. If information is uncertain or not clearly stated, omit it rather than guessing
+    6. Do not include generic statements like "patient was treated" without specifying what treatment
+
+    STRUCTURE (only include sections with available information):
+    - Primary diagnosis/condition with any relevant clinical findings
+    - Key interventions, procedures, or medications (include specific names and dosages if mentioned)
+    - Critical test results or measurements if present
+    - Current status, follow-up plan, or next steps
+
+    OUTPUT FORMAT:
+    - Write in clear, concise paragraphs (NOT bullet points)
+    - No headers, no "Here is the summary" preamble
+    - Aim for 3-5 sentences, but extend if necessary to capture all critical information
+    - Prioritize completeness and accuracy over brevity
+
+    If the raw summary lacks substantive medical information, state "Limited clinical information available in source document" rather than fabricating content."""
+
+            user_template = f"""Document Type: {document_type}
+
+    Raw Summary Input:
+    {raw_summary_text}
+
+    Extract and present the concise summary following the rules above:"""
+            
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", system_template),
+                ("user", user_template)
+            ])
+            
+            chain = prompt | llm
+            
+            # Run in executor to avoid blocking
+            response = await asyncio.get_event_loop().run_in_executor(
+                LLM_EXECUTOR, 
+                lambda: chain.invoke({})
+            )
+            
+            clean_summary = response.content.strip()
+            
+            # Validation: Check if summary is suspiciously short given substantial input
+            if len(raw_summary_text) > 200 and len(clean_summary) < 50:
+                logger.warning("⚠️ Generated summary may be incomplete - falling back to raw summary")
+                return (raw_summary_text[:500] + "...") if len(raw_summary_text) > 500 else raw_summary_text
+            
+            # Validation: Check for generic/hallucinated content patterns
+            hallucination_indicators = [
+                "patient was seen",
+                "routine care provided",
+                "standard treatment given",
+                "typical findings noted"
+            ]
+            if any(indicator in clean_summary.lower() for indicator in hallucination_indicators):
+                if not any(indicator in raw_summary_text.lower() for indicator in hallucination_indicators):
+                    logger.warning("⚠️ Detected potentially fabricated generic content - using raw summary")
+                    return (raw_summary_text[:500] + "...") if len(raw_summary_text) > 500 else raw_summary_text
+            
+            logger.info(f"✅ Generated concise summary ({len(clean_summary)} chars)")
+            return clean_summary
+
+        except Exception as e:
+            logger.error(f"❌ Failed to generate concise brief summary: {e}")
+            # Fallback: Return truncated original text with better length handling
+            return (raw_summary_text[:500] + "...") if len(raw_summary_text) > 500 else raw_summary_text
+    
     async def process_document_data(self, data: dict) -> dict:
         logger.info(f"📥 Processing document: {data.get('document_id', 'unknown')}")
 
@@ -340,28 +437,94 @@ class WebhookService:
         logger.info(f"✅ Generated long summary: {len(long_summary)} chars")
         logger.info(f"✅ Generated short summary: {short_summary}")
 
-        analyzer = EnhancedReportAnalyzer()
-
-        # ✅ Pass pre-extracted patient details to reasoning agent
-        # Create closure to capture variables for executor
-        patient_details_for_closure = pre_extracted_patient_details
+        # analyzer = EnhancedReportAnalyzer() logic REMOVED.
+        # Construct DocumentAnalysis directly from ReportAnalyzer output + Pre-extracted details
         
-        # Run both analyzer functions in parallel using dedicated LLM executor
-        analysis_task = loop.run_in_executor(
-            LLM_EXECUTOR,
-            lambda: analyzer.extract_document_data_with_reasoning(
-                long_summary, None, None, mode, patient_details_for_closure
-            )
+        def safe_get(d, key, default="Not specified"):
+            val = d.get(key)
+            if not val or str(val).lower() in ["none", "null", ""]:
+                return default
+            return val
+
+        # Map pre-extracted patient details
+        patient_name_val = safe_get(pre_extracted_patient_details, "patient_name")
+        claim_number_val = safe_get(pre_extracted_patient_details, "claim_number")
+        dob_val = safe_get(pre_extracted_patient_details, "dob", "0000-00-00")
+        doi_val = safe_get(pre_extracted_patient_details, "doi", "0000-00-00")
+        report_date_val = safe_get(pre_extracted_patient_details, "date_of_report", "0000-00-00")
+        author_val = safe_get(pre_extracted_patient_details, "author", "Not specified")
+        
+        detected_doc_type = doc_type_result.get('doc_type', 'Unknown')
+
+        # Helper to convert structured short_summary dict to string
+        raw_brief_summary_text = "Summary not available"
+        if short_summary:
+            if isinstance(short_summary, dict):
+                # Try to extract meaningful text from structured summary
+                try:
+                    # 1. Try to get items texts
+                    items = short_summary.get('summary', {}).get('items', [])
+                    text_parts = []
+                    for item in items:
+                        if isinstance(item, dict):
+                            # Prefer expanded text, fall back to collapsed
+                            part = item.get('expanded') or item.get('collapsed')
+                            if part:
+                                text_parts.append(part)
+                    
+                    if text_parts:
+                        raw_brief_summary_text = " ".join(text_parts)
+                    elif short_summary.get('header', {}).get('title'):
+                         # Fallback to Title if no items
+                         raw_brief_summary_text = f"Report: {short_summary['header']['title']}"
+                    else:
+                        # Fallback to JSON string as last resort
+                        raw_brief_summary_text = json.dumps(short_summary)
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to parse structured short_summary: {e}")
+                    raw_brief_summary_text = str(short_summary)
+            else:
+                raw_brief_summary_text = str(short_summary)
+        
+        # ✅ Process the raw summary through the AI Condenser
+        brief_summary_text = await self._generate_concise_brief_summary(
+            raw_brief_summary_text, 
+            detected_doc_type
         )
 
-        summary_task = loop.run_in_executor(
-            LLM_EXECUTOR,
-            lambda: analyzer.generate_brief_summary(raw_text, mode)
+        document_analysis = DocumentAnalysis(
+            patient_name=patient_name_val,
+            claim_number=claim_number_val,
+            dob=dob_val,
+            doi=doi_val,
+            status="Not specified",
+            rd=report_date_val,
+            body_part="Not specified",
+            body_parts_analysis=[],
+            diagnosis="See summary",
+            key_concern="Medical evaluation",
+            extracted_recommendation="See summary",
+            extracted_decision="Not specified",
+            ur_decision="",
+            ur_denial_reason=None,
+            adls_affected="Not specified",
+            work_restrictions="Not specified",
+            consulting_doctor=author_val,
+            all_doctors=[],
+            referral_doctor="Not specified",
+            ai_outcome="Review required",
+            document_type=detected_doc_type,
+            summary_points=[],
+            brief_summary=brief_summary_text,
+            date_reasoning=None,
+            is_task_needed=False,
+            formatted_summary=brief_summary_text,
+            extraction_confidence=1.0 if short_summary else 0.0,
+            verified=True,
+            verification_notes=["Simplified analysis from ReportAnalyzer"]
         )
-
-        document_analysis, brief_summary = await asyncio.gather(
-            analysis_task, summary_task
-        )
+        
+        brief_summary = document_analysis.brief_summary
 
         patient_name = (
             document_analysis.patient_name
@@ -759,7 +922,7 @@ class WebhookService:
             only_current = existing_history is not None
             if only_current:
                 logger.info(f"🔄 Treatment history exists for {lookup_result.get('patient_name_to_use')}, generating new entries for archive/merge")
-            logger.info(f"📝 Generating treatment history for patient: {ai_summarizer_text}")
+            # logger.info(f"📝 Generating treatment history for patient: {ai_summarizer_text}")
             # Create treatment history
             treatment_history = await history_generator.generate_treatment_history(
                 patient_name=lookup_result.get("patient_name_to_use"),
@@ -815,27 +978,9 @@ class WebhookService:
     def _normalize_name(self, name):
         """
         Advanced name normalization:
-        - Removes titles (Dr, Dr., MD, M.D, DO, D.O, Prof, etc.)
-        - Removes commas
-        - Handles "LastName, FirstName" and "FirstName LastName" formats
-        - Converts to lowercase for comparison
+        Delegates to centralized clean_name_string helper.
         """
-        if not name:
-            return ""
-        
-        # Remove all titles and credentials (case-insensitive, with or without dots)
-        name = re.sub(r'\b(Dr\.?|M\.?D\.?|D\.?O\.?|D\.?P\.?M\.?|D\.?C\.?|N\.?P\.?|P\.?A\.?|Mr\.?|Ms\.?|Mrs\.?|Prof\.?|Doctor|QME)\b', '', name, flags=re.IGNORECASE)
-        
-        # Remove all commas
-        name = name.replace(',', ' ')
-        
-        # Remove all standalone periods and extra whitespace
-        name = name.replace('.', ' ')
-        
-        # Remove extra whitespace and convert to lowercase
-        name = ' '.join(name.split()).lower()
-        
-        return name.strip()
+        return clean_name_string(name)
 
     def _extract_name_parts(self, name):
         """
@@ -913,7 +1058,7 @@ class WebhookService:
         """
         if not long_summary:
             return None
-        logger.info(f"🔍 Extracting author from long summary... {long_summary[:800]}")  # Log first 100 chars for context
+        # logger.info(f"🔍 Extracting author from long summary... {long_summary[:800]}")  # Log first 100 chars for context
         try:
             # Patterns to look for author information
             # we only need the author who signed the report, not assistants or transcribers, or prepared by, directed by, etc.
@@ -2009,12 +2154,9 @@ class WebhookService:
                 )
             )
             
-            summary_task = asyncio.create_task(
-                asyncio.to_thread(analyzer.generate_brief_summary, long_summary, mode)
-            )
-            
-            # Wait for both to complete
-            document_analysis, brief_summary = await asyncio.gather(analysis_task, summary_task)
+            # OPTIMIZED: brief_summary is now generated within extract_document_data_with_reasoning
+            document_analysis = await analysis_task
+            brief_summary = document_analysis.brief_summary
             
             # Override with updated fields from the user
             if updated_fields.get("patient_name") and str(updated_fields["patient_name"]).lower() != "not specified":

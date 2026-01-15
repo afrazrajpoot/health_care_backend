@@ -343,6 +343,8 @@ class ProgressService:
                 'current_file': '',
                 'processed_files': [],
                 'failed_files': [],
+                'successful_items': [],
+                'failed_items': [],
                 'filenames': filenames,
                 'progress_percentage': 0,
                 'current_file_progress': 0,
@@ -460,6 +462,47 @@ class ProgressService:
             'message': message or status.capitalize()
         }
         
+        # 🆕 Real-time update of processed/failed lists
+        if 'processed_files' not in progress_data:
+            progress_data['processed_files'] = []
+        if 'failed_files' not in progress_data:
+            progress_data['failed_files'] = []
+            
+        # Ensure distinct lists (remove if exists to update status/avoid dupes)
+        if filename in progress_data['processed_files']:
+            progress_data['processed_files'].remove(filename)
+        if filename in progress_data['failed_files']:
+            progress_data['failed_files'].remove(filename)
+            
+        # Add to appropriate list based on completion status
+        if (status == 'success' or status == 'completed') and file_progress == 100:
+            progress_data['processed_files'].append(filename)
+        elif status == 'failed':
+            progress_data['failed_files'].append(filename)
+            
+        # 🆕 Real-time update of detailed item lists (for new frontend)
+        if 'successful_items' not in progress_data:
+            progress_data['successful_items'] = []
+        if 'failed_items' not in progress_data:
+            progress_data['failed_items'] = []
+
+        # Helper to remove existing item by filename (avoid duplicates)
+        progress_data['successful_items'] = [item for item in progress_data['successful_items'] if item.get('filename') != filename]
+        progress_data['failed_items'] = [item for item in progress_data['failed_items'] if item.get('filename') != filename]
+
+        if (status == 'success' or status == 'completed') and file_progress == 100:
+             progress_data['successful_items'].append({
+                 'filename': filename,
+                 'status': 'success',
+                 'message': message or 'Completed'
+             })
+        elif status == 'failed':
+             progress_data['failed_items'].append({
+                 'filename': filename,
+                 'status': 'failed',
+                 'message': message or 'manual review required'
+             })
+        
         # Calculate completed count for display (e.g., "1/2 files")
         completed_files = sum(1 for fp in progress_data['files_progress'] if fp and fp['progress'] == 100)
         progress_data['completed_steps'] = completed_files  # Reuse for "X/Y files"
@@ -506,6 +549,10 @@ class ProgressService:
         failed_count = sum(1 for r in results if r.get('status') == 'failed')
         progress_data['processed_files'] = [r.get('filename') for r in results if r.get('status') == 'success']
         progress_data['failed_files'] = [r.get('filename') for r in results if r.get('status') == 'failed']
+        
+        # 🆕 Populate detailed lists (preserved from realtime or from results)
+        progress_data['successful_items'] = [r for r in results if r.get('status') == 'success']
+        progress_data['failed_items'] = [r for r in results if r.get('status') == 'failed']
         
         # 🆕 CRITICAL: Set status to 'completed' (not just the passed status)
         progress_data['status'] = 'completed' if status == 'completed' else 'completed_with_errors'
@@ -723,7 +770,9 @@ class ProgressService:
                     'total_files': progress['total_steps'],
                     'processed': progress['completed_steps'],
                     'successful': len(progress['processed_files']),
-                    'failed': len(progress['failed_files'])
+                    'failed': len(progress['failed_files']),
+                    'successful_list': progress.get('successful_items', []),
+                    'failed_list': progress.get('failed_items', []),
                 }
             }
             if user_id:

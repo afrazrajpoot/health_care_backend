@@ -242,6 +242,7 @@ class DocumentAnalysis(BaseModel):
     ai_outcome: str = Field(..., description="AI-generated key outcome prediction keywords/phrases")
     document_type: str = Field(..., description="Type of document")
     summary_points: List[str] = Field(..., description="3-5 key points, each 2-3 words")
+    brief_summary: str = Field(..., description="Concise 2-3 sentence professional summary focusing on diagnosis, key findings, treatments, and recommendations")
     date_reasoning: Optional[DateReasoning] = Field(None, description="Reasoning behind date assignments")
     is_task_needed: bool = Field(default=False, description="If analysis determines any tasks are needed based on pending actions")
     

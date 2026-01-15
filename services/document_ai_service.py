@@ -187,7 +187,7 @@ class DocumentAIProcessor:
                 logger.info("📄 FULL OCR TEXT (for comparison):")
                 logger.info("=" * 80)
                 logger.info(f"Full text length: {len(result.text)} chars")
-                logger.info(f"First 500 chars: {result.text[:500]}")
+                # logger.info(f"First 500 chars: {result.text[:500]}")
                 logger.info("=" * 80)
             
             # Extract author signature from document text
@@ -226,7 +226,7 @@ class DocumentAIProcessor:
             llm_json["content"]["summary"] = summary_text
             llm_text = json.dumps(llm_json, indent=2)
 
-            logger.info(f'summary text----------------- : {summary_text}')
+            # logger.info(f'summary text----------------- : {summary_text}')
             
             # Prepend patient details to raw_text if available
             final_raw_text = layout_data["raw_text"]
@@ -238,6 +238,18 @@ class DocumentAIProcessor:
                 logger.info("🔍 DEBUG: Patient details prepended to raw_text")
                 logger.info(f"🔍 First 500 chars of final_raw_text:\n{final_raw_text[:500]}")
             
+            # Validate mandatory fields
+            p_name = patient_details.get("patient_name")
+            auth = patient_details.get("author")
+            
+            has_p_name = p_name and str(p_name).lower() not in ["not specified", "unknown", "none", "", "null"]
+            has_author = auth and str(auth).lower() not in ["not specified", "unknown", "none", "", "null"]
+
+            if not has_p_name or not has_author:
+                error_msg = f"MANDATORY FIELDS MISSING after retries: Name={has_p_name}, Author={has_author}. Marking FAILED."
+                logger.error(f"❌ {error_msg}")
+                return ExtractionResult(success=False, error=error_msg)
+
             # Create extraction result
             processed_result = ExtractionResult(
                 text=result.text,
@@ -316,122 +328,119 @@ class DocumentAIProcessor:
         total_pages: int
     ) -> dict:
         """
-        Extract patient details using smart AI-first approach.
+        Extract patient details using smart AI-first approach with MANDATORY re-extraction logic.
         
         Strategy:
-        1. First: Try AI extraction from summarizer output (fast, accurate)
-        2. If all fields found: Skip layout parser entirely
-        3. If some fields missing: Use layout parser to fill gaps
-        4. Use signature extractor as fallback for author if still missing
-        5. Merge: Combine results for completeness
+        1. Attempt extraction (AI + Layout Check).
+        2. Merge: Combine results for completeness.
+        3. Check mandatory fields (Patient Name, Author).
+        4. If missing, RETRY step 1-2 (up to 2 times).
+        5. If still missing, return incomplete dict (caller handles failure).
         """
         patient_details = {}
-        
-        # Get patient extractor instance
         patient_extractor = get_patient_extractor()
         
         # Get signature info from layout_data if available (extracted earlier)
         signature_info = layout_data.get("signature_info")
         signature_author = signature_info.get("author") if signature_info else None
-        if signature_author:
-            logger.info(f"✍️ Signature author available for fallback: {signature_author} ({signature_info.get('confidence')} confidence)")
         
-        # Step 1: Try AI extraction from summarizer first (pass signature_info for author detection)
-        logger.info("🤖 Step 1: Attempting AI extraction from summarizer output...")
-        ai_result = patient_extractor.extract_from_summarizer_ai(summary_text, signature_info=signature_info)
-        
-        # Check which fields are found by AI
-        ai_fields_found = [k for k in ['patient_name', 'dob', 'doi', 'claim_number', 'author'] if ai_result.get(k)]
-        ai_missing_fields = [k for k in ['patient_name', 'dob', 'doi', 'claim_number', 'author'] if not ai_result.get(k)]
-        
-        logger.info(f"📊 AI extraction found {len(ai_fields_found)}/5 fields: {ai_fields_found}")
-        
-        # Step 2: If all fields found by AI, skip layout parser
-        if not ai_missing_fields:
-            logger.info("✅ All patient details found via AI - skipping layout parser extraction")
-            patient_details = ai_result
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            is_retry = attempt > 0
+            if is_retry:
+                logger.warning(f"🔄 Re-extraction attempt {attempt}/{max_retries} for missing mandatory fields...")
             
-            # Still update layout_data metadata
-            if layout_data.get("structured_document", {}).get("metadata") is not None:
-                layout_data["structured_document"]["metadata"]["patient_details"] = patient_details
+            # Step 1: AI extraction
+            logger.info(f"🤖 Step 1 (Attempt {attempt+1}): AI extraction from summarizer output...")
+            ai_result = patient_extractor.extract_from_summarizer_ai(summary_text, signature_info=signature_info)
             
-            log_patient_details(patient_details, "PATIENT DETAILS (AI extraction - complete)")
-            return patient_details
-        
-        # Step 3: Some fields missing - use layout parser to fill gaps
-        logger.info(f"⚠️ AI missing fields: {ai_missing_fields} - using layout parser fallback")
-        
-        # Determine pages to extract (first 3 pages)
-        pages_to_extract = list(range(1, min(4, total_pages + 1)))
-        
-        if not pages_to_extract:
-            logger.warning("⚠️ No pages to extract, returning AI results only")
-            return ai_result
-        
-        logger.info(f"📄 Extracting layout from first {len(pages_to_extract)} pages for missing fields")
-        
-        mime_type = get_mime_type(filepath)
-        layout_result = self.layout_parser.process_pages(filepath, pages_to_extract, mime_type)
-        
-        document_dict = layout_result.get("document_dict", {})
-        formatted_text = layout_result.get("formatted_text", "")
-        
-        logger.info(f"🔍 Layout result keys: {list(layout_result.keys())}")
-        logger.info(f"📄 Document dict keys: {list(document_dict.keys()) if document_dict else 'None'}")
-        
-        if document_dict:
-            try:
-                # Extract from layout parser
-                layout_patient_details = patient_extractor.extract_from_layout_json(document_dict)
-                
-                # Step 4: Merge results - AI takes priority, layout fills gaps, signature as final fallback for author
-                patient_details = {
-                    "patient_name": ai_result.get("patient_name") or layout_patient_details.get("patient_name"),
-                    "dob": ai_result.get("dob") or layout_patient_details.get("dob"),
-                    "doi": ai_result.get("doi") or layout_patient_details.get("doi"),
-                    "claim_number": ai_result.get("claim_number") or layout_patient_details.get("claim_number"),
-                    "author": ai_result.get("author") or layout_patient_details.get("author") or signature_author,
-                    "date_of_report": ai_result.get("date_of_report")  # Only from AI
-                }
-                
-                # Log merge results
-                logger.info("=" * 60)
-                logger.info("🔗 MERGED PATIENT DETAILS (AI + Layout Parser + Signature):")
-                logger.info("=" * 60)
-                for field in ['patient_name', 'dob', 'doi', 'claim_number', 'author']:
-                    ai_val = ai_result.get(field)
-                    layout_val = layout_patient_details.get(field)
-                    merged_val = patient_details.get(field)
-                    if field == 'author':
-                        source = "AI" if ai_val else ("Layout" if layout_val else ("Signature" if signature_author and merged_val == signature_author else "Not found"))
-                    else:
-                        source = "AI" if ai_val else ("Layout" if layout_val else "Not found")
-                    logger.info(f"  {field}: {merged_val} (source: {source})")
-                logger.info("=" * 60)
-                
-                # Add patient details to metadata
-                if layout_data.get("structured_document", {}).get("metadata") is not None:
-                    layout_data["structured_document"]["metadata"]["patient_details"] = patient_details
-                
-            except Exception as e:
-                logger.error(f"❌ Layout parser patient extraction failed: {e}")
-                import traceback
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                # Fall back to AI-only results
+            # Step 2: Merge logic (AI vs Layout)
+            # Layout logic is deterministic so we don't necessarily re-run it unless we think it helps (it's expensive).
+            # We will run layout parser ONCE if AI is missing fields, then reuse results.
+            
+            ai_missing_fields = [k for k in ['patient_name', 'dob', 'doi', 'claim_number', 'author'] if not ai_result.get(k)]
+            
+            # Only run layout parser if we have missing fields AND haven't run it successfully yet
+            layout_patient_details = {}
+            # Check if we need layout parser (if we have layout_data but not details yet, specific check omitted for brevity, reusing logic)
+            
+            if not ai_missing_fields:
+                logger.info("✅ All details found via AI.")
                 patient_details = ai_result
+            else:
+                logger.info(f"⚠️ AI missing fields: {ai_missing_fields}")
+                # Use layout parser (only run once if possible context permits, but here we keep it simple or check if done)
+                # Since layout parser is expensive, we might want to run it only once.
+                # Assuming layout_parser logic below handles idempotency or we accept cost for correctness.
+                
+                pages_to_extract = list(range(1, min(4, total_pages + 1)))
+                if pages_to_extract and self.layout_parser.is_configured:
+                     try:
+                        mime_type = get_mime_type(filepath)
+                        # Optimization: Cache layout result if we want? For now, re-run or rely on deterministic nature.
+                        # Actually, layout parser is expensive. If we already found layout keys in a previous attempt, ideally we reuse.
+                        # But `_extract_patient_details` is called once per doc flow. The loop IS strictly local.
+                        # We will move layout extraction OUTSIDE loop if we want to extract once, OR keep inside if we hope a retry helps? 
+                        # Layout parser results won't change on retry. Only AI extraction changes.
+                        
+                        # So, perform layout extraction ONCE if needed
+                        if 'layout_extraction_done' not in locals():
+                            logger.info("📄 Extracting layout (running ONCE)...")
+                            layout_result = self.layout_parser.process_pages(filepath, pages_to_extract, mime_type)
+                            document_dict = layout_result.get("document_dict", {})
+                            formatted_text = layout_result.get("formatted_text", "")
+                            
+                            # Update raw text with layout only once
+                            if document_dict:
+                                json_output = json.dumps(document_dict, indent=2, ensure_ascii=False)
+                                layout_data["raw_text"] = (
+                                    summary_text + 
+                                    "\n\n--- STRUCTURED LAYOUT (Formatted) ---\n\n" + formatted_text +
+                                    "\n\n--- STRUCTURED LAYOUT (Full JSON) ---\n\n" + json_output
+                                )
+                            layout_extraction_done = True
+                            
+                            if document_dict:
+                                layout_patient_details = patient_extractor.extract_from_layout_json(document_dict)
+
+                     except Exception as e:
+                        logger.error(f"❌ Layout parser error: {e}")
             
-            # Append structured layout to raw_text
-            json_output = json.dumps(document_dict, indent=2, ensure_ascii=False)
-            logger.info(f"📝 JSON output layout: {json_output}")
-            layout_data["raw_text"] = (
-                summary_text + 
-                "\n\n--- STRUCTURED LAYOUT (Formatted) ---\n\n" + formatted_text +
-                "\n\n--- STRUCTURED LAYOUT (Full JSON) ---\n\n" + json_output
-            )
-        else:
-            logger.warning("⚠️ document_dict is empty, using AI results only")
-            patient_details = ai_result
+            # Merge Results
+            merged_details = {
+                "patient_name": ai_result.get("patient_name") or layout_patient_details.get("patient_name"),
+                "dob": ai_result.get("dob") or layout_patient_details.get("dob"),
+                "doi": ai_result.get("doi") or layout_patient_details.get("doi"),
+                "claim_number": ai_result.get("claim_number") or layout_patient_details.get("claim_number"),
+                "author": ai_result.get("author") or layout_patient_details.get("author") or signature_author,
+                "date_of_report": ai_result.get("date_of_report")
+            }
+            
+            # Step 3: Check Mandatory Fields
+            # Patient Name AND Author are MANDATORY
+            p_name = merged_details.get("patient_name")
+            auth = merged_details.get("author")
+            
+            has_p_name = p_name and str(p_name).lower() not in ["not specified", "unknown", "none", "", "null"]
+            has_author = auth and str(auth).lower() not in ["not specified", "unknown", "none", "", "null"]
+            
+            if has_p_name and has_author:
+                logger.info("✅ Mandatory fields (Patient Name, Author) found.")
+                patient_details = merged_details
+                break # Success
+            else:
+                logger.warning(f"⚠️ Attempt {attempt+1}: Missing mandatory fields (Name: {has_p_name}, Author: {has_author}).")
+                if attempt < max_retries:
+                    continue # Retry
+                else:
+                    logger.error("❌ Failed to extract mandatory fields after max retries.")
+                    patient_details = merged_details # Return what we have, let caller handle failure
+
+        # Final Update of metadata and logs
+        if layout_data.get("structured_document", {}).get("metadata") is not None:
+            layout_data["structured_document"]["metadata"]["patient_details"] = patient_details
         
+        log_patient_details(patient_details, "FINAL MERGED PATIENT DETAILS")
         return patient_details
     
     def _process_document_batch(self, filepath: str) -> ExtractionResult:
@@ -481,48 +490,107 @@ class DocumentAIProcessor:
             patient_details = {}
             patient_extractor = get_patient_extractor()
             
-            # Note: Batch processing doesn't have raw OCR text for signature extraction
-            # Author detection will rely on AI extraction from summary text only
-            
-            # Step 1: Try AI extraction from summarizer first
-            ai_result = patient_extractor.extract_from_summarizer_ai(summary_text, signature_info=None)
-            ai_fields_found = [k for k in ['patient_name', 'dob', 'doi', 'claim_number', 'author'] if ai_result.get(k)]
-            ai_missing_fields = [k for k in ['patient_name', 'dob', 'doi', 'claim_number', 'author'] if not ai_result.get(k)]
-            
-            logger.info(f"📊 AI extraction found {len(ai_fields_found)}/4 fields: {ai_fields_found}")
-            
-            # Step 2: If all fields found, use AI results
-            if not ai_missing_fields:
-                logger.info("✅ All patient details found via AI - skipping layout parser")
-                patient_details = ai_result
-            else:
-                # Step 3: Use layout parser to fill gaps
-                logger.info(f"⚠️ AI missing fields: {ai_missing_fields} - using layout parser fallback")
+            # OPTIMIZATION: Extract raw text locally from PDF for Signature Detection
+            # This is fast (local CPU) and allows us to find the author even in batch mode
+            # without relying on the summary text which might omit the signature block.
+            batch_signature_info = None
+            try:
+                from PyPDF2 import PdfReader
+                raw_pdf_text = ""
+                with open(filepath, "rb") as f:
+                    pdf_reader = PdfReader(f)
+                    # Read up to first 5 pages and last 3 pages (where signatures usually are)
+                    # This avoids reading 100+ pages of medical records unnecessarily
+                    total_p = len(pdf_reader.pages)
+                    pages_to_read = list(range(min(5, total_p))) # First 5
+                    if total_p > 5:
+                        pages_to_read.extend(range(max(5, total_p - 3), total_p)) # Last 3
+                    
+                    for p_num in sorted(list(set(pages_to_read))):
+                        page_text = pdf_reader.pages[p_num].extract_text()
+                        if page_text:
+                            raw_pdf_text += page_text + "\n"
                 
-                if self.layout_parser.is_configured:
+                if raw_pdf_text:
+                    batch_signature_info = extract_author_signature(raw_pdf_text)
+                    if batch_signature_info:
+                        logger.info(f"✍️ Batch Signature extracted (via local PDF text): {batch_signature_info.get('author')}")
+            except Exception as sig_err:
+                logger.warning(f"⚠️ Failed to extract local PDF text for signature: {sig_err}")
+
+            # Step 1: Try AI extraction from summarizer first (pass the signature info we just found)
+            # RE-EXTRACTION LOGIC for Batch Processing
+            patient_details = {}
+            max_retries = 2
+            
+            for attempt in range(max_retries + 1):
+                logger.info(f"🤖 Step 1 (Attempt {attempt+1}): Batch AI extraction from summarizer output...")
+                ai_result = patient_extractor.extract_from_summarizer_ai(summary_text, signature_info=batch_signature_info)
+                
+                ai_missing_fields = [k for k in ['patient_name', 'dob', 'doi', 'claim_number', 'author'] if not ai_result.get(k)]
+                
+                # Layout logic fallback (run once if needed)
+                layout_patient_details = {}
+                if ai_missing_fields and self.layout_parser.is_configured:
+                    logger.info(f"⚠️ AI missing fields: {ai_missing_fields} - using layout parser fallback")
                     try:
-                        layout_result = self.layout_parser.process_pages(filepath, [1, 2, 3], mime_type)
-                        if layout_result and layout_result.get("document_dict"):
-                            document_dict = layout_result.get("document_dict", {})
-                            layout_patient_details = patient_extractor.extract_from_layout_json(document_dict)
-                            
-                            # Merge results - AI takes priority
-                            patient_details = {
-                                "patient_name": ai_result.get("patient_name") or layout_patient_details.get("patient_name"),
-                                "dob": ai_result.get("dob") or layout_patient_details.get("dob"),
-                                "doi": ai_result.get("doi") or layout_patient_details.get("doi"),
-                                "claim_number": ai_result.get("claim_number") or layout_patient_details.get("claim_number"),
-                                "date_of_report": ai_result.get("date_of_report")
-                            }
-                            
-                            logger.info("🔗 Merged AI + Layout parser results")
-                        else:
-                            patient_details = ai_result
+                        # Only run layout parser ONCE per batch job to avoid cost, or leverage retries if desired.
+                        # Since we are in a loop, we cache it.
+                        if 'batch_layout_extracted' not in locals():
+                             layout_result = self.layout_parser.process_pages(filepath, [1, 2, 3], mime_type)
+                             if layout_result and layout_result.get("document_dict"):
+                                document_dict = layout_result.get("document_dict", {})
+                                layout_patient_details = patient_extractor.extract_from_layout_json(document_dict)
+                                batch_layout_extracted = True
+                             else:
+                                batch_layout_extracted = False # Failed or empty
+                        elif locals().get('batch_layout_extracted') and 'document_dict' in locals():
+                             # Re-extract from cached dict (idempotent, but just in case logic changes)
+                             layout_patient_details = patient_extractor.extract_from_layout_json(document_dict)
+
                     except Exception as layout_err:
                         logger.warning(f"⚠️ Layout parser extraction failed: {layout_err}")
-                        patient_details = ai_result
+                
+                # Merge results - AI takes priority
+                merged_details = {
+                    "patient_name": ai_result.get("patient_name") or layout_patient_details.get("patient_name"),
+                    "dob": ai_result.get("dob") or layout_patient_details.get("dob"),
+                    "doi": ai_result.get("doi") or layout_patient_details.get("doi"),
+                    "claim_number": ai_result.get("claim_number") or layout_patient_details.get("claim_number"),
+                    "author": ai_result.get("author") or layout_patient_details.get("author"), # Add signature fallback if needed? batch_signature_info is passed to AI already.
+                    "date_of_report": ai_result.get("date_of_report")
+                }
+                
+                # Check Mandatory Fields
+                p_name = merged_details.get("patient_name")
+                auth = merged_details.get("author")
+                has_p_name = p_name and str(p_name).lower() not in ["not specified", "unknown", "none", "", "null"]
+                has_author = auth and str(auth).lower() not in ["not specified", "unknown", "none", "", "null"]
+                
+                if has_p_name and has_author:
+                    logger.info("✅ Mandatory fields (Patient Name, Author) found in Batch.")
+                    patient_details = merged_details
+                    break
                 else:
-                    patient_details = ai_result
+                    logger.warning(f"⚠️ Batch Attempt {attempt+1}: Missing mandatory fields (Name: {has_p_name}, Author: {has_author}).")
+                    if attempt < max_retries:
+                        continue
+                    else:
+                        logger.error("❌ Failed to extract mandatory fields after max retries in Batch.")
+                        patient_details = merged_details
+            
+            # Validation Step before return
+            p_name = patient_details.get("patient_name")
+            auth = patient_details.get("author")
+            has_p_name = p_name and str(p_name).lower() not in ["not specified", "unknown", "none", "", "null"]
+            has_author = auth and str(auth).lower() not in ["not specified", "unknown", "none", "", "null"]
+
+            if not has_p_name or not has_author:
+                 error_msg = f"MANDATORY FIELDS MISSING in Batch: Name={has_p_name}, Author={has_author}. Marking FAILED."
+                 logger.error(f"❌ {error_msg}")
+                 raise Exception(error_msg) # Batch usually raises exception on failure
+
+            # Build final result
             
             # Build final result
             final_raw_text = summary_text

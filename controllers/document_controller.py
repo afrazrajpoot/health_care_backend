@@ -16,10 +16,10 @@ from services.get_document_services import DocumentAggregationService
 from utils.page_extractor import get_page_extractor
 from utils.document_detector import detect_document_type
 from services.report_analyzer import ReportAnalyzer
-from services.resoning_agent import EnhancedReportAnalyzer
 from services.patient_lookup_service import EnhancedPatientLookup
 from services.webhook_service import WebhookService
 from models.schemas import ExtractionResult
+from models.data_models import DocumentAnalysis
 from datetime import datetime
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -406,7 +406,6 @@ async def split_and_process_document(request: Request):
         db_service = await get_database_service()
         webhook_service = WebhookService()
         report_analyzer = ReportAnalyzer(mode)
-        enhanced_analyzer = EnhancedReportAnalyzer()
         patient_lookup = EnhancedPatientLookup()
         page_extractor = get_page_extractor()
         
@@ -474,22 +473,72 @@ async def split_and_process_document(request: Request):
                 long_summary = report_result.get("long_summary", "")
                 short_summary = report_result.get("short_summary", "")
                 
-                # Step 2c: Use EnhancedReportAnalyzer for full extraction
-                analysis_task = loop.run_in_executor(
-                    llm_executor,
-                    lambda: enhanced_analyzer.extract_document_data_with_reasoning(
-                        long_summary, None, None, mode,
-                    )
+                # Step 2c: REMOVED EnhancedReportAnalyzer
+                # Construct DocumentAnalysis from available data
+                
+                # Helper to convert structured short_summary dict to string
+                brief_summary_text = "Summary not available"
+                if short_summary:
+                    if isinstance(short_summary, dict):
+                        # Try to extract meaningful text from structured summary
+                        try:
+                            # 1. Try to get items texts
+                            items = short_summary.get('summary', {}).get('items', [])
+                            text_parts = []
+                            for item in items:
+                                if isinstance(item, dict):
+                                    # Prefer expanded text, fall back to collapsed
+                                    part = item.get('expanded') or item.get('collapsed')
+                                    if part:
+                                        text_parts.append(part)
+                            
+                            if text_parts:
+                                brief_summary_text = " ".join(text_parts)
+                            elif short_summary.get('header', {}).get('title'):
+                                # Fallback to Title if no items
+                                brief_summary_text = f"Report: {short_summary['header']['title']}"
+                            else:
+                                # Fallback to JSON string as last resort
+                                brief_summary_text = json.dumps(short_summary)
+                        except Exception as e:
+                            logger.warning(f"⚠️ Failed to parse structured short_summary in controller: {e}")
+                            brief_summary_text = str(short_summary)
+                    else:
+                        brief_summary_text = str(short_summary)
+
+                document_analysis = DocumentAnalysis(
+                    patient_name="Not specified",
+                    claim_number="Not specified",
+                    dob="0000-00-00",
+                    doi="0000-00-00",
+                    status="Not specified",
+                    rd="0000-00-00",
+                    body_part="Not specified",
+                    body_parts_analysis=[],
+                    diagnosis="See summary",
+                    key_concern="Medical evaluation",
+                    extracted_recommendation="See summary",
+                    extracted_decision="Not specified",
+                    ur_decision="",
+                    ur_denial_reason=None,
+                    adls_affected="Not specified",
+                    work_restrictions="Not specified",
+                    consulting_doctor="Not specified",
+                    all_doctors=[],
+                    referral_doctor="Not specified",
+                    ai_outcome="Review required",
+                    document_type=doc_type,
+                    summary_points=[],
+                    brief_summary=brief_summary_text,
+                    date_reasoning=None,
+                    is_task_needed=False,
+                    formatted_summary=brief_summary_text,
+                    extraction_confidence=1.0 if short_summary else 0.0,
+                    verified=True,
+                    verification_notes=["Simplified analysis from ReportAnalyzer"]
                 )
                 
-                summary_task = loop.run_in_executor(
-                    llm_executor,
-                    lambda: enhanced_analyzer.generate_brief_summary(raw_text if raw_text else report_text, mode)
-                )
-                
-                document_analysis, brief_summary = await asyncio.gather(
-                    analysis_task, summary_task
-                )
+                brief_summary = document_analysis.brief_summary
                 
                 # Step 2d: Prepare processed_data similar to webhook processing
                 processed_data = {

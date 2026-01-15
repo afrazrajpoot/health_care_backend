@@ -2,6 +2,7 @@ from difflib import SequenceMatcher
 import re
 from typing import Optional, Tuple
 from utils.logger import logger
+from helpers.helpers import clean_name_string
 
 class EnhancedPatientLookup:
     """Enhanced patient lookup with fuzzy matching and field normalization"""
@@ -16,19 +17,7 @@ class EnhancedPatientLookup:
         if not name or str(name).lower() in ["not specified", "unknown", "", "none", "null"]:
             return ""
         
-        # Convert to lowercase and remove extra spaces
-        normalized = str(name).strip().lower()
-        
-        # Remove common suffixes/prefixes
-        normalized = re.sub(r'\b(mr|mrs|ms|dr|prof|sr|jr|ii|iii|iv)\b\.?', '', normalized)
-        
-        # Remove special characters but keep spaces and hyphens
-        normalized = re.sub(r'[^\w\s-]', '', normalized)
-        
-        # Normalize multiple spaces
-        normalized = ' '.join(normalized.split())
-        
-        return normalized
+        return clean_name_string(name)
     
     def parse_name_components(self, name: str) -> set:
         """Parse name into components for fuzzy matching"""

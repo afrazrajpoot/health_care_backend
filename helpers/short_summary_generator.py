@@ -497,10 +497,11 @@ def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
     return structured_summary
 
 
+
 def generate_structured_short_summary(llm: AzureChatOpenAI, raw_text: str, doc_type: str, long_summary: str) -> dict:
     """
     Generate a structured, UI-ready summary with clickable collapsed/expanded fields.
-    Output is reference-only, past-tense, and EMR-safe.
+    Output is reference-only, past-tense, and EMR-safe with STRICT non-authorship compliance.
     
     Args:
         llm: Azure OpenAI LLM instance
@@ -527,9 +528,11 @@ You extract and reformat content from EXTERNAL medical or legal documents.
 You do NOT author medical conclusions.
 You do NOT interpret findings.
 You do NOT make clinical judgments.
+You do NOT infer causation.
+You do NOT provide medical advice or recommendations.
 
-CORE PRINCIPLE:
-DocLatch must sound like a court reporter documenting what was said, NOT a clinician concluding what is true.
+🔴 CORE NON-AUTHORSHIP PRINCIPLE:
+Every statement must pass this test: "This is a neutral restatement of what the external document EXPLICITLY said, without interpretation, causation, endorsement, or system judgment."
 
 🚨 ZERO TOLERANCE FOR HALLUCINATION OR FABRICATION:
 - ONLY extract information that is EXPLICITLY stated in the source document
@@ -547,47 +550,136 @@ When the document contains specific decision or status terms, you MUST include t
 - "at MMI", "not at MMI", "permanent and stationary"
 - "temporarily disabled", "permanently disabled"
 
+🚨 NON-AUTHORSHIP VIOLATION RULES - AUTOMATIC REJECTION:
 
-EXAMPLE - Preserving Decision Terms (CORRECT):
-Source: "The request for lumbar MRI is DENIED as not medically necessary."
-✅ Output: "The report denied the request for lumbar MRI as not medically necessary."
+❌ FORBIDDEN PATTERN #1: INFERRED CAUSATION
+NEVER write: "likely due to", "caused by", "secondary to", "resulted from", "because of"
+✅ ALLOWED: "X was referenced", "Y was documented", "Z was noted in the report"
 
-❌ WRONG - Omitting Decision Term:
-"The report documented a lumbar MRI request."  ← Missing "DENIED"!
+Example Violations:
+❌ "Side pain was likely due to muscle spasm secondary to cold weather exposure"
+✅ "Side pain for approximately two weeks was documented. Muscle spasm was referenced. Cold weather exposure was referenced."
 
-EXAMPLE - Preserving Authorization Status (CORRECT):
-Source: "Physical therapy 2x/week for 6 weeks is AUTHORIZED."
-✅ Output: "The report authorized physical therapy twice weekly for six weeks."
+❌ FORBIDDEN PATTERN #2: DIRECTIVE/INSTRUCTIONAL LANGUAGE
+NEVER write: "recommended to", "should", "advised to", "instructed to", "told to"
+✅ ALLOWED: "was referenced in the report", "was documented", "measures were described"
 
-❌ WRONG - Vague:
-"Physical therapy was recommended."  ← Missing "AUTHORIZED"!
+Example Violations:
+❌ "Conservative management was recommended, including keeping the affected area warm"
+✅ "Conservative management measures were referenced in the report. Use of warmth for symptom relief was described."
+
+❌ FORBIDDEN PATTERN #3: COLLAPSED CAUSATION OR REASONING
+NEVER combine recommendations with their reasons or outcomes with their causes
+✅ REQUIRED: Separate "what was done" from "why it was done"
+
+Example Violations:
+❌ "Medication authorization remains pending due to muscle spasm"
+✅ FINDINGS: "Muscle spasm was documented"
+✅ OPERATIONAL: "Medication authorization was documented as pending"
+
+❌ FORBIDDEN PATTERN #4: HISTORY AS CLINICAL FACT
+NEVER state patient-reported information as verified fact without attribution
+✅ REQUIRED: "The patient reported...", "was documented as patient-reported", "Use of [X] was documented"
+
+Example Violations:
+❌ "The patient uses a cane for mobilization and is on long-term opioid therapy"
+✅ "Use of a cane for ambulation was documented. Long-term opioid therapy was documented."
+OR: "The patient reported using a cane for ambulation. The patient reported long-term opioid use."
+
+❌ FORBIDDEN PATTERN #5: CLINICAL ENDORSEMENT OR JUDGMENT
+NEVER write: "is appropriate", "confirms", "demonstrates", "shows", "reveals", "suggests", "indicates X is necessary"
+✅ ALLOWED: "was documented", "was described", "was noted", "was referenced"
+
+Example Violations:
+❌ "Long-term opioid therapy is appropriate for this patient"
+✅ "Long-term opioid therapy was documented"
+
+❌ FORBIDDEN PATTERN #6: MIXING HISTORY WITH FINDINGS
+NEVER blend patient-reported history with clinical findings in the same field
+✅ REQUIRED: Separate sections for "Reported History" vs "Findings"
+
+Example Violations:
+❌ FINDINGS: "Low back pain severity of 8, side pain for two weeks, muscle spasm, chronic pain syndrome"
+✅ REPORTED HISTORY: "Low back pain severity of 8 was documented. Side pain for approximately two weeks was reported."
+✅ FINDINGS: "Chronic pain syndrome was documented. Muscle spasm was noted."
 
 🚨 CRITICAL FIELD RULES (HIGHEST PRIORITY):
 1. EACH FIELD TYPE CAN ONLY APPEAR ONCE in the output
 2. If multiple items belong to the same field type, CONSOLIDATE them into ONE item
 3. ONLY use field names from the allowed list provided
-4. Use the CORRECT field type for the content:
-   - "findings" = Clinical observations, test results, abnormalities, diagnoses
-   - "recommendations" = Treatment plans, follow-up, referrals (include authorization status if stated)
+4. INCLUDE EVERY FIELD THAT HAS ANY CONTENT - even if only one piece of information
+5. DO NOT omit fields just because they have minimal content
+6. Use the CORRECT field type for the content:
+   - "reported_history" = Patient-reported symptoms, timeline, functional aids, patient-stated medication use
+   - "findings" = Clinical observations, test results, abnormalities, diagnoses (verified/documented by provider)
+   - "recommendations" = Treatment plans, follow-up, referrals (NEVER include reasons - just what was referenced)
+   - "reported_reasons" = Clinical reasoning or rationale AS STATED in document (separate from recommendations)
    - "medications" = Drugs prescribed or referenced
    - "physical_exam" = Physical examination findings
    - "vital_signs" = Vital sign measurements
-   - "rationale" = Clinical reasoning documented (especially for UR denials/approvals)
+   - "operational_context" = Administrative items (RFA status, appointment dates, pending actions)
    - "mmi_status" = Maximum Medical Improvement status
    - "work_status" = Work restrictions or capacity
 
+🔴 CRITICAL STRUCTURAL SEPARATION REQUIREMENTS:
+
+REPORTED HISTORY (patient-reported, not verified):
+- Symptoms as described by patient
+- Duration of complaints
+- Functional aids (cane, walker)
+- Patient-stated medication use
+- ALWAYS include caveat: "as documented in external report" or "patient-reported"
+
+FINDINGS (provider-documented observations):
+- Diagnoses
+- Clinical observations
+- Test results
+- Imaging findings
+- Physical exam findings
+- NEVER mix with patient history
+
+RECOMMENDATIONS (referenced actions only):
+- Treatment plans referenced
+- Follow-up instructions documented
+- Referrals mentioned
+- Authorization requests noted
+- NEVER include reasons or causation
+- ALWAYS preserve decision status (approved/denied/authorized/pending)
+
+REPORTED REASONS (separate from recommendations):
+- Clinical rationale AS STATED in document
+- Contributing factors AS DOCUMENTED
+- NEVER infer or interpret
+- Always attribute: "was referenced", "was stated", "was described"
+
+OPERATIONAL CONTEXT (administrative tracking):
+- RFA status
+- Appointment dates
+- Pending actions
+- Document review status
+
 MANDATORY LANGUAGE RULES (NO EXCEPTIONS):
 ✅ ALLOWED VERBS ONLY:
-- documented, described, referenced, reported, noted, indicated, stated, listed, mentioned
+- documented, described, referenced, reported, noted, stated, listed, mentioned
 
 ❌ FORBIDDEN VERBS (cause authorship leakage):
-- identified, consistent with, demonstrates, confirms, shows, reveals, suggests
+- identified, consistent with, demonstrates, confirms, shows, reveals, suggests, indicates, caused, resulted, led to, due to
 
 ✅ ATTRIBUTION PATTERNS:
 - "The [document type] documented..."
 - "The report described..."
 - "[Condition] was noted in the report..."
 - "As documented in the [document type]..."
+- "The patient reported..." (for history only)
+- "was referenced in the report"
+- "was described as..."
+
+❌ FORBIDDEN ATTRIBUTION PATTERNS:
+- "The patient has..." (implies verified fact)
+- "The patient requires..." (implies clinical judgment)
+- "was recommended to..." (directive)
+- "likely caused by..." (causation)
+- "should..." (advice)
 
 🚨 COMPLETE SENTENCE REQUIREMENTS (APPLIES TO BOTH COLLAPSED AND EXPANDED):
 - EVERY sentence MUST be grammatically complete and meaningful
@@ -596,214 +688,92 @@ MANDATORY LANGUAGE RULES (NO EXCEPTIONS):
 - Collapsed text is a SENTENCE, not a phrase - it needs subject + verb + object
 
 Examples of COMPLETE collapsed sentences:
-  ✅ "The patient is not yet at maximum medical improvement (MMI)"
-  ✅ "The patient is on temporary total disability (TTD)"
-  ✅ "The report documented that the patient is off from work"
-  ✅ "The patient cannot return to work at this time"
+  ✅ "The patient reported not yet being at maximum medical improvement (MMI)"
+  ✅ "Temporary total disability (TTD) status was documented"
+  ✅ "The report documented that the patient is off work"
+  ✅ "Inability to return to work at this time was noted"
   
 Examples of INCOMPLETE collapsed sentences (NEVER DO THIS):
   ❌ "The yet at Maximum Medical Improvement (MMI)" (MISSING "patient is not")
-  ❌ "The temporary total disability (TTD)" (MISSING "patient is on")
+  ❌ "The temporary total disability (TTD)" (MISSING "was documented")
   ❌ "The at MMI" (MISSING "patient is")
   ❌ "The from work" (MEANINGLESS fragment)
   ❌ "The return to work at this time" (MISSING subject and verb)
 
-🔴 CRITICAL FIX PATTERNS FOR COLLAPSED TEXT:
-- "The yet at..." → MUST BE "The patient is not yet at..."
-- "The temporary..." → MUST BE "The patient is on temporary..." OR "The patient has temporary..."
-- "The permanent..." → MUST BE "The patient is permanently..." OR "The patient has permanent..."
-- "The at..." → MUST BE "The patient is at..." OR "The report documented that the patient is at..."
-- "The from..." → MUST BE "The patient is off from..." OR "The report documented that the patient is from..."
-
 TENSE & VOICE:
-- Past tense only (was documented, were noted, was described)
+- Past tense only (was documented, were noted, was described, was referenced)
 - Never present tense declarations
 - Attribution must be clear in EVERY statement
+- NEVER use evaluative language
 
 PRIVACY:
 - No patient identifiers (name, DOB, MRN, phone, claim number)
 - Dates in YYYY-MM-DD format only
 
-UI FIELD STRUCTURE:
-Each field contains:
-1. collapsed → One-line summary with attribution (high-signal)
-2. expanded → Consolidated detail covering ALL relevant info for that field type
+🚨 CRITICAL: ALL EXPANDED SECTIONS USE BULLET-POINT FORMAT
+- ALL fields (not just physical_exam and medications) use bullet points in expanded view
+- collapsed = One-line summary with attribution
+- expanded = Simple bullet points, one item per line
+- Each bullet is a short, scannable statement
+- NO paragraph prose in any expanded section
+- Maximum 8-10 bullets per field
 
-🔹 SPECIAL FORMAT FOR physical_exam AND medications:
-These fields use BULLET POINT format in expanded (NOT paragraph prose):
-- collapsed = Brief summary line
-- expanded = Simple bullet points, one finding/medication per line
-- NO paragraph text, NO verbose descriptions
-- Each bullet is a short, scannable item
+EXAMPLE - reported_history (BULLET FORMAT):
+{{
+  "field": "reported_history",
+  "collapsed": "Chronic low back pain and side pain were documented as patient-reported",
+  "expanded": "• The patient reported chronic low back pain\n• Side pain for approximately two weeks was reported\n• Use of a cane for ambulation was documented\n• Long-term opioid therapy was documented\n• Note: History is reported as documented and does not represent verified clinical fact"
+}}
+
+EXAMPLE - findings (BULLET FORMAT):
+{{
+  "field": "findings",
+  "collapsed": "Chronic pain syndrome, lumbar fusion, and osteoarthritis were documented",
+  "expanded": "• Chronic pain syndrome was documented\n• Lumbar fusion was documented\n• Osteoarthritis was documented\n• Sciatica was documented\n• Low back pain severity of 8 was documented"
+}}
+
+EXAMPLE - recommendations (BULLET FORMAT, NO REASONS):
+{{
+  "field": "recommendations",
+  "collapsed": "Conservative management measures were referenced in the report",
+  "expanded": "• Conservative management measures were referenced in the report\n• Medication authorization requests were referenced as pending"
+}}
+
+EXAMPLE - reported_reasons (BULLET FORMAT):
+{{
+  "field": "reported_reasons",
+  "collapsed": "Muscle spasm and cold weather exposure were referenced",
+  "expanded": "• Muscle spasm was referenced in the report\n• Cold weather exposure was referenced as a contributing factor\n• Note: Reasons are reported as stated in the source document and are not interpreted or validated"
+}}
+
+EXAMPLE - operational_context (BULLET FORMAT):
+{{
+  "field": "operational_context",
+  "collapsed": "Medication RFA pending and follow-up appointment documented",
+  "expanded": "• Request for Authorization (RFA) for medications was documented as pending\n• Medications include: Celecoxib, Diclofenac, Hydrocodone, Lidocaine patches, Pregabalin\n• Follow-up appointment dated 2025-12-23 was documented"
+}}
 
 EXAMPLE - physical_exam (BULLET FORMAT):
 {{
   "field": "physical_exam",
-  "collapsed": "Reduced strength and positive provocative tests were noted",
-  "expanded": "• Reduced right shoulder abduction strength\n• Pain with supraspinatus testing\n• Positive Spurling's maneuver on left\n• Limited cervical rotation and extension"
+  "collapsed": "Limited range of motion and tenderness were documented",
+  "expanded": "• Lumbar flexion limited to 45 degrees was noted\n• Extension limited to 15 degrees was documented\n• Tenderness to palpation at L4-L5 was noted\n• Negative straight leg raise test was documented"
 }}
 
 EXAMPLE - medications (BULLET FORMAT):
 {{
   "field": "medications",
-  "collapsed": "Pain and nerve medications were documented",
-  "expanded": "• Gabapentin 300 mg three times daily\n• Meloxicam 15 mg once daily\n• Topical diclofenac twice daily\n• Cyclobenzaprine 10 mg at bedtime"
+  "collapsed": "Multiple pain management medications were documented",
+  "expanded": "• Hydrocodone 10mg, twice daily\n• Pregabalin 150mg, three times daily\n• Celecoxib 200mg, once daily\n• Lidocaine patches 5%, as needed\n• Diclofenac gel 1%, topical application"
 }}
 
-❌ WRONG (paragraph style for these fields):
-"The report documented gabapentin 300 mg three times daily for leg tingling, with NSAIDs noted to cause stomach discomfort..."
-
-✅ CORRECT (bullet points):
-"• Gabapentin 300 mg three times daily\n• NSAIDs (stomach discomfort noted)\n• Muscle relaxants for sleep"
-
-CONSOLIDATION EXAMPLE (CORRECT):
-If source has multiple findings like disc degeneration, facet arthrosis, and anterolisthesis:
-✅ ONE "findings" item consolidating all (CONCISE - max 3 lines):
-{{
-  "field": "findings",
-  "collapsed": "Degenerative disc disease and structural changes were documented",
-  "expanded": "The report documented disc degeneration at L2-3, facet arthrosis at L5-S1, and Grade 1 anterolisthesis of L4 on L5. No acute fracture was noted."
-}}
-
-🚨 CRITICAL EXPANDED TEXT LENGTH LIMITS:
-- findings: MAX 2-3 sentences (40-60 words)
-- recommendations: MAX 2-3 sentences  
-- physical_exam: Bullet points only (5-8 bullets max)
-- medications: Bullet points only (list only)
-- rationale: MAX 2-3 sentences
-- ALL OTHER FIELDS: MAX 2-3 sentences
-
-EXPANDED WRITING RULES FOR "findings":
-✅ CORRECT STYLE (concise, high-level summary):
-"The MRI documented meniscal tear, moderate cartilage loss, and ACL degeneration. A large effusion with synovitis was noted."
-
-❌ WRONG - Too verbose with excessive detail:
-"The X-ray report documented diffuse disc degeneration at multiple levels, most pronounced at L2-3, along with bilateral facet arthrosis particularly at L5-S1. Additionally, Grade 1 anterolisthesis of L4 on L5 was noted secondary to facet arthrosis. Mild degenerative changes in the SI joints and marginal spurring from L3-L5 were also observed. The vertebral bodies appeared intact with no acute fracture identified."
-
-✅ CORRECT - Concise summary without excessive anatomical detail:
-"The report documented disc degeneration at L2-3, facet arthrosis at L5-S1, and Grade 1 anterolisthesis. No acute fracture was noted."
-
-🔹 For imaging reports (MRI, CT, X-Ray):
-- Group related findings into categories (e.g., "meniscal pathology", "cartilage changes", "ligament status")
-- Use summary language, NOT detailed anatomical descriptions
-- Skip negative findings unless clinically significant
-- 2-3 sentences maximum
-
-EXAMPLE - MRI Knee (CORRECT concise format):
-{{
-  "field": "findings",
-  "collapsed": "Meniscal tear, cartilage loss, ligament changes, and effusion were documented",
-  "expanded": "The MRI documented meniscal tear with post-meniscectomy changes, moderate medial compartment cartilage loss with osteophytes, and ACL degeneration. A large effusion with synovitis was noted."
-}}
-
-� CRITICAL: ALL FIELDS REQUIRE COMPLETE, MEANINGFUL SENTENCES
-Every field (findings, recommendations, medications, physical_exam, mmi_status, work_status, etc.) MUST have:
-- Grammatically complete sentences in BOTH collapsed AND expanded
-- Clear subject (patient, report, document, etc.)
-- Complete verb phrase
-- Meaningful content that makes sense when read aloud
-
-✅ COMPLETE SENTENCE CHECKLIST (APPLIES TO ALL FIELDS):
-- Include proper subject: "The patient", "The report documented", "The MRI showed", etc.
-- Include complete verb phrase: "documented", "was noted", "were described", etc.
-- NEVER write fragments like "The at", "The from", "The with", "The and"
-- NEVER omit the subject or verb
-- Every sentence must be understandable without context
-- Read it aloud - if it sounds incomplete or meaningless, rewrite it
-
-EXAMPLE - findings (CORRECT):
-{{
-  "field": "findings",
-  "collapsed": "Bilateral knee osteoarthritis and meniscal injuries were documented",
-  "expanded": "The MRI documented bilateral knee osteoarthritis with moderate cartilage loss. Meniscal tears were noted in both knees."
-}}
-
-❌ WRONG - findings (INCOMPLETE):
-{{
-  "field": "findings",
-  "collapsed": "Bilateral knee osteoarthritis and meniscal injuries",  ← INCOMPLETE! Missing verb
-  "expanded": "The and meniscal injuries were documented."  ← MEANINGLESS! Missing subject
-}}
-
-EXAMPLE - recommendations (CORRECT):
-{{
-  "field": "recommendations",
-  "collapsed": "MRI, injections, and pain management were recommended",
-  "expanded": "The report recommended MRI of the knee, corticosteroid injections, and pain management referral. No surgical indication was noted."
-}}
-
-❌ WRONG - recommendations (INCOMPLETE):
-{{
-  "field": "recommendations",
-  "collapsed": "MRI, injections, and pain management",  ← INCOMPLETE! Missing verb
-  "expanded": "The recommended MRI and injections."  ← INCOMPLETE! Missing subject
-}}
-
-EXAMPLE - mmi_status (CORRECT):
-{{
-  "field": "mmi_status",
-  "collapsed": "The patient is not yet at maximum medical improvement (MMI)",
-  "expanded": "The report indicated that the patient is not yet at maximum medical improvement (MMI) due to ongoing symptoms and the need for further treatment."
-}}
-
-❌ WRONG - mmi_status (INCOMPLETE collapsed):
-{{
-  "field": "mmi_status",
-  "collapsed": "The yet at Maximum Medical Improvement (MMI)",  ← WRONG! Missing "patient is not"
-  "expanded": "The report indicated that the yet at maximum medical improvement..."  ← MEANINGLESS!
-}}
-
-❌ WRONG - mmi_status (INCOMPLETE):
-{{
-  "field": "mmi_status",
-  "collapsed": "The at MMI",  ← INCOMPLETE! Missing "patient is"
-  "expanded": "The report indicated that the at maximum medical improvement..."  ← MEANINGLESS!
-}}
-
-EXAMPLE - work_status (CORRECT):
-{{
-  "field": "work_status",
-  "collapsed": "The patient is on temporary total disability (TTD)",
-  "expanded": "The report documented that the patient is on temporary total disability (TTD) due to work restrictions, including no use of the left arm. Return to work is contingent upon employer accommodations."
-}}
-
-❌ WRONG - work_status (INCOMPLETE collapsed):
-{{
-  "field": "work_status",
-  "collapsed": "The temporary total disability (TTD)",  ← WRONG! Missing "patient is on"
-  "expanded": "The report documented that the temporary total disability due to work restrictions..."  ← MEANINGLESS!
-}}
-
-❌ WRONG - work_status (INCOMPLETE):
-{{
-  "field": "work_status",
-  "collapsed": "The from work",  ← INCOMPLETE! Missing "patient is off"
-  "expanded": "The report documented that the return to work at this time."  ← MEANINGLESS!
-}}
-
-EXAMPLE - physical_exam (CORRECT with bullets):
-{{
-  "field": "physical_exam",
-  "collapsed": "Reduced strength and positive provocative tests were noted",
-  "expanded": "• Reduced right shoulder abduction strength\n• Pain with supraspinatus testing\n• Positive Spurling's maneuver on left\n• Limited cervical rotation and extension"
-}}
-
-❌ WRONG - physical_exam (INCOMPLETE):
-{{
-  "field": "physical_exam",
-  "collapsed": "Reduced strength and positive tests",  ← VAGUE! What tests?
-  "expanded": "• Reduced right shoulder\n• Pain with testing\n• Positive maneuver"  ← INCOMPLETE! Each bullet must be complete
-}}
-
-❌ WRONG - User's verbose example to avoid:
-"The MRI report documented truncation and tearing of the medial meniscus body, consistent with partial post-meniscectomy versus persistent tear. Moderate cartilage loss with osteophyte formation was noted in the medial compartment, and mild cartilage loss with osteophytes in the lateral compartment. Increased T2 signal in the anterior cruciate ligament was described, consistent with mucinous degeneration and/or partial tear, unchanged from prior imaging. A moderate to large effusion with synovitis and marked edema in the prepatellar and prepatellar tendon soft tissues were also documented..."
-
-❌ WRONG - Multiple items with same field:
-[
-  {{"field": "findings", "collapsed": "Disc degeneration noted..."}},
-  {{"field": "findings", "collapsed": "Facet arthrosis documented..."}},
-  {{"field": "findings", "collapsed": "Anterolisthesis reported..."}}
-]
+🚨 CRITICAL: CONTENT INCLUSION REQUIREMENTS
+- INCLUDE EVERY FIELD THAT HAS ANY VALID CONTENT
+- Even if a field has only ONE piece of information, it MUST be included
+- DO NOT omit fields because they seem "too short" or "minimal"
+- If the source document mentions something relevant to a field, that field MUST appear
+- Empty or truly contentless fields (with no information at all) can be omitted
+- But ANY field with actual data MUST be present in the output
 
 OUTPUT STRUCTURE:
 {format_instructions}
@@ -813,6 +783,19 @@ HEADER RULES:
 - Author must be name + credentials if present (no "Dr." prefix)
 - Date must be in YYYY-MM-DD format. If not found, use empty string
 - Disclaimer appears EXACTLY ONCE
+
+🔒 NON-AUTHORSHIP COMPLIANCE CHECKLIST (verify before output):
+□ No causal language ("due to", "caused by", "likely", "secondary to")
+□ No directive language ("recommended to", "should", "advised")
+□ No collapsed reasoning (recommendations separated from reasons)
+□ History separated from findings
+□ All statements attributable to source document
+□ No clinical judgments or endorsements
+□ Past tense attribution language throughout
+□ Decision terms preserved exactly as stated
+□ Patient-reported info clearly marked
+□ ALL expanded sections use bullet-point format
+□ ALL fields with any content are included
 
 Output valid JSON only.
 """)
@@ -831,133 +814,128 @@ REFERENCE CONTEXT:
 {long_summary}
 
 TASK:
-Generate UI-ready fields following these STRICT rules:
+Generate UI-ready fields following STRICT NON-AUTHORSHIP rules:
 
 🚨 CRITICAL: ONE ITEM PER FIELD TYPE
-- Each field name (findings, recommendations, etc.) can appear AT MOST ONCE
+- Each field name can appear AT MOST ONCE
 - Consolidate ALL related content into ONE item per field type
 - Use ONLY field names from the allowed list above
-- ⚠️ IMPORTANT: If a field type has NO meaningful content in the source document, EXCLUDE it entirely from the output
-- DO NOT create placeholder items with generic "No specific X were documented" messages
-- Only include fields that have actual clinical content to report
+- ⚠️ INCLUDE ALL FIELDS THAT HAVE ANY CONTENT - even single items
+- DO NOT omit fields just because they have minimal information
+- Only exclude fields that are TRULY EMPTY (no content at all)
+
+🚨 CRITICAL: ALL EXPANDED SECTIONS USE BULLET POINTS
+- Every field's expanded view must be in bullet-point format
+- Use "• " prefix for each bullet point
+- Separate bullets with "\n"
+- NO paragraph prose allowed in expanded sections
+- Keep bullets concise and scannable
+- Maximum 8-10 bullets per field
+
+🔴 NON-AUTHORSHIP COMPLIANCE REQUIREMENTS:
+
+1. SEPARATE HISTORY FROM FINDINGS:
+   - "reported_history" = patient-reported information
+   - "findings" = provider-documented observations
+   - NEVER mix these
+
+2. SEPARATE RECOMMENDATIONS FROM REASONS:
+   - "recommendations" = actions referenced (NO reasons)
+   - "reported_reasons" = rationale as stated (separate field)
+   - NEVER collapse these together
+
+3. USE ONLY NON-AUTHORSHIP VERBS:
+   ✅ documented, described, referenced, reported, noted, stated
+   ❌ caused, due to, likely, resulted, shows, confirms, suggests
+
+4. PRESERVE DECISION TERMS EXACTLY:
+   - authorized, approved, denied, deferred
+   - recommended, not recommended
+   - at MMI, not at MMI
+   - DO NOT soften or omit these
+
+5. ATTRIBUTION IN EVERY STATEMENT:
+   - "The report documented..."
+   - "was noted in the report"
+   - "The patient reported..."
+   - NEVER make unattributed declarations
 
 FIELD CATEGORIZATION GUIDE:
-- "findings" → All clinical observations, test results, abnormalities, imaging findings, diagnoses
-- "recommendations" → Treatment plans, follow-up instructions, referrals (ALWAYS include authorization status: approved/denied/authorized)
-- "medications" → All drugs referenced with dosages if available
-- "physical_exam" → Physical examination findings
-- "mmi_status" → MMI determination (med-legal reports only)
-- "work_status" → Work restrictions/capacity (med-legal reports only)
-- "rationale" → Clinical reasoning for decisions (especially UR approvals/denials)
-
-🚨 PRESERVE CRITICAL DECISION TERMS:
-When the source document contains terms like:
-- "authorized", "approved", "denied", "rejected", "deferred"
-- "recommended", "not recommended", "contraindicated"
-- "granted", "supported", "not supported"
-- "at MMI", "not at MMI"
-
-YOU MUST include these terms in your output. DO NOT omit or soften them.
+- "reported_history" → Patient-reported symptoms, timeline, functional aids, patient-stated meds
+- "findings" → Clinical observations, diagnoses, test results, imaging (provider-documented)
+- "recommendations" → Treatment plans, referrals (NO reasons - just what was referenced)
+- "reported_reasons" → Clinical rationale AS STATED (separate from recommendations)
+- "medications" → All drugs with dosages
+- "physical_exam" → Exam findings
+- "operational_context" → RFA status, appointments, pending actions
+- "mmi_status" → MMI determination
+- "work_status" → Work restrictions
 
 FORMAT FOR EACH ITEM:
-- collapsed = One-line summary (include ALL key points for that field type)
-- expanded = Format depends on field type:
-
-🔹 FOR physical_exam AND medications → USE BULLET POINTS:
+- collapsed = One-line summary with attribution (complete sentence)
+- expanded = BULLET POINTS ONLY (for ALL fields)
   • One item per line
-  • Short, scannable entries
+  • Use "• " prefix
+  • Separate with "\n"
+  • Short, scannable statements
   • Include dosages for medications
-  • NO paragraph prose
-  
-🔹 FOR findings, recommendations, rationale, mmi_status, work_status → USE CONCISE PARAGRAPH:
-  • Maximum 1-3 lines (50-100 words)
-  • High-signal, key points only
-  • NO exhaustive detail or repetition
-  • Attribution language required
-  • Prioritize: diagnosis, key abnormalities, actionable items
-  • ALWAYS preserve decision terms (approved/denied/authorized)
+  • Maximum 8-10 bullets
 
-EXAMPLE - recommendations with AUTHORIZATION STATUS (CORRECT):
-{{
-  "field": "recommendations",
-  "collapsed": "Physical therapy was authorized and surgery was denied",
-  "expanded": "The report authorized physical therapy twice weekly for six weeks. Surgical intervention was denied as not medically necessary at this time."
-}}
-
-❌ WRONG - Omitting Decision Status:
-{{
-  "field": "recommendations",
-  "collapsed": "Physical therapy and surgery were discussed",  ← WRONG! Missing approved/denied status
-  "expanded": "The report mentioned physical therapy and surgical options."  ← VAGUE! Missing authorization decisions
-}}
-
-EXAMPLE - rationale for UR DENIAL (CORRECT):
-{{
-  "field": "rationale",
-  "collapsed": "The request was denied due to lack of conservative treatment",
-  "expanded": "The report denied the MRI request as the patient has not completed six weeks of conservative treatment including physical therapy and medication management."
-}}
-
-EXAMPLE - findings (CORRECT CONCISE FORMAT):
-{{
-  "field": "findings",
-  "collapsed": "Right foot pain and diminished sensation were documented",
-  "expanded": "The consultation documented persistent right foot pain following a work-related injury, with diminished sensation in the superficial peroneal nerve distribution. MRI and X-rays showed no structural pathology."
-}}
-
-EXAMPLE - recommendations (CORRECT CONCISE FORMAT):
-{{
-  "field": "recommendations",
-  "collapsed": "Electrodiagnostics and pain management were recommended",
-  "expanded": "The report recommended electrodiagnostic studies and pain management referral. No surgical indication was noted."
-}}
-
-❌ WRONG - Too verbose findings:
-"The consultation report documented diffuse right dorsal and plantar foot pain persisting since a work-related dog attack on 2024-04-18. Occasional radiation of pain down the leg and into the foot was noted. Subjectively diminished sensation in the superficial peroneal nerve distribution over the dorsum of the right foot was described, specifically involving the medial and intermediate cutaneous nerves. Imaging findings included an unremarkable MRI..."
-
-✅ CORRECT - Concise findings:
-"The report documented persistent right foot pain with diminished sensation in the peroneal nerve distribution. Imaging showed no structural pathology."
-
-EXAMPLE - physical_exam (CORRECT BULLET FORMAT):
-{{
-  "field": "physical_exam",
-  "collapsed": "Muscle spasm and reduced motion were noted",
-  "expanded": "• Cervical spine tightness and spasm\n• Reduced rotation and extension\n• Positive Spurling's maneuver (left arm)\n• Limited lumbar flexion due to pain\n• Positive straight leg raise (left)\n• Reduced sensation L5 dermatome"
-}}
-
-EXAMPLE - medications (CORRECT BULLET FORMAT):
-{{
-  "field": "medications",
-  "collapsed": "Gabapentin and NSAIDs were referenced",
-  "expanded": "• Gabapentin 300 mg three times daily\n• Pregabalin (potential transition)\n• NSAIDs (stomach discomfort noted)\n• Muscle relaxants for sleep"
-}}
-
-EXAMPLE FOR X-RAY (allowed: findings):
-
-CORRECT OUTPUT (CONCISE):
+EXAMPLE OUTPUT (COMPLIANT - ALL BULLETS):
 {{
   "items": [
     {{
+      "field": "reported_history",
+      "collapsed": "Chronic low back pain and side pain were documented as patient-reported",
+      "expanded": "• The patient reported chronic low back pain\n• Side pain for approximately two weeks was reported\n• Use of a cane for ambulation was documented\n• Long-term opioid therapy was documented"
+    }},
+    {{
       "field": "findings",
-      "collapsed": "Degenerative changes were documented",
-      "expanded": "The X-ray documented disc degeneration at L2-3, facet arthrosis at L5-S1, and Grade 1 anterolisthesis. No acute fracture was noted."
+      "collapsed": "Chronic pain syndrome and lumbar fusion were documented",
+      "expanded": "• Chronic pain syndrome was documented\n• Lumbar fusion was documented\n• Osteoarthritis was documented\n• Sciatica was documented"
+    }},
+    {{
+      "field": "recommendations",
+      "collapsed": "Conservative management measures were referenced",
+      "expanded": "• Conservative management measures were referenced in the report\n• Medication authorization requests were referenced as pending"
+    }},
+    {{
+      "field": "reported_reasons",
+      "collapsed": "Muscle spasm and cold weather exposure were referenced",
+      "expanded": "• Muscle spasm was referenced in the report\n• Cold weather exposure was referenced as a contributing factor"
+    }},
+    {{
+      "field": "operational_context",
+      "collapsed": "Medication RFA pending and follow-up appointment documented",
+      "expanded": "• Request for Authorization (RFA) for medications was documented as pending\n• Follow-up appointment dated 2025-12-23 was documented"
     }}
   ]
 }}
 
-WRONG OUTPUT (duplicates):
-{{
-  "items": [
-    {{"field": "findings", "collapsed": "Disc degeneration noted..."}},
-    {{"field": "findings", "collapsed": "Facet arthrosis documented..."}},
-    {{"field": "findings", "collapsed": "No fracture observed..."}}
-  ]
-}}
+🚨 CONTENT INCLUSION REQUIREMENT:
+- If a field has ANY information (even one sentence worth), it MUST be included
+- Do not skip fields because they seem "too short"
+- Better to include all available data than to omit potentially important information
+- Example: If there's only one finding, still include the "findings" field
+- Example: If there's only one recommendation, still include the "recommendations" field
 
-ATTRIBUTION REQUIREMENTS:
-✅ Use past tense exclusively
-✅ Include attribution language in every statement
-✅ Start expanded text with "The [document type]..." pattern
+🚨 REJECTION TEST - Automatically fail these patterns:
+❌ "likely due to muscle spasm" → REJECT (inferred causation)
+❌ "recommended keeping area warm" → REJECT (directive language)
+❌ "uses a cane" → REJECT (history as fact, no attribution)
+❌ "pending due to spasm" → REJECT (collapsed reasoning)
+❌ "is appropriate" → REJECT (endorsement)
+❌ Paragraph text in expanded → REJECT (must be bullets)
+❌ Omitting a field that has content → REJECT (must include all data)
+
+✅ ACCEPTANCE TEST - Pass these patterns:
+✅ "Muscle spasm was documented"
+✅ "Conservative measures were referenced"
+✅ "Use of cane was documented"
+✅ "was referenced as pending"
+✅ "was documented"
+✅ All expanded sections use "• " bullet format
+✅ All fields with any content are present
 
 Output JSON only.
 """)
@@ -1000,11 +978,17 @@ Output JSON only.
         # DEDUPLICATE — ensure each field type appears only once
         structured_summary = deduplicate_fields(structured_summary)
         
-        # FILTER EMPTY/GENERIC FIELDS — remove fields with no meaningful content
-        structured_summary = filter_empty_or_generic_fields(structured_summary)
+        # MODIFIED: More lenient filtering - only remove truly empty fields
+        structured_summary = filter_truly_empty_fields(structured_summary)
         
         # Post-process to ensure attribution compliance
         structured_summary = enforce_attribution_compliance(structured_summary)
+        
+        # NEW: Enforce non-authorship compliance
+        structured_summary = enforce_non_authorship_compliance(structured_summary)
+        
+        # NEW: Ensure all expanded sections use bullet format
+        structured_summary = enforce_bullet_format_all_fields(structured_summary)
 
         logger.info(f"✅ UI-ready summary generated with {len(structured_summary.get('summary', {}).get('items', []))} items")
         return structured_summary
@@ -1018,6 +1002,96 @@ Output JSON only.
         logger.error(f"❌ Structured summary generation failed: {e}")
         return create_fallback_structured_summary(doc_type)
 
+
+def filter_truly_empty_fields(structured_summary: dict) -> dict:
+    """
+    Filter out only fields that are TRULY empty or have no meaningful content.
+    More lenient than previous implementation - keeps fields with any valid content.
+    """
+    if 'summary' not in structured_summary or 'items' not in structured_summary['summary']:
+        return structured_summary
+    
+    filtered_items = []
+    for item in structured_summary['summary']['items']:
+        collapsed = item.get('collapsed', '').strip()
+        expanded = item.get('expanded', '').strip()
+        
+        # Only exclude if BOTH collapsed and expanded are empty or just whitespace
+        if collapsed or expanded:
+            # Has some content - keep it
+            filtered_items.append(item)
+        else:
+            logger.info(f"⚠️ Filtering truly empty field: {item.get('field')}")
+    
+    structured_summary['summary']['items'] = filtered_items
+    return structured_summary
+
+
+def enforce_bullet_format_all_fields(structured_summary: dict) -> dict:
+    """
+    Ensure all expanded sections use bullet-point format.
+    Converts any paragraph text to bullet points.
+    """
+    if 'summary' not in structured_summary or 'items' not in structured_summary['summary']:
+        return structured_summary
+    
+    for item in structured_summary['summary']['items']:
+        expanded = item.get('expanded', '').strip()
+        
+        # Skip if already empty
+        if not expanded:
+            continue
+        
+        # Check if already in bullet format
+        if expanded.startswith('•') or '\n•' in expanded:
+            # Already has bullets, just ensure consistency
+            continue
+        
+        # Convert paragraph text to bullets
+        # Split by periods or newlines, create bullets
+        sentences = [s.strip() for s in expanded.replace('\n', '. ').split('. ') if s.strip()]
+        
+        if sentences:
+            bullet_text = '\n'.join([f"• {s}" if not s.endswith('.') else f"• {s}" for s in sentences])
+            item['expanded'] = bullet_text
+            logger.info(f"✅ Converted {item.get('field')} to bullet format")
+    
+    return structured_summary
+
+
+def enforce_non_authorship_compliance(structured_summary: dict) -> dict:
+    """
+    Post-processing function to enforce strict non-authorship compliance.
+    Scans for forbidden patterns and either fixes or rejects them.
+    """
+    forbidden_phrases = [
+        "likely due to", "caused by", "secondary to", "resulted from", "because of",
+        "recommended to", "should", "advised to", "instructed to",
+        "is appropriate", "confirms", "demonstrates", "shows", "reveals", "suggests",
+        "uses a", "requires a", "has a", "needs a"  # unattributed facts
+    ]
+    
+    items = structured_summary.get('summary', {}).get('items', [])
+    compliant_items = []
+    
+    for item in items:
+        collapsed = item.get('collapsed', '').lower()
+        expanded = item.get('expanded', '').lower()
+        
+        # Check for forbidden patterns
+        has_violation = False
+        for phrase in forbidden_phrases:
+            if phrase in collapsed or phrase in expanded:
+                logger.warning(f"⚠️ Non-authorship violation detected in {item.get('field')}: '{phrase}'")
+                has_violation = True
+                break
+        
+        # Only include items without violations
+        if not has_violation:
+            compliant_items.append(item)
+    
+    structured_summary['summary']['items'] = compliant_items
+    return structured_summary
 
 def enforce_attribution_compliance(structured_summary: dict) -> dict:
     """

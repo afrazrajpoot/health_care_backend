@@ -171,6 +171,32 @@ class DocumentExtractorService:
                     processing_path
                 )
             
+            # Check for explicit failure from AI service
+            if hasattr(document_result, 'success') and not document_result.success:
+                 error_msg = getattr(document_result, 'error', "Unknown processing error")
+                 logger.warning(f"❌ AI Service reported failure: {error_msg}")
+                 
+                 # Generate user-friendly message
+                 user_msg = "Document failed processing validation."
+                 if "MANDATORY FIELDS MISSING" in error_msg:
+                     missing = []
+                     if "Name=False" in error_msg or "Name=None" in error_msg:
+                         missing.append("Patient Name")
+                     if "Author=False" in error_msg or "Author=None" in error_msg:
+                         missing.append("Author/Physician Name")
+                     if missing:
+                         user_msg = f"Validation Failed: High confidence {', '.join(missing)} not found."
+                     else:
+                         user_msg = "Validation Failed: Mandatory fields missing."
+                 
+                 return {
+                     "success": False,
+                     "reason": user_msg,
+                     "error": user_msg, # Backward compatibility for batch processor
+                     "system_error": error_msg,
+                     "filename": document.filename
+                 }
+
             # Build ExtractionResult - include all fields from document_result
             result = ExtractionResult(
                 text=document_result.text,
@@ -359,15 +385,28 @@ class DocumentExtractorService:
                 
                 # 🆕 Update per-file progress with overall percentage
                 if upload_task_id and progress_service:
-                    file_progress = 100 if isinstance(result, dict) and result.get("success") else 50
-                    status = "completed" if file_progress == 100 else "failed"
+                    # Mark file step as 100% complete even if failed, so progress bar advances
+                    file_progress = 100
+                    is_success = isinstance(result, dict) and result.get("success")
+                    status = "completed" if is_success else "failed"
+                    
+                    # Determine message
+                    message = "Processed"
+                    if is_success:
+                         if result.get("payload", {}).get("result", {}).get("is_multiple_reports"):
+                             message = "Processed (Multiple Reports)"
+                    elif isinstance(result, dict):
+                         message = result.get("reason") or result.get("error") or "Failed"
+                    else:
+                         message = "System Error"
+
                     progress_service.update_file_progress_only(
                         task_id=upload_task_id,
                         file_index=doc_index - 1,
                         filename=current_doc.filename,
                         status=status,
                         file_progress=file_progress,
-                        message=result.get("error", "Processed") if isinstance(result, dict) else "Error"
+                        message=message
                     )
                     
                     # Update overall progress based on files completed (scale to 15-30%)
@@ -384,7 +423,8 @@ class DocumentExtractorService:
                     logger.error(f"❌ Document failed with exception: {result}")
                     all_ignored.append({
                         "filename": "unknown",
-                        "reason": str(result)
+                        "reason": str(result),
+                        "system_error": str(result)
                     })
                 elif result["success"]:
                     all_payloads.append(result["payload"])
@@ -394,13 +434,15 @@ class DocumentExtractorService:
                         all_ignored.append({
                             "filename": result["filename"],
                             "reason": result.get("message", "Duplicate file"),
+                            "system_error": "duplicate_file_hash_match",
                             "existing_file": result.get("existing_document", {}).get("fileName"),
                             "document_id": result.get("existing_document", {}).get("id")
                         })
                     else:
                         all_ignored.append({
                             "filename": result["filename"],
-                            "reason": result.get("error", "Unknown error")
+                            "reason": result.get("reason") or result.get("error", "Unknown error"),
+                            "system_error": result.get("system_error", result.get("error", "Check logs"))
                         })
         
         preprocess_msg = f"✅ BATCH complete: {len(all_payloads)} ready, {len(all_ignored)} ignored"
@@ -460,7 +502,8 @@ class DocumentExtractorService:
                     logger.error(f"❌ Document failed with exception: {result}")
                     all_ignored.append({
                         "filename": "unknown",
-                        "reason": str(result)
+                        "reason": str(result),
+                        "system_error": str(result)
                     })
                 elif result["success"]:
                     all_payloads.append(result["payload"])
@@ -470,13 +513,15 @@ class DocumentExtractorService:
                         all_ignored.append({
                             "filename": result["filename"],
                             "reason": result.get("message", "Duplicate file"),
+                            "system_error": "duplicate_file_hash_match",
                             "existing_file": result.get("existing_document", {}).get("fileName"),
                             "document_id": result.get("existing_document", {}).get("id")
                         })
                     else:
                         all_ignored.append({
                             "filename": result["filename"],
-                            "reason": result.get("error", "Unknown error")
+                            "reason": result.get("reason") or result.get("error", "Unknown error"),
+                            "system_error": result.get("system_error", result.get("error", "Check logs"))
                         })
         
         preprocess_msg = f"✅ OPTIMIZED batch complete: {len(all_payloads)} ready, {len(all_ignored)} ignored"
