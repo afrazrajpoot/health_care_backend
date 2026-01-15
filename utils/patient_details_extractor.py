@@ -307,6 +307,8 @@ class PatientDetailsExtractor:
     ❌ Other patients or family members mentioned
     ❌ Generic references like "the provider stated" without a specific name
     ❌ Names mentioned only in: patient history, previous records, appointment scheduling, or referral context
+    ❌ Non-human labels or document headers (e.g., "FAX FORM", "PAGE", "CONFIDENTIAL", "DATE", "PHONE", "CLAIM NUMBER")
+    ❌ Generic titles without names (e.g., "Medical Reviewer", "QME Physician", "Claims Examiner")
     
     **CONFIDENCE THRESHOLDS:**
     - If you cannot identify explicit authorship signals (Steps 2-3) → return null
@@ -350,6 +352,7 @@ class PatientDetailsExtractor:
     - For dates, use format: YYYY-MM-DD when possible, otherwise use the exact format from the document
     - Patient name should be the actual full name, not a description
     - Author extraction requires explicit evidence - when in doubt, return null
+    - Author MUST be a REAL HUMAN NAME (First Last). Do not return "Medical Group", "Clinic", "Fax Form", "Page 1", etc.
 
     Return a JSON object with these exact keys:
     {
@@ -377,8 +380,10 @@ A regex-based signature extractor has identified a potential author from the raw
 
 **FULL SIGNATURE BLOCK TEXT (500 words from signature location):**
 {signature_full_text}
-
-IMPORTANT: The text above contains the actual signature block from the document. Look for the REAL person's name (not just "Claims Examiner" or job titles). 
+HUMAN NAME (e.g. "John Smith, MD").
+IGNORE document artifacts like "FAX FORM", "DATE:", "PAGE 1", "CONFIDENTIAL", "PHONE", "CLAIM #".
+For example, if you see "Sincerely, Claims Examiner Natalie Rocha", the author is "Natalie Rocha", NOT "Claims Examiner".
+If you see "Date: 01/01/2024 FAX FORM", ignore "FAX FORM" completelyst "Claims Examiner" or job titles). 
 For example, if you see "Sincerely, Claims Examiner Natalie Rocha", the author is "Natalie Rocha", NOT "Claims Examiner".
 Use this signature block text as the PRIMARY source for author identification.
 """
@@ -388,7 +393,8 @@ Use this signature block text as the PRIMARY source for author identification.
     CRITICAL: For the author field, you MUST follow the 5-step reasoning process in the system instructions. Think step-by-step:
     1. What type of document is this?
     2. Are there explicit authorship signals (signature, "signed by", "prepared by")?
-    3. Are there strong authorship signals (examination performed by, evaluation by)?
+    3. Are there strong authorship signals (examination performed by, evalua
+    6. Is the extracted name a REAL PERSON? (Absolutely REJECT words like "Fax Form", "Date", "Page", "Confidential", "Medical Group")tion by)?
     4. Who is the primary examiner vs. other mentioned people?
     5. Does the identified author make logical sense for this document type?{signature_context}
 
@@ -1343,7 +1349,11 @@ Use this signature block text as the PRIMARY source for author identification.
         invalid_names = [
             'medical group', 'health services', 'clinic', 'hospital', 
             'physician', 'surgeon', 'doctor', 'pharmacist', 'radiologist',
-            'department', 'facility', 'center', 'institute', 'association'
+            'department', 'facility', 'center', 'institute', 'association',
+            'fax form', 'fax cover', 'confidential', 'page', 'date',
+            'to:', 'from:', 're:', 'subject:', 'memo', 'urgent',
+            'claim number', 'file number', 'workers comp', 'work comp',
+            'patient name', 'dob', 'ssn', 'date of birth'
         ]
         name_lower = name.lower()
         if any(invalid in name_lower for invalid in invalid_names):

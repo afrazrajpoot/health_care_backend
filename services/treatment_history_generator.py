@@ -840,7 +840,6 @@ class TreatmentHistoryGenerator:
                                         claim_number: Optional[str],
                                         physician_id: str,
                                         current_document_id: Optional[str] = None,
-                                        current_document_analysis: Any = None,
                                         current_document_data: Dict = None,
                                         only_current: bool = False) -> Dict:
         """
@@ -871,14 +870,13 @@ class TreatmentHistoryGenerator:
             if not context.strip():
                 logger.info(f"📝 No previous documents found for {patient_name}, creating initial history")
                 context = f"Initial document for {patient_name}. "
-                if current_document_analysis:
-                    context += f"Current findings: {current_document_analysis.diagnosis if hasattr(current_document_analysis, 'diagnosis') else 'Not specified'}"
+                # Removed current_document_analysis dependency
             
             # Generate treatment history with LLM
             treatment_history = await self.generate_treatment_history_with_llm(
                 patient_name=patient_name,
                 context=context,
-                current_document_analysis=current_document_analysis
+                current_document_analysis=current_document_data  # Explicitly None as parameter was removed
             )
             
             logger.info(f"✅ Treatment history generated for patient: {patient_name}")

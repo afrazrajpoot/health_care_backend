@@ -242,12 +242,41 @@ class SignatureExtractor:
         
         # Remove leading/trailing punctuation and whitespace
         text = text.strip(' \t\n\r,.:;')
+
+        # ❌ BLOCKLIST: Terms that are definitely NOT names
+        # Common false positives from document headers, footers, forms
+        invalid_terms_exact = {
+            'fax form', 'fax cover sheet', 'transmission', 'confidential', 
+            'date', 'time', 'phone', 'fax', 'email', 'website', 'page',
+            'to', 'from', 're', 'subject', 'memo', 'memorandum',
+            'comments', 'notes', 'remarks', 'urgent', 'please reply',
+            'medical report', 'evaluation', 'examination', 'progress report',
+            'workers compensation', 'work comp', 'claim', 'file',
+            'patient name', 'dob', 'ssn', 'date of birth', 'warning',
+            'sent from', 'scanned by', 'total pages', 'number of pages'
+        }
+        
+        # Check if the text matches invalid terms
+        text_lower = text.lower()
+        
+        # Exact match check
+        if text_lower in invalid_terms_exact:
+            return None
+            
+        # Starts with check (e.g. "Page 1", "Date: 12/12/12", "RE: Patient")
+        invalid_prefixes = [
+            'page ', 'date:', 'date ', 'time:', 'phone:', 'fax:', 'email:', 
+            'to:', 'from:', 're:', 'subject:', 'claim #', 'file #', 'www.', 'http'
+        ]
+        if any(text_lower.startswith(p) for p in invalid_prefixes):
+            return None
         
         # Remove common noise words/phrases
         noise_patterns = [
             r'^(?:by|dr\.?|doctor|md|do)\s+',
             r'\s+(?:on|date|dated)\s+\d',
             r'^\s*[:\-_]+\s*',
+            r'(?:electronically|digitally)\s+signed\s+by\s*'
         ]
         
         for noise in noise_patterns:
@@ -255,11 +284,24 @@ class SignatureExtractor:
         
         text = text.strip()
         
-        # Validate: should contain at least one letter and reasonable length
-        if not re.search(r'[A-Za-z]', text):
+        # If text contains digits, likely not a name (or contains noise like date/phone)
+        # Attempt to split on digits and take the first part
+        if re.search(r'\d', text):
+            # Split on first digit
+            parts = re.split(r'\d', text)
+            if parts:
+                text = parts[0].strip()
+        
+        # Re-check length after stripping
+        if len(text) < 3 or len(text) > 100:
+            return None
+
+        # Check blocklist again on cleaned text
+        if text.lower() in invalid_terms_exact:
             return None
         
-        if len(text) < 3 or len(text) > 100:
+        # Validate: should contain at least one letter and reasonable length
+        if not re.search(r'[A-Za-z]', text):
             return None
         
         # Extract name with credentials if present
@@ -280,6 +322,17 @@ class SignatureExtractor:
         
         # Fallback: return first reasonable line
         first_line = text.split('\n')[0].strip()
+        
+        # Extra validation for fallback (ALL CAPS heuristic)
+        # If it's ALL CAPS, it should be at least two parts (First Last) to be considered a name
+        # to avoid "CONFIDENTIAL" or "IMPORTANT"
+        if first_line.isupper() and ' ' not in first_line:
+             return None
+
+        # Also reject if it contains restricted chars often found in headers
+        if re.search(r'[|\\/]', first_line):
+            return None
+
         if 3 <= len(first_line) <= 100:
             return first_line
         

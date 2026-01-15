@@ -248,7 +248,14 @@ class DocumentAIProcessor:
             if not has_p_name or not has_author:
                 error_msg = f"MANDATORY FIELDS MISSING after retries: Name={has_p_name}, Author={has_author}. Marking FAILED."
                 logger.error(f"❌ {error_msg}")
-                return ExtractionResult(success=False, error=error_msg)
+                # ✅ Return metadata and raw text even on failure so FailDocs has data
+                return ExtractionResult(
+                    success=False, 
+                    error=error_msg,
+                    metadata={"patient_details": patient_details} if patient_details else {},
+                    raw_text=final_raw_text,
+                    text=result.text  # Also return OCR text if available
+                )
 
             # Create extraction result
             processed_result = ExtractionResult(
@@ -495,7 +502,7 @@ class DocumentAIProcessor:
             # without relying on the summary text which might omit the signature block.
             batch_signature_info = None
             try:
-                from PyPDF2 import PdfReader
+                # PdfReader is already imported at the top level
                 raw_pdf_text = ""
                 with open(filepath, "rb") as f:
                     pdf_reader = PdfReader(f)

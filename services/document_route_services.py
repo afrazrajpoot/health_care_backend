@@ -188,6 +188,42 @@ class DocumentExtractorService:
                          user_msg = f"Validation Failed: High confidence {', '.join(missing)} not found."
                      else:
                          user_msg = "Validation Failed: Mandatory fields missing."
+                     
+                     # 🚨 Save to FailDocs so user can request manual review
+                     try:
+                         logger.info("💾 Saving failed document to FailDocs for manual review...")
+                         # 1. Upload to GCS
+                         gcs_url, blob_path = await self._async_gcs_upload(content, document.filename)
+                         
+                         # 2. Extract metadata if available
+                         metadata = getattr(document_result, 'metadata', {})
+                         patient_details = metadata.get('patient_details', {})
+                         
+                         # 3. Save to FailDocs
+                         fail_doc_data = {
+                             "reason": user_msg,
+                             "fileName": document.filename,
+                             "fileHash": file_hash,
+                             "blobPath": blob_path,
+                             "gcsFileLink": gcs_url,
+                             "physicianId": physician_id,
+                             "documentText": document_result.text if hasattr(document_result, 'text') else None,
+                             "patientName": patient_details.get('patient_name'),
+                             "author": patient_details.get('author'),
+                             "claimNumber": patient_details.get('claim_number'),
+                             "doi": patient_details.get('doi'),
+                             "dob": patient_details.get('dob'),
+                             "aiSummarizerText": document_result.raw_text if hasattr(document_result, 'raw_text') else None
+                         }
+                         
+                         # Ensure DB service is connected
+                         if not self.db_service:
+                             self.db_service = await get_database_service()
+                             
+                         await self.db_service.save_fail_doc(fail_doc_data)
+                         
+                     except Exception as save_err:
+                         logger.error(f"❌ Failed to save failed document record: {save_err}")
                  
                  return {
                      "success": False,

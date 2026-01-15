@@ -189,7 +189,7 @@ class DatabaseService:
         
     async def save_fail_doc(
             self, 
-            reason: str, 
+            reason: str | Dict[str, Any], 
             db: Optional[str] = None,
             doi: Optional[str] = None,
             claim_number: Optional[str] = None,
@@ -204,46 +204,55 @@ class DatabaseService:
             ai_summarizer_text: Optional[str] = None,
             author: Optional[str] = None
         ) -> str:
-            """Save a failed document record to the FailDocs table."""
+            """Save a failed document record to the FailDocs table. Supports both arg-based and dict-based usage."""
             try:
-                data = {
-                    "reason": reason,
-                }
-                if db is not None:
-                    data["dob"] = db
-                if doi is not None:
-                    data["doi"] = doi
-                if claim_number is not None:
-                    data["claimNumber"] = claim_number
-                if patient_name is not None:
-                    data["patientName"] = patient_name
-                if document_text is not None:
-                    data["documentText"] = document_text
-                if physician_id is not None:
-                    data["physicianId"] = physician_id
-                if gcs_file_link is not None:
-                    data["gcsFileLink"] = gcs_file_link
-                if file_name is not None:
-                    data["fileName"] = file_name
-                if file_hash is not None:
-                    data["fileHash"] = file_hash
-                if blob_path is not None:
-                    data["blobPath"] = blob_path
-                if ai_summarizer_text is not None:
-                    data["aiSummarizerText"] = ai_summarizer_text
-                if author is not None:
-                    data["author"] = author
-                # if mode is not None:
-                #     data["mode"] = mode
+                # Handle dict-based input (overloaded usage)
+                if isinstance(reason, dict):
+                    data = reason
+                    # Ensure minimal required fields are present if passed via dict
+                    if "reason" not in data:
+                        data["reason"] = "Unknown failure"
+                else:
+                    # Handle arg-based logic (legacy usage)
+                    data = {
+                        "reason": reason,
+                    }
+                    if db is not None:
+                        data["dob"] = db
+                    if doi is not None:
+                        data["doi"] = doi
+                    if claim_number is not None:
+                        data["claimNumber"] = claim_number
+                    if patient_name is not None:
+                        data["patientName"] = patient_name
+                    if document_text is not None:
+                        data["documentText"] = document_text
+                    if physician_id is not None:
+                        data["physicianId"] = physician_id
+                    if gcs_file_link is not None:
+                        data["gcsFileLink"] = gcs_file_link
+                    if file_name is not None:
+                        data["fileName"] = file_name
+                    if file_hash is not None:
+                        data["fileHash"] = file_hash
+                    if blob_path is not None:
+                        data["blobPath"] = blob_path
+                    if ai_summarizer_text is not None:
+                        data["aiSummarizerText"] = ai_summarizer_text
+                    if author is not None:
+                        data["author"] = author
+
+                await self.connect()
                 
                 fail_doc = await self.prisma.faildocs.create(
                     data=data
                 )
-                logger.info(f"💾 Saved fail doc with ID: {fail_doc.id} (Physician ID: {physician_id if physician_id else 'None'})")
+                logger.info(f"💾 Saved fail doc with ID: {fail_doc.id} (Physician ID: {data.get('physicianId') if data.get('physicianId') else 'None'})")
                 return fail_doc.id
             except Exception as e:
                 logger.error(f"❌ Error saving fail doc: {str(e)}")
-                raise
+                # raise  # Don't raise, just log
+                return None
     
     async def get_fail_doc_by_id(self, fail_doc_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a failed document record by its ID from the FailDocs table."""

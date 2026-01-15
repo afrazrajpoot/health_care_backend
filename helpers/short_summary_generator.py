@@ -43,7 +43,7 @@ REPORT_FIELD_MATRIX: Dict[str, Dict] = {
     
     # Imaging Reports
     "MRI": {
-        "allowed": {"findings", }
+        "allowed": {"findings", "recommendations"}
     },
     "CT": {"inherit": "MRI"},
     "X-RAY": {"inherit": "MRI"},
@@ -77,7 +77,7 @@ REPORT_FIELD_MATRIX: Dict[str, Dict] = {
     
     # PR-2 Reports
     "PR-2": {
-        "allowed": {"findings", "recommendations", "work_status"}
+        "allowed": {"findings", "recommendations", "work_status", "medications", "physical_exam"}
     },
     "PR2": {"inherit": "PR-2"},
     
@@ -89,7 +89,7 @@ REPORT_FIELD_MATRIX: Dict[str, Dict] = {
     
     # Default for unmatched types
     "DEFAULT": {
-        "allowed": {"findings", "recommendations"}
+        "allowed": {"findings", "recommendations", "medications", "physical_exam"}
     }
 }
 
@@ -942,65 +942,78 @@ Output JSON only.
 
     chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
 
-    try:
-        # Truncate raw_text if too long (keep most relevant content)
-        truncated_text = raw_text[:8000] if len(raw_text) > 8000 else raw_text
-        truncated_long_summary = long_summary[:4000] if len(long_summary) > 4000 else long_summary
-        
-        chain = chat_prompt | llm
-        response = chain.invoke({
-            "raw_text": truncated_text,
-            "long_summary": truncated_long_summary,
-            "doc_type": doc_type,
-            "allowed_fields": list(allowed_fields),
-            "format_instructions": pydantic_parser.get_format_instructions()
-        })
-        
-        # Extract JSON from response content
-        response_content = response.content.strip()
-        
-        # Try to parse JSON - handle potential markdown code blocks
-        if response_content.startswith("```"):
-            # Remove markdown code blocks
-            response_content = re.sub(r'^```(?:json)?\n?', '', response_content)
-            response_content = re.sub(r'\n?```$', '', response_content)
-        
-        structured_summary = json.loads(response_content)
+    # Retry mechanism for robust generation
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # Truncate raw_text if too long (keep most relevant content)
+            truncated_text = raw_text[:8000] if len(raw_text) > 8000 else raw_text
+            truncated_long_summary = long_summary[:4000] if len(long_summary) > 4000 else long_summary
+            
+            chain = chat_prompt | llm
+            response = chain.invoke({
+                "raw_text": truncated_text,
+                "long_summary": truncated_long_summary,
+                "doc_type": doc_type,
+                "allowed_fields": list(allowed_fields),
+                "format_instructions": pydantic_parser.get_format_instructions()
+            })
+            
+            # Extract JSON from response content
+            response_content = response.content.strip()
+            
+            # Robust JSON extraction: Find the first outer brace and last outer brace
+            # This handles markdown blocks (```json ... ```) AND any conversational filler text
+            start_idx = response_content.find('{')
+            end_idx = response_content.rfind('}')
+            
+            if start_idx != -1 and end_idx != -1:
+                response_content = response_content[start_idx:end_idx+1]
+            
+            # FIX: Clean invalid control characters (common issue with LLM JSON)
+            # Remove control characters (0-31) except newline, carriage return, and tab
+            response_content = "".join(ch for ch in response_content if ch >= ' ' or ch in '\n\r\t')
+            
+            # Parse with strict=False to allow control chars like newlines in strings
+            structured_summary = json.loads(response_content, strict=False)
 
-        # Hard safety checks (non-LLM)
-        structured_summary = remove_patient_identifiers(structured_summary)
-        structured_summary = ensure_header_fields(structured_summary, doc_type, raw_text)
-        structured_summary = validate_ui_items(structured_summary)
-        
-        # HARD FILTER — drop disallowed fields (defensive)
-        structured_summary = filter_disallowed_fields(structured_summary, allowed_fields)
-        
-        # DEDUPLICATE — ensure each field type appears only once
-        structured_summary = deduplicate_fields(structured_summary)
-        
-        # MODIFIED: More lenient filtering - only remove truly empty fields
-        structured_summary = filter_truly_empty_fields(structured_summary)
-        
-        # Post-process to ensure attribution compliance
-        structured_summary = enforce_attribution_compliance(structured_summary)
-        
-        # NEW: Enforce non-authorship compliance
-        structured_summary = enforce_non_authorship_compliance(structured_summary)
-        
-        # NEW: Ensure all expanded sections use bullet format
-        structured_summary = enforce_bullet_format_all_fields(structured_summary)
+            # Hard safety checks (non-LLM)
+            structured_summary = remove_patient_identifiers(structured_summary)
+            structured_summary = ensure_header_fields(structured_summary, doc_type, raw_text)
+            structured_summary = validate_ui_items(structured_summary)
+            
+            # HARD FILTER — drop disallowed fields (defensive)
+            structured_summary = filter_disallowed_fields(structured_summary, allowed_fields)
+            
+            # DEDUPLICATE — ensure each field type appears only once
+            structured_summary = deduplicate_fields(structured_summary)
+            
+            # MODIFIED: More lenient filtering - only remove truly empty fields
+            structured_summary = filter_truly_empty_fields(structured_summary)
+            
+            # Post-process to ensure attribution compliance
+            structured_summary = enforce_attribution_compliance(structured_summary)
+            
+            # NEW: Enforce non-authorship compliance
+            structured_summary = enforce_non_authorship_compliance(structured_summary)
+            
+            # NEW: Ensure all expanded sections use bullet format
+            structured_summary = enforce_bullet_format_all_fields(structured_summary)
 
-        logger.info(f"✅ UI-ready summary generated with {len(structured_summary.get('summary', {}).get('items', []))} items")
-        return structured_summary
+            logger.info(f"✅ UI-ready summary generated with {len(structured_summary.get('summary', {}).get('items', []))} items")
+            return structured_summary
 
-    except json.JSONDecodeError as je:
-        logger.error(f"❌ JSON parsing failed: {je}")
-        logger.error(f"Response content: {response.content[:500] if 'response' in dir() else 'N/A'}")
-        return create_fallback_structured_summary(doc_type)
+        except json.JSONDecodeError as je:
+            logger.warning(f"⚠️ JSON parsing failed (attempt {attempt+1}/{max_retries}): {je}")
+            if attempt == max_retries - 1:
+                logger.error(f"Response content: {response.content[:2000] if 'response' in dir() else 'N/A'}")
         
-    except Exception as e:
-        logger.error(f"❌ Structured summary generation failed: {e}")
-        return create_fallback_structured_summary(doc_type)
+        except Exception as e:
+            logger.warning(f"⚠️ Structured summary generation failed (attempt {attempt+1}/{max_retries}): {e}")
+
+    # Fallback if all retries failed
+    logger.error("❌ All retries failed. Returning fallback summary.")
+    return create_fallback_structured_summary(doc_type)
 
 
 def filter_truly_empty_fields(structured_summary: dict) -> dict:
@@ -1062,70 +1075,165 @@ def enforce_bullet_format_all_fields(structured_summary: dict) -> dict:
 def enforce_non_authorship_compliance(structured_summary: dict) -> dict:
     """
     Post-processing function to enforce strict non-authorship compliance.
-    Scans for forbidden patterns and either fixes or rejects them.
+    Scans for forbidden patterns and REPLACES them with compliant alternatives.
+    Does NOT remove fields - instead fixes the text in place.
     """
-    forbidden_phrases = [
-        "likely due to", "caused by", "secondary to", "resulted from", "because of",
-        "recommended to", "should", "advised to", "instructed to",
-        "is appropriate", "confirms", "demonstrates", "shows", "reveals", "suggests",
-        "uses a", "requires a", "has a", "needs a"  # unattributed facts
+    # Mapping of forbidden phrases to their compliant replacements
+    # Format: (forbidden_phrase, replacement_phrase)
+    phrase_replacements = [
+        # Causation phrases -> neutral documentation
+        ("likely due to", "was documented alongside"),
+        ("caused by", "was documented with"),
+        ("secondary to", "was documented in context of"),
+        ("resulted from", "was documented following"),
+        ("because of", "was noted with"),
+        ("due to", "was documented with"),
+        ("as a result of", "was documented following"),
+        ("attributed to", "was referenced in relation to"),
+        ("related to", "was documented alongside"),
+        
+        # Directive phrases -> passive documentation
+        ("recommended to", "was referenced as a recommendation to"),
+        ("should", "was documented as"),
+        ("advised to", "was documented as advised regarding"),
+        ("instructed to", "was documented as instructions for"),
+        ("told to", "was documented as guidance for"),
+        ("needs to", "was documented regarding"),
+        ("must", "was documented as required to"),
+        
+        # Endorsement phrases -> neutral documentation
+        ("is appropriate", "was documented"),
+        ("are appropriate", "were documented"),
+        ("confirms", "was documented as"),
+        ("confirm", "was documented as"),
+        ("demonstrates", "was documented as showing"),
+        ("demonstrate", "was documented as showing"),
+        ("shows", "was documented as"),
+        ("show", "was documented as"),
+        ("reveals", "was documented as"),
+        ("reveal", "was documented as"),
+        ("suggests", "was documented as"),
+        ("suggest", "was documented as"),
+        ("indicates", "was documented as"),
+        ("indicate", "was documented as"),
+        ("proves", "was documented as"),
+        ("prove", "was documented as"),
+        
+        # Unattributed facts -> attributed documentation
+        ("uses a", "use of a"),
+        ("uses the", "use of the"),
+        ("requires a", "requirement for a"),
+        ("requires the", "requirement for the"),
+        ("has a", "presence of a"),
+        ("has the", "presence of the"),
+        ("have a", "presence of a"),
+        ("have the", "presence of the"),
+        ("needs a", "documented need for a"),
+        ("needs the", "documented need for the"),
+        
+        # Present tense declarations -> past tense documentation
+        ("the patient is", "the patient was documented as"),
+        ("the patient has", "the patient was documented with"),
+        ("patient is", "patient was documented as"),
+        ("patient has", "patient was documented with"),
+        ("is experiencing", "was documented as experiencing"),
+        ("is suffering", "was documented as experiencing"),
+        ("is taking", "was documented as taking"),
+        ("is on", "was documented as being on"),
+        
+        # Clinical judgment phrases -> neutral documentation
+        ("consistent with", "documented alongside"),
+        ("compatible with", "documented with"),
+        ("indicative of", "documented as"),
+        ("suggestive of", "documented as potentially"),
+        ("diagnostic of", "documented as"),
+        ("characteristic of", "documented as"),
     ]
     
+    def fix_text(text: str, field_name: str) -> str:
+        """Apply all phrase replacements to the text."""
+        if not text:
+            return text
+        
+        fixed_text = text
+        for forbidden, replacement in phrase_replacements:
+            # Case-insensitive replacement while preserving surrounding text
+            pattern = re.compile(re.escape(forbidden), re.IGNORECASE)
+            if pattern.search(fixed_text):
+                logger.info(f"🔧 Fixing non-authorship phrase in {field_name}: '{forbidden}' -> '{replacement}'")
+                fixed_text = pattern.sub(replacement, fixed_text)
+        
+        return fixed_text
+    
     items = structured_summary.get('summary', {}).get('items', [])
-    compliant_items = []
+    fixed_items = []
     
     for item in items:
-        collapsed = item.get('collapsed', '').lower()
-        expanded = item.get('expanded', '').lower()
+        field_name = item.get('field', 'unknown')
+        collapsed = item.get('collapsed', '')
+        expanded = item.get('expanded', '')
         
-        # Check for forbidden patterns
-        has_violation = False
-        for phrase in forbidden_phrases:
-            if phrase in collapsed or phrase in expanded:
-                logger.warning(f"⚠️ Non-authorship violation detected in {item.get('field')}: '{phrase}'")
-                has_violation = True
-                break
+        # Fix both collapsed and expanded text
+        fixed_collapsed = fix_text(collapsed, f"{field_name}.collapsed")
+        fixed_expanded = fix_text(expanded, f"{field_name}.expanded")
         
-        # Only include items without violations
-        if not has_violation:
-            compliant_items.append(item)
+        # Update the item with fixed text
+        fixed_item = {
+            'field': field_name,
+            'collapsed': fixed_collapsed,
+            'expanded': fixed_expanded
+        }
+        fixed_items.append(fixed_item)
+        
+        # Log if any fixes were made
+        if fixed_collapsed != collapsed or fixed_expanded != expanded:
+            logger.info(f"✅ Fixed non-authorship violations in field '{field_name}'")
     
-    structured_summary['summary']['items'] = compliant_items
+    structured_summary['summary']['items'] = fixed_items
     return structured_summary
 
 def enforce_attribution_compliance(structured_summary: dict) -> dict:
     """
-    Post-LLM enforcement layer to catch any attribution violations.
-    This is a defensive safety check.
+    Post-LLM enforcement layer to fix any attribution violations.
+    Replaces forbidden phrases with compliant alternatives instead of removing fields.
     """
-    forbidden_phrases = [
-        'consistent with',
-        'identified',
-        'demonstrates',
-        'confirms',
-        'shows',
-        'reveals',
-        'suggests'
+    # Mapping of forbidden phrases to compliant replacements
+    attribution_replacements = [
+        ('consistent with', 'documented alongside'),
+        ('identified', 'documented'),
+        ('demonstrates', 'was documented as showing'),
+        ('confirms', 'was documented as'),
+        ('shows', 'was documented as'),
+        ('reveals', 'was documented as'),
+        ('suggests', 'was documented as'),
+        ('indicates', 'was documented as'),
     ]
     
-    # Check all text fields recursively
-    def check_and_warn(text: str, location: str) -> None:
+    def fix_attribution(text: str, location: str) -> str:
+        """Fix attribution violations in text."""
         if not text:
-            return
-        text_lower = text.lower()
-        for phrase in forbidden_phrases:
-            if phrase in text_lower:
-                logger.warning(f"⚠️ Attribution violation detected in {location}: '{phrase}'")
-                # In production, you might want to reject or auto-fix here
+            return text
+        
+        fixed_text = text
+        for forbidden, replacement in attribution_replacements:
+            pattern = re.compile(r'\b' + re.escape(forbidden) + r'\b', re.IGNORECASE)
+            if pattern.search(fixed_text):
+                logger.info(f"🔧 Fixing attribution violation in {location}: '{forbidden}' -> '{replacement}'")
+                fixed_text = pattern.sub(replacement, fixed_text)
+        
+        return fixed_text
     
-    # Check summary items
+    # Fix summary items
     if 'summary' in structured_summary and 'items' in structured_summary['summary']:
         for idx, item in enumerate(structured_summary['summary']['items']):
-            check_and_warn(item.get('collapsed', ''), f"item[{idx}].collapsed")
-            check_and_warn(item.get('expanded', ''), f"item[{idx}].expanded")
+            field_name = item.get('field', f'item[{idx}]')
+            
+            # Fix collapsed text
+            if 'collapsed' in item:
+                item['collapsed'] = fix_attribution(item['collapsed'], f"{field_name}.collapsed")
+            
+            # Fix expanded text
+            if 'expanded' in item:
+                item['expanded'] = fix_attribution(item['expanded'], f"{field_name}.expanded")
     
     return structured_summary
-
-
-
-

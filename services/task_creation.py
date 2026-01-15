@@ -162,38 +162,38 @@ For each task:
 
 ### **Scheduling Tasks (with specificity):**
 ```json
-{
+{{
   "description": "Schedule lumbar spine MRI with contrast for John Smith",
   "department": "Approvals to Schedule",
-  "quick_notes": {
+  "quick_notes": {{
     "details": "Authorization approved for MRI L-spine. Schedule within 2 weeks per auth requirements.",
     "one_line_note": "MRI L-spine approved - schedule ASAP"
-  }
-}
+  }}
+}}
 ```
 
 ### **Appeal Tasks (with context):**
 ```json
-{
+{{
   "description": "Appeal denied lumbar epidural injection for Maria Garcia",
   "department": "Denials & Appeals",
-  "quick_notes": {
+  "quick_notes": {{
     "details": "Denial reason: insufficient conservative care. Have documented 8 weeks PT and medication trials. Deadline: 1/25.",
     "one_line_note": "ESI denied - PT documented, appeal by 1/25"
-  }
-}
+  }}
+}}
 ```
 
 ### **Signature Tasks (with details):**
 ```json
-{
+{{
   "description": "Sign settlement agreement for Robert Lee - return via fax",
   "department": "Signature Required",
-  "quick_notes": {
+  "quick_notes": {{
     "details": "C&R settlement agreement requires signature. Fax to (555) 123-4567 attn: Claims Adjuster by 1/22.",
     "one_line_note": "Settlement signature - fax by 1/22"
-  }
-}
+  }}
+}}
 ```
 
 ---
@@ -202,27 +202,27 @@ For each task:
 
 ❌ **Generic Review Tasks:**
 ```json
-{
+{{
   "description": "Review progress notes for John Smith",  // NO VALUE
   "department": "Administrative Tasks"
-}
+}}
 ```
 
 ❌ **Missing Specificity:**
 ```json
-{
+{{
   "description": "Schedule MRI for patient",  // Missing body part
   "department": "Scheduling Tasks"
-}
+}}
 ```
 
 ❌ **Duplicate of Existing:**
 ```json
 // If "Schedule lumbar MRI" exists, DO NOT create:
-{
+{{
   "description": "Book imaging study",  // Duplicate
   "department": "Scheduling Tasks"
-}
+}}
 ```
 
 ---
@@ -256,9 +256,9 @@ For each task:
 
 **If document has actionable items:**
 ```json
-{
+{{{{
   "internal_tasks": [
-    {
+    {{{{
       "description": "[Specific action] + [what/body part] + [for patient]",
       "department": "Exact department name",
       "status": "Pending",
@@ -266,20 +266,20 @@ For each task:
       "patient": "Exact patient name",
       "actions": ["Claim", "Complete"],
       "source_document": "{{source_document}}",
-      "quick_notes": {
+      "quick_notes": {{{{
         "details": "Why this matters + specific context (deadline, body part, reason)",
         "one_line_note": "Short summary with key detail (under 50 chars)"
-      }
-    }
+      }}}}
+    }}}}
   ]
-}
+}}}}
 ```
 
 **If document is purely informational:**
 ```json
-{
+{{{{
   "internal_tasks": []
-}
+}}}}
 ```
 
 ---
@@ -371,7 +371,7 @@ Before adding ANY task:
 
 **If NO to any → DO NOT create this task**
 
-{{format_instructions}}
+{format_instructions}
 """
         
         return ChatPromptTemplate.from_messages([

@@ -154,7 +154,7 @@ async def update_fail_document(request: Request):
             "patient_name": data.get("patient_name"),
             "author": data.get("author")
         }
-        logger.info(f"   🔄 Fields to update: {updated_fields}")
+        # logger.info(f"   🔄 Fields to update: {updated_fields}")
 
         db_service = await get_database_service()
         fail_doc = await db_service.get_fail_doc_by_id(fail_doc_id)
