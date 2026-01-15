@@ -199,7 +199,7 @@ class PatientDetailsExtractor:
             "date_of_report": None,
             "author": None
         }
-        logger.info(f"🔍 Attempting patient details extraction from summarizer using AI: {signature_info}")
+        # logger.info(f"🔍 Attempting patient details extraction from summarizer using AI: {signature_info}")
         
         # Extract signature author for use in prompt and as fallback
         signature_author = signature_info.get("author") if signature_info else None

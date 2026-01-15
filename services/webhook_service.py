@@ -115,52 +115,6 @@ class WebhookService:
             logger.error(f"❌ Redis connection failed: {e}")
             return False
     
-    async def debug_redis_contents(self, pattern: str = "patient_lookup:*"):
-        """Debug method to see what's actually in Redis"""
-        if not self.redis_client:
-            logger.error("❌ Redis client not available for debug")
-            return
-        
-        try:
-            keys = await self.redis_client.keys(pattern)
-            logger.info(f"🔍 Found {len(keys)} Redis keys matching pattern: {pattern}")
-            
-            for key in keys:
-                try:
-                    # Check the type of the key first
-                    key_type = await self.redis_client.type(key)
-                    logger.info(f"🔍 Key: {key}, Type: {key_type}")
-                    
-                    if key_type == "string":
-                        value = await self.redis_client.get(key)
-                        if value:
-                            try:
-                                parsed_value = json.loads(value)
-                                logger.info(f"   📄 Data: {str(parsed_value)[:200]}...")
-                            except:
-                                logger.info(f"   📄 Raw Value: {str(value)[:200]}...")
-                        else:
-                            logger.info(f"   📄 Value: None")
-                    elif key_type == "list":
-                        length = await self.redis_client.llen(key)
-                        values = await self.redis_client.lrange(key, 0, 4)  # Get first 5 items
-                        logger.info(f"   📋 List length: {length}, First items: {values}")
-                    elif key_type == "hash":
-                        values = await self.redis_client.hgetall(key)
-                        logger.info(f"   🗂️ Hash: {str(values)[:200]}...")
-                    elif key_type == "set":
-                        values = await self.redis_client.smembers(key)
-                        logger.info(f"   🔵 Set members: {str(list(values)[:5])}...")
-                    elif key_type == "zset":
-                        values = await self.redis_client.zrange(key, 0, 4, withscores=True)
-                        logger.info(f"   📊 Sorted set: {values}")
-                    else:
-                        logger.info(f"   ❓ Unknown type: {key_type}")
-                except Exception as key_err:
-                    logger.error(f"   ❌ Error reading key {key}: {key_err}")
-        except Exception as e:
-            logger.error(f"❌ Debug Redis failed: {e}")
-    
     async def test_redis_basic(self):
         """Test basic Redis operations"""
         if not self.redis_client:
@@ -1848,14 +1802,10 @@ class WebhookService:
             # EXTERNAL document - author is NOT from our clinic, can proceed with processing
             logger.info(f"✅ EXTERNAL document confirmed - Author: {author_info.get('author_name')} (not a clinic member)")
             
-            # DEBUG: Check Redis before patient lookup
-            await self.debug_redis_contents("patient_lookup:*")
             
             # Step 2: Perform patient lookup with enhanced fuzzy matching (NO DUPLICATE CHECK)
             lookup_result = await self.patient_lookup.perform_patient_lookup(db_service, processed_data)
             
-            # DEBUG: Check Redis after patient lookup
-            await self.debug_redis_contents("patient_lookup:*")
             
             # Step 3: Save document (ALL documents are saved - no duplicate blocking)
             save_result = await self.save_document(db_service, processed_data, lookup_result)
@@ -2006,8 +1956,6 @@ class WebhookService:
             #         # Don't fail the document if the check itself fails - log and continue
             #         logger.warning("⚠️ Continuing with saved document despite check error")
             
-            # DEBUG: Final Redis check
-            await self.debug_redis_contents("*")
             
             # Prepare final response - INCLUDE TREATMENT HISTORY INFORMATION
             result = {
