@@ -343,14 +343,13 @@ async def startup():
     # 🆕 Initialize Redis
     await init_redis()
     
-    # 🕓 Start enhanced cron scheduler - runs every 1 minute FOR TESTING
-    scheduler = AsyncIOScheduler()
-    # scheduler.add_job(check_all_overdue_tasks, "interval", minutes=1)
-    scheduler.start()
-    print("🕒 Enhanced scheduler started — runs every 1 minute (FOR TESTING)")
-    print("🔒 All API routes are secured with JWT authentication")
-    print("🌐 Public route available: /api/agent/progress/{task_id}")
-    print("💾 Redis caching: Enabled")
+    if os.getenv("RUN_SCHEDULER", "0") == "1":
+        scheduler = AsyncIOScheduler()
+        scheduler.start()
+        print("🕒 Enhanced scheduler started — runs every 1 minute (FOR TESTING)")
+        print("🔒 All API routes are secured with JWT authentication")
+        print("🌐 Public route available: /api/agent/progress/{task_id}")
+        print("💾 Redis caching: Enabled")
 
 
 @app.on_event("shutdown")
