@@ -973,8 +973,10 @@ Output JSON only.
                 api_key=CONFIG.get("azure_openai_api_key"),
                 api_version=CONFIG.get("azure_openai_api_version"),
                 temperature=0.1,  # Lower temperature for more consistent output
-                max_tokens=5000,  # Explicit max_tokens to prevent truncation
-                timeout=60,  # Longer timeout for complete generation
+                max_tokens=9000,  # Explicit max_tokens to prevent truncation
+                timeout=90,  # Longer timeout for complete generation
+                request_timeout=90,
+
             )
             
             chain = chat_prompt | summary_llm
