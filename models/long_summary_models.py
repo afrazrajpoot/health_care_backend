@@ -2,8 +2,18 @@
 Pydantic Models for Long Summary Generation
 Ensures consistent, structured output without hallucination.
 """
-from typing import List, Optional, Literal
-from pydantic import BaseModel, Field
+from typing import List, Optional, Literal, Any
+from pydantic import BaseModel, Field, field_validator
+
+
+def normalize_claim_number(value: Any) -> Optional[str]:
+    """Convert claim_number to string if it's a list/array."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        # Join multiple claim numbers with comma and space
+        return ", ".join(str(v) for v in value if v)
+    return str(value) if value else None
 
 
 # ============================================================================
@@ -14,9 +24,14 @@ class MedicalDocumentOverview(BaseModel):
     """Overview section for medical documents"""
     document_type: str = Field(default="", description="Type of the medical document")
     report_date: str = Field(default="", description="Date of the report in MM/DD/YYYY format. Use '00/00/0000' if not found")
-    claim_number: Optional[str] = Field(default=None, description="Claim number if present, otherwise null")
+    claim_number: Optional[str] = Field(default=None, description="Claim number if present, otherwise null. If multiple, join with comma.")
     patient_name: str = Field(default="", description="Full name of the patient")
     provider: str = Field(default="", description="Healthcare provider or facility name")
+
+    @field_validator('claim_number', mode='before')
+    @classmethod
+    def normalize_claim_number(cls, v: Any) -> Optional[str]:
+        return normalize_claim_number(v)
 
 
 class DoctorInfo(BaseModel):
@@ -82,9 +97,14 @@ class AdministrativeDocumentOverview(BaseModel):
     """Overview section for administrative documents"""
     document_type: str = Field(default="", description="Type of the administrative document")
     document_date: str = Field(default="", description="Date of the document in MM/DD/YYYY format. Use '00/00/0000' if not found")
-    claim_number: Optional[str] = Field(default=None, description="Claim number if present, otherwise null")
+    claim_number: Optional[str] = Field(default=None, description="Claim number if present, otherwise null. If multiple, join with comma.")
     purpose: str = Field(default="", description="Purpose of the document")
     author: AuthorInfo = Field(default_factory=AuthorInfo, description="Author/signature information")
+
+    @field_validator('claim_number', mode='before')
+    @classmethod
+    def normalize_claim_number(cls, v: Any) -> Optional[str]:
+        return normalize_claim_number(v)
 
 
 class KeyParties(BaseModel):
@@ -140,7 +160,7 @@ class UniversalLongSummary(BaseModel):
     # === COMMON FIELDS (applicable to both types) ===
     document_type: str = Field(default="", description="Type of the document")
     document_date: str = Field(default="", description="Date of the document. Use '00/00/0000' if not found")
-    claim_number: Optional[str] = Field(default=None, description="Claim number if present")
+    claim_number: Optional[str] = Field(default=None, description="Claim number if present. If multiple, join with comma.")
     patient_name: str = Field(default="", description="Patient's full name")
     
     # === MEDICAL-SPECIFIC FIELDS ===
@@ -173,6 +193,11 @@ class UniversalLongSummary(BaseModel):
     deadlines: str = Field(default="", description="Deadlines mentioned")
     contact_information: str = Field(default="", description="Contact information")
     next_steps: str = Field(default="", description="Next steps")
+
+    @field_validator('claim_number', mode='before')
+    @classmethod
+    def normalize_claim_number_field(cls, v: Any) -> Optional[str]:
+        return normalize_claim_number(v)
 
 
 # ============================================================================
@@ -395,8 +420,13 @@ class PR2PatientInformation(BaseModel):
     occupation: str = Field(default="", description="Patient's occupation")
     employer: str = Field(default="", description="Patient's employer")
     claims_administrator: str = Field(default="", description="Claims administrator name")
-    claim_number: Optional[str] = Field(default=None, description="Claim number if present")
+    claim_number: Optional[str] = Field(default=None, description="Claim number if present. If multiple, join with comma.")
     all_doctors_involved: List[DoctorInfo] = Field(default_factory=list, description="All doctors mentioned in the document")
+
+    @field_validator('claim_number', mode='before')
+    @classmethod
+    def normalize_claim_number_field(cls, v: Any) -> Optional[str]:
+        return normalize_claim_number(v)
 
 
 class PR2ChiefComplaint(BaseModel):
@@ -750,8 +780,13 @@ class AdminPartiesInvolved(BaseModel):
     author_signature: str = Field(default="", description="Name/title of the person who SIGNED the report (physical or electronic signature). Must be the actual signer - NOT providers, claim adjusters, requesting physicians, insurance representatives, or other officials.")
     signature_type: Optional[Literal["physical", "electronic"]] = Field(default=None, description="Type of signature")
     legal_representation: AdminLegalRepresentation = Field(default_factory=AdminLegalRepresentation, description="Legal representation")
-    claim_number: Optional[str] = Field(default=None, description="Claim number if present")
+    claim_number: Optional[str] = Field(default=None, description="Claim number if present. If multiple, join with comma.")
     all_doctors_involved: List[DoctorInfo] = Field(default_factory=list, description="All doctors mentioned")
+
+    @field_validator('claim_number', mode='before')
+    @classmethod
+    def normalize_claim_number_field(cls, v: Any) -> Optional[str]:
+        return normalize_claim_number(v)
 
 
 class AdminKeyDatesDeadlines(BaseModel):
@@ -786,11 +821,16 @@ class AdminLegalProceduralElements(BaseModel):
 
 class AdminMedicalClaimInfo(BaseModel):
     """Medical and claim information section for administrative documents"""
-    claim_number: Optional[str] = Field(default=None, description="Claim number")
+    claim_number: Optional[str] = Field(default=None, description="Claim number. If multiple, join with comma.")
     case_number: str = Field(default="", description="Case number")
     work_status: str = Field(default="", description="Work status")
     disability_information: str = Field(default="", description="Disability information")
     treatment_authorizations: List[str] = Field(default_factory=list, description="Treatment authorizations (up to 3)")
+
+    @field_validator('claim_number', mode='before')
+    @classmethod
+    def normalize_claim_number_field(cls, v: Any) -> Optional[str]:
+        return normalize_claim_number(v)
 
 
 class AdminContactFollowUp(BaseModel):
@@ -1082,7 +1122,7 @@ class ClinicalLongSummary(BaseModel):
     # Main sections matching the clinical extractor prompt
     encounter_overview: ClinicalEncounterOverview = Field(default_factory=ClinicalEncounterOverview, description="Clinical encounter overview")
     provider_info: ClinicalProviderInfo = Field(default_factory=ClinicalProviderInfo, description="Provider information")
-    claim_number: Optional[str] = Field(default=None, description="Claim number if present")
+    claim_number: Optional[str] = Field(default=None, description="Claim number if present. If multiple, join with comma.")
     all_doctors_involved: List[DoctorInfo] = Field(default_factory=list, description="All doctors mentioned in the document")
     subjective_findings: ClinicalSubjectiveFindings = Field(default_factory=ClinicalSubjectiveFindings, description="Subjective findings")
     objective_examination: ClinicalObjectiveExamination = Field(default_factory=ClinicalObjectiveExamination, description="Objective examination findings")
@@ -1093,6 +1133,11 @@ class ClinicalLongSummary(BaseModel):
     outcome_measures: ClinicalOutcomeMeasures = Field(default_factory=ClinicalOutcomeMeasures, description="Outcome measures")
     signature_author: ClinicalSignatureAuthor = Field(default_factory=ClinicalSignatureAuthor, description="Signature and author")
     critical_clinical_findings: List[str] = Field(default_factory=list, description="Critical clinical findings (up to 8)")
+
+    @field_validator('claim_number', mode='before')
+    @classmethod
+    def normalize_claim_number_field(cls, v: Any) -> Optional[str]:
+        return normalize_claim_number(v)
 
 
 def format_clinical_long_summary(summary: ClinicalLongSummary) -> str:
@@ -1286,7 +1331,12 @@ class ConsultPatientInfo(BaseModel):
     name: str = Field(default="", description="Patient's full name")
     date_of_birth: str = Field(default="", description="Patient's date of birth")
     date_of_injury: str = Field(default="", description="Date of injury")
-    claim_number: Optional[str] = Field(default=None, description="Claim number if present")
+    claim_number: Optional[str] = Field(default=None, description="Claim number if present. If multiple, join with comma.")
+
+    @field_validator('claim_number', mode='before')
+    @classmethod
+    def normalize_claim_number_field(cls, v: Any) -> Optional[str]:
+        return normalize_claim_number(v)
 
 
 class ConsultChiefComplaint(BaseModel):
@@ -1573,8 +1623,13 @@ class FormalMedicalPatientInfo(BaseModel):
     name: str = Field(default="", description="Patient's full name")
     date_of_birth: str = Field(default="", description="Patient's date of birth")
     date_of_injury: str = Field(default="", description="Date of injury")
-    claim_number: Optional[str] = Field(default=None, description="Claim number if present")
+    claim_number: Optional[str] = Field(default=None, description="Claim number if present. If multiple, join with comma.")
     employer: str = Field(default="", description="Employer name if applicable")
+
+    @field_validator('claim_number', mode='before')
+    @classmethod
+    def normalize_claim_number_field(cls, v: Any) -> Optional[str]:
+        return normalize_claim_number(v)
 
 
 class FormalMedicalProviders(BaseModel):
@@ -1902,10 +1957,15 @@ class ImagingPatientInfo(BaseModel):
     """Patient information section"""
     name: str = Field(default="", description="Patient's full name")
     date_of_birth: str = Field(default="", description="Patient's date of birth")
-    claim_number: Optional[str] = Field(default=None, description="Claim number if present")
+    claim_number: Optional[str] = Field(default=None, description="Claim number if present. If multiple, join with comma.")
     date_of_injury: str = Field(default="", description="Date of injury")
     employer: str = Field(default="", description="Employer name")
     all_doctors_involved: List[ImagingDoctorInfo] = Field(default_factory=list, description="All doctors mentioned")
+
+    @field_validator('claim_number', mode='before')
+    @classmethod
+    def normalize_claim_number_field(cls, v: Any) -> Optional[str]:
+        return normalize_claim_number(v)
 
 
 class ImagingClinicalIndication(BaseModel):
@@ -2154,9 +2214,14 @@ class QMEPatientInfo(BaseModel):
     """Patient information section for QME reports"""
     name: str = Field(default="", description="Patient's full name")
     date_of_birth: str = Field(default="", description="Patient's date of birth")
-    claim_number: Optional[str] = Field(default=None, description="Claim number if present")
+    claim_number: Optional[str] = Field(default=None, description="Claim number if present. If multiple, join with comma.")
     date_of_injury: str = Field(default="", description="Date of injury")
     employer: str = Field(default="", description="Employer name")
+
+    @field_validator('claim_number', mode='before')
+    @classmethod
+    def normalize_claim_number_field(cls, v: Any) -> Optional[str]:
+        return normalize_claim_number(v)
 
 
 class QMEReportDetails(BaseModel):

@@ -137,6 +137,7 @@ llm = AzureChatOpenAI(
     api_key=CONFIG["azure_openai_api_key"],
     api_version=CONFIG["azure_openai_api_version"],
     temperature=0.3,
+    max_tokens=5000,  # Explicit max_tokens to prevent truncation/garbled output
     model_name="gpt-4o-mini"
 )
 

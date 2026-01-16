@@ -423,6 +423,7 @@ def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
     - Contains "not found", "not available", "not specified"
     - Is just a placeholder with no real clinical content
     - Contains incomplete sentences (e.g., "The at MMI", "The from work")
+    - Contains garbled/truncated text patterns
     """
     if "summary" not in structured_summary or "items" not in structured_summary["summary"]:
         return structured_summary
@@ -437,7 +438,7 @@ def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
         r"^no\s+\w+\s*\.?$",  # Just "No X" or "No X."
     ]
     
-    # Incomplete sentence patterns that indicate malformed text
+    # Incomplete/garbled sentence patterns that indicate malformed text
     incomplete_patterns = [
         r"^the\s+(at|from|to|in|on|for|with|was|is|yet|temporary|permanent|off)\s+",  # "The at MMI", "The yet at", "The temporary", etc.
         r"^the\s+\w+\s+(at|from|to|in|on)\s+",  # "The patient at", "The report from"
@@ -447,6 +448,16 @@ def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
         r"^the\s+(is|are|was|were)\s*$",  # Just "The is/are/was/were"
         r"^the\s+\w+\s+disability",  # "The temporary disability" without verb
         r"^the\s+(not\s+)?yet\s+at",  # "The yet at", "The not yet at"
+        r"\bas\s+at\s+",  # "as at MMI" - garbled pattern
+        r"\bwas\s+documented\s+asers?\b",  # "was documented asers" - garbled
+        r"\bdocumented\s+aser\b",  # "documented aser" - garbled  
+        r"\b(the|a)\s+as\s+(at|for|to|in)\b",  # "the as at" - garbled
+        r"\bfor\s+was\s+documented\b",  # "for was documented" - garbled
+        r"\b\w{1,2}\s+\w{1,2}\s+\w{1,2}\s*$",  # Multiple 1-2 char fragments at end
+        r"\b(was|is|are|were)\s+(the|a|an)\s+(at|to|for|in)\b",  # "was the at" - garbled
+        r"\bthe\s+\w+\s+for\s+was\b",  # "the X for was" - garbled
+        r"\baser[s]?\b",  # "aser" or "asers" - common truncation artifact
+        r"\b\w+ers?\s+but\s+not\s+for\s+the\s+\w+\.$",  # Incomplete comparison pattern
     ]
     
     items = structured_summary["summary"]["items"]
@@ -699,6 +710,7 @@ Examples of INCOMPLETE collapsed sentences (NEVER DO THIS):
   ❌ "The at MMI" (MISSING "patient is")
   ❌ "The from work" (MEANINGLESS fragment)
   ❌ "The return to work at this time" (MISSING subject and verb)
+  ❌ "The request for a consultation with a Pulmonologist was apwas documented asd
 
 TENSE & VOICE:
 - Past tense only (was documented, were noted, was described, was referenced)
@@ -950,7 +962,22 @@ Output JSON only.
             truncated_text = raw_text[:8000] if len(raw_text) > 8000 else raw_text
             truncated_long_summary = long_summary[:4000] if len(long_summary) > 4000 else long_summary
             
-            chain = chat_prompt | llm
+            # Create a new LLM instance with explicit max_tokens to prevent truncation
+            # This ensures complete sentences and avoids garbled output
+            from langchain_openai import AzureChatOpenAI
+            from config.settings import CONFIG
+            
+            summary_llm = AzureChatOpenAI(
+                azure_deployment=CONFIG.get("azure_openai_deployment"),
+                azure_endpoint=CONFIG.get("azure_openai_endpoint"),
+                api_key=CONFIG.get("azure_openai_api_key"),
+                api_version=CONFIG.get("azure_openai_api_version"),
+                temperature=0.1,  # Lower temperature for more consistent output
+                max_tokens=5000,  # Explicit max_tokens to prevent truncation
+                timeout=60,  # Longer timeout for complete generation
+            )
+            
+            chain = chat_prompt | summary_llm
             response = chain.invoke({
                 "raw_text": truncated_text,
                 "long_summary": truncated_long_summary,
@@ -988,8 +1015,14 @@ Output JSON only.
             # DEDUPLICATE — ensure each field type appears only once
             structured_summary = deduplicate_fields(structured_summary)
             
+            # NEW: Clean up garbled/truncated text before other filtering
+            structured_summary = clean_garbled_text(structured_summary)
+            
             # MODIFIED: More lenient filtering - only remove truly empty fields
             structured_summary = filter_truly_empty_fields(structured_summary)
+            
+            # Filter out incomplete/garbled sentences
+            structured_summary = filter_empty_or_generic_fields(structured_summary)
             
             # Post-process to ensure attribution compliance
             structured_summary = enforce_attribution_compliance(structured_summary)
@@ -1037,6 +1070,59 @@ def filter_truly_empty_fields(structured_summary: dict) -> dict:
             logger.info(f"⚠️ Filtering truly empty field: {item.get('field')}")
     
     structured_summary['summary']['items'] = filtered_items
+    return structured_summary
+
+
+def clean_garbled_text(structured_summary: dict) -> dict:
+    """
+    Clean up garbled/truncated text patterns commonly caused by token limits.
+    
+    Detects and removes common garbled patterns like:
+    - "was documented asers" (should be "was documented")
+    - "The as at MMI" (incomplete phrase)
+    - "for was documented" (word order issues)
+    - Repeated words or fragments
+    """
+    if 'summary' not in structured_summary or 'items' not in structured_summary['summary']:
+        return structured_summary
+    
+    # Patterns to clean up (pattern -> replacement)
+    cleanup_patterns = [
+        # Garbled word patterns - fix common truncation artifacts
+        (r'\bdocumented\s+asers?\b', 'documented'),
+        (r'\bwas\s+documented\s+asers?\b', 'was documented'),
+        (r'\bthe\s+as\s+at\b', 'the status at'),
+        (r'\bfor\s+was\s+documented\b', 'was documented'),
+        (r'\baser[s]?\b', ''),  # Remove orphan "aser" or "asers"
+        (r'\b(the|a)\s+as\s+(at|for|to|in)\b', r'\2'),  # "the as at" -> "at"
+        # Clean up excessive whitespace
+        (r'\s{2,}', ' '),
+        # Clean up orphaned punctuation
+        (r'\s+\.', '.'),
+        (r'\s+,', ','),
+    ]
+    
+    def clean_text(text: str) -> str:
+        if not text:
+            return text
+        
+        cleaned = text
+        for pattern, replacement in cleanup_patterns:
+            cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+        
+        return cleaned.strip()
+    
+    for item in structured_summary['summary']['items']:
+        original_collapsed = item.get('collapsed', '')
+        original_expanded = item.get('expanded', '')
+        
+        item['collapsed'] = clean_text(original_collapsed)
+        item['expanded'] = clean_text(original_expanded)
+        
+        # Log if we made changes
+        if item['collapsed'] != original_collapsed or item['expanded'] != original_expanded:
+            logger.info(f"🧹 Cleaned garbled text in field '{item.get('field', 'unknown')}'")
+    
     return structured_summary
 
 
