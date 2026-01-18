@@ -98,21 +98,25 @@ Before generating tasks, analyze:
 ## 🏢 INTERNAL TASKS (internal_tasks array)
 
 Generate when document requires OUR clinic to:
-- Schedule procedures/appointments in our facility
+- Schedule procedures/appointments in our facility (MRI, CT, therapy, injections, surgeries - NOT medications or DME)
 - Review clinical findings requiring our physician's decision
 - Submit authorization requests from our clinic
 - Handle denials/appeals for our services
 - Sign documents (settlement agreements, QME attestations, authorization forms)
-- Manage medications/treatment plans for our patients
+- Track medication authorizations (administrative, not scheduling)
+- Track DME authorizations (administrative, not scheduling)
 - Follow up on our diagnostic studies
 - Complete administrative tasks in our workflow
 
 **Examples:**
-- "Schedule MRI at our facility for John Smith"
+- "Schedule MRI at our facility for John Smith" ✅ (imaging requires scheduling)
+- "Schedule physical therapy for Maria Garcia" ✅ (therapy requires scheduling)
 - "Review abnormal lab results for Maria Garcia"
 - "Submit authorization request for physical therapy"
 - "Sign settlement agreement for Robert Lee"
 - "Appeal denied authorization for our services"
+- "Process approved medication for John Smith" ✅ (medication = administrative, NOT schedule)
+- "Process approved TENS unit for Jane Doe" ✅ (DME = administrative, NOT schedule)
 
 ---
 
@@ -154,9 +158,31 @@ Generate when document requires OUR clinic to:
 |------------|------------|
 | **Signature Required** | Document requires physician/provider signature |
 | **Denials & Appeals** | RFA tracking, UR denials, IMR filing, authorization appeals, EOB denials |
-| **Approvals to Schedule** | Authorization approved and needs appointment scheduling |
+| **Approvals to Schedule** | Authorization approved for services that REQUIRE scheduling (MRI, CT, therapy sessions, injections, procedures, surgeries, specialist consultations) |
 | **Scheduling Tasks** | Follow-up visits, general appointment booking, procedure scheduling |
-| **Administrative Tasks** | Legal correspondence, compliance docs, QME admin, attorney letters, credentialing, external referral tracking |
+| **Administrative Tasks** | Legal correspondence, compliance docs, QME admin, attorney letters, credentialing, external referral tracking, medication authorizations, DME authorizations |
+
+---
+
+## 🚫 SCHEDULING EXCLUSIONS - DO NOT CREATE SCHEDULE TASKS FOR:
+
+**Medications (prescription drugs):**
+- ❌ DO NOT create "Schedule" tasks for approved medications
+- ❌ Approved pain medications, muscle relaxants, anti-inflammatories, etc.
+- ✅ Instead, route medication approvals to "Administrative Tasks" for tracking/dispensing
+
+**DME (Durable Medical Equipment):**
+- ❌ DO NOT create "Schedule" tasks for approved DME
+- ❌ Wheelchairs, walkers, TENS units, braces, orthotics, oxygen equipment, hospital beds, CPAP machines
+- ✅ Instead, route DME approvals to "Administrative Tasks" for ordering/delivery coordination
+
+**What DOES need scheduling (Approvals to Schedule):**
+- ✅ MRI, CT, X-ray, EMG, imaging studies
+- ✅ Physical therapy, occupational therapy sessions
+- ✅ Injections (epidural, facet, trigger point)
+- ✅ Surgical procedures
+- ✅ Specialist consultations
+- ✅ Follow-up appointments
 
 ---
 
@@ -339,7 +365,7 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
                 patient_name = getattr(processed_data, "patient_name", "Unknown")
                 document_type = getattr(processed_data, "document_type", "Unknown")
             
-            logger.info(f"🔍 Analyzing document: ({processed_data})")
+            # logger.info(f"🔍 Analyzing document: ({processed_data})")
 
             prompt = self.create_prompt(patient_name)
             chain = prompt | self.llm | self.parser

@@ -959,7 +959,6 @@ Output JSON only.
     for attempt in range(max_retries):
         try:
             # Truncate raw_text if too long (keep most relevant content)
-            truncated_text = raw_text[:8000] if len(raw_text) > 8000 else raw_text
             truncated_long_summary = long_summary[:4000] if len(long_summary) > 4000 else long_summary
             
             # Create a new LLM instance with explicit max_tokens to prevent truncation
@@ -981,7 +980,7 @@ Output JSON only.
             
             chain = chat_prompt | summary_llm
             response = chain.invoke({
-                "raw_text": truncated_text,
+                "raw_text": raw_text,
                 "long_summary": truncated_long_summary,
                 "doc_type": doc_type,
                 "allowed_fields": list(allowed_fields),

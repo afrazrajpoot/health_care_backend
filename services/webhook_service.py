@@ -674,143 +674,6 @@ class WebhookService:
         
         return lookup_data
 
-    async def create_treatment_history(self, 
-                                    processed_data: dict, 
-                                    lookup_result: dict,
-                                    document_id: str = None,
-                                    ai_summarizer_text: str = ""
-                                    ) -> dict:
-        """Step 3.5: Create or update treatment history"""
-        logger.info(f"🔄 Treatment history creation is currently DISABLED in WebhookService")
-        return {}
-        # logger.info(f"🔄 Creating treatment history for {lookup_result.get('patient_name_to_use')}")
-        # logger.info(f"   processed data: {processed_data.get('report_analyzer_result').get('short_summary', '')}")
-        # 
-        # try:
-        #     # Initialize treatment history generator
-        #     history_generator = TreatmentHistoryGenerator()
-        #     
-        #     # Get document analysis
-        #     document_analysis = processed_data.get("document_analysis")
-        #     
-        #     # Extract report date from document analysis - NEVER use current date as fallback
-        #     report_date = None
-        #     if document_analysis:
-        #         # Try to get rd (report date) from document analysis
-        #         if hasattr(document_analysis, 'rd') and document_analysis.rd:
-        #             rd_value = str(document_analysis.rd).lower()
-        #             if rd_value not in ["not specified", "unknown", "none", ""]:
-        #                 report_date = document_analysis.rd
-        #         # Fallback to doi (date of injury) if rd not available
-        #         if not report_date and hasattr(document_analysis, 'doi') and document_analysis.doi:
-        #             doi_value = str(document_analysis.doi).lower()
-        #             if doi_value not in ["not specified", "unknown", "none", ""]:
-        #                 report_date = document_analysis.doi
-        #     
-        #     # Prepare current document data for history generator
-        #     # CRITICAL: Only include date if actually extracted from document, NEVER use current date
-        #     current_doc_data = {
-        #         "short_summary": processed_data.get("brief_summary", ""),
-        #         "long_summary": processed_data.get("text_for_analysis", ""),
-        #         "briefSummary": processed_data.get("brief_summary", ""),
-        #         "whatsNew": json.dumps({
-        #             "long_summary": processed_data.get("text_for_analysis", ""),
-        #             "short_summary": processed_data.get("brief_summary", "")
-        #         }) if processed_data.get("text_for_analysis") else None
-        #     }
-        #     
-        #     # Only add date fields if they were actually extracted from the document
-        #     if report_date:
-        #         current_doc_data["createdAt"] = report_date
-        #         current_doc_data["documentDate"] = report_date
-        #         current_doc_data["date"] = report_date
-        #         logger.info(f"📅 Using extracted report date for treatment history: {report_date}")
-        #     else:
-        #         logger.warning(f"⚠️ No report date found in document - treatment history will use 'Date not specified'")
-        #     
-        #     # Add body part snapshots if available
-        #     if hasattr(document_analysis, 'body_parts_analysis') and document_analysis.body_parts_analysis:
-        #         current_doc_data["bodyPartSnapshots"] = []
-        #         for bp in document_analysis.body_parts_analysis:
-        #             if hasattr(bp, 'dict'):
-        #                 current_doc_data["bodyPartSnapshots"].append(bp.dict())
-        #             else:
-        #                 current_doc_data["bodyPartSnapshots"].append({
-        #                     "bodyPart": getattr(bp, 'body_part', None),
-        #                     "condition": getattr(bp, 'condition', None),
-        #                     "dx": getattr(bp, 'diagnosis', None),
-        #                     "keyConcern": getattr(bp, 'key_concern', None),
-        #                     "nextStep": getattr(bp, 'extracted_recommendation', None),
-        #                     "clinicalSummary": getattr(bp, 'clinical_summary', None),
-        #                     "treatmentApproach": getattr(bp, 'treatment_plan', None),
-        #                     "adlsAffected": getattr(bp, 'adls_affected', None)
-        #                 })
-        #     
-        #     # ✅ Step 3.4: Check if treatment history already exists
-        #     existing_history = await history_generator.get_treatment_history(
-        #         patient_name=lookup_result.get("patient_name_to_use"),
-        #         dob=getattr(document_analysis, 'dob', None) if document_analysis else None,
-        #         claim_number=lookup_result.get("claim_to_save"),
-        #         physician_id=processed_data.get("physician_id")
-        #     )
-        #     
-        #     # If history exists, we only generate history for the CURRENT document and then merge/archive
-        #     # If history doesn't exist, we generate from ALL documents
-        #     only_current = existing_history is not None
-        #     if only_current:
-        #         logger.info(f"🔄 Treatment history exists for {lookup_result.get('patient_name_to_use')}, generating new entries for archive/merge")
-        #     # logger.info(f"📝 Generating treatment history for patient: {ai_summarizer_text}")
-        #     # Create treatment history
-        #     treatment_history = await history_generator.generate_treatment_history(
-        #         patient_name=lookup_result.get("patient_name_to_use"),
-        #         dob=getattr(document_analysis, 'dob', None) if document_analysis else None,
-        #         claim_number=lookup_result.get("claim_to_save"),
-        #         physician_id=processed_data.get("physician_id"),
-        #         current_document_id=document_id,
-        #         current_document_data=processed_data.get('report_analyzer_result', {}).get('short_summary', ''),
-        #         only_current=only_current
-        #         
-        #     )
-        #     
-        #     # ✅ Step 3.6: Save treatment history to database (Moved from TreatmentHistoryGenerator)
-        #     if treatment_history:
-        #         logger.info(f"💾 Saving treatment history to database for {lookup_result.get('patient_name_to_use')}")
-        #         await history_generator.save_treatment_history(
-        #             patient_name=lookup_result.get("patient_name_to_use"),
-        #             dob=getattr(document_analysis, 'dob', None) if document_analysis else None,
-        #             claim_number=lookup_result.get("claim_to_save"),
-        #             physician_id=processed_data.get("physician_id"),
-        #             history_data=treatment_history,
-        #             document_id=document_id
-        #         )
-        #     
-        #     logger.info(f"✅ Treatment history created and saved for {lookup_result.get('patient_name_to_use')}")
-        #     return treatment_history
-        #     
-        # except ImportError as e:
-        #     logger.error(f"❌ TreatmentHistoryGenerator not found: {str(e)}")
-        #     return {}
-        # except Exception as e:
-        #     logger.error(f"❌ Error creating/saving treatment history: {str(e)}")
-        #     # Return empty template on error
-        #     return {
-        #         "musculoskeletal_system": [],
-        #         "cardiovascular_system": [],
-        #         "pulmonary_respiratory": [],
-        #         "neurological": [],
-        #         "gastrointestinal": [],
-        #         "metabolic_endocrine": [],
-        #         "other_systems": [],
-        #         "general_treatments": []
-        #     }
-        # finally:
-        #     # ✅ Ensure database connection is closed
-        #     try:
-        #         if 'history_generator' in locals():
-        #             await history_generator.disconnect()
-        #     except Exception as disconnect_error:
-        #         logger.warning(f"⚠️ Error disconnecting history generator: {disconnect_error}")
-    
     def _normalize_name(self, name):
         """
         Advanced name normalization:
@@ -1054,7 +917,7 @@ class WebhookService:
 
     async def create_tasks_if_needed(self, document_analysis, document_id: str, physician_id: str, filename: str, processed_data: dict = None) -> int:
         """Step 3: Create tasks for documents"""
-        logger.info(f"🔧 Creating tasks for document {document_analysis}...")
+        # logger.info(f"🔧 Creating tasks for document {document_analysis}...")
         created_tasks = 0
         
         try:
@@ -1161,7 +1024,54 @@ class WebhookService:
             # Step 1: Process document data
             processed_data = await self.process_document_data(data)
 
-            # logger.info(f"📄 Document data processed successfully : {processed_data['result_data']['raw_text']}")
+            # logger.info(f"📄 Document data processed successfully : {processed_data.keys()}, document_analysis: {processed_data.get('document_analysis', {})}")
+            
+            # 🚨 CHECK: Early internal document detection (from process_document_data pre-check)
+            if processed_data.get("internal_doc_skipped"):
+                # Internal document was already detected in process_document_data
+                # Extract the author from the error message or use the extracted author
+                error_msg = processed_data.get("error_msg", "Internal document detected")
+                
+                # Try to extract author name from error_msg (format: "Internal document from AuthorName")
+                extracted_author = None
+                if "Internal document from " in error_msg:
+                    extracted_author = error_msg.replace("Internal document from ", "").strip()
+                
+                logger.warning(f"⚠️ INTERNAL DOCUMENT (early detection): Author '{extracted_author}' - saving to FailDocs")
+                
+                raw_text = processed_data.get("raw_text", "")
+                text_for_analysis = processed_data.get("text_for_analysis", "")
+                
+                fail_doc_id = await db_service.save_fail_doc(
+                    reason=f"Internal document detected - Author: {extracted_author}. Cannot process documents authored by clinic members.",
+                    db=processed_data.get("dob"),
+                    claim_number=processed_data.get("claim_number"),
+                    patient_name=processed_data.get("patient_name"),
+                    physician_id=processed_data.get("physician_id"),
+                    gcs_file_link=processed_data.get("gcs_url"),
+                    file_name=processed_data.get("filename"),
+                    file_hash=processed_data.get("file_hash"),
+                    blob_path=processed_data.get("blob_path"),
+                    mode=processed_data.get("mode", "wc"),
+                    document_text=text_for_analysis if text_for_analysis else raw_text,
+                    doi=None,
+                    ai_summarizer_text=f"Internal document detected. Author: {extracted_author}",
+                    author=extracted_author
+                )
+                
+                parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
+                
+                return {
+                    "status": "internal_document_fail",
+                    "document_id": fail_doc_id,
+                    "filename": processed_data.get("filename"),
+                    "parse_count_decremented": parse_decremented,
+                    "failure_reason": f"Internal document detected - Author: {extracted_author}",
+                    "author_info": {
+                        "author_name": extracted_author,
+                        "author_source": "early_detection"
+                    }
+                }
             
             # SKIP author check for task-only documents (administrative docs don't need author verification)
             is_task_only = processed_data.get("is_task_only", False)
@@ -1230,7 +1140,7 @@ class WebhookService:
                     short_summary_text_internal = short_summary.get('raw_summary', str(short_summary)) if isinstance(short_summary, dict) else (short_summary or 'N/A')
                     
                     fail_doc_id = await db_service.save_fail_doc(
-                        reason=f"Internal document detected - author '{author_name}' is a clinic member. Cannot process internal documents.",
+                        reason=f"Internal document detected - Author: {author_name}. Cannot process documents authored by clinic members.",
                         db=processed_data.get("dob"),
                         claim_number=processed_data.get("claim_number"),
                         patient_name=processed_data.get("patient_name"),
@@ -1242,7 +1152,8 @@ class WebhookService:
                         mode=processed_data.get("mode", "wc"),
                         document_text=text_for_analysis if text_for_analysis else raw_text,
                         doi=None,
-                        ai_summarizer_text=f"Internal document detected.\nShort Summary: {short_summary_text_internal[:200] if short_summary_text_internal else 'N/A'}..."
+                        ai_summarizer_text=f"Internal document detected. Author: {author_name}\nShort Summary: {short_summary_text_internal[:200] if short_summary_text_internal else 'N/A'}...",
+                        author=author_name
                     )
                     
                     parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
@@ -1252,7 +1163,7 @@ class WebhookService:
                         "document_id": fail_doc_id,
                         "filename": processed_data.get("filename"),
                         "parse_count_decremented": parse_decremented,
-                        "failure_reason": f"Internal document detected - author '{author_name}' is a clinic member",
+                        "failure_reason": f"Internal document detected - Author: {author_name}",
                         "author_info": {
                             "author_name": author_name,
                             "author_source": author_info.get("author_source")
