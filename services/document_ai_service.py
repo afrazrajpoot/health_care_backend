@@ -398,17 +398,17 @@ class DocumentAIProcessor:
                             formatted_text = layout_result.get("formatted_text", "")
                             
                             # Update raw text with layout only once
-                            if document_dict:
-                                json_output = json.dumps(document_dict, indent=2, ensure_ascii=False)
-                                layout_data["raw_text"] = (
-                                    summary_text + 
-                                    "\n\n--- STRUCTURED LAYOUT (Formatted) ---\n\n" + formatted_text +
-                                    "\n\n--- STRUCTURED LAYOUT (Full JSON) ---\n\n" + json_output
-                                )
-                            layout_extraction_done = True
+                            # if document_dict:
+                            #     json_output = json.dumps(document_dict, indent=2, ensure_ascii=False)
+                            #     layout_data["raw_text"] = (
+                            #         summary_text + 
+                            #         "\n\n--- STRUCTURED LAYOUT (Formatted) ---\n\n" + formatted_text +
+                            #         "\n\n--- STRUCTURED LAYOUT (Full JSON) ---\n\n" + json_output
+                            #     )
+                            # layout_extraction_done = True
                             
                             if document_dict:
-                                layout_patient_details = patient_extractor.extract_from_layout_json(document_dict)
+                                layout_patient_details = patient_extractor.extract_from_layout_json(formatted_text)
 
                      except Exception as e:
                         logger.error(f"❌ Layout parser error: {e}")

@@ -27,7 +27,6 @@ class AITask(BaseModel):
     patient: str
     quick_notes: QuickNotes
     actions: List[str]
-    source_document: str = ""
 
 class TaskCreationResult(BaseModel):
     internal_tasks: List[AITask] = Field(default_factory=list, description="Tasks for internal clinic operations")
@@ -67,12 +66,26 @@ Generate ALL relevant tasks for this category. The system will handle these work
 5. ❌ NEVER create EMR chart upload tasks
 6. ❌ NEVER create patient notification tasks
 7. ❌ NEVER create duplicate tasks with different wording
-8. ✅ If document is unclear/incomplete, create a task to handle that issue
-9. ✅ ALWAYS create at least one task - external documents require review/acknowledgment
+8. ❌ NEVER create generic "Review [document type] report for [patient]" tasks when specific action tasks exist
+9. ✅ If document is unclear/incomplete, create a task to handle that issue
+10. ✅ ALWAYS create at least one task - but make it specific and actionable
 
 ### **When to Return Empty Arrays:**
-- NEVER return empty arrays - external documents always need at least a review task
-- Even informational documents need a "Review [document type] for [patient]" task
+- NEVER return empty arrays - you must create at least one actionable task
+
+### **Redundant Tasks - DO NOT CREATE:**
+❌ **NEVER** create "Review [Document Type] report for [Patient]" when you have already created specific action tasks
+❌ **NEVER** create "Process [Document Type] for [Patient]" when you have already created specific action tasks
+
+**Examples of what NOT to do:**
+- ❌ Creating both "Submit authorization request for PT" AND "Review PR2 report for John" - just create the authorization task
+- ❌ Creating both "Sign settlement agreement" AND "Review QME report for Jane" - just create the sign task
+- ❌ Creating "Schedule MRI", "Review abnormal findings", AND "Review radiology report" - just create the first two specific tasks
+
+**Only create a generic review task if:**
+✅ Document is purely informational with NO actionable items
+✅ Document purpose is unclear and needs manual review to determine next steps
+✅ No specific actions can be identified from the document content
 
 ### **Understanding Before Creating:**
 Before generating tasks, analyze:
@@ -222,7 +235,6 @@ Instead of skipping, create a clarification task:
       "due_date": "YYYY-MM-DD",
       "patient": "Exact patient name",
       "actions": ["Claim", "Complete"],
-      "source_document": "{{{{source_document}}}}",
       "quick_notes": {{
         "details": "Why this matters and what to do (1-2 sentences)",
         "one_line_note": "Short dashboard summary (under 50 chars)"
@@ -251,20 +263,15 @@ Before generating output, verify:
 **Remember:** Use O3 reasoning to deeply understand the document before creating tasks. Quality over quantity.
 """
     
-    def create_prompt(self, patient_name: str, source_document: str, matched_doctor_name: str) -> ChatPromptTemplate:
+    def create_prompt(self, patient_name: str) -> ChatPromptTemplate:
         user_template = """
 DOCUMENT TYPE: {{document_type}}
-
-FULL DOCUMENT TEXT:
-{{full_text}}
 
 DOCUMENT ANALYSIS (Structured Extraction):
 {{document_analysis}}
 
-SOURCE DOCUMENT: {{source_document}}
 TODAY'S DATE: {{current_date}}
 PATIENT: {{patient_name}}
-MATCHED DOCTOR: {{matched_doctor_name}}
 
 **TASK GENERATION INSTRUCTIONS:**
 
@@ -304,9 +311,11 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
 - Are due dates appropriate?
 
 **IMPORTANT:** NEVER return empty internal_tasks array. External documents ALWAYS need at least one task.
-- If document is informational: Create "Review [document type] for [patient]" task
-- If document has specific actions: Create those specific tasks
-- If document has issues: Create task like "Clarify missing authorization details in report"
+- If document has SPECIFIC actions: Create ONLY those specific tasks (e.g., "Schedule MRI", "Sign agreement") - DO NOT also create a generic review task
+- If document is PURELY informational with NO specific actions: Create "Review [document type] for [patient]" task
+- If document has issues/missing info: Create task like "Clarify missing authorization details in report"
+
+**CRITICAL:** Never create a generic "Review [document type] report for [patient]" task when you have already identified specific actionable tasks. The review task is ONLY for documents with no other actions.
 
 {{format_instructions}}
 """
@@ -316,28 +325,30 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
             HumanMessagePromptTemplate.from_template(user_template, template_format="jinja2"),
         ])
 
-    async def generate_tasks(self, document_analysis: dict, source_document: str = "", full_text: str = "", matched_doctor_name: str = "") -> dict:
+    async def generate_tasks(self, document_analysis: str, processed_data) -> Dict[str, Any]:
         """Generate internal_tasks array."""
         try:
             current_date = datetime.now()
-            patient_name = document_analysis.get("patient_name", "Unknown")
-            document_type = document_analysis.get("document_type", "Unknown")
             
-            logger.info(f"🔍 Analyzing document: {source_document} ({document_type})")
-            logger.info(f"📝 Full text length: {len(full_text) if full_text else 0} characters")
-            logger.info(f"👨‍⚕️ Matched doctor: {matched_doctor_name if matched_doctor_name else 'Not specified'}")
+            # Handle both dict and object types for processed_data
+            if isinstance(processed_data, dict):
+                patient_name = processed_data.get("patient_name", "Unknown")
+                document_type = processed_data.get("document_type", "Unknown")
+            else:
+                # It's an object (like DocumentAnalysis)
+                patient_name = getattr(processed_data, "patient_name", "Unknown")
+                document_type = getattr(processed_data, "document_type", "Unknown")
+            
+            logger.info(f"🔍 Analyzing document: ({processed_data})")
 
-            prompt = self.create_prompt(patient_name, source_document, matched_doctor_name)
+            prompt = self.create_prompt(patient_name)
             chain = prompt | self.llm | self.parser
 
             invocation_data = {
-                "document_analysis": json.dumps(document_analysis, indent=2),
+                "document_analysis": document_analysis,
                 "current_date": current_date.strftime("%Y-%m-%d"),
-                "source_document": source_document or "Unknown",
                 "document_type": document_type,
                 "patient_name": patient_name,
-                "matched_doctor_name": matched_doctor_name or "Not specified",
-                "full_text": full_text if full_text else "Not available",
                 "format_instructions": self.parser.get_format_instructions()
             }
 
@@ -380,9 +391,8 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
 
             # If both arrays are empty, create fallback
             if not validated_internal:
-                logger.warning(f"⚠️ LLM returned no tasks for document type: {document_type}, patient: {patient_name}")
-                logger.warning(f"⚠️ Full text available: {len(full_text) if full_text else 0} chars")
-                fallback = await self._create_fallback_task(document_analysis, source_document, full_text)
+                logger.warning(f"⚠️ LLM returned no tasks for document type: {document_type}")
+                fallback = await self._create_fallback_task(processed_data)
                 validated_internal = fallback  # Put fallback in internal
 
             result_dict = {
@@ -400,9 +410,13 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
 
         except Exception as e:
             logger.error(f"❌ Task generation failed: {str(e)}")
-            logger.error(f"❌ Document type: {document_analysis.get('document_type', 'Unknown')}")
-            logger.error(f"❌ Full text length: {len(full_text) if full_text else 0}")
-            fallback = await self._create_fallback_task(document_analysis, source_document, full_text)
+            # Handle both dict and object types for error logging
+            if isinstance(processed_data, dict):
+                doc_type_for_log = processed_data.get('document_type', 'Unknown')
+            else:
+                doc_type_for_log = getattr(processed_data, 'document_type', 'Unknown')
+            logger.error(f"❌ Document type: {doc_type_for_log}")
+            fallback = await self._create_fallback_task(processed_data)
             return {"internal_tasks": fallback}
 
     def _infer_department(self, description: str, doc_type: str) -> str:
@@ -422,15 +436,21 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
         
         return "Administrative Tasks"
 
-    async def _create_fallback_task(self, document_analysis: dict, source_document: str, full_text: str = "") -> list[dict]:
+    async def _create_fallback_task(self, document_analysis) -> list[dict]:
         """Create intelligent fallback task when generation fails or returns empty."""
         current_date = datetime.now()
         due_date = (current_date + timedelta(days=2)).strftime("%Y-%m-%d")
         
-        doc_type = document_analysis.get("document_type", "document")
-        patient = document_analysis.get("patient_name", "Unknown")
+        # Handle both dict and DocumentAnalysis object
+        if isinstance(document_analysis, dict):
+            doc_type = document_analysis.get("document_type", "document")
+            patient = document_analysis.get("patient_name", "Unknown")
+        else:
+            # It's a DocumentAnalysis object or similar
+            doc_type = getattr(document_analysis, "document_type", "document")
+            patient = getattr(document_analysis, "patient_name", "Unknown")
+        
         doc_type_lower = doc_type.lower() if doc_type else ""
-        full_text_lower = (full_text or "").lower()
         
         # Intelligent fallback based on document type
         fallback_mappings = {
@@ -439,45 +459,45 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
                 "description": f"Review progress notes for {patient}",
                 "department": "Administrative Tasks",
                 "details": "Progress notes received from external provider. Review for treatment updates and document findings.",
-                "one_line_note": "Review external progress notes"
+                "one_line_note": ""
             },
             "progress report": {
                 "description": f"Review progress report for {patient}",
                 "department": "Administrative Tasks", 
                 "details": "Progress report requires review for clinical updates and any follow-up actions.",
-                "one_line_note": "Review progress report"
+                "one_line_note": ""
             },
             # UR/Authorization documents
             "ur decision": {
                 "description": f"Process UR decision for {patient}",
                 "department": "Denials & Appeals",
                 "details": "Utilization Review decision received. Determine if approved or denied and take appropriate action.",
-                "one_line_note": "Process UR decision"
+                "one_line_note": ""
             },
             "authorization": {
                 "description": f"Process authorization for {patient}",
                 "department": "Approvals to Schedule",
                 "details": "Authorization document received. Verify approval status and schedule if approved.",
-                "one_line_note": "Process authorization"
+                "one_line_note": ""
             },
             # Imaging/Diagnostic
             "mri": {
                 "description": f"Review MRI results for {patient}",
                 "department": "Administrative Tasks",
                 "details": "MRI results received. Review findings and document any follow-up recommendations.",
-                "one_line_note": "Review MRI results"
+                "one_line_note": ""
             },
             "radiology": {
                 "description": f"Review radiology report for {patient}",
                 "department": "Administrative Tasks",
                 "details": "Radiology report received. Review findings and determine next steps.",
-                "one_line_note": "Review radiology report"
+                "one_line_note": ""
             },
             "imaging": {
                 "description": f"Review imaging study for {patient}",
                 "department": "Administrative Tasks",
                 "details": "Imaging study results received. Review and document findings.",
-                "one_line_note": "Review imaging results"
+                "one_line_note": ""
             },
             # QME/Legal
             "qme": {
@@ -553,8 +573,15 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
                 fallback_info = info
                 break
         
-        # If no match by doc type, check full text for clues
-        if not fallback_info and full_text_lower:
+        # If no match by doc type, check document analysis text for clues
+        if not fallback_info and isinstance(document_analysis, dict):
+            # Get text content from document_analysis if available
+            doc_text = ""
+            if "summary" in document_analysis:
+                doc_text = str(document_analysis.get("summary", "")).lower()
+            elif "document_text" in document_analysis:
+                doc_text = str(document_analysis.get("document_text", "")).lower()
+            
             text_clue_mappings = [
                 (["signature required", "please sign", "sign and return"], {
                     "description": f"Sign and return document for {patient}",
@@ -583,7 +610,7 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
             ]
             
             for keywords, info in text_clue_mappings:
-                if any(kw in full_text_lower for kw in keywords):
+                if any(kw in doc_text for kw in keywords):
                     fallback_info = info
                     break
         
@@ -603,7 +630,6 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
             "due_date": due_date,
             "patient": patient,
             "actions": ["Claim", "Complete"],
-            "source_document": source_document or "Unknown",
             "quick_notes": {
                 "details": fallback_info["details"],
                 "one_line_note": fallback_info["one_line_note"]

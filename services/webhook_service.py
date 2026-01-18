@@ -20,6 +20,9 @@ import asyncio
 import re
 import json
 from .treatment_history_generator import TreatmentHistoryGenerator
+# Import refactored service functions
+from services.document_save_service import save_document as save_document_external
+from services.fail_document_service import update_fail_document as update_fail_document_external, generate_concise_brief_summary
 # Dedicated thread pool for LLM operations (shared across all WebhookService instances)
 LLM_EXECUTOR = ThreadPoolExecutor(max_workers=10)
 
@@ -100,144 +103,12 @@ class WebhookService:
         
         return new_filename
     
-    async def verify_redis_connection(self):
-        """Verify Redis connection is working"""
-        if not self.redis_client:
-            logger.error("❌ Redis client is None - not initialized")
-            return False
-        
-        try:
-            # Test the connection
-            await self.redis_client.ping()
-            logger.info("✅ Redis connection verified")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Redis connection failed: {e}")
-            return False
-    
-    async def test_redis_basic(self):
-        """Test basic Redis operations"""
-        if not self.redis_client:
-            print("❌ Redis client is None")
-            return False
-        
-        try:
-            test_key = "test_key_123"
-            test_value = {"test": "data", "timestamp": datetime.now().isoformat()}
-            
-            # Set value
-            await self.redis_client.setex(test_key, 60, json.dumps(test_value))
-            logger.info("✅ Test value set in Redis")
-            
-            # Get value
-            retrieved = await self.redis_client.get(test_key)
-            if retrieved:
-                parsed_retrieved = json.loads(retrieved)
-                logger.info(f"✅ Test value retrieved: {parsed_retrieved}")
-                return True
-            else:
-                logger.error("❌ Test value not found")
-                return False
-                
-        except Exception as e:
-            logger.error(f"❌ Redis test failed: {e}")
-            return False
-    
-
     async def _generate_concise_brief_summary(self, raw_summary_text: str, document_type: str = "Medical Document") -> str:
         """
         Uses LLM to transform the raw summarizer output into a concise, accurate professional summary.
-        Focuses on factual extraction without adding interpretations or missing critical details.
+        Wrapper for external service function.
         """
-        if not raw_summary_text or len(raw_summary_text) < 10:
-            return "Summary not available"
-
-        try:
-            logger.info("🤖 Generating concise brief summary using LLM...")
-            
-            from langchain_core.prompts import ChatPromptTemplate
-            from langchain_openai import AzureChatOpenAI
-            from config.settings import CONFIG
-
-            llm = AzureChatOpenAI(
-                azure_endpoint=CONFIG.get("azure_openai_endpoint"),
-                api_key=CONFIG.get("azure_openai_api_key"),
-                deployment_name=CONFIG.get("azure_openai_deployment"),
-                api_version=CONFIG.get("azure_openai_api_version"),
-                temperature=0.0,  # Zero temperature for maximum factual accuracy
-                timeout=30
-            )
-
-            system_template = """You are a medical documentation assistant specialized in accurate information extraction.
-
-    CRITICAL RULES:
-    1. Extract ONLY information explicitly stated in the raw summary - DO NOT infer, assume, or add any details
-    2. If critical information is present, include it even if it makes the summary longer
-    3. Preserve ALL specific medical details: diagnoses, medications (with dosages), test results, dates, measurements
-    4. Use the EXACT medical terminology from the source - do not paraphrase medical terms
-    5. If information is uncertain or not clearly stated, omit it rather than guessing
-    6. Do not include generic statements like "patient was treated" without specifying what treatment
-
-    STRUCTURE (only include sections with available information):
-    - Primary diagnosis/condition with any relevant clinical findings
-    - Key interventions, procedures, or medications (include specific names and dosages if mentioned)
-    - Critical test results or measurements if present
-    - Current status, follow-up plan, or next steps
-
-    OUTPUT FORMAT:
-    - Write in clear, concise paragraphs (NOT bullet points)
-    - No headers, no "Here is the summary" preamble
-    - Aim for 3-5 sentences, but extend if necessary to capture all critical information
-    - Prioritize completeness and accuracy over brevity
-
-    If the raw summary lacks substantive medical information, state "Limited clinical information available in source document" rather than fabricating content."""
-
-            user_template = f"""Document Type: {document_type}
-
-    Raw Summary Input:
-    {raw_summary_text}
-
-    Extract and present the concise summary following the rules above:"""
-            
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", system_template),
-                ("user", user_template)
-            ])
-            
-            chain = prompt | llm
-            
-            # Run in executor to avoid blocking
-            response = await asyncio.get_event_loop().run_in_executor(
-                LLM_EXECUTOR, 
-                lambda: chain.invoke({})
-            )
-            
-            clean_summary = response.content.strip()
-            
-            # Validation: Check if summary is suspiciously short given substantial input
-            if len(raw_summary_text) > 200 and len(clean_summary) < 50:
-                logger.warning("⚠️ Generated summary may be incomplete - falling back to raw summary")
-                return (raw_summary_text[:500] + "...") if len(raw_summary_text) > 500 else raw_summary_text
-            
-            # Validation: Check for generic/hallucinated content patterns
-            hallucination_indicators = [
-                "patient was seen",
-                "routine care provided",
-                "standard treatment given",
-                "typical findings noted"
-            ]
-            if any(indicator in clean_summary.lower() for indicator in hallucination_indicators):
-                if not any(indicator in raw_summary_text.lower() for indicator in hallucination_indicators):
-                    logger.warning("⚠️ Detected potentially fabricated generic content - using raw summary")
-                    return (raw_summary_text[:500] + "...") if len(raw_summary_text) > 500 else raw_summary_text
-            
-            logger.info(f"✅ Generated concise summary ({len(clean_summary)} chars)")
-            return clean_summary
-
-        except Exception as e:
-            logger.error(f"❌ Failed to generate concise brief summary: {e}")
-            # Fallback: Return truncated original text with better length handling
-            return (raw_summary_text[:500] + "...") if len(raw_summary_text) > 500 else raw_summary_text
+        return await generate_concise_brief_summary(raw_summary_text, document_type, LLM_EXECUTOR)
     
     async def process_document_data(self, data: dict) -> dict:
         logger.info(f"📥 Processing document: {data.get('document_id', 'unknown')}")
@@ -256,107 +127,10 @@ class WebhookService:
 
         logger.info(f"📋 Document mode: {mode}")
         logger.info(f"📊 Text lengths - Full OCR: {len(text)} chars, Document AI summary: {len(raw_text)} chars")
-        # logger.info(f"📊 Multiple reports detected (from Document AI): {is_multiple_reports}")
-        
-        # 🚨 EARLY EXIT: If Document AI already detected multiple reports, return immediately
-        # Do NOT run any further processing (no ReportAnalyzer, no summaries)
-        # if is_multiple_reports:
-        #     logger.warning("⚠️ MULTIPLE REPORTS DETECTED by Document AI - returning early, skipping all analysis")
-        #     return {
-        #         "document_analysis": None,
-        #         "brief_summary": "",
-        #         "text_for_analysis": text,
-        #         "raw_text": raw_text,
-        #         "report_analyzer_result": {},
-        #         "patient_name": None,
-        #         "claim_number": None,
-        #         "dob": None,
-        #         "has_patient_name": False,
-        #         "has_claim_number": False,
-        #         "physician_id": data.get("physician_id"),
-        #         "user_id": data.get("user_id"),
-        #         "filename": data["filename"],
-        #         "gcs_url": data["gcs_url"],
-        #         "blob_path": data.get("blob_path"),
-        #         "file_size": data.get("file_size", 0),
-        #         "mime_type": data.get("mime_type", "application/octet-stream"),
-        #         "processing_time_ms": data.get("processing_time_ms", 0),
-        #         "file_hash": data.get("file_hash"),
-        #         "result_data": result_data,
-        #         "document_id": data.get("document_id", "unknown"),
-        #         "mode": mode,
-        #         "is_multiple_reports": True,
-        #         "multi_report_info": multi_report_info
-        #     }
         
         # Log if raw_text is missing to help debug
         if not raw_text:
             logger.warning("⚠️ raw_text is empty - Document AI summarizer output not available, will use full OCR text as fallback")
-        
-        # 🔍 Check for multiple reports using MultiReportDetector
-        # Use raw_text (Document AI summary) if available, otherwise use full OCR text
-        # text_to_check = raw_text if raw_text else text
-        # if text_to_check and len(text_to_check.strip()) > 50:
-        #     try:
-        #         logger.info("🔍 Running MultiReportDetector to check for multiple reports in document...")
-        #         detector = get_multi_report_detector()
-        #         loop = asyncio.get_event_loop()
-        #         detection_result = await loop.run_in_executor(
-        #             LLM_EXECUTOR, 
-        #             detector.detect_multiple_reports, 
-        #             text_to_check
-        #         )
-                
-        #         # If multiple reports detected, override the flags and return early
-        #         if detection_result.get("is_multiple", False):
-        #             is_multiple_reports = True
-        #             multi_report_info = {
-        #                 "is_multiple": True,
-        #                 "confidence": detection_result.get("confidence", "unknown"),
-        #                 "reason": detection_result.get("reasoning", "Multiple reports detected in document"),
-        #                 "report_count_estimate": detection_result.get("report_count", 2),
-        #                 "reports_identified": detection_result.get("report_types", [])
-        #             }
-        #             logger.warning(f"⚠️ MULTIPLE REPORTS DETECTED by MultiReportDetector!")
-        #             logger.warning(f"   Confidence: {multi_report_info.get('confidence')}")
-        #             logger.warning(f"   Reason: {multi_report_info.get('reason')}")
-        #             logger.warning(f"   Estimated count: {multi_report_info.get('report_count_estimate')}")
-        #             logger.info("⏭️ Skipping further processing - will save to FailDocs")
-                    
-        #             # Return early with minimal data - save resources by not running expensive analyzers
-        #             return {
-        #                 "document_analysis": None,
-        #                 "brief_summary": "",
-        #                 "text_for_analysis": text,
-        #                 "raw_text": raw_text,
-        #                 "report_analyzer_result": {},
-        #                 "patient_name": None,
-        #                 "claim_number": None,
-        #                 "dob": None,
-        #                 "has_patient_name": False,
-        #                 "has_claim_number": False,
-        #                 "physician_id": data.get("physician_id"),
-        #                 "user_id": data.get("user_id"),
-        #                 "filename": data["filename"],
-        #                 "gcs_url": data["gcs_url"],
-        #                 "blob_path": data.get("blob_path"),
-        #                 "file_size": data.get("file_size", 0),
-        #                 "mime_type": data.get("mime_type", "application/octet-stream"),
-        #                 "processing_time_ms": data.get("processing_time_ms", 0),
-        #                 "file_hash": data.get("file_hash"),
-        #                 "result_data": result_data,
-        #                 "document_id": data.get("document_id", "unknown"),
-        #                 "mode": mode,
-        #                 "is_multiple_reports": is_multiple_reports,
-        #                 "multi_report_info": multi_report_info
-        #             }
-        #         else:
-        #             logger.info("✅ MultiReportDetector: Single report confirmed")
-                    
-        #     except Exception as e:
-        #         logger.error(f"❌ Multi-report detection failed: {str(e)}")
-        #         # Continue processing even if detection fails
-        #         logger.warning("⚠️ Continuing with document processing despite detection error")
         
         # OPTIMIZED: Detect document type ONCE and reuse result
         # Uses summarizer output first, falls back to raw_text if confidence is low
@@ -386,12 +160,6 @@ class WebhookService:
             if physician_id_chk:
                 logger.info(f"🔍 Pre-check: Verifying if author '{extracted_author}' is internal...")
                 try:
-                    # Reuse the logic from _check_physician_author but just check the "is_clinic_member"
-                    # We pass dummy summaries because we just want to match the author name
-                    # But _check_physician_author extracts name from summary, so we need to construct a fake summary with signature
-                    # Or better: refactor _check_physician_author to accept direct name.
-                    # For now, let's duplicate the DB check logic slightly here for efficiency/speed
-                    
                     prisma = Prisma()
                     await prisma.connect()
                     
@@ -448,20 +216,52 @@ class WebhookService:
                 except Exception as e:
                     logger.error(f"❌ Error in internal author pre-check: {e}")
                     # Continue if check fails, safe fallback
+        # 🎯 CHECK: Is this document valid for Summary Card (physician review)?
+        is_valid_for_summary_card = doc_type_result.get('is_valid_for_summary_card', True)  # Default True for safety
+        summary_card_reasoning = doc_type_result.get('summary_card_reasoning', '')
         
-        # Run ReportAnalyzer in dedicated LLM executor, passing pre-detected doc_type
-        report_analyzer = ReportAnalyzer(mode)
-        report_result = await loop.run_in_executor(
-            LLM_EXECUTOR, 
-            lambda: report_analyzer.extract_document(text, raw_text, doc_type_result=doc_type_result)
-        )
-        long_summary = report_result.get("long_summary", "")
-        short_summary = report_result.get("short_summary", "")
+        logger.info(f"🎯 Summary Card Eligibility: {is_valid_for_summary_card}")
+        logger.info(f"   Reasoning: {summary_card_reasoning[:100]}..." if len(summary_card_reasoning) > 100 else f"   Reasoning: {summary_card_reasoning}")
+        
+        # Initialize variables
+        long_summary = ""
+        short_summary = ""
+        report_result = {}
+        
+        if is_valid_for_summary_card:
+            # ✅ FULL EXTRACTION: Document requires physician review - generate summaries
+            logger.info("📋 Document requires Summary Card - running full LLM extraction...")
+            
+            # Run ReportAnalyzer in dedicated LLM executor, passing pre-detected doc_type
+            report_analyzer = ReportAnalyzer(mode)
+            report_result = await loop.run_in_executor(
+                LLM_EXECUTOR, 
+                lambda: report_analyzer.extract_document(text, raw_text, doc_type_result=doc_type_result)
+            )
+            long_summary = report_result.get("long_summary", "")
+            short_summary = report_result.get("short_summary", "")
 
-        logger.info(f"✅ Generated long summary: {len(long_summary)} chars")
-        logger.info(f"✅ Generated short summary: {short_summary}")
+            logger.info(f"✅ Generated long summary: {len(long_summary)} chars")
+            logger.info(f"✅ Generated short summary: {type(short_summary)}")
+           
+        else:
+            # ⏭️ TASK-ONLY MODE: Document is administrative - skip expensive LLM extraction
+            logger.info("📌 Document is TASK-ONLY (administrative) - skipping LLM extraction for summaries")
+            logger.info(f"   Document type: {doc_type_result.get('doc_type', 'Unknown')}")
+            logger.info(f"   Reason: {summary_card_reasoning}")
+            
+            # Create minimal summary for task generation (just use raw_text as reference)
+            detected_doc_type = doc_type_result.get('doc_type', 'Unknown')
+            long_summary = f"[TASK-ONLY DOCUMENT]\nType: {detected_doc_type}\nReason: {summary_card_reasoning}\n\nThis document is administrative and does not require physician clinical review. Tasks have been generated for staff action."
+            short_summary = ""  # No short summary for task-only docs
+            report_result = {
+                "long_summary": long_summary,
+                "short_summary": short_summary,
+                "is_task_only": True,
+                "task_only_reason": summary_card_reasoning
+            }
+            logger.info("⏭️ Skipped ReportAnalyzer - will proceed to task generation only")
 
-        # Construct DocumentAnalysis directly from ReportAnalyzer output + Pre-extracted details
         
         def safe_get(d, key, default="Not specified"):
             val = d.get(key)
@@ -508,12 +308,19 @@ class WebhookService:
                     raw_brief_summary_text = str(short_summary)
             else:
                 raw_brief_summary_text = str(short_summary)
+        elif not is_valid_for_summary_card:
+            # For task-only documents, use a simple description
+            raw_brief_summary_text = f"{detected_doc_type} - Administrative document for staff action"
         
-        # ✅ Process the raw summary through the AI Condenser
-        brief_summary_text = await self._generate_concise_brief_summary(
-            raw_brief_summary_text, 
-            detected_doc_type
-        )
+        # ✅ Process the raw summary through the AI Condenser (only if we have a real summary)
+        if is_valid_for_summary_card and raw_brief_summary_text != "Summary not available":
+            brief_summary_text = await self._generate_concise_brief_summary(
+                raw_brief_summary_text, 
+                detected_doc_type
+            )
+        else:
+            # Skip AI condenser for task-only docs
+            brief_summary_text = raw_brief_summary_text
 
         document_analysis = DocumentAnalysis(
             patient_name=patient_name_val,
@@ -591,7 +398,11 @@ class WebhookService:
             "document_id": data.get("document_id", "unknown"),
             "mode": mode,
             "is_multiple_reports": is_multiple_reports,
-            "multi_report_info": multi_report_info
+            "multi_report_info": multi_report_info,
+            # 🎯 NEW: Summary Card eligibility flag
+            "is_valid_for_summary_card": is_valid_for_summary_card,
+            "summary_card_reasoning": summary_card_reasoning,
+            "is_task_only": not is_valid_for_summary_card
         }
 
     async def save_to_redis_cache(self, document_id: str, document_data: dict):
@@ -1240,72 +1051,25 @@ class WebhookService:
             }
 
     async def create_tasks_if_needed(self, document_analysis, document_id: str, physician_id: str, filename: str, processed_data: dict = None) -> int:
-        """Step 3: Create tasks if conditions are met - ONLY for EXTERNAL documents"""
-        logger.info(f"🔧 Checking document {filename} for task creation...")
+        """Step 3: Create tasks for documents"""
+        logger.info(f"🔧 Creating tasks for document {document_analysis}...")
         created_tasks = 0
         
         try:
-            # Get summaries for author check
-            report_analyzer_result = processed_data.get("report_analyzer_result", {}) if processed_data else {}
-            short_summary = report_analyzer_result.get("short_summary", "") if isinstance(report_analyzer_result, dict) else ""
-            long_summary = report_analyzer_result.get("long_summary", "") if isinstance(report_analyzer_result, dict) else ""
-            
-            # Check for document author using summaries
-            author_info = await self._check_physician_author(
-                physician_id=physician_id,
-                short_summary=short_summary,
-                long_summary=long_summary
-            )
-            
-            # If no author found, cannot process
-            if not author_info.get("author_found"):
-                logger.warning(f"⚠️ {author_info.get('error_message', 'No author found in document')}")
-                return -2  # Return -2 to indicate no author found
-            
-            author_name = author_info.get("author_name", "Unknown")
-            
-            # If author is from our clinic (INTERNAL document), cannot process
-            if author_info.get("is_internal_document") or author_info.get("is_clinic_member"):
-                logger.warning(f"⚠️ Document author '{author_name}' is a clinic member - INTERNAL document cannot be processed")
-                return -1  # Return -1 to indicate internal document
-            
-            # EXTERNAL document - can create tasks
-            logger.info(f"✅ Document is EXTERNAL (author: {author_name}) - Creating tasks...")
-            
-            # Generate and create tasks for EXTERNAL documents
+            # Generate and create tasks
             task_creator = TaskCreator()
-            document_data = document_analysis.dict()
-            document_data["filename"] = filename
-            document_data["document_id"] = document_id
-            document_data["physician_id"] = physician_id
             
-            # Get document text for task generation - prioritize raw_text (Document AI summarizer output)
-            full_text = ""
-            if processed_data:
-                # PRIMARY: Use raw_text (Document AI summarizer output) for accurate context
-                full_text = processed_data.get("raw_text", "")
-                # FALLBACK: Use full OCR text only if raw_text is not available
-                if not full_text:
-                    full_text = processed_data.get("text_for_analysis", "")
-                    if not full_text:
-                        result_data = processed_data.get("result_data", {})
-                        full_text = result_data.get("text", "")
+            tasks_result = await task_creator.generate_tasks(document_analysis=document_analysis, processed_data=processed_data)
             
-            logger.info(f"📝 Passing {len(full_text)} characters to task generator (from {'Document AI summarizer' if processed_data.get('raw_text') else 'OCR text'})")
-            
-            tasks_result = await task_creator.generate_tasks(document_data, filename, full_text, author_name)
-            
-            # Extract tasks - for external documents we create tasks
-            external_tasks = tasks_result.get("internal_tasks", [])  # Using same key for now
-            
-            logger.info(f"📋 Document is EXTERNAL (author: {author_name}) - Processing {len(external_tasks)} tasks")
-
+            # Extract tasks
+            generated_tasks = tasks_result.get("internal_tasks", [])
+            logger.info(f"🔢 Generated {len(generated_tasks)} tasks for document")
             # Save tasks to database
             prisma = Prisma()
             await prisma.connect()
             
-            # Process tasks for external documents
-            for task in external_tasks:
+            # Process tasks
+            for task in generated_tasks:
                 try:
                     # Ensure task is a dict
                     if not isinstance(task, dict):
@@ -1329,7 +1093,7 @@ class WebhookService:
                         quick_notes = {"status_update": "", "details": "", "one_line_note": ""}
                     quick_notes_json = json.dumps({
                         "status_update": quick_notes.get("status_update", ""),
-                        "details": quick_notes.get("details", f"External document from {author_name}"),
+                        "details": quick_notes.get("details", ""),
                         "one_line_note": quick_notes.get("one_line_note", "")
                     })
                     
@@ -1361,7 +1125,7 @@ class WebhookService:
                     
                     await prisma.task.create(data=mapped_task)
                     created_tasks += 1
-                    logger.info(f"✅ Created EXTERNAL task: {task.get('description', 'Unknown task')}")
+                    logger.info(f"✅ Created task: {task.get('description', 'Unknown task')}")
                     
                 except Exception as task_err:
                     logger.error(f"❌ Failed to create task: {task_err}")
@@ -1369,269 +1133,22 @@ class WebhookService:
             
 
             await prisma.disconnect()
-            logger.info(f"✅ {created_tasks} tasks created successfully for external document")
+            logger.info(f"✅ {created_tasks} tasks created successfully")
             
         except Exception as e:
             logger.error(f"❌ Error in task creation: {str(e)}")
         
         return created_tasks
+    
     async def save_document(self, db_service, processed_data: dict, lookup_result: dict) -> dict:
-        """Step 4: Save document to database and Redis cache"""
-        
-        # ✅ Check if both DOB and claim number are not specified
-        document_analysis = processed_data["document_analysis"]
-        dob_not_specified = (
-            not hasattr(document_analysis, 'dob') or 
-            not document_analysis.dob or 
-            str(document_analysis.dob).lower() in ["not specified", "none", ""]
+        """Step 4: Save document to database and Redis cache - Wrapper for external service"""
+        return await save_document_external(
+            db_service=db_service,
+            processed_data=processed_data,
+            lookup_result=lookup_result,
+            generate_filename_func=self._generate_document_filename,
+            save_to_redis_cache_func=self.save_to_redis_cache
         )
-        
-        claim_not_specified = (
-            not lookup_result.get("claim_to_save") or 
-            str(lookup_result["claim_to_save"]).lower() in ["not specified", "none", ""]
-        )
-        
-        # If both DOB and claim number are not specified, save as fail document
-        if dob_not_specified and claim_not_specified:
-            # ✅ Get the actual parsed text from the result data
-            parsed_text = processed_data["result_data"].get("text", "")
-            
-            # ✅ Also get the brief summary and other analysis data
-            brief_summary = processed_data.get("brief_summary", "")
-            
-            # ✅ Combine text and summary for comprehensive document text
-            full_document_text = f"ORIGINAL TEXT:\n{parsed_text}\n\nSUMMARY:\n{brief_summary}"
-            
-            fail_doc_id = await db_service.save_fail_doc(
-                reason="Both DOB and claim number are not specified",
-                db=document_analysis.dob if hasattr(document_analysis, 'dob') else None,
-                claim_number=lookup_result.get("claim_to_save"),
-                patient_name=lookup_result.get("patient_name_to_use"),
-                physician_id=processed_data.get("physician_id"),
-                gcs_file_link=processed_data.get("gcs_url"),
-                file_name=processed_data.get("filename"),
-                file_hash=processed_data.get("file_hash"),
-                blob_path=processed_data.get("blob_path"),
-                mode=processed_data.get("mode"),
-                # ✅ SAVE THE PARSED TEXT AND SUMMARY
-                document_text=full_document_text,
-                doi=document_analysis.doi if hasattr(document_analysis, 'doi') else None,
-                ai_summarizer_text=brief_summary
-            )
-
-            
-            # ✅ Decrement parse count even for failed documents since they consumed resources
-            parse_decremented = await db_service.decrement_parse_count(processed_data["physician_id"])
-            
-            return {
-                "status": "failed",
-                "document_id": fail_doc_id,
-                "parse_count_decremented": parse_decremented,  # Now True for failed docs too
-                "filename": processed_data["filename"],
-                "cache_success": False,
-                "failure_reason": "Both DOB and claim number are not specified"
-            }
-        
-        # Continue with normal document saving process...
-        # Create ExtractionResult
-        extraction_result = ExtractionResult(
-            text=processed_data["result_data"].get("text", ""),
-            pages=processed_data["result_data"].get("pages", 0),
-            entities=processed_data["result_data"].get("entities", []),
-            tables=processed_data["result_data"].get("tables", []),
-            formFields=processed_data["result_data"].get("formFields", []),
-            confidence=processed_data["result_data"].get("confidence", 0.0),
-            success=processed_data["result_data"].get("success", False),
-            gcs_file_link=processed_data["result_data"].get("gcs_file_link", processed_data["gcs_url"]),
-            fileInfo=processed_data["result_data"].get("fileInfo", {}),
-            summary=processed_data["brief_summary"],
-            document_id=processed_data["result_data"].get("document_id", f"webhook_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),
-        )
-        
-        # Prepare the additional required parameters with default values
-        document_analysis = processed_data["document_analysis"]
-        
-        # Get RD (Report Date) - use from analysis
-        rd = None
-        if hasattr(document_analysis, 'rd') and document_analysis.rd and str(document_analysis.rd).lower() != "not specified":
-            try:
-                date_str = str(document_analysis.rd).strip()
-                logger.info(f"📅 Parsing report date: {date_str}")
-                
-                # Try multiple date formats
-                date_formats = [
-                    "%Y-%m-%d",      # 2025-11-25
-                    "%m-%d-%Y",      # 11-25-2025
-                    "%m/%d/%Y",      # 11/25/2025
-                    "%m/%d/%y",      # 11/25/25
-                    "%d-%m-%Y",      # 25-11-2025
-                    "%d/%m/%Y",      # 25/11/2025
-                    "%Y/%m/%d",      # 2025/11/25
-                ]
-                
-                parsed = False
-                for fmt in date_formats:
-                    try:
-                        rd = datetime.strptime(date_str, fmt)
-                        # Set time to noon to avoid timezone shifting issues
-                        rd = rd.replace(hour=12, minute=0, second=0, microsecond=0)
-                        logger.info(f"✅ Parsed report date with format {fmt}: {rd}")
-                        parsed = True
-                        break
-                    except ValueError:
-                        continue
-                
-                if not parsed:
-                    logger.warning(f"⚠️ Could not parse report date: {date_str}, keeping as None")
-                    rd = None
-                    
-            except Exception as e:
-                logger.warning(f"⚠️ Error parsing report date: {e}")
-                rd = None  # Don't fallback to current date - leave as None
-        
-        # Create summary snapshots
-        summary_snapshots = []
-        if hasattr(document_analysis, 'body_parts_analysis') and document_analysis.body_parts_analysis:
-            for body_part_analysis in document_analysis.body_parts_analysis:
-                snapshot = {
-                    "mode": processed_data["mode"],
-                    "body_part": body_part_analysis.body_part if processed_data["mode"] == "wc" else None,
-                    "condition": None if processed_data["mode"] == "wc" else body_part_analysis.body_part,
-                    "dx": body_part_analysis.diagnosis,
-                    "key_concern": body_part_analysis.key_concern,
-                    "next_step": body_part_analysis.extracted_recommendation or None,
-                    "ur_decision": document_analysis.ur_decision or None,
-                    "recommended": body_part_analysis.extracted_recommendation or None,
-                    "ai_outcome": document_analysis.ai_outcome or None,
-                    "consulting_doctor": document_analysis.consulting_doctor or None,
-                    "key_findings": body_part_analysis.clinical_summary or None,
-                    "treatment_approach": body_part_analysis.treatment_plan or None,
-                    "clinical_summary": body_part_analysis.clinical_summary or None,
-                    "referral_doctor": document_analysis.referral_doctor or None,
-                    "adls_affected": body_part_analysis.adls_affected or None,
-                }
-                summary_snapshots.append(snapshot)
-        else:
-            # Create a single snapshot if no body parts analysis
-            snapshot = {
-                "mode": processed_data["mode"],
-                "body_part": document_analysis.body_part if processed_data["mode"] == "wc" else None,
-                "condition": None if processed_data["mode"] == "wc" else document_analysis.body_part,
-                "dx": document_analysis.diagnosis,
-                "key_concern": document_analysis.key_concern,
-                "next_step": document_analysis.extracted_recommendation or None,
-                "ur_decision": document_analysis.ur_decision or None,
-                "recommended": document_analysis.extracted_recommendation or None,
-                "ai_outcome": document_analysis.ai_outcome or None,
-                "consulting_doctor": document_analysis.consulting_doctor or None,
-                "key_findings": document_analysis.diagnosis or None,
-                "treatment_approach": document_analysis.extracted_recommendation or None,
-                "clinical_summary": f"{document_analysis.diagnosis} - {document_analysis.key_concern}" or None,
-                "referral_doctor": document_analysis.referral_doctor or None,
-                "adls_affected": document_analysis.adls_affected or None,
-            }
-            summary_snapshots.append(snapshot)
-        
-        # ✅ FIXED: Get the ACTUAL long and short summaries from ReportAnalyzer
-        report_analyzer_result = processed_data.get("report_analyzer_result", {})
-        
-        # Use the actual summaries from ReportAnalyzer if available
-        if report_analyzer_result and isinstance(report_analyzer_result, dict):
-            long_summary = report_analyzer_result.get("long_summary", "")
-            short_summary = report_analyzer_result.get("short_summary", "")
-        else:
-            # Fallback to the existing data
-            long_summary = processed_data.get("text_for_analysis", "")
-            short_summary = processed_data["brief_summary"]
-        
-        whats_new = {
-            "long_summary": long_summary,
-            "short_summary": short_summary
-        }
-        
-        # Create ADL data
-        adl_data = {
-            "mode": processed_data["mode"],
-            "adls_affected": document_analysis.adls_affected if hasattr(document_analysis, 'adls_affected') else None,
-            "work_restrictions": document_analysis.work_restrictions if hasattr(document_analysis, 'work_restrictions') else None
-        }
-        
-        # Create document summary
-        document_summary = {
-            "type": document_analysis.document_type if hasattr(document_analysis, 'document_type') else "Unknown",
-            "created_at": datetime.now(),
-            "summary": " | ".join(document_analysis.summary_points) if hasattr(document_analysis, 'summary_points') and document_analysis.summary_points else processed_data["brief_summary"]
-        }
-        
-        # Generate structured filename: patientName_typeOfReport_dateOfReport
-        original_filename = processed_data["filename"]
-        document_type = document_analysis.document_type if hasattr(document_analysis, 'document_type') else "Document"
-        structured_filename = self._generate_document_filename(
-            patient_name=lookup_result["patient_name_to_use"],
-            document_type=document_type,
-            report_date=rd,
-            original_filename=original_filename
-        )
-        
-        # Save document to database with all required parameters
-        document_id = await db_service.save_document_analysis(
-            extraction_result=extraction_result,
-            file_name=structured_filename,  # New structured filename
-            file_size=processed_data["file_size"],
-            mime_type=processed_data["mime_type"],
-            processing_time_ms=processed_data["processing_time_ms"],
-            blob_path=processed_data["blob_path"],
-            file_hash=processed_data["file_hash"],
-            gcs_file_link=processed_data["gcs_url"],
-            patient_name=lookup_result["patient_name_to_use"],
-            claim_number=lookup_result["claim_to_save"],
-            dob=document_analysis.dob if hasattr(document_analysis, 'dob') else None,
-            doi=document_analysis.doi if hasattr(document_analysis, 'doi') else None,
-            status=lookup_result["document_status"],
-            brief_summary=processed_data["brief_summary"],
-            physician_id=processed_data["physician_id"],
-            mode=processed_data["mode"],
-            # Add the missing required parameters
-            rd=rd,
-            summary_snapshots=summary_snapshots,
-            whats_new=whats_new,
-            adl_data=adl_data,
-            document_summary=document_summary,
-            original_name=original_filename,  # Store original filename
-            ai_summarizer_text=processed_data.get("raw_text")
-        )
-        
-        # SAVE TO REDIS CACHE (only for successful documents, not for fail documents)
-        cache_success = False
-        if document_id:
-            # Prepare data for caching
-            cache_data = {
-                "patient_name": lookup_result["patient_name_to_use"],
-                "claim_number": lookup_result["claim_to_save"],
-                "dob": document_analysis.dob if hasattr(document_analysis, 'dob') else None,
-                "doi": document_analysis.doi if hasattr(document_analysis, 'doi') else None,
-                "physician_id": processed_data["physician_id"],
-                "status": lookup_result["document_status"],
-                "mode": processed_data["mode"],
-                "brief_summary": processed_data["brief_summary"],
-                "filename": processed_data["filename"],
-                "document_analysis": document_analysis.dict() if hasattr(document_analysis, 'dict') else str(document_analysis),
-                "summary_snapshots": summary_snapshots,
-                "created_at": datetime.now().isoformat()
-            }
-            
-            cache_success = await self.save_to_redis_cache(document_id, cache_data)
-        
-        # Decrement parse count
-        parse_decremented = await db_service.decrement_parse_count(processed_data["physician_id"])
-        
-        return {
-            "status": lookup_result["document_status"],
-            "document_id": document_id,
-            "parse_count_decremented": parse_decremented,
-            "filename": processed_data["filename"],
-            "cache_success": cache_success
-        }
 
     async def handle_webhook(self, data: dict, db_service) -> dict:
         """
@@ -1639,168 +1156,109 @@ class WebhookService:
         Includes treatment history creation
         """
         try:
-            # Test Redis connection first
-            redis_test = await self.test_redis_basic()
-            if not redis_test:
-                logger.warning("⚠️ Redis basic test failed - caching will be disabled")
-            
             # Step 1: Process document data
             processed_data = await self.process_document_data(data)
+
+            # logger.info(f"📄 Document data processed successfully : {processed_data['result_data']['raw_text']}")
             
-            # Step 1.1: Check for multiple reports FIRST - if detected, save to FailDocs immediately
-            # This must happen before author check since multi-report docs return early with no analysis
-            if processed_data.get("is_multiple_reports", False):
-                multi_report_info = processed_data.get("multi_report_info", {})
-                confidence = multi_report_info.get("confidence", "unknown")
-                reason = multi_report_info.get("reason", "Multiple reports detected")
-                report_count = multi_report_info.get("report_count_estimate", 2)
-                reports_identified = multi_report_info.get("reports_identified", [])
+            # SKIP author check for task-only documents (administrative docs don't need author verification)
+            is_task_only = processed_data.get("is_task_only", False)
+            
+            if is_task_only:
+                logger.info("📌 Task-only document - skipping author verification (administrative documents don't require author check)")
+            else:
+                # Get summaries for author check
+                report_analyzer_result = processed_data.get("report_analyzer_result", {})
+                short_summary = report_analyzer_result.get("short_summary", "") if isinstance(report_analyzer_result, dict) else ""
+                long_summary = report_analyzer_result.get("long_summary", "") if isinstance(report_analyzer_result, dict) else ""
                 
-                # Get the original text/summary
-                raw_text = processed_data.get("raw_text", "")
-                text_for_analysis = processed_data.get("text_for_analysis", "")
-                
-                # Create enhanced summary with detection details
-                summary_parts = []
-                if raw_text:
-                    summary_parts.append(f"DOCUMENT AI SUMMARY:\n{raw_text}")
-                summary_parts.append(f"\n\n=== MULTI-REPORT DETECTION RESULTS ===")
-                summary_parts.append(f"Confidence: {confidence}")
-                summary_parts.append(f"Reason: {reason}")
-                summary_parts.append(f"Estimated Report Count: {report_count}")
-                if reports_identified:
-                    summary_parts.append(f"Reports Identified: {', '.join(reports_identified)}")
-                summary_text = "\n".join(summary_parts)
-                
-                logger.warning(f"⚠️ MULTIPLE REPORTS DETECTED (confidence: {confidence})")
-                logger.warning(f"   Reason: {reason}")
-                logger.warning(f"   Estimated count: {report_count}")
-                logger.info("💾 Saving to FailDocs for manual review...")
-                
-                # Save to FailDocs with clear reason for multiple reports
-                fail_doc_id = await db_service.save_fail_doc(
-                    reason=f"Multiple reports detected. Found {report_count} reports with {confidence} confidence. Report types: {', '.join(reports_identified) if reports_identified else 'Unknown'}",
-                    db=processed_data.get("dob"),
-                    claim_number=processed_data.get("claim_number"),
-                    patient_name=processed_data.get("patient_name"),
-                    physician_id=processed_data.get("physician_id"),
-                    gcs_file_link=processed_data.get("gcs_url"),
-                    file_name=processed_data.get("filename"),
-                    file_hash=processed_data.get("file_hash"),
-                    blob_path=processed_data.get("blob_path"),
-                    mode=processed_data.get("mode", "wc"),
-                    document_text=text_for_analysis if text_for_analysis else raw_text,
-                    doi=None,
-                    ai_summarizer_text=raw_text  # Store raw AI summarizer output directly
+                author_info = await self._check_physician_author(
+                    physician_id=processed_data["physician_id"],
+                    short_summary=short_summary,
+                    long_summary=long_summary
                 )
                 
-                # Decrement parse count
-                parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
-                
-                logger.info(f"✅ Multiple reports document saved to FailDocs with ID: {fail_doc_id}")
-                
-                return {
-                    "status": "multiple_reports_detected",
-                    "document_id": fail_doc_id,
-                    "filename": processed_data.get("filename"),
-                    "parse_count_decremented": parse_decremented,
-                    "failure_reason": f"Multiple reports detected. {reason}",
-                    "multi_report_info": multi_report_info
-                }
-            
-            # Step 1.2: Check if author is from our clinic (INTERNAL document check)
-            # Get summaries for author check
-            report_analyzer_result = processed_data.get("report_analyzer_result", {})
-            short_summary = report_analyzer_result.get("short_summary", "") if isinstance(report_analyzer_result, dict) else ""
-            long_summary = report_analyzer_result.get("long_summary", "") if isinstance(report_analyzer_result, dict) else ""
-            
-            author_info = await self._check_physician_author(
-                physician_id=processed_data["physician_id"],
-                short_summary=short_summary,
-                long_summary=long_summary
-            )
-            
-            # If no author found in document, save to FailDocs
-            if not author_info.get("author_found"):
-                logger.warning(f"⚠️ NO AUTHOR FOUND: {author_info.get('error_message')}")
-                logger.info("💾 Saving to FailDocs as per requirements...")
-                
-                raw_text = processed_data.get("raw_text", "")
-                text_for_analysis = processed_data.get("text_for_analysis", "")
-                
-                # Handle short_summary being either a string or dict
-                short_summary_text = short_summary.get('raw_summary', str(short_summary)) if isinstance(short_summary, dict) else (short_summary or 'N/A')
-                
-                fail_doc_id = await db_service.save_fail_doc(
-                    reason=author_info.get('error_message', "No author found in document - manual verification required"),
-                    db=processed_data.get("dob"),
-                    claim_number=processed_data.get("claim_number"),
-                    patient_name=processed_data.get("patient_name"),
-                    physician_id=processed_data.get("physician_id"),
-                    gcs_file_link=processed_data.get("gcs_url"),
-                    file_name=processed_data.get("filename"),
-                    file_hash=processed_data.get("file_hash"),
-                    blob_path=processed_data.get("blob_path"),
-                    mode=processed_data.get("mode", "wc"),
-                    document_text=text_for_analysis if text_for_analysis else raw_text,
-                    doi=None,
-                    ai_summarizer_text=f"No author detected in document.\nShort Summary: {short_summary_text[:200] if short_summary_text else 'N/A'}..."
-                )
-                
-                parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
-                
-                return {
-                    "status": "no_author_found_fail",
-                    "document_id": fail_doc_id,
-                    "filename": processed_data.get("filename"),
-                    "parse_count_decremented": parse_decremented,
-                    "failure_reason": author_info.get('error_message', "No author found in document")
-                }
-            
-            # If author IS from our clinic (INTERNAL document), save to FailDocs
-            if author_info.get("is_internal_document") or author_info.get("is_clinic_member"):
-                author_name = author_info.get("author_name", "Unknown")
-                logger.warning(f"⚠️ INTERNAL DOCUMENT DETECTED: Author '{author_name}' is from our clinic")
-                logger.info("💾 Saving to FailDocs as per requirements - cannot process internal documents...")
-                
-                raw_text = processed_data.get("raw_text", "")
-                text_for_analysis = processed_data.get("text_for_analysis", "")
-                
-                # Handle short_summary being either a string or dict
-                short_summary_text_internal = short_summary.get('raw_summary', str(short_summary)) if isinstance(short_summary, dict) else (short_summary or 'N/A')
-                
-                fail_doc_id = await db_service.save_fail_doc(
-                    reason=f"Internal document detected - author '{author_name}' is a clinic member. Cannot process internal documents.",
-                    db=processed_data.get("dob"),
-                    claim_number=processed_data.get("claim_number"),
-                    patient_name=processed_data.get("patient_name"),
-                    physician_id=processed_data.get("physician_id"),
-                    gcs_file_link=processed_data.get("gcs_url"),
-                    file_name=processed_data.get("filename"),
-                    file_hash=processed_data.get("file_hash"),
-                    blob_path=processed_data.get("blob_path"),
-                    mode=processed_data.get("mode", "wc"),
-                    document_text=text_for_analysis if text_for_analysis else raw_text,
-                    doi=None,
-                    ai_summarizer_text=f"Internal document detected.\nShort Summary: {short_summary_text_internal[:200] if short_summary_text_internal else 'N/A'}..."
-                )
-                
-                parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
-                
-                return {
-                    "status": "internal_document_fail",
-                    "document_id": fail_doc_id,
-                    "filename": processed_data.get("filename"),
-                    "parse_count_decremented": parse_decremented,
-                    "failure_reason": f"Internal document detected - author '{author_name}' is a clinic member",
-                    "author_info": {
-                        "author_name": author_name,
-                        "author_source": author_info.get("author_source")
+                # If no author found in document, save to FailDocs
+                if not author_info.get("author_found"):
+                    logger.warning(f"⚠️ NO AUTHOR FOUND: {author_info.get('error_message')}")
+                    logger.info("💾 Saving to FailDocs as per requirements...")
+                    
+                    raw_text = processed_data.get("raw_text", "")
+                    text_for_analysis = processed_data.get("text_for_analysis", "")
+                    
+                    # Handle short_summary being either a string or dict
+                    short_summary_text = short_summary.get('raw_summary', str(short_summary)) if isinstance(short_summary, dict) else (short_summary or 'N/A')
+                    
+                    fail_doc_id = await db_service.save_fail_doc(
+                        reason=author_info.get('error_message', "No author found in document - manual verification required"),
+                        db=processed_data.get("dob"),
+                        claim_number=processed_data.get("claim_number"),
+                        patient_name=processed_data.get("patient_name"),
+                        physician_id=processed_data.get("physician_id"),
+                        gcs_file_link=processed_data.get("gcs_url"),
+                        file_name=processed_data.get("filename"),
+                        file_hash=processed_data.get("file_hash"),
+                        blob_path=processed_data.get("blob_path"),
+                        mode=processed_data.get("mode", "wc"),
+                        document_text=text_for_analysis if text_for_analysis else raw_text,
+                        doi=None,
+                        ai_summarizer_text=f"No author detected in document.\nShort Summary: {short_summary_text[:200] if short_summary_text else 'N/A'}..."
+                    )
+                    
+                    parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
+                    
+                    return {
+                        "status": "no_author_found_fail",
+                        "document_id": fail_doc_id,
+                        "filename": processed_data.get("filename"),
+                        "parse_count_decremented": parse_decremented,
+                        "failure_reason": author_info.get('error_message', "No author found in document")
                     }
-                }
-            
-            # EXTERNAL document - author is NOT from our clinic, can proceed with processing
-            logger.info(f"✅ EXTERNAL document confirmed - Author: {author_info.get('author_name')} (not a clinic member)")
+                
+                # If author IS from our clinic (INTERNAL document), save to FailDocs
+                if author_info.get("is_internal_document") or author_info.get("is_clinic_member"):
+                    author_name = author_info.get("author_name", "Unknown")
+                    logger.warning(f"⚠️ INTERNAL DOCUMENT DETECTED: Author '{author_name}' is from our clinic")
+                    logger.info("💾 Saving to FailDocs as per requirements - cannot process internal documents...")
+                    
+                    raw_text = processed_data.get("raw_text", "")
+                    text_for_analysis = processed_data.get("text_for_analysis", "")
+                    
+                    # Handle short_summary being either a string or dict
+                    short_summary_text_internal = short_summary.get('raw_summary', str(short_summary)) if isinstance(short_summary, dict) else (short_summary or 'N/A')
+                    
+                    fail_doc_id = await db_service.save_fail_doc(
+                        reason=f"Internal document detected - author '{author_name}' is a clinic member. Cannot process internal documents.",
+                        db=processed_data.get("dob"),
+                        claim_number=processed_data.get("claim_number"),
+                        patient_name=processed_data.get("patient_name"),
+                        physician_id=processed_data.get("physician_id"),
+                        gcs_file_link=processed_data.get("gcs_url"),
+                        file_name=processed_data.get("filename"),
+                        file_hash=processed_data.get("file_hash"),
+                        blob_path=processed_data.get("blob_path"),
+                        mode=processed_data.get("mode", "wc"),
+                        document_text=text_for_analysis if text_for_analysis else raw_text,
+                        doi=None,
+                        ai_summarizer_text=f"Internal document detected.\nShort Summary: {short_summary_text_internal[:200] if short_summary_text_internal else 'N/A'}..."
+                    )
+                    
+                    parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
+                    
+                    return {
+                        "status": "internal_document_fail",
+                        "document_id": fail_doc_id,
+                        "filename": processed_data.get("filename"),
+                        "parse_count_decremented": parse_decremented,
+                        "failure_reason": f"Internal document detected - author '{author_name}' is a clinic member",
+                        "author_info": {
+                            "author_name": author_name,
+                            "author_source": author_info.get("author_source")
+                        }
+                    }
+                
+                # EXTERNAL document - author is NOT from our clinic, can proceed with processing
+                logger.info(f"✅ EXTERNAL document confirmed - Author: {author_info.get('author_name')} (not a clinic member)")
             
             
             # Step 2: Perform patient lookup with enhanced fuzzy matching (NO DUPLICATE CHECK)
@@ -1812,151 +1270,27 @@ class WebhookService:
             
             # Step 3.5: Create treatment history (ONLY for successfully saved documents)
             treatment_history = {}
-            if save_result["document_id"] and save_result["status"] != "failed":
-                treatment_history = await self.create_treatment_history(
-                    processed_data=processed_data,
-                    lookup_result=lookup_result,
-                    document_id=save_result["document_id"],
-                    ai_summarizer_text=processed_data.get("raw_text", "")
-                )
-                logger.info(f"✅ Treatment history created with {sum(len(v) for v in treatment_history.values())} total events across {len(treatment_history)} categories")
-            else:
-                logger.info("⚠️ Skipping treatment history creation - document not saved or failed")
-            
-            # Step 4: Create tasks if document was saved successfully (NOT for FailDocs)
+
+               # Step 4: Create tasks if document was saved successfully (NOT for FailDocs)
             tasks_created = 0
-            if save_result["document_id"] and save_result["status"] != "failed":
-                tasks_created = await self.create_tasks_if_needed(
-                    processed_data["document_analysis"],
-                    save_result["document_id"],
-                    processed_data["physician_id"],
-                    processed_data["filename"],
-                    processed_data  # Pass full processed_data for document text access
-                )
+            tasks_created = await self.create_tasks_if_needed(
+                processed_data["result_data"]["raw_text"],
+                save_result["document_id"],
+                processed_data["physician_id"],
+                processed_data["filename"],
+                processed_data['document_analysis']
+            )
                 
-                if tasks_created == -1:
-                    # This should ideally be caught by Step 1.2, but as a safety measure:
-                    logger.warning(f"⚠️ Task creation returned -1 (self-authored).")
-                    # We already saved the document, so we might need to move it to FailDocs here too
-                    # but Step 1.2 should have caught it.
-                    pass
-            else:
-                logger.info(f"⚠️ Skipping task creation - document was saved as FailDoc (status: {save_result.get('status')})")
-            
-            # Step 5: Post-save check - Verify document doesn't contain multiple different reports
-            # This check happens AFTER document is saved to catch cases where multiple reports
-            # of the same patient (e.g., QME + PR2) are combined in one document
-            # if save_result["document_id"] and save_result["status"] != "failed":
-            #     try:
-            #         logger.info("🔍 Running post-save multi-report detection check...")
-                    
-            #         # Get document text for analysis
-            #         raw_text = processed_data.get("raw_text", "")
-            #         text_for_analysis = processed_data.get("text_for_analysis", "")
-            #         text_to_check = raw_text if raw_text else text_for_analysis
-                    
-            #         if text_to_check and len(text_to_check.strip()) > 50:
-            #             detector = get_multi_report_detector()
-            #             loop = asyncio.get_event_loop()
-            #             detection_result = await loop.run_in_executor(
-            #                 LLM_EXECUTOR,
-            #                 detector.detect_multiple_reports,
-            #                 text_to_check
-            #             )
-                        
-            #             # If multiple reports detected, move document to FailDocs
-            #             if detection_result.get("is_multiple", False):
-            #                 confidence = detection_result.get("confidence", "unknown")
-            #                 reason = detection_result.get("reason", "Multiple reports detected in document")
-            #                 report_count = detection_result.get("report_count_estimate", 2)
-            #                 reports_identified = detection_result.get("reports_identified", [])
+            # if tasks_created == -1:
+            #     # This should ideally be caught by Step 1.2, but as a safety measure:
+            #     logger.warning(f"⚠️ Task creation returned -1 (self-authored).")
+            #     # We already saved the document, so we might need to move it to FailDocs here too
+            #     # but Step 1.2 should have caught it.
+            #     pass
+            # else:
+            #     logger.info(f"⚠️ Skipping task creation - document was saved as FailDoc (status: {save_result.get('status')})")
                             
-            #                 logger.warning(f"⚠️ POST-SAVE CHECK: Multiple reports detected in saved document!")
-            #                 logger.warning(f"   Document ID: {save_result['document_id']}")
-            #                 logger.warning(f"   Confidence: {confidence}")
-            #                 logger.warning(f"   Reason: {reason}")
-            #                 logger.warning(f"   Estimated count: {report_count}")
-            #                 logger.info("🔄 Moving document from Documents to FailDocs...")
-                            
-            #                 # Get document details before deletion
-            #                 document_details = await db_service.get_document(save_result["document_id"])
-                            
-            #                 # Create enhanced summary with detection details
-            #                 summary_parts = []
-            #                 if raw_text:
-            #                     summary_parts.append(f"DOCUMENT AI SUMMARY:\n{raw_text}")
-            #                 summary_parts.append(f"\n\n=== POST-SAVE MULTI-REPORT DETECTION RESULTS ===")
-            #                 summary_parts.append(f"Confidence: {confidence}")
-            #                 summary_parts.append(f"Reason: {reason}")
-            #                 summary_parts.append(f"Estimated Report Count: {report_count}")
-            #                 if reports_identified:
-            #                     summary_parts.append(f"Reports Identified: {', '.join(reports_identified)}")
-            #                 summary_parts.append(f"\nNote: Document was initially saved successfully but failed post-save validation.")
-            #                 summary_text = "\n".join(summary_parts)
-                            
-            #                 # Save to FailDocs with all document information
-            #                 fail_doc_id = await db_service.save_fail_doc(
-            #                     reason=f"Multiple reports detected after save ({report_count} reports) - manual review required. {reason}",
-            #                     db=document_details.get("dob") if document_details else processed_data.get("dob"),
-            #                     claim_number=document_details.get("claimNumber") if document_details else processed_data.get("claim_number"),
-            #                     patient_name=document_details.get("patientName") if document_details else processed_data.get("patient_name"),
-            #                     physician_id=processed_data.get("physician_id"),
-            #                     gcs_file_link=processed_data.get("gcs_url"),
-            #                     file_name=processed_data.get("filename"),
-            #                     file_hash=processed_data.get("file_hash"),
-            #                     blob_path=processed_data.get("blob_path"),
-            #                     mode=processed_data.get("mode", "wc"),
-            #                     document_text=text_for_analysis if text_for_analysis else raw_text,
-            #                     doi=document_details.get("doi") if document_details else None,
-            #                     ai_summarizer_text=summary_text
-            #                 )
-                            
-            #                 # Delete the document and all related records including treatment history
-            #                 try:
-            #                     # First, delete the treatment history if it exists
-            #                     if treatment_history:
-            #                         history_generator = TreatmentHistoryGenerator()
-            #                         await history_generator.connect()
-            #                         await history_generator.prisma.treatmenthistory.delete_many(
-            #                             where={"documentId": save_result["document_id"]}
-            #                         )
-            #                         await history_generator.disconnect()
-                                
-            #                     # Delete the document
-            #                     await db_service._delete_existing_document(save_result["document_id"])
-            #                     logger.info(f"🗑️ Deleted document {save_result['document_id']} and related treatment history after multi-report detection")
-            #                 except Exception as delete_error:
-            #                     logger.error(f"❌ Failed to delete document {save_result['document_id']}: {str(delete_error)}")
-            #                     # Continue even if deletion fails - document is already in FailDocs
-                            
-            #                 logger.info(f"✅ Document moved to FailDocs with ID: {fail_doc_id}")
-                            
-            #                 # Return failure status
-            #                 return {
-            #                     "status": "multiple_reports_detected_after_save",
-            #                     "document_id": fail_doc_id,
-            #                     "filename": processed_data["filename"],
-            #                     "parse_count_decremented": save_result.get("parse_count_decremented", False),
-            #                     "failure_reason": f"Multiple reports detected after save - document moved to FailDocs. {reason}",
-            #                     "original_document_id": save_result["document_id"],
-            #                     "multi_report_info": {
-            #                         "confidence": confidence,
-            #                         "reason": reason,
-            #                         "report_count_estimate": report_count,
-            #                         "reports_identified": reports_identified
-            #                     }
-            #                 }
-            #             else:
-            #                 logger.info("✅ Post-save check: Single report confirmed - document is valid")
-            #         else:
-            #             logger.info("⚠️ Post-save check skipped: Document text too short for analysis")
-                        
-            #     except Exception as check_error:
-            #         logger.error(f"❌ Post-save multi-report check failed: {str(check_error)}")
-            #         # Don't fail the document if the check itself fails - log and continue
-            #         logger.warning("⚠️ Continuing with saved document despite check error")
-            
-            
+
             # Prepare final response - INCLUDE TREATMENT HISTORY INFORMATION
             result = {
                 "status": save_result["status"],
@@ -2079,246 +1413,15 @@ class WebhookService:
     async def update_fail_document(self, fail_doc: Any, updated_fields: dict, user_id: str = None, db_service: Any = None) -> dict:
         """
         Updates and processes a failed document using the complete webhook-like logic.
+        Wrapper for external service function.
         """
-        # Use updated values if provided, otherwise fallback to fail_doc values
-        document_text = updated_fields.get("document_text") or fail_doc.documentText
-        dob_str = updated_fields.get("dob") or fail_doc.dob  # ✅ FIXED: Changed from fail_doc.db to fail_doc.dob
-        doi = updated_fields.get("doi") or fail_doc.doi
-        claim_number = updated_fields.get("claim_number") or fail_doc.claimNumber
-        patient_name = updated_fields.get("patient_name") or fail_doc.patientName
-        author = updated_fields.get("author") or fail_doc.author  # ✅ Get author from client or fail_doc
-        physician_id = fail_doc.physicianId
-        filename = fail_doc.fileName
-        gcs_url = fail_doc.gcsFileLink
-        blob_path = fail_doc.blobPath
-        file_hash = fail_doc.fileHash
-        mode = "wc"  # Default mode, you can extract from fail_doc if available
-
-        # Construct webhook-like data
-        result_data = {
-            "text": document_text,
-            "pages": 0,
-            "entities": [],
-            "tables": [],
-            "formFields": [],
-            "confidence": 0.0,
-            "success": False,
-            "gcs_file_link": gcs_url,
-            "fileInfo": {},
-            "comprehensive_analysis": None,
-            "document_id": f"update_fail_{fail_doc.id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        }
-
-       
-
-        try:
-            # Step 1: Process document data through BOTH EnhancedReportAnalyzer and ReportAnalyzer
-            logger.info(f"🔄 Processing failed document through LLM analysis: {fail_doc.id}")
-            
-            # Generate long summary using ReportAnalyzer (same as process_document_data)
-            report_analyzer = ReportAnalyzer(mode)
-            report_result = await asyncio.to_thread(
-                report_analyzer.extract_document,
-                document_text,
-                document_text  # Use same text for raw_text parameter
-            )
-            
-            # ✅ STORE THE ACTUAL REPORT ANALYZER RESULT
-            long_summary = report_result.get("long_summary", "")
-            short_summary = report_result.get("short_summary", "")
-            logger.info(f"✅ ReportAnalyzer long summary in author: {author}")
-            
-            # ✅ If author provided by user, replace or inject it into long_summary as "Signature:" field
-            if author and str(author).strip().lower() not in ["not specified", "unknown", "none", ""]:
-                import re
-                # Replace existing signature line or add new one
-                signature_pattern = r'•\s*Signature:.*?(?=\n•|\n\n|$)'
-                signature_line = f"• Signature: {author.strip()}"
-                
-                if re.search(signature_pattern, long_summary, re.IGNORECASE | re.DOTALL):
-                    # Replace existing signature
-                    long_summary = re.sub(signature_pattern, signature_line, long_summary, flags=re.IGNORECASE | re.DOTALL)
-                    logger.info(f"✅ Replaced existing signature with: {author}")
-                else:
-                    # Add new signature line
-                    long_summary = long_summary + f"\n\n{signature_line}"
-                    logger.info(f"✅ Injected author into long_summary: {author}")
-                
-                # Update the report_result dictionary to reflect the modified long_summary
-                report_result["long_summary"] = long_summary
-                
-                # ✅ Also update the author field in short_summary header
-                if isinstance(short_summary, dict) and 'header' in short_summary:
-                    short_summary['header']['author'] = author.strip()
-                    report_result["short_summary"] = short_summary
-                    logger.info(f"✅ Updated short_summary header author: {author}")
-            
-            logger.info(f"✅ Generated long summary: {long_summary}")
-            logger.info(f"✅ Generated short summary: {short_summary}")
-            
-            # Use ReportAnalyzer output directly (avoiding EnhancedReportAnalyzer)
-            detected_doc_type = report_result.get('doc_type', 'Unknown')
-            
-            # Helper to convert structured short_summary dict to string
-            raw_brief_summary_text = "Summary not available"
-            if short_summary:
-                if isinstance(short_summary, dict):
-                    # Try to extract meaningful text from structured summary
-                    try:
-                        # 1. Try to get items texts
-                        items = short_summary.get('summary', {}).get('items', [])
-                        text_parts = []
-                        for item in items:
-                            if isinstance(item, dict):
-                                # Prefer expanded text, fall back to collapsed
-                                part = item.get('expanded') or item.get('collapsed')
-                                if part:
-                                    text_parts.append(part)
-                        
-                        if text_parts:
-                            raw_brief_summary_text = " ".join(text_parts)
-                        elif short_summary.get('header', {}).get('title'):
-                             # Fallback to Title if no items
-                             raw_brief_summary_text = f"Report: {short_summary['header']['title']}"
-                        else:
-                            # Fallback to JSON string as last resort
-                            raw_brief_summary_text = json.dumps(short_summary)
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to parse structured short_summary: {e}")
-                        raw_brief_summary_text = str(short_summary)
-                else:
-                    raw_brief_summary_text = str(short_summary)
-            
-            # ✅ Process the raw summary through the AI Condenser
-            brief_summary_text = await self._generate_concise_brief_summary(
-                raw_brief_summary_text, 
-                detected_doc_type
-            )
-            
-            # Prepare fields for DocumentAnalysis
-            da_patient_name = patient_name or "Not specified"
-            da_claim_number = claim_number or "Not specified"
-            da_dob = dob_str or "0000-00-00" 
-            da_doi = doi or "0000-00-00"
-            da_author = author or "Not specified"
-            
-            # Manually construct DocumentAnalysis (replicating normal flow without EnhancedReportAnalyzer)
-            document_analysis = DocumentAnalysis(
-                patient_name=da_patient_name,
-                claim_number=da_claim_number,
-                dob=da_dob,
-                doi=da_doi,
-                status="Not specified",
-                rd="0000-00-00", 
-                body_part="Not specified",
-                body_parts_analysis=[],
-                diagnosis="See summary",
-                key_concern="Medical evaluation",
-                extracted_recommendation="See summary",
-                extracted_decision="Not specified",
-                ur_decision="",
-                ur_denial_reason=None,
-                adls_affected="Not specified",
-                work_restrictions="Not specified",
-                consulting_doctor=da_author,
-                all_doctors=[],
-                referral_doctor="Not specified",
-                ai_outcome="Review required",
-                document_type=detected_doc_type,
-                summary_points=[],
-                brief_summary=brief_summary_text,
-                date_reasoning=None,
-                is_task_needed=False,
-                formatted_summary=brief_summary_text,
-                extraction_confidence=1.0 if short_summary else 0.0,
-                verified=True,
-                verification_notes=["Analysis from basic ReportAnalyzer (Update Fail Doc)"]
-            )
-            
-            brief_summary = document_analysis.brief_summary
-            
-            # Override with updated fields from the user
-            if updated_fields.get("patient_name") and str(updated_fields["patient_name"]).lower() != "not specified":
-                document_analysis.patient_name = updated_fields["patient_name"]
-                logger.info(f"✅ Overridden patient_name: {updated_fields['patient_name']}")
-            
-            if updated_fields.get("dob") and str(updated_fields["dob"]).lower() != "not specified":
-                document_analysis.dob = updated_fields["dob"]
-                logger.info(f"✅ Overridden DOB: {updated_fields['dob']}")
-            
-            if updated_fields.get("doi") and str(updated_fields["doi"]).lower() != "not specified":
-                document_analysis.doi = updated_fields["doi"]
-                logger.info(f"✅ Overridden DOI: {updated_fields['doi']}")
-            
-            if updated_fields.get("claim_number") and str(updated_fields["claim_number"]).lower() != "not specified":
-                document_analysis.claim_number = updated_fields["claim_number"]
-                logger.info(f"✅ Overridden claim_number: {updated_fields['claim_number']}")
-            
-            # ✅ Override consulting_doctor (author) if provided by user
-            if author and str(author).strip().lower() not in ["not specified", "unknown", "none", ""]:
-                document_analysis.consulting_doctor = author.strip()
-                logger.info(f"✅ Overridden consulting_doctor (author): {author}")
-
-            logger.info(f"author detected : {author}")
-
-            # Prepare processed_data similar to process_document_data
-            processed_data = {
-                "document_analysis": document_analysis,
-                "brief_summary": brief_summary,
-                "text_for_analysis": document_text,
-                "report_analyzer_result": report_result,
-                "patient_name": document_analysis.patient_name if document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified" else None,
-                "claim_number": document_analysis.claim_number if document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified" else None,
-                "dob": document_analysis.dob if hasattr(document_analysis, 'dob') and document_analysis.dob and str(document_analysis.dob).lower() != "not specified" else None,
-                "has_patient_name": bool(document_analysis.patient_name and str(document_analysis.patient_name).lower() != "not specified"),
-                "has_claim_number": bool(document_analysis.claim_number and str(document_analysis.claim_number).lower() != "not specified"),
-                "physician_id": physician_id,
-                "user_id": user_id,
-                "filename": filename,
-                "gcs_url": gcs_url,
-                "blob_path": blob_path,
-                "file_size": 0,
-                "mime_type": "application/octet-stream",
-                "processing_time_ms": 0,
-                "file_hash": file_hash,
-                "result_data": result_data,
-                "document_id": str(fail_doc.id),
-                "mode": mode
-            }
-
-            # Step 2: Perform patient lookup with enhanced fuzzy matching
-            logger.info("🔍 Performing patient lookup for updated failed document...")
-            lookup_result = await self.patient_lookup.perform_patient_lookup(db_service, processed_data)
-            
-            # Step 3: Save document to database
-            logger.info("💾 Saving updated document to database...")
-            save_result = await self.save_document(db_service, processed_data, lookup_result)
-            
-            # Step 4: Create tasks if needed
-            tasks_created = 0
-            if save_result["document_id"] and save_result["status"] != "failed":
-                tasks_created = await self.create_tasks_if_needed(
-                    processed_data["document_analysis"],
-                    save_result["document_id"],
-                    processed_data["physician_id"],
-                    processed_data["filename"],
-                    processed_data  # Pass full processed_data for document text access
-                )
-                save_result["tasks_created"] = tasks_created
-
-            # Step 5: Delete the FailDoc only if successful
-            if save_result["status"] != "failed" and save_result["document_id"]:
-                await db_service.delete_fail_doc(fail_doc.id)
-                logger.info(f"🗑️ Deleted fail doc {fail_doc.id} after successful update")
-                logger.info(f"📡 Success event processed for document: {save_result['document_id']}")
-            else:
-                logger.warning(f"⚠️ Failed document update unsuccessful, keeping fail doc {fail_doc.id}")
-                # Optionally update the fail doc with the new failure reason
-                if save_result.get("failure_reason"):
-                    logger.info(f"📝 Updating fail doc reason: {save_result['failure_reason']}")
-
-            return save_result
-
-        except Exception as e:
-            logger.error(f"❌ Failed to update fail document {fail_doc.id}: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Update fail document processing failed: {str(e)}")
+        return await update_fail_document_external(
+            fail_doc=fail_doc,
+            updated_fields=updated_fields,
+            user_id=user_id,
+            db_service=db_service,
+            patient_lookup=self.patient_lookup,
+            save_document_func=self.save_document,
+            create_tasks_func=self.create_tasks_if_needed,
+            llm_executor=LLM_EXECUTOR
+        )

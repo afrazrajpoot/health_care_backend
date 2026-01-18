@@ -148,7 +148,6 @@ class ReportAnalyzer:
             is_standard_type = detection_result.get("is_standard_type", False)
             confidence = detection_result.get("confidence", 0.0)
 
-            # logger.info(f"🔍 Document type1111111111 raw_text: {raw_text}")
             
             logger.info(f"📄 Document type detected: {doc_type_str} (Conf: {confidence})")
             
