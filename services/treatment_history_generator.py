@@ -846,45 +846,47 @@ class TreatmentHistoryGenerator:
         Main function to generate treatment history
         Returns the treatment history data
         """
-        try:
-            logger.info(f"🔄 Generating treatment history for patient: {patient_name} (only_current={only_current})")
-            
-            # Get previous documents (skip if only_current is True)
-            previous_docs = []
-            if not only_current:
-                previous_docs = await self.get_patient_documents(
-                    patient_name=patient_name,
-                    dob=dob,
-                    claim_number=claim_number,
-                    physician_id=physician_id,
-                    exclude_document_id=current_document_id
-                )
-            
-            # Prepare context for LLM
-            context = await self.extract_treatment_history_from_docs(
-                documents=previous_docs,
-                current_document=current_document_data
-            )
-            
-            # If no documents found, create minimal context from current analysis
-            if not context.strip():
-                logger.info(f"📝 No previous documents found for {patient_name}, creating initial history")
-                context = f"Initial document for {patient_name}. "
-                # Removed current_document_analysis dependency
-            
-            # Generate treatment history with LLM
-            treatment_history = await self.generate_treatment_history_with_llm(
-                patient_name=patient_name,
-                context=context,
-                current_document_analysis=current_document_data  # Explicitly None as parameter was removed
-            )
-            
-            logger.info(f"✅ Treatment history generated for patient: {patient_name}")
-            return treatment_history
-            
-        except Exception as e:
-            logger.error(f"❌ Error creating treatment history: {str(e)}")
-            return self._get_empty_history_template()
+        logger.info(f"🔄 Treatment history generation is currently DISABLED for patient: {patient_name}")
+        return self._get_empty_history_template()
+        # try:
+        #     logger.info(f"🔄 Generating treatment history for patient: {patient_name} (only_current={only_current})")
+        #     
+        #     # Get previous documents (skip if only_current is True)
+        #     previous_docs = []
+        #     if not only_current:
+        #         previous_docs = await self.get_patient_documents(
+        #             patient_name=patient_name,
+        #             dob=dob,
+        #             claim_number=claim_number,
+        #             physician_id=physician_id,
+        #             exclude_document_id=current_document_id
+        #         )
+        #     
+        #     # Prepare context for LLM
+        #     context = await self.extract_treatment_history_from_docs(
+        #         documents=previous_docs,
+        #         current_document=current_document_data
+        #     )
+        #     
+        #     # If no documents found, create minimal context from current analysis
+        #     if not context.strip():
+        #         logger.info(f"📝 No previous documents found for {patient_name}, creating initial history")
+        #         context = f"Initial document for {patient_name}. "
+        #         # Removed current_document_analysis dependency
+        #     
+        #     # Generate treatment history with LLM
+        #     treatment_history = await self.generate_treatment_history_with_llm(
+        #         patient_name=patient_name,
+        #         context=context,
+        #         current_document_analysis=current_document_data  # Explicitly None as parameter was removed
+        #     )
+        #     
+        #     logger.info(f"✅ Treatment history generated for patient: {patient_name}")
+        #     return treatment_history
+        #     
+        # except Exception as e:
+        #     logger.error(f"❌ Error creating treatment history: {str(e)}")
+        #     return self._get_empty_history_template()
     
     async def save_treatment_history(self,
                                    patient_name: str,
@@ -896,81 +898,83 @@ class TreatmentHistoryGenerator:
         """
         Save treatment history to database with intelligent date-based archiving
         """
-        try:
-            await self.connect()
-            
-            # Check if treatment history already exists
-            existing = await self.prisma.treatmenthistory.find_unique(
-                where={
-                    "patientName_dob_claimNumber_physicianId": {
-                        "patientName": patient_name,
-                        "dob": dob or "",
-                        "claimNumber": claim_number or "",
-                        "physicianId": physician_id
-                    }
-                }
-            )
-            
-            if existing:
-                # Merge new history with existing history using date-based logic
-                existing_data = existing.historyData
-                if isinstance(existing_data, str):
-                    existing_data = json.loads(existing_data)
-                
-                # If existing data is in old format (just lists), convert it first
-                if isinstance(existing_data, dict):
-                    # Check if any system is still in old format (list instead of dict with current/archive)
-                    for system in existing_data:
-                        if isinstance(existing_data[system], list):
-                            existing_data[system] = {
-                                "current": existing_data[system],
-                                "archive": []
-                            }
-                else:
-                    # If existing_data is not a dict, create empty structure
-                    existing_data = self._get_empty_history_template()
-                
-                merged_data = self.merge_history_data(existing_data, history_data)
-                
-                # Update existing record
-                await self.prisma.treatmenthistory.update(
-                    where={"id": existing.id},
-                    data={
-                        "historyData": json.dumps(merged_data),
-                        "documentId": document_id,
-                        "updatedAt": datetime.now()
-                    }
-                )
-                logger.info(f"📝 Merged and updated treatment history for {patient_name}")
-            else:
-                # For new records, format the LLM output
-                formatted_data = self._get_empty_history_template()
-                for system, events in history_data.items():
-                    if system in formatted_data and events:
-                        # Sort new events by date (newest first) and deduplicate
-                        unique_events = self._deduplicate_events(events)
-                        formatted_data[system]["current"] = sorted(
-                            unique_events, 
-                            key=lambda x: self._parse_date(x.get('date', '')), 
-                            reverse=True
-                        )
-                
-                # Create new record
-                await self.prisma.treatmenthistory.create(
-                    data={
-                        "patientName": patient_name,
-                        "dob": dob,
-                        "claimNumber": claim_number,
-                        "physicianId": physician_id,
-                        "historyData": json.dumps(formatted_data),
-                        "documentId": document_id
-                    }
-                )
-                logger.info(f"📝 Created new treatment history for {patient_name}")
-                
-        except Exception as e:
-            logger.error(f"❌ Error saving treatment history to database: {str(e)}")
-            raise
+        logger.info(f"💾 Treatment history saving is currently DISABLED for {patient_name}")
+        return
+        # try:
+        #     await self.connect()
+        #     
+        #     # Check if treatment history already exists
+        #     existing = await self.prisma.treatmenthistory.find_unique(
+        #         where={
+        #             "patientName_dob_claimNumber_physicianId": {
+        #                 "patientName": patient_name,
+        #                 "dob": dob or "",
+        #                 "claimNumber": claim_number or "",
+        #                 "physicianId": physician_id
+        #             }
+        #         }
+        #     )
+        #     
+        #     if existing:
+        #         # Merge new history with existing history using date-based logic
+        #         existing_data = existing.historyData
+        #         if isinstance(existing_data, str):
+        #             existing_data = json.loads(existing_data)
+        #         
+        #         # If existing data is in old format (just lists), convert it first
+        #         if isinstance(existing_data, dict):
+        #             # Check if any system is still in old format (list instead of dict with current/archive)
+        #             for system in existing_data:
+        #                 if isinstance(existing_data[system], list):
+        #                     existing_data[system] = {
+        #                         "current": existing_data[system],
+        #                         "archive": []
+        #                     }
+        #         else:
+        #             # If existing_data is not a dict, create empty structure
+        #             existing_data = self._get_empty_history_template()
+        #         
+        #         merged_data = self.merge_history_data(existing_data, history_data)
+        #         
+        #         # Update existing record
+        #         await self.prisma.treatmenthistory.update(
+        #             where={"id": existing.id},
+        #             data={
+        #                 "historyData": json.dumps(merged_data),
+        #                 "documentId": document_id,
+        #                 "updatedAt": datetime.now()
+        #             }
+        #         )
+        #         logger.info(f"📝 Merged and updated treatment history for {patient_name}")
+        #     else:
+        #         # For new records, format the LLM output
+        #         formatted_data = self._get_empty_history_template()
+        #         for system, events in history_data.items():
+        #             if system in formatted_data and events:
+        #                 # Sort new events by date (newest first) and deduplicate
+        #                 unique_events = self._deduplicate_events(events)
+        #                 formatted_data[system]["current"] = sorted(
+        #                     unique_events, 
+        #                     key=lambda x: self._parse_date(x.get('date', '')), 
+        #                     reverse=True
+        #                 )
+        #         
+        #         # Create new record
+        #         await self.prisma.treatmenthistory.create(
+        #             data={
+        #                 "patientName": patient_name,
+        #                 "dob": dob,
+        #                 "claimNumber": claim_number,
+        #                 "physicianId": physician_id,
+        #                 "historyData": json.dumps(formatted_data),
+        #                 "documentId": document_id
+        #             }
+        #         )
+        #         logger.info(f"📝 Created new treatment history for {patient_name}")
+        #         
+        # except Exception as e:
+        #     logger.error(f"❌ Error saving treatment history to database: {str(e)}")
+        #     raise
     
     async def get_treatment_history(self,
                                   patient_name: str,
