@@ -312,7 +312,7 @@ Provide your analysis as JSON."""
         
         try:
             logger.info("🔍 Starting multi-strategy detection...")
-            logger.info(f"📝 Summary length: {len(summary_text)} characters")
+            logger.info(f"📝 Summary length: {summary_text}")
             
             # Strategy 1: Pattern-based detection
             logger.info("🔎 Running pattern-based detection...")

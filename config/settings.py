@@ -22,6 +22,15 @@ class Settings:
         self.azure_openai_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
         self.azure_openai_o3_model = os.getenv("AZURE_OPENAI_O3_MODEL_NAME")
         self.azure_openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION")
+        
+        # Azure OpenAI Embedding configuration
+        self.azure_embedding_deployment_name = os.getenv("AZURE_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-ada-002")
+        self.azure_embedding_api_version = os.getenv("AZURE_EMBEDDING_API_VERSION", "2023-05-15")
+        
+        # Citation service configuration
+        self.citation_min_confidence = float(os.getenv("CITATION_MIN_CONFIDENCE", "0.80"))
+        self.citation_enabled = os.getenv("CITATION_ENABLED", "true").lower() == "true"
+        
         self.api_base_url = os.getenv("API_BASE_URL", "http://localhost:8000")
         # self.api_base_url = os.getenv("API_BASE_URL", "http://localhost:8000")
         self.tavily_api_key = os.getenv("TAVILY_API_KEY")

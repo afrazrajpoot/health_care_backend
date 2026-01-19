@@ -10,6 +10,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel, Field
+from config.settings import settings
 
 logger = logging.getLogger("document_ai")
 
@@ -1016,23 +1017,33 @@ Output JSON only.
             # DEDUPLICATE — ensure each field type appears only once
             structured_summary = deduplicate_fields(structured_summary)
             
-            # NEW: Clean up garbled/truncated text before other filtering
-            structured_summary = clean_garbled_text(structured_summary)
-            
             # MODIFIED: More lenient filtering - only remove truly empty fields
             structured_summary = filter_truly_empty_fields(structured_summary)
             
             # Filter out incomplete/garbled sentences
             structured_summary = filter_empty_or_generic_fields(structured_summary)
             
-            # Post-process to ensure attribution compliance
-            structured_summary = enforce_attribution_compliance(structured_summary)
-            
-            # NEW: Enforce non-authorship compliance
-            structured_summary = enforce_non_authorship_compliance(structured_summary)
-            
             # NEW: Ensure all expanded sections use bullet format
             structured_summary = enforce_bullet_format_all_fields(structured_summary)
+            
+            # NEW: Attach citations to summary items if citation feature is enabled
+            if settings.citation_enabled and raw_text:
+                try:
+                    from services.citation_service import attach_citations_to_short_summary
+                    
+                    # Estimate total pages from text length (~2500 chars per page for medical docs)
+                    estimated_pages = max(1, len(raw_text) // 2500 + 1)
+                    
+                    structured_summary = attach_citations_to_short_summary(
+                        structured_summary, 
+                        raw_text,
+                        min_confidence=settings.citation_min_confidence,
+                        total_pages=estimated_pages
+                    )
+                    logger.info(f"✅ Citations attached to summary items (estimated {estimated_pages} pages)")
+                except Exception as citation_error:
+                    logger.warning(f"⚠️ Citation attachment failed (non-critical): {citation_error}")
+                    # Continue without citations - feature is additive, not blocking
 
             logger.info(f"✅ UI-ready summary generated with {len(structured_summary.get('summary', {}).get('items', []))} items")
             return structured_summary
@@ -1074,59 +1085,6 @@ def filter_truly_empty_fields(structured_summary: dict) -> dict:
     return structured_summary
 
 
-def clean_garbled_text(structured_summary: dict) -> dict:
-    """
-    Clean up garbled/truncated text patterns commonly caused by token limits.
-    
-    Detects and removes common garbled patterns like:
-    - "was documented asers" (should be "was documented")
-    - "The as at MMI" (incomplete phrase)
-    - "for was documented" (word order issues)
-    - Repeated words or fragments
-    """
-    if 'summary' not in structured_summary or 'items' not in structured_summary['summary']:
-        return structured_summary
-    
-    # Patterns to clean up (pattern -> replacement)
-    cleanup_patterns = [
-        # Garbled word patterns - fix common truncation artifacts
-        (r'\bdocumented\s+asers?\b', 'documented'),
-        (r'\bwas\s+documented\s+asers?\b', 'was documented'),
-        (r'\bthe\s+as\s+at\b', 'the status at'),
-        (r'\bfor\s+was\s+documented\b', 'was documented'),
-        (r'\baser[s]?\b', ''),  # Remove orphan "aser" or "asers"
-        (r'\b(the|a)\s+as\s+(at|for|to|in)\b', r'\2'),  # "the as at" -> "at"
-        # Clean up excessive whitespace
-        (r'\s{2,}', ' '),
-        # Clean up orphaned punctuation
-        (r'\s+\.', '.'),
-        (r'\s+,', ','),
-    ]
-    
-    def clean_text(text: str) -> str:
-        if not text:
-            return text
-        
-        cleaned = text
-        for pattern, replacement in cleanup_patterns:
-            cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
-        
-        return cleaned.strip()
-    
-    for item in structured_summary['summary']['items']:
-        original_collapsed = item.get('collapsed', '')
-        original_expanded = item.get('expanded', '')
-        
-        item['collapsed'] = clean_text(original_collapsed)
-        item['expanded'] = clean_text(original_expanded)
-        
-        # Log if we made changes
-        if item['collapsed'] != original_collapsed or item['expanded'] != original_expanded:
-            logger.info(f"🧹 Cleaned garbled text in field '{item.get('field', 'unknown')}'")
-    
-    return structured_summary
-
-
 def enforce_bullet_format_all_fields(structured_summary: dict) -> dict:
     """
     Ensure all expanded sections use bullet-point format.
@@ -1155,172 +1113,5 @@ def enforce_bullet_format_all_fields(structured_summary: dict) -> dict:
             bullet_text = '\n'.join([f"• {s}" if not s.endswith('.') else f"• {s}" for s in sentences])
             item['expanded'] = bullet_text
             logger.info(f"✅ Converted {item.get('field')} to bullet format")
-    
-    return structured_summary
-
-
-def enforce_non_authorship_compliance(structured_summary: dict) -> dict:
-    """
-    Post-processing function to enforce strict non-authorship compliance.
-    Scans for forbidden patterns and REPLACES them with compliant alternatives.
-    Does NOT remove fields - instead fixes the text in place.
-    """
-    # Mapping of forbidden phrases to their compliant replacements
-    # Format: (forbidden_phrase, replacement_phrase)
-    phrase_replacements = [
-        # Causation phrases -> neutral documentation
-        ("likely due to", "was documented alongside"),
-        ("caused by", "was documented with"),
-        ("secondary to", "was documented in context of"),
-        ("resulted from", "was documented following"),
-        ("because of", "was noted with"),
-        ("due to", "was documented with"),
-        ("as a result of", "was documented following"),
-        ("attributed to", "was referenced in relation to"),
-        ("related to", "was documented alongside"),
-        
-        # Directive phrases -> passive documentation
-        ("recommended to", "was referenced as a recommendation to"),
-        ("should", "was documented as"),
-        ("advised to", "was documented as advised regarding"),
-        ("instructed to", "was documented as instructions for"),
-        ("told to", "was documented as guidance for"),
-        ("needs to", "was documented regarding"),
-        ("must", "was documented as required to"),
-        
-        # Endorsement phrases -> neutral documentation
-        ("is appropriate", "was documented"),
-        ("are appropriate", "were documented"),
-        ("confirms", "was documented as"),
-        ("confirm", "was documented as"),
-        ("demonstrates", "was documented as showing"),
-        ("demonstrate", "was documented as showing"),
-        ("shows", "was documented as"),
-        ("show", "was documented as"),
-        ("reveals", "was documented as"),
-        ("reveal", "was documented as"),
-        ("suggests", "was documented as"),
-        ("suggest", "was documented as"),
-        ("indicates", "was documented as"),
-        ("indicate", "was documented as"),
-        ("proves", "was documented as"),
-        ("prove", "was documented as"),
-        
-        # Unattributed facts -> attributed documentation
-        ("uses a", "use of a"),
-        ("uses the", "use of the"),
-        ("requires a", "requirement for a"),
-        ("requires the", "requirement for the"),
-        ("has a", "presence of a"),
-        ("has the", "presence of the"),
-        ("have a", "presence of a"),
-        ("have the", "presence of the"),
-        ("needs a", "documented need for a"),
-        ("needs the", "documented need for the"),
-        
-        # Present tense declarations -> past tense documentation
-        ("the patient is", "the patient was documented as"),
-        ("the patient has", "the patient was documented with"),
-        ("patient is", "patient was documented as"),
-        ("patient has", "patient was documented with"),
-        ("is experiencing", "was documented as experiencing"),
-        ("is suffering", "was documented as experiencing"),
-        ("is taking", "was documented as taking"),
-        ("is on", "was documented as being on"),
-        
-        # Clinical judgment phrases -> neutral documentation
-        ("consistent with", "documented alongside"),
-        ("compatible with", "documented with"),
-        ("indicative of", "documented as"),
-        ("suggestive of", "documented as potentially"),
-        ("diagnostic of", "documented as"),
-        ("characteristic of", "documented as"),
-    ]
-    
-    def fix_text(text: str, field_name: str) -> str:
-        """Apply all phrase replacements to the text."""
-        if not text:
-            return text
-        
-        fixed_text = text
-        for forbidden, replacement in phrase_replacements:
-            # Case-insensitive replacement while preserving surrounding text
-            pattern = re.compile(re.escape(forbidden), re.IGNORECASE)
-            if pattern.search(fixed_text):
-                logger.info(f"🔧 Fixing non-authorship phrase in {field_name}: '{forbidden}' -> '{replacement}'")
-                fixed_text = pattern.sub(replacement, fixed_text)
-        
-        return fixed_text
-    
-    items = structured_summary.get('summary', {}).get('items', [])
-    fixed_items = []
-    
-    for item in items:
-        field_name = item.get('field', 'unknown')
-        collapsed = item.get('collapsed', '')
-        expanded = item.get('expanded', '')
-        
-        # Fix both collapsed and expanded text
-        fixed_collapsed = fix_text(collapsed, f"{field_name}.collapsed")
-        fixed_expanded = fix_text(expanded, f"{field_name}.expanded")
-        
-        # Update the item with fixed text
-        fixed_item = {
-            'field': field_name,
-            'collapsed': fixed_collapsed,
-            'expanded': fixed_expanded
-        }
-        fixed_items.append(fixed_item)
-        
-        # Log if any fixes were made
-        if fixed_collapsed != collapsed or fixed_expanded != expanded:
-            logger.info(f"✅ Fixed non-authorship violations in field '{field_name}'")
-    
-    structured_summary['summary']['items'] = fixed_items
-    return structured_summary
-
-def enforce_attribution_compliance(structured_summary: dict) -> dict:
-    """
-    Post-LLM enforcement layer to fix any attribution violations.
-    Replaces forbidden phrases with compliant alternatives instead of removing fields.
-    """
-    # Mapping of forbidden phrases to compliant replacements
-    attribution_replacements = [
-        ('consistent with', 'documented alongside'),
-        ('identified', 'documented'),
-        ('demonstrates', 'was documented as showing'),
-        ('confirms', 'was documented as'),
-        ('shows', 'was documented as'),
-        ('reveals', 'was documented as'),
-        ('suggests', 'was documented as'),
-        ('indicates', 'was documented as'),
-    ]
-    
-    def fix_attribution(text: str, location: str) -> str:
-        """Fix attribution violations in text."""
-        if not text:
-            return text
-        
-        fixed_text = text
-        for forbidden, replacement in attribution_replacements:
-            pattern = re.compile(r'\b' + re.escape(forbidden) + r'\b', re.IGNORECASE)
-            if pattern.search(fixed_text):
-                logger.info(f"🔧 Fixing attribution violation in {location}: '{forbidden}' -> '{replacement}'")
-                fixed_text = pattern.sub(replacement, fixed_text)
-        
-        return fixed_text
-    
-    # Fix summary items
-    if 'summary' in structured_summary and 'items' in structured_summary['summary']:
-        for idx, item in enumerate(structured_summary['summary']['items']):
-            field_name = item.get('field', f'item[{idx}]')
-            
-            # Fix collapsed text
-            if 'collapsed' in item:
-                item['collapsed'] = fix_attribution(item['collapsed'], f"{field_name}.collapsed")
-            
-            # Fix expanded text
-            if 'expanded' in item:
-                item['expanded'] = fix_attribution(item['expanded'], f"{field_name}.expanded")
     
     return structured_summary

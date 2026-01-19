@@ -148,7 +148,7 @@ def merge_extraction_results(
     logger.info("=" * 80)
     
     # Run multi-report detection on merged text
-    multi_report_result = detect_multiple_reports(merged_text)
+    # multi_report_result = detect_multiple_reports(merged_text)
     
     merged_result = ExtractionResult(
         text=merged_raw_text,
@@ -163,8 +163,8 @@ def merge_extraction_results(
         confidence=1.0,
         success=True,
         metadata={"patient_details": patient_details} if patient_details else {},
-        is_multiple_reports=multi_report_result.get("is_multiple", False),
-        multi_report_info=multi_report_result
+        is_multiple_reports=False,
+        multi_report_info=None
     )
     
     return merged_result

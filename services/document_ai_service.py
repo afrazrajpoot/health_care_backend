@@ -180,6 +180,7 @@ class DocumentAIProcessor:
             
             # Run multi-report detection
             # multi_report_result = detect_multiple_reports(summary_text)
+            # logger.info(f"🔍 Multi-report detection: Is Multiple={multi_report_result.get('is_multiple', False)}")
             
             # Log full text comparison for debugging
             if result.text and len(result.text) != len(summary_text):
