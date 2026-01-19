@@ -3,7 +3,7 @@ Fail Document Update Service - Handles updating and reprocessing failed document
 Extracted from webhook_service.py for better modularity
 """
 from datetime import datetime
-from typing import Any
+from typing import Any, List
 from fastapi import HTTPException
 from models.data_models import DocumentAnalysis
 from services.report_analyzer import ReportAnalyzer
@@ -447,3 +447,87 @@ async def update_fail_document(
     except Exception as e:
         logger.error(f"❌ Failed to update fail document {fail_doc.id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Update fail document processing failed: {str(e)}")
+
+
+async def update_multiple_fail_documents(
+    fail_docs_data: List[dict],
+    user_id: str,
+    db_service: Any,
+    patient_lookup,
+    save_document_func,
+    create_tasks_func,
+    llm_executor=None
+) -> dict:
+    """
+    Updates and processes multiple failed documents in batch.
+    
+    Args:
+        fail_docs_data: List of dictionaries containing:
+            - fail_doc: The failed document object
+            - updated_fields: Fields to update
+        user_id: User ID making the update
+        db_service: Database service instance
+        patient_lookup: Patient lookup service instance
+        save_document_func: Function to save document
+        create_tasks_func: Function to create tasks
+        llm_executor: ThreadPoolExecutor for LLM operations
+        
+    Returns:
+        dict with overall results and individual document results
+    """
+    results = {
+        "total_documents": len(fail_docs_data),
+        "successful": 0,
+        "failed": 0,
+        "documents": []
+    }
+    
+    # Process documents sequentially
+    for doc_data in fail_docs_data:
+        fail_doc = doc_data.get("fail_doc")
+        updated_fields = doc_data.get("updated_fields", {})
+        
+        if not fail_doc:
+            logger.error("❌ Missing fail_doc in batch data")
+            results["failed"] += 1
+            results["documents"].append({
+                "fail_doc_id": "unknown",
+                "status": "failed",
+                "error": "Missing fail_doc object"
+            })
+            continue
+        
+        try:
+            # Process individual document
+            document_result = await update_fail_document(
+                fail_doc=fail_doc,
+                updated_fields=updated_fields,
+                user_id=user_id,
+                db_service=db_service,
+                patient_lookup=patient_lookup,
+                save_document_func=save_document_func,
+                create_tasks_func=create_tasks_func,
+                llm_executor=llm_executor
+            )
+            
+            results["successful"] += 1
+            results["documents"].append({
+                "fail_doc_id": fail_doc.id,
+                "status": "success",
+                "document_id": document_result.get("document_id"),
+                "tasks_created": document_result.get("tasks_created", 0)
+            })
+            
+            logger.info(f"✅ Successfully processed fail document {fail_doc.id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to process fail document {fail_doc.id}: {str(e)}")
+            results["failed"] += 1
+            results["documents"].append({
+                "fail_doc_id": fail_doc.id,
+                "status": "failed",
+                "error": str(e)
+            })
+    
+    return results
+
