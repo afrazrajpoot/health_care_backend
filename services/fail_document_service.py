@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from models.data_models import DocumentAnalysis
 from services.report_analyzer import ReportAnalyzer
 from utils.logger import logger
+from utils.document_detector import detect_document_type
 import asyncio
 import json
 import re
@@ -159,6 +160,17 @@ async def update_fail_document(
     blob_path = fail_doc.blobPath
     file_hash = fail_doc.fileHash
     mode = "wc"  # Default mode
+    
+    # ✅ Use aiSummarizerText if available (actual Document AI Summarizer output)
+    # This is preferred over documentText for summary generation
+    ai_summarizer_text = getattr(fail_doc, 'aiSummarizerText', None)
+    if ai_summarizer_text and len(ai_summarizer_text) > 50:
+        logger.info(f"📋 Using aiSummarizerText for processing ({len(ai_summarizer_text)} chars)")
+        # Use aiSummarizerText as the primary text for document type detection and summary generation
+        summarizer_output = ai_summarizer_text
+    else:
+        logger.info(f"📋 aiSummarizerText not available, using documentText")
+        summarizer_output = document_text
 
     # Construct webhook-like data
     result_data = {
@@ -176,55 +188,95 @@ async def update_fail_document(
     }
 
     try:
-        # Step 1: Process document data through ReportAnalyzer
-        logger.info(f"🔄 Processing failed document through LLM analysis: {fail_doc.id}")
+        # Step 1: Detect document type and check if valid for summary card
+        logger.info(f"🔍 Detecting document type for failed document: {fail_doc.id}")
         
-        # Generate long summary using ReportAnalyzer
-        report_analyzer = ReportAnalyzer(mode)
-        report_result = await asyncio.to_thread(
-            report_analyzer.extract_document,
-            document_text,
-            document_text  # Use same text for raw_text parameter
+        doc_type_result = await asyncio.to_thread(
+            lambda: detect_document_type(summarizer_output=summarizer_output, raw_text=document_text)
         )
         
-        # ✅ STORE THE ACTUAL REPORT ANALYZER RESULT
-        long_summary = report_result.get("long_summary", "")
-        short_summary = report_result.get("short_summary", "")
-        logger.info(f"✅ ReportAnalyzer completed, author field: {author}")
+        detected_doc_type = doc_type_result.get('doc_type', 'Unknown')
+        is_valid_for_summary_card = doc_type_result.get('is_valid_for_summary_card', True)  # Default True for safety
+        summary_card_reasoning = doc_type_result.get('summary_card_reasoning', '')
         
-        # ✅ If author provided by user, replace or inject it into long_summary as "Signature:" field
-        if author and str(author).strip().lower() not in ["not specified", "unknown", "none", ""]:
-            # Replace existing signature line or add new one
-            signature_pattern = r'•\s*Signature:.*?(?=\n•|\n\n|$)'
-            signature_line = f"• Signature: {author.strip()}"
-            
-            if re.search(signature_pattern, long_summary, re.IGNORECASE | re.DOTALL):
-                # Replace existing signature
-                long_summary = re.sub(signature_pattern, signature_line, long_summary, flags=re.IGNORECASE | re.DOTALL)
-                logger.info(f"✅ Replaced existing signature with: {author}")
-            else:
-                # Add new signature line
-                long_summary = long_summary + f"\n\n{signature_line}"
-                logger.info(f"✅ Injected author into long_summary: {author}")
-            
-            # Update the report_result dictionary to reflect the modified long_summary
-            report_result["long_summary"] = long_summary
-            
-            # ✅ Also update the author field in short_summary header
-            if isinstance(short_summary, dict) and 'header' in short_summary:
-                short_summary['header']['author'] = author.strip()
-                report_result["short_summary"] = short_summary
-                logger.info(f"✅ Updated short_summary header author: {author}")
+        logger.info(f"📋 Detected Document Type: {detected_doc_type}")
+        logger.info(f"🎯 Summary Card Eligibility: {is_valid_for_summary_card}")
+        logger.info(f"   Reasoning: {summary_card_reasoning[:100]}..." if len(summary_card_reasoning) > 100 else f"   Reasoning: {summary_card_reasoning}")
         
-        logger.info(f"✅ Generated long summary: {len(long_summary)} chars")
-        logger.info(f"✅ Generated short summary: {type(short_summary)}")
+        # Initialize variables
+        long_summary = ""
+        short_summary = ""
+        report_result = {}
         
-        # Use ReportAnalyzer output directly
-        detected_doc_type = report_result.get('doc_type', 'Unknown')
+        # Step 2: Process document based on summary card eligibility
+        if is_valid_for_summary_card:
+            # ✅ FULL EXTRACTION: Document requires physician review - generate summaries
+            logger.info("📋 Document requires Summary Card - running full LLM extraction...")
+            
+            report_analyzer = ReportAnalyzer(mode)
+            report_result = await asyncio.to_thread(
+                report_analyzer.extract_document,
+                summarizer_output,  # Use aiSummarizerText (Document AI Summarizer output)
+                document_text,  # Use documentText as raw_text parameter
+                doc_type_result  # Pass pre-detected doc_type
+            )
+            
+            # ✅ STORE THE ACTUAL REPORT ANALYZER RESULT
+            long_summary = report_result.get("long_summary", "")
+            short_summary = report_result.get("short_summary", "")
+            logger.info(f"✅ ReportAnalyzer completed, author field: {author}")
+            
+            # ✅ If author provided by user, replace or inject it into long_summary as "Signature:" field
+            if author and str(author).strip().lower() not in ["not specified", "unknown", "none", ""]:
+                # Replace existing signature line or add new one
+                signature_pattern = r'•\s*Signature:.*?(?=\n•|\n\n|$)'
+                signature_line = f"• Signature: {author.strip()}"
+                
+                if re.search(signature_pattern, long_summary, re.IGNORECASE | re.DOTALL):
+                    # Replace existing signature
+                    long_summary = re.sub(signature_pattern, signature_line, long_summary, flags=re.IGNORECASE | re.DOTALL)
+                    logger.info(f"✅ Replaced existing signature with: {author}")
+                else:
+                    # Add new signature line
+                    long_summary = long_summary + f"\n\n{signature_line}"
+                    logger.info(f"✅ Injected author into long_summary: {author}")
+                
+                # Update the report_result dictionary to reflect the modified long_summary
+                report_result["long_summary"] = long_summary
+                
+                # ✅ Also update the author field in short_summary header
+                if isinstance(short_summary, dict) and 'header' in short_summary:
+                    short_summary['header']['author'] = author.strip()
+                    report_result["short_summary"] = short_summary
+                    logger.info(f"✅ Updated short_summary header author: {author}")
+            
+            logger.info(f"✅ Generated long summary: {len(long_summary)} chars")
+            logger.info(f"✅ Generated short summary: {type(short_summary)}")
+        else:
+            # ⏭️ TASK-ONLY MODE: Document is administrative - skip expensive LLM extraction
+            logger.info("📌 Document is TASK-ONLY (administrative) - skipping LLM extraction for summaries")
+            logger.info(f"   Document type: {detected_doc_type}")
+            logger.info(f"   Reason: {summary_card_reasoning}")
+            
+            # Create minimal summary for task generation (just use raw_text as reference)
+            long_summary = f"[TASK-ONLY DOCUMENT]\nType: {detected_doc_type}\nReason: {summary_card_reasoning}\n\nThis document is administrative and does not require physician clinical review. Tasks have been generated for staff action."
+            short_summary = ""  # No short summary for task-only docs
+            report_result = {
+                "long_summary": long_summary,
+                "short_summary": short_summary,
+                "doc_type": detected_doc_type,
+                "is_task_only": True,
+                "task_only_reason": summary_card_reasoning
+            }
+            logger.info("⏭️ Skipped ReportAnalyzer - will proceed to task generation only")
         
         # Helper to convert structured short_summary dict to string
         raw_brief_summary_text = "Summary not available"
-        if short_summary:
+        
+        # Handle task-only documents differently
+        if not is_valid_for_summary_card:
+            raw_brief_summary_text = f"{detected_doc_type} - Administrative document for staff action"
+        elif short_summary:
             if isinstance(short_summary, dict):
                 # Try to extract meaningful text from structured summary
                 try:
@@ -252,12 +304,15 @@ async def update_fail_document(
             else:
                 raw_brief_summary_text = str(short_summary)
         
-        # ✅ Process the raw summary through the AI Condenser
-        brief_summary_text = await generate_concise_brief_summary(
-            raw_brief_summary_text, 
-            detected_doc_type,
-            llm_executor
-        )
+        # ✅ Process the raw summary through the AI Condenser (only for summary card eligible docs)
+        if is_valid_for_summary_card and raw_brief_summary_text != "Summary not available":
+            brief_summary_text = await generate_concise_brief_summary(
+                raw_brief_summary_text, 
+                detected_doc_type,
+                llm_executor
+            )
+        else:
+            brief_summary_text = raw_brief_summary_text
         
         # Prepare fields for DocumentAnalysis
         da_patient_name = patient_name or "Not specified"
@@ -348,7 +403,10 @@ async def update_fail_document(
             "file_hash": file_hash,
             "result_data": result_data,
             "document_id": str(fail_doc.id),
-            "mode": mode
+            "mode": mode,
+            "is_valid_for_summary_card": is_valid_for_summary_card,
+            "is_task_only": not is_valid_for_summary_card,
+            "doc_type_result": doc_type_result
         }
 
         # Step 2: Perform patient lookup with enhanced fuzzy matching
@@ -360,14 +418,16 @@ async def update_fail_document(
         save_result = await save_document_func(db_service, processed_data, lookup_result)
         
         # Step 4: Create tasks if needed
+        # ✅ FIX: Pass the actual Document AI Summarizer output (summarizer_output) as document_analysis
+        # The task generator expects raw text content, not a DocumentAnalysis object
         tasks_created = 0
         if save_result["document_id"] and save_result["status"] != "failed":
             tasks_created = await create_tasks_func(
-                processed_data["document_analysis"],
+                summarizer_output,  # ✅ Pass Document AI Summarizer output (same as direct processing)
                 save_result["document_id"],
                 processed_data["physician_id"],
                 processed_data["filename"],
-                processed_data  # Pass full processed_data for document text access
+                processed_data  # Pass full processed_data for patient_name and document_type
             )
             save_result["tasks_created"] = tasks_created
 

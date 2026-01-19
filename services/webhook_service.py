@@ -1055,7 +1055,7 @@ class WebhookService:
                     mode=processed_data.get("mode", "wc"),
                     document_text=text_for_analysis if text_for_analysis else raw_text,
                     doi=None,
-                    ai_summarizer_text=f"Internal document detected. Author: {extracted_author}",
+                    ai_summarizer_text=raw_text,  # Store actual Document AI Summarizer output
                     author=extracted_author
                 )
                 
@@ -1114,7 +1114,7 @@ class WebhookService:
                         mode=processed_data.get("mode", "wc"),
                         document_text=text_for_analysis if text_for_analysis else raw_text,
                         doi=None,
-                        ai_summarizer_text=f"No author detected in document.\nShort Summary: {short_summary_text[:200] if short_summary_text else 'N/A'}..."
+                        ai_summarizer_text=raw_text  # Store actual Document AI Summarizer output
                     )
                     
                     parse_decremented = await db_service.decrement_parse_count(processed_data.get("physician_id"))
@@ -1152,7 +1152,7 @@ class WebhookService:
                         mode=processed_data.get("mode", "wc"),
                         document_text=text_for_analysis if text_for_analysis else raw_text,
                         doi=None,
-                        ai_summarizer_text=f"Internal document detected. Author: {author_name}\nShort Summary: {short_summary_text_internal[:200] if short_summary_text_internal else 'N/A'}...",
+                        ai_summarizer_text=raw_text,  # Store actual Document AI Summarizer output
                         author=author_name
                     )
                     
