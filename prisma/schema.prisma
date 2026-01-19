@@ -402,6 +402,7 @@ model PatientIntakeUpdate {
   // Point-based summaries for staff dashboard
   adlEffectPoints         String[] @default([])  // Array of ADL effect points (e.g., ["Grip strength decreased", "Walking distance limited"])
   intakePatientPoints     String[] @default([])  // Array of intake patient points (e.g., ["Med refill requested", "New ortho consult scheduled"])
+  generatedPoints         String[] @default([])  // Combined AI-generated points for dashboard display
   
   // Extracted tags/pills for quick view
   medRefillsRequested      String?  // "Yes" or "No"
