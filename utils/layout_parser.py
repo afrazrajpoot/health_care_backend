@@ -48,22 +48,9 @@ def extract_fields_from_blocks(blocks: List[Dict], field_keywords: List[str] = N
     
     formatted_lines = []
     i = 0
-
-    # Helper to get page start safely
-    def get_page_start(block):
-        if not isinstance(block, dict):
-            return -1
-        page_span = block.get("pageSpan", {})
-        if not isinstance(page_span, dict):
-            return -1
-        return page_span.get("pageStart", 0)
     
     while i < len(blocks):
         current_block = blocks[i]
-        if not isinstance(current_block, dict):
-            i += 1
-            continue
-
         current_text = current_block.get("text", "").strip()
         
         if not current_text:
@@ -77,35 +64,33 @@ def extract_fields_from_blocks(blocks: List[Dict], field_keywords: List[str] = N
             # Look for value in next block (field: value pattern)
             if i + 1 < len(blocks):
                 next_block = blocks[i + 1]
-                if isinstance(next_block, dict):
-                    next_text = next_block.get("text", "").strip()
-                    
-                    # Check if they're on same page and close by block ID
-                    current_page = get_page_start(current_block)
-                    next_page = get_page_start(next_block)
-                    
-                    if current_page == next_page and next_text:
-                        formatted_lines.append(f"{current_text}: {next_text}")
-                        i += 2  # Skip next block as it's been processed
-                        continue
+                next_text = next_block.get("text", "").strip()
+                
+                # Check if they're on same page and close by block ID
+                current_page = current_block.get("pageSpan", {}).get("pageStart", 0)
+                next_page = next_block.get("pageSpan", {}).get("pageStart", 0)
+                
+                if current_page == next_page and next_text:
+                    formatted_lines.append(f"{current_text}: {next_text}")
+                    i += 2  # Skip next block as it's been processed
+                    continue
             
             formatted_lines.append(current_text)
         else:
             # Check if next block is a field keyword (value field pattern)
             if i + 1 < len(blocks):
                 next_block = blocks[i + 1]
-                if isinstance(next_block, dict):
-                    next_text = next_block.get("text", "").strip()
-                    next_is_field = any(keyword in next_text.lower() for keyword in field_keywords)
+                next_text = next_block.get("text", "").strip()
+                next_is_field = any(keyword in next_text.lower() for keyword in field_keywords)
+                
+                if next_is_field:
+                    current_page = current_block.get("pageSpan", {}).get("pageStart", 0)
+                    next_page = next_block.get("pageSpan", {}).get("pageStart", 0)
                     
-                    if next_is_field:
-                        current_page = get_page_start(current_block)
-                        next_page = get_page_start(next_block)
-                        
-                        if current_page == next_page:
-                            formatted_lines.append(f"{next_text}: {current_text}")
-                            i += 2
-                            continue
+                    if current_page == next_page:
+                        formatted_lines.append(f"{next_text}: {current_text}")
+                        i += 2
+                        continue
             
             formatted_lines.append(current_text)
         
@@ -208,21 +193,14 @@ class LayoutParser:
             formatted_text = ""
             blocks = []
             
-            if (document_dict.get('document_layout') 
-                and isinstance(document_dict['document_layout'], dict) 
-                and document_dict['document_layout'].get('blocks')):
-                
+            if document_dict.get('document_layout') and document_dict['document_layout'].get('blocks'):
                 blocks = document_dict['document_layout']['blocks']
                 formatted_text = extract_fields_from_blocks(blocks)
                 logger.info(f"✅ Layout Parser extracted {len(blocks)} blocks from document_layout")
             else:
-                layout_status = "missing" if not document_dict.get('document_layout') else (
-                    f"type: {type(document_dict.get('document_layout'))}"
-                )
-                logger.warning(f"⚠️ No document_layout blocks found in response (Layout: {layout_status})")
-                
-                if document_dict.get('pages') and isinstance(document_dict['pages'], list):
-                    total_blocks = sum(len(page.get('blocks', [])) for page in document_dict['pages'] if isinstance(page, dict))
+                logger.warning(f"⚠️ No document_layout blocks found in response")
+                if document_dict.get('pages'):
+                    total_blocks = sum(len(page.get('blocks', [])) for page in document_dict['pages'])
                     logger.info(f"📄 Found {total_blocks} blocks in pages structure")
             
             # Log document structure for debugging
