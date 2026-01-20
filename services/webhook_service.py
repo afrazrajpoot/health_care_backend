@@ -3,7 +3,7 @@ OPTIMIZED Webhook Service - Clean Version with Redis Caching (No Duplication)
 """
 from fastapi import HTTPException
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any,List
 from models.schemas import ExtractionResult
 from models.data_models import DocumentAnalysis
 from helpers.helpers import clean_name_string
@@ -22,7 +22,7 @@ import json
 from .treatment_history_generator import TreatmentHistoryGenerator
 # Import refactored service functions
 from services.document_save_service import save_document as save_document_external
-from services.fail_document_service import update_fail_document as update_fail_document_external, generate_concise_brief_summary
+from services.fail_document_service import update_fail_document as update_fail_doc_service, update_multiple_fail_documents, generate_concise_brief_summary
 # Dedicated thread pool for LLM operations (shared across all WebhookService instances)
 LLM_EXECUTOR = ThreadPoolExecutor(max_workers=10)
 
@@ -1328,7 +1328,7 @@ class WebhookService:
         Updates and processes a failed document using the complete webhook-like logic.
         Wrapper for external service function.
         """
-        return await update_fail_document_external(
+        return await update_fail_doc_service(
             fail_doc=fail_doc,
             updated_fields=updated_fields,
             user_id=user_id,
@@ -1338,3 +1338,86 @@ class WebhookService:
             create_tasks_func=self.create_tasks_if_needed,
             llm_executor=LLM_EXECUTOR
         )
+
+    async def update_fail_documents_batch(
+        self,
+        fail_docs_data: List[dict],
+        user_id: str,
+        db_service: Any,
+        max_concurrent: int = 3
+    ) -> dict:
+        """
+        Updates and processes multiple failed documents concurrently.
+        
+        Args:
+            max_concurrent: Maximum number of documents to process concurrently
+        """
+        results = {
+            "total_documents": len(fail_docs_data),
+            "successful": 0,
+            "failed": 0,
+            "documents": []
+        }
+        
+        # Create semaphore to limit concurrent processing
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def process_single_document(doc_data):
+            async with semaphore:
+                fail_doc = doc_data.get("fail_doc")
+                updated_fields = doc_data.get("updated_fields", {})
+                
+                if not fail_doc:
+                    return {
+                        "fail_doc_id": "unknown",
+                        "status": "failed",
+                        "error": "Missing fail_doc object"
+                    }
+                
+                try:
+                    document_result = await update_fail_doc_service(
+                        fail_doc=fail_doc,
+                        updated_fields=updated_fields,
+                        user_id=user_id,
+                        db_service=db_service,
+                        patient_lookup=self.patient_lookup,
+                        save_document_func=self.save_document,
+                        create_tasks_func=self.create_tasks_if_needed,
+                        llm_executor=LLM_EXECUTOR
+                    )
+                    
+                    return {
+                        "fail_doc_id": fail_doc.id,
+                        "status": "success",
+                        "document_id": document_result.get("document_id"),
+                        "tasks_created": document_result.get("tasks_created", 0)
+                    }
+                except Exception as e:
+                    logger.error(f"❌ Failed to process fail document {fail_doc.id}: {str(e)}")
+                    return {
+                        "fail_doc_id": fail_doc.id,
+                        "status": "failed",
+                        "error": str(e)
+                    }
+        
+        # Process all documents concurrently
+        tasks = [process_single_document(doc_data) for doc_data in fail_docs_data]
+        individual_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results
+        for result in individual_results:
+            if isinstance(result, Exception):
+                results["failed"] += 1
+                results["documents"].append({
+                    "fail_doc_id": "unknown",
+                    "status": "failed",
+                    "error": str(result)
+                })
+            else:
+                if result["status"] == "success":
+                    results["successful"] += 1
+                else:
+                    results["failed"] += 1
+                results["documents"].append(result)
+        
+        return results

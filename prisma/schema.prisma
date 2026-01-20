@@ -433,8 +433,7 @@ model TreatmentHistory {
   
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
-  
-  @@unique([patientName, dob, claimNumber, physicianId])
+
   @@map("treatment_histories")
   @@index([patientName, dob, claimNumber])
   @@index([physicianId])

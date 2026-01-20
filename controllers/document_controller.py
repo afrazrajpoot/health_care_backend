@@ -140,45 +140,142 @@ async def extract_documents(
 async def update_fail_document(request: Request):
     try:
         data = await request.json()
-        logger.info(f"📥 Update fail document request for ID: {data.get('fail_doc_id', 'unknown')}")
-
-        fail_doc_id = data.get("fail_doc_id")
-        if not fail_doc_id:
-            raise HTTPException(status_code=400, detail="Missing required fail_doc_id in request payload")
-
-        updated_fields = {
-            "document_text": data.get("document_text"),
-            "dob": data.get("dob"),
-            "doi": data.get("doi"),
-            "claim_number": data.get("claim_number"),
-            "patient_name": data.get("patient_name"),
-            "author": data.get("author")
-        }
-        # logger.info(f"   🔄 Fields to update: {updated_fields}")
-
-        db_service = await get_database_service()
-        fail_doc = await db_service.get_fail_doc_by_id(fail_doc_id)
-
-        if not fail_doc:
-            raise HTTPException(status_code=404, detail="Fail document not found")
-
-        service = WebhookService()
-        result = await service.update_fail_document(fail_doc, updated_fields, data.get("user_id"), db_service)
-
-        # Defensive logging: avoid KeyError if result doesn't include expected keys
-        if not isinstance(result, dict):
-            logger.warning(f"⚠️ update_fail_document returned non-dict result: {result}")
-            return result
-
-        doc_id = result.get("document_id") or result.get("id") or result.get("fail_doc_id")
-        status = result.get("status") or result.get("result_status") or "unknown"
-
-        if doc_id is None:
-            logger.warning(f"⚠️ update_fail_document result missing document id. Full result: {json.dumps(result, default=str)[:1000]}")
+        
+        # Check if data is an array (batch) or single object
+        if isinstance(data, list):
+            # Batch processing - multiple documents
+            logger.info(f"📦 Batch update request for {len(data)} fail documents")
+            
+            results = {
+                "total_documents": len(data),
+                "successful": 0,
+                "failed": 0,
+                "documents": []
+            }
+            
+            db_service = await get_database_service()
+            service = WebhookService()
+            
+            # Process each document in the array
+            for idx, doc_data in enumerate(data):
+                try:
+                    fail_doc_id = doc_data.get("fail_doc_id")
+                    if not fail_doc_id:
+                        results["failed"] += 1
+                        results["documents"].append({
+                            "fail_doc_id": "unknown",
+                            "status": "failed",
+                            "error": f"Document at index {idx} missing fail_doc_id",
+                            "index": idx
+                        })
+                        continue
+                    
+                    logger.info(f"🔄 Processing document {idx+1}/{len(data)}: {fail_doc_id}")
+                    
+                    updated_fields = {
+                        "document_text": doc_data.get("document_text"),
+                        "dob": doc_data.get("dob"),
+                        "doi": doc_data.get("doi"),
+                        "claim_number": doc_data.get("claim_number"),
+                        "patient_name": doc_data.get("patient_name"),
+                        "author": doc_data.get("author")
+                    }
+                    
+                    fail_doc = await db_service.get_fail_doc_by_id(fail_doc_id)
+                    
+                    if not fail_doc:
+                        results["failed"] += 1
+                        results["documents"].append({
+                            "fail_doc_id": fail_doc_id,
+                            "status": "failed",
+                            "error": "Fail document not found",
+                            "index": idx
+                        })
+                        continue
+                    
+                    result = await service.update_fail_document(
+                        fail_doc, 
+                        updated_fields, 
+                        doc_data.get("user_id"), 
+                        db_service
+                    )
+                    
+                    doc_id = result.get("document_id") or result.get("id") or fail_doc_id
+                    status = result.get("status") or result.get("result_status") or "unknown"
+                    
+                    if status == "failed" or result.get("error"):
+                        results["failed"] += 1
+                        results["documents"].append({
+                            "fail_doc_id": fail_doc_id,
+                            "status": "failed",
+                            "error": result.get("error", "Unknown error"),
+                            "index": idx
+                        })
+                    else:
+                        results["successful"] += 1
+                        results["documents"].append({
+                            "fail_doc_id": fail_doc_id,
+                            "status": "success",
+                            "document_id": doc_id,
+                            "tasks_created": result.get("tasks_created", 0),
+                            "index": idx
+                        })
+                        
+                        logger.info(f"✅ Successfully processed fail document {fail_doc_id}")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Failed to process fail document {fail_doc_id}: {str(e)}")
+                    results["failed"] += 1
+                    results["documents"].append({
+                        "fail_doc_id": fail_doc_id or f"index_{idx}",
+                        "status": "failed",
+                        "error": str(e),
+                        "index": idx
+                    })
+            
+            logger.info(f"📊 Batch processing complete: {results['successful']} successful, {results['failed']} failed")
+            return results
+            
         else:
-            logger.info(f"💾 Fail document updated and saved via route with ID: {doc_id}, status: {status}")
+            # Single document processing (backward compatibility)
+            logger.info(f"📥 Single update request for ID: {data.get('fail_doc_id', 'unknown')}")
 
-        return result
+            fail_doc_id = data.get("fail_doc_id")
+            if not fail_doc_id:
+                raise HTTPException(status_code=400, detail="Missing required fail_doc_id in request payload")
+
+            updated_fields = {
+                "document_text": data.get("document_text"),
+                "dob": data.get("dob"),
+                "doi": data.get("doi"),
+                "claim_number": data.get("claim_number"),
+                "patient_name": data.get("patient_name"),
+                "author": data.get("author")
+            }
+
+            db_service = await get_database_service()
+            fail_doc = await db_service.get_fail_doc_by_id(fail_doc_id)
+
+            if not fail_doc:
+                raise HTTPException(status_code=404, detail="Fail document not found")
+
+            service = WebhookService()
+            result = await service.update_fail_document(fail_doc, updated_fields, data.get("user_id"), db_service)
+
+            # Defensive logging: avoid KeyError if result doesn't include expected keys
+            if not isinstance(result, dict):
+                logger.warning(f"⚠️ update_fail_document returned non-dict result: {result}")
+                return result
+
+            doc_id = result.get("document_id") or result.get("id") or result.get("fail_doc_id")
+            status = result.get("status") or result.get("result_status") or "unknown"
+
+            if doc_id is None:
+                logger.warning(f"⚠️ update_fail_document result missing document id. Full result: {json.dumps(result, default=str)[:1000]}")
+            else:
+                logger.info(f"💾 Fail document updated and saved via route with ID: {doc_id}, status: {status}")
+
+            return result
 
     except Exception as e:
         logger.error(f"❌ Update fail document failed: {str(e)}", exc_info=True)
@@ -186,18 +283,24 @@ async def update_fail_document(request: Request):
         # On exception, emit error
         if 'data' in locals():
             try:
+                fail_doc_id = 'unknown'
+                if isinstance(data, list) and data:
+                    # For batch, get first document ID for error reporting
+                    fail_doc_id = data[0].get("fail_doc_id", "unknown")
+                elif isinstance(data, dict):
+                    fail_doc_id = data.get('fail_doc_id', 'unknown')
+                
                 await sio.emit('task_error', {
-                    'document_id': data.get('fail_doc_id', 'unknown'),
-                    'filename': fail_doc.fileName if 'fail_doc' in locals() else 'unknown',
+                    'document_id': fail_doc_id,
+                    'filename': 'batch_update' if isinstance(data, list) else (fail_doc.fileName if 'fail_doc' in locals() else 'unknown'),
                     'error': str(e),
-                    'gcs_url': fail_doc.gcsFileLink if 'fail_doc' in locals() else 'unknown',
-                    'physician_id': fail_doc.physicianId if 'fail_doc' in locals() else None,
-                    'blob_path': fail_doc.blobPath if 'fail_doc' in locals() else ''
+                    'gcs_url': fail_doc.gcsFileLink if 'fail_doc' in locals() and isinstance(data, dict) else '',
+                    'physician_id': fail_doc.physicianId if 'fail_doc' in locals() and isinstance(data, dict) else None,
+                    'blob_path': fail_doc.blobPath if 'fail_doc' in locals() and isinstance(data, dict) else ''
                 })
             except:
                 pass  # Ignore emit failure during error
         raise HTTPException(status_code=500, detail=f"Update fail document processing failed: {str(e)}")
-
 @router.get('/document')
 async def get_document(
     patient_name: str,
