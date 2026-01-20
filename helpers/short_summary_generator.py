@@ -18,33 +18,48 @@ logger = logging.getLogger("document_ai")
 # ============== Report-Type Field Eligibility Matrix ==============
 
 REPORT_FIELD_MATRIX: Dict[str, Dict] = {
+
+    # -------------------------
     # Med-Legal Reports (QME family)
+    # -------------------------
     "QME": {
         "allowed": {
-            "findings", "physical_exam",
-            "medications", "recommendations", "rationale",
-            "mmi_status", "work_status"
+            "mechanism_of_injury",
+            "findings",
+            "physical_exam",
+            "medications",
+            "recommendations",
+            "rationale",
+            "mmi_status",
+            "work_status"
         }
     },
     "AME": {"inherit": "QME"},
     "PQME": {"inherit": "QME"},
     "IME": {"inherit": "QME"},
-    
-    # Consult Reports
+
+    # -------------------------
+    # Consult / Clinical Reports
+    # -------------------------
     "CONSULT": {
         "allowed": {
+            "mechanism_of_injury",
             "findings",
-            "physical_exam", "medications", "recommendations"
+            "physical_exam",
+            "medications",
+            "recommendations"
         }
     },
     "PAIN MANAGEMENT": {"inherit": "CONSULT"},
     "PROGRESS NOTE": {"inherit": "CONSULT"},
     "OFFICE VISIT": {"inherit": "CONSULT"},
     "CLINIC NOTE": {"inherit": "CONSULT"},
-    
+
+    # -------------------------
     # Imaging Reports
+    # -------------------------
     "MRI": {
-        "allowed": {"findings", "recommendations"}
+        "allowed": {"findings"}
     },
     "CT": {"inherit": "MRI"},
     "X-RAY": {"inherit": "MRI"},
@@ -54,46 +69,78 @@ REPORT_FIELD_MATRIX: Dict[str, Dict] = {
     "PET SCAN": {"inherit": "MRI"},
     "BONE SCAN": {"inherit": "MRI"},
     "DEXA SCAN": {"inherit": "MRI"},
-    
+
+    # -------------------------
     # Utilization Review
+    # -------------------------
     "UR": {
         "allowed": {"recommendations", "rationale"}
     },
     "IMR": {"inherit": "UR"},
     "PEER REVIEW": {"inherit": "UR"},
-    
-    # Therapy Notes
+
+    # -------------------------
+    # Therapy Reports
+    # -------------------------
     "PHYSICAL THERAPY": {
-        "allowed": {"findings", "recommendations"}
+        "allowed": {
+            "mechanism_of_injury",
+            "findings",
+            "recommendations"
+        }
     },
+    "THERAPY NOTE": {"inherit": "PHYSICAL THERAPY"},
     "OCCUPATIONAL THERAPY": {"inherit": "PHYSICAL THERAPY"},
     "CHIROPRACTIC": {"inherit": "PHYSICAL THERAPY"},
-    
-    # Surgical Reports
+
+    # -------------------------
+    # Surgical / Operative Reports
+    # -------------------------
     "SURGERY REPORT": {
-        "allowed": {"findings", "recommendations"}
+        "allowed": {"findings"}
     },
     "OPERATIVE NOTE": {"inherit": "SURGERY REPORT"},
     "POST-OP": {"inherit": "SURGERY REPORT"},
-    
+
+    # -------------------------
     # PR-2 Reports
+    # -------------------------
     "PR-2": {
-        "allowed": {"findings", "recommendations", "work_status", "medications", "physical_exam"}
+        "allowed": {
+            "mechanism_of_injury",
+            "findings",
+            "physical_exam",
+            "medications",
+            "recommendations",
+            "work_status"
+        }
     },
     "PR2": {"inherit": "PR-2"},
-    
+
+    # -------------------------
     # Labs & Diagnostics
+    # -------------------------
     "LABS": {
-        "allowed": {"findings", "recommendations"}
+        "allowed": {"findings"}
     },
     "PATHOLOGY": {"inherit": "LABS"},
-    
-    # Default for unmatched types
+
+    # -------------------------
+    # Legal / Administrative Reports
+    # -------------------------
+    "ATTORNEY QUESTIONS": {
+        "allowed": {"questions", "mmi_status", "work_status"}
+    },
+    "ADJUSTER QUESTIONS": {"inherit": "ATTORNEY QUESTIONS"},
+    "NURSE CASE MANAGER": {"inherit": "ATTORNEY QUESTIONS"},
+
+    # -------------------------
+    # Default fallback
+    # -------------------------
     "DEFAULT": {
-        "allowed": {"findings", "recommendations", "medications", "physical_exam"}
+        "allowed": {"findings", "recommendations"}
     }
 }
-
 
 def resolve_allowed_fields(doc_type: str) -> Set[str]:
     """
@@ -423,8 +470,7 @@ def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
     - Contains generic phrases like "No specific X were documented"
     - Contains "not found", "not available", "not specified"
     - Is just a placeholder with no real clinical content
-    - Contains incomplete sentences (e.g., "The at MMI", "The from work")
-    - Contains garbled/truncated text patterns
+    - Contains incomplete/malformed sentences detected by linguistic analysis
     """
     if "summary" not in structured_summary or "items" not in structured_summary["summary"]:
         return structured_summary
@@ -437,28 +483,6 @@ def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
         r"none\s+(documented|noted|described|found)",
         r"(recommendations?|findings?|medications?|exam)\s+not\s+",
         r"^no\s+\w+\s*\.?$",  # Just "No X" or "No X."
-    ]
-    
-    # Incomplete/garbled sentence patterns that indicate malformed text
-    incomplete_patterns = [
-        r"^the\s+(at|from|to|in|on|for|with|was|is|yet|temporary|permanent|off)\s+",  # "The at MMI", "The yet at", "The temporary", etc.
-        r"^the\s+\w+\s+(at|from|to|in|on)\s+",  # "The patient at", "The report from"
-        r"\b(patient|report|document)\s+(at|from|to)\s+(the|a)\s*$",  # Incomplete phrases
-        r"^(at|from|to|in|on)\s+\w+\s*$",  # Just preposition + word
-        r"\bthe\s+the\b",  # Duplicate "the"
-        r"^the\s+(is|are|was|were)\s*$",  # Just "The is/are/was/were"
-        r"^the\s+\w+\s+disability",  # "The temporary disability" without verb
-        r"^the\s+(not\s+)?yet\s+at",  # "The yet at", "The not yet at"
-        r"\bas\s+at\s+",  # "as at MMI" - garbled pattern
-        r"\bwas\s+documented\s+asers?\b",  # "was documented asers" - garbled
-        r"\bdocumented\s+aser\b",  # "documented aser" - garbled  
-        r"\b(the|a)\s+as\s+(at|for|to|in)\b",  # "the as at" - garbled
-        r"\bfor\s+was\s+documented\b",  # "for was documented" - garbled
-        r"\b\w{1,2}\s+\w{1,2}\s+\w{1,2}\s*$",  # Multiple 1-2 char fragments at end
-        r"\b(was|is|are|were)\s+(the|a|an)\s+(at|to|for|in)\b",  # "was the at" - garbled
-        r"\bthe\s+\w+\s+for\s+was\b",  # "the X for was" - garbled
-        r"\baser[s]?\b",  # "aser" or "asers" - common truncation artifact
-        r"\b\w+ers?\s+but\s+not\s+for\s+the\s+\w+\.$",  # Incomplete comparison pattern
     ]
     
     items = structured_summary["summary"]["items"]
@@ -474,18 +498,15 @@ def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
             logger.info(f"🗑️ Removed empty field '{field}' (too short or empty)")
             continue
         
-        # Check for incomplete sentences
-        is_incomplete = False
+        # Check for malformed sentences using linguistic validation
+        is_malformed = False
         for text, label in [(collapsed, "collapsed"), (expanded, "expanded")]:
-            for pattern in incomplete_patterns:
-                if re.search(pattern, text, re.IGNORECASE):
-                    logger.warning(f"🗑️ Removed field '{field}' with incomplete {label} text: '{text[:50]}...'")
-                    is_incomplete = True
-                    break
-            if is_incomplete:
+            if is_malformed_sentence(text):
+                logger.warning(f"🗑️ Removed field '{field}' with malformed {label} text: '{text[:60]}...'")
+                is_malformed = True
                 break
         
-        if is_incomplete:
+        if is_malformed:
             continue
         
         # Check for generic patterns in both collapsed and expanded
@@ -507,6 +528,127 @@ def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
     structured_summary["summary"]["items"] = filtered_items
     logger.info(f"✅ Filtered to {len(filtered_items)} meaningful fields (removed {len(items) - len(filtered_items)} empty/generic/incomplete)")
     return structured_summary
+
+
+def is_malformed_sentence(text: str) -> bool:
+    """
+    Generic linguistic validation to detect malformed/garbled sentences.
+    Uses linguistic rules rather than hardcoded patterns.
+    
+    Checks:
+    1. Sentences starting with "The" must have a valid subject (noun/noun phrase) after it
+    2. Function words (prepositions, conjunctions, articles) shouldn't appear in invalid positions
+    3. Sentences must have proper semantic content (not just function words)
+    4. Detects truncated/garbled word fragments
+    
+    Returns:
+        True if the sentence is malformed, False if it appears valid
+    """
+    if not text:
+        return True
+    
+    # Clean the text for analysis
+    text = text.strip()
+    
+    # Skip bullet points for analysis (check the actual content)
+    if text.startswith('•'):
+        text = text[1:].strip()
+    
+    # If empty after cleaning, it's malformed
+    if not text or len(text) < 5:
+        return True
+    
+    words = text.split()
+    if len(words) < 2:
+        return True
+    
+    # Define word categories for linguistic analysis
+    # Function words that shouldn't directly follow "The" without a noun
+    function_words = {
+        'a', 'an', 'the',  # articles
+        'at', 'to', 'from', 'in', 'on', 'for', 'with', 'by', 'as', 'of',  # prepositions
+        'and', 'or', 'but', 'yet', 'so', 'nor',  # conjunctions
+        'is', 'are', 'was', 'were', 'be', 'been', 'being',  # be-verbs (alone is odd)
+        'not', 'no', 'never',  # negations (shouldn't directly follow "The")
+    }
+    
+    # Words that ARE valid after "The" (nouns, adjectives that modify nouns)
+    valid_after_the = {
+        'patient', 'report', 'document', 'physician', 'doctor', 'provider',
+        'examination', 'assessment', 'evaluation', 'findings', 'results',
+        'diagnosis', 'treatment', 'recommendation', 'medication', 'condition',
+        'injury', 'pain', 'symptoms', 'history', 'following', 'above', 'below',
+        'cervical', 'lumbar', 'thoracic', 'chronic', 'acute', 'bilateral',
+        'left', 'right', 'upper', 'lower', 'medical', 'clinical', 'physical',
+        'requested', 'recommended', 'documented', 'noted', 'referenced',
+        'multiple', 'various', 'several', 'specific', 'primary', 'secondary',
+        'temporary', 'permanent', 'total', 'partial',  # These are valid as adjectives before nouns
+    }
+    
+    # Check 1: "The" followed by function word without valid noun structure
+    first_word = words[0].lower().rstrip('.,;:')
+    if first_word == 'the' and len(words) >= 2:
+        second_word = words[1].lower().rstrip('.,;:')
+        
+        # If second word is a function word, it's likely malformed
+        # Exception: some function words can be valid (e.g., "The following")
+        if second_word in function_words and second_word not in valid_after_the:
+            # Check if there's a valid noun soon after
+            has_valid_subject = False
+            for i, word in enumerate(words[2:6], start=2):  # Check next few words
+                clean_word = word.lower().rstrip('.,;:')
+                # Check if it's a content word (not function word) and reasonably long
+                if clean_word not in function_words and len(clean_word) > 2:
+                    # Check if it looks like a noun (simple heuristic)
+                    if not clean_word.endswith(('ly', 'ing')) or clean_word in valid_after_the:
+                        has_valid_subject = True
+                        break
+            
+            if not has_valid_subject:
+                return True  # Malformed: "The [function word] ..." without valid subject
+    
+    # Check 2: Detect garbled/truncated words (nonsense fragments)
+    nonsense_indicators = 0
+    for word in words:
+        clean_word = word.lower().rstrip('.,;:!?')
+        # Very short words in odd positions (not common function words)
+        if len(clean_word) <= 2 and clean_word not in {'a', 'an', 'as', 'at', 'be', 'by', 'do', 'go', 'he', 'if', 'in', 'is', 'it', 'me', 'my', 'no', 'of', 'on', 'or', 'so', 'to', 'up', 'us', 'we'}:
+            nonsense_indicators += 1
+        # Garbled word fragments (uncommon letter combinations)
+        if re.search(r'[bcdfghjklmnpqrstvwxz]{4,}', clean_word):  # 4+ consonants in a row
+            nonsense_indicators += 2
+        # Words ending in unusual fragments
+        if re.search(r'(aser|asers|ment$|tion$)s{2,}', clean_word):  # doubled endings
+            nonsense_indicators += 2
+    
+    # If too many nonsense indicators relative to sentence length
+    if nonsense_indicators > len(words) * 0.3:  # More than 30% nonsense
+        return True
+    
+    # Check 3: Sentence must have at least one verb or verb-like word
+    verb_indicators = {'was', 'were', 'is', 'are', 'been', 'being', 'documented', 'noted', 
+                       'referenced', 'reported', 'described', 'stated', 'indicated', 'showed',
+                       'revealed', 'found', 'observed', 'recorded', 'included', 'recommended'}
+    has_verb = any(word.lower().rstrip('.,;:') in verb_indicators or 
+                   word.lower().rstrip('.,;:').endswith(('ed', 'ing')) 
+                   for word in words)
+    
+    # Very short sentences without verbs are suspicious
+    if len(words) < 5 and not has_verb:
+        return True
+    
+    # Check 4: Detect repeated words (sign of generation error)
+    word_list = [w.lower().rstrip('.,;:') for w in words]
+    for i in range(len(word_list) - 1):
+        if word_list[i] == word_list[i + 1] and word_list[i] not in {'very', 'much', 'so'}:
+            return True  # Repeated word like "the the"
+    
+    # Check 5: Sentence shouldn't start with certain function words
+    invalid_starters = {'as', 'at', 'for', 'from', 'in', 'on', 'to', 'with', 'by', 'and', 'or', 'but'}
+    if first_word in invalid_starters and len(words) < 6:
+        return True
+    
+    return False  # Sentence appears valid
 
 
 
@@ -797,6 +939,47 @@ HEADER RULES:
 - Date must be in YYYY-MM-DD format. If not found, use empty string
 - Disclaimer appears EXACTLY ONCE
 
+� CRITICAL: SIGNAL CONSOLIDATION (PREVENT REDUNDANCY)
+When multiple related items come from the SAME SOURCE SENTENCE:
+- CONSOLIDATE into ONE bullet with sub-items OR one comprehensive statement
+- DO NOT create separate bullets that repeat the same source text
+- Group related findings that share attribution
+
+Example - BEFORE (redundant):
+❌ "• Cervical disc degeneration was documented"
+❌ "• Status post cervical spinal fusion was documented"  
+❌ "• Cervical spondylosis was documented"
+❌ "• Cervicalgia was documented"
+(All from same sentence = cognitive overload)
+
+Example - AFTER (consolidated):
+✅ "• Cervical spine conditions documented include: disc degeneration, status post spinal fusion (C3-C7), spondylosis, and cervicalgia"
+
+OR with sub-bullets:
+✅ "• Multiple cervical spine conditions were documented:
+  - Cervical disc degeneration
+  - Status post cervical spinal fusion (C3-C7)
+  - Other cervical spondylosis
+  - Cervicalgia"
+
+APPLY THIS TO:
+- Multiple diagnoses from same assessment
+- Related surgical history items
+- Grouped medications from same prescription
+- Related exam findings from same examination section
+
+WHEN TO KEEP SEPARATE:
+- Items from different source sections
+- Findings with different clinical significance
+- Items requiring different operational handling
+
+EXAMPLE - findings (CONSOLIDATED BULLET FORMAT):
+{{
+  "field": "findings",
+  "collapsed": "Multiple cervical spine conditions and chronic pain syndrome were documented",
+  "expanded": "• Cervical spine conditions documented include: disc degeneration, status post spinal fusion (C3-C7), spondylosis, and cervicalgia\n• Chronic pain syndrome was documented\n• Low back pain severity of 8/10 was documented\n• Sciatica was noted"
+}}
+
 🔒 NON-AUTHORSHIP COMPLIANCE CHECKLIST (verify before output):
 □ No causal language ("due to", "caused by", "likely", "secondary to")
 □ No directive language ("recommended to", "should", "advised")
@@ -809,6 +992,7 @@ HEADER RULES:
 □ Patient-reported info clearly marked
 □ ALL expanded sections use bullet-point format
 □ ALL fields with any content are included
+□ Related items from same source consolidated (no redundant bullets)
 
 Output valid JSON only.
 """)
@@ -872,6 +1056,45 @@ Generate UI-ready fields following STRICT NON-AUTHORSHIP rules:
    - "was noted in the report"
    - "The patient reported..."
    - NEVER make unattributed declarations
+                                                           
+🚫 AUTHORSHIP / JUDGMENT LANGUAGE — STRICTLY FORBIDDEN
+
+Do NOT use any wording that implies judgment, causation, recommendation, assessment, certainty, necessity, or factual patient assertions.
+
+Forbidden terms include (non-exhaustive, exact + variants):
+
+Clinical judgment / opinion:
+likely, unlikely, probable, probably, possible, possibly, appears to be, suggests, suggestive of, consistent with, indicative of, concerning for, supports the diagnosis of, points to, favors, rules out, cannot rule out
+
+Causation / attribution:
+due to, secondary to, caused by, resulting from, related to, associated with (unless explicitly quoted), attributable to, because of, stemming from, precipitated by
+
+Recommendations / directives:
+recommend, recommended, should, advised, advise, plan to, will continue, initiate, discontinue, increase, decrease, start, stop, manage with, treat with, follow up, continue therapy
+
+Assessment / impression language:
+assessment, impression, diagnosis is, final diagnosis, primary diagnosis, differential diagnosis, clinical picture, evaluation reveals, findings indicate
+
+Certainty / validation:
+confirms, confirmed, demonstrates, establishes, proves, verifies, shows that
+
+Necessity / appropriateness:
+necessary, required, appropriate, indicated, justified, warranted, medically necessary
+
+Patient status assertions:
+patient has, patient requires, patient needs, patient suffers from, patient is unable to
+
+✅ REQUIRED SAFE NON-AUTHORING LANGUAGE (WHITELIST)
+
+Use attribution-based, passive, or referential phrasing only:
+
+“The patient reported…”
+“The report documented…”
+was documented, was reported, was referenced
+per report, according to the report, as stated in the report
+external documentation notes
+authorization was requested
+no decision documented
 
 FIELD CATEGORIZATION GUIDE:
 - "reported_history" → Patient-reported symptoms, timeline, functional aids, patient-stated meds
@@ -1026,24 +1249,27 @@ Output JSON only.
             # NEW: Ensure all expanded sections use bullet format
             structured_summary = enforce_bullet_format_all_fields(structured_summary)
             
-            # NEW: Attach citations to summary items if citation feature is enabled
-            if settings.citation_enabled and raw_text:
-                try:
-                    from services.citation_service import attach_citations_to_short_summary
+            # NEW: Consolidate redundant bullets from same source
+            structured_summary = consolidate_redundant_bullets(structured_summary)
+            
+            # # NEW: Attach citations to summary items if citation feature is enabled
+            # if settings.citation_enabled and raw_text:
+            #     try:
+            #         from services.citation_service import attach_citations_to_short_summary
                     
-                    # Estimate total pages from text length (~2500 chars per page for medical docs)
-                    estimated_pages = max(1, len(raw_text) // 2500 + 1)
+            #         # Estimate total pages from text length (~2500 chars per page for medical docs)
+            #         estimated_pages = max(1, len(raw_text) // 2500 + 1)
                     
-                    structured_summary = attach_citations_to_short_summary(
-                        structured_summary, 
-                        raw_text,
-                        min_confidence=settings.citation_min_confidence,
-                        total_pages=estimated_pages
-                    )
-                    logger.info(f"✅ Citations attached to summary items (estimated {estimated_pages} pages)")
-                except Exception as citation_error:
-                    logger.warning(f"⚠️ Citation attachment failed (non-critical): {citation_error}")
-                    # Continue without citations - feature is additive, not blocking
+            #         structured_summary = attach_citations_to_short_summary(
+            #             structured_summary, 
+            #             raw_text,
+            #             min_confidence=settings.citation_min_confidence,
+            #             total_pages=estimated_pages
+            #         )
+            #         logger.info(f"✅ Citations attached to summary items (estimated {estimated_pages} pages)")
+            #     except Exception as citation_error:
+            #         logger.warning(f"⚠️ Citation attachment failed (non-critical): {citation_error}")
+            #         # Continue without citations - feature is additive, not blocking
 
             logger.info(f"✅ UI-ready summary generated with {len(structured_summary.get('summary', {}).get('items', []))} items")
             return structured_summary
@@ -1113,5 +1339,94 @@ def enforce_bullet_format_all_fields(structured_summary: dict) -> dict:
             bullet_text = '\n'.join([f"• {s}" if not s.endswith('.') else f"• {s}" for s in sentences])
             item['expanded'] = bullet_text
             logger.info(f"✅ Converted {item.get('field')} to bullet format")
+    
+    return structured_summary
+
+
+def consolidate_redundant_bullets(structured_summary: dict) -> dict:
+    """
+    Post-process to consolidate bullets that likely come from same source.
+    Detects bullets with same verb patterns and combines them to reduce redundancy.
+    
+    This improves signal density by grouping related findings that share attribution,
+    reducing cognitive load when scanning summaries.
+    """
+    if 'summary' not in structured_summary or 'items' not in structured_summary['summary']:
+        return structured_summary
+    
+    items = structured_summary.get('summary', {}).get('items', [])
+    
+    for item in items:
+        expanded = item.get('expanded', '')
+        if not expanded or '•' not in expanded:
+            continue
+            
+        bullets = [b.strip() for b in expanded.split('\n') if b.strip().startswith('•')]
+        
+        # Group bullets with identical attribution patterns
+        # Example: "X was documented", "Y was documented", "Z was documented"
+        attribution_groups = {}
+        non_grouped_bullets = []
+        
+        for bullet in bullets:
+            # Extract attribution pattern (e.g., "was documented", "was noted")
+            grouped = False
+            for key, patterns in [
+                ('documented', [' was documented', ' were documented']),
+                ('noted', [' was noted', ' were noted']),
+                ('referenced', [' was referenced', ' were referenced']),
+            ]:
+                for pattern in patterns:
+                    if pattern in bullet.lower():
+                        if key not in attribution_groups:
+                            attribution_groups[key] = []
+                        attribution_groups[key].append(bullet)
+                        grouped = True
+                        break
+                if grouped:
+                    break
+            
+            if not grouped:
+                non_grouped_bullets.append(bullet)
+        
+        # If we have 3+ bullets with same attribution, consolidate them
+        consolidated_bullets = []
+        processed_groups = set()
+        
+        for attr_key, group_bullets in attribution_groups.items():
+            if len(group_bullets) >= 3:
+                # Extract the subjects from each bullet
+                subjects = []
+                for bullet in group_bullets:
+                    # Simple extraction: get text before "was documented/noted/referenced"
+                    for pattern in [' was documented', ' were documented', ' was noted', ' were noted', ' was referenced', ' were referenced']:
+                        if pattern in bullet.lower():
+                            # Find pattern case-insensitively
+                            idx = bullet.lower().find(pattern)
+                            if idx > 0:
+                                subject = bullet[2:idx].strip()  # Remove "• " prefix
+                                if subject:
+                                    subjects.append(subject)
+                            break
+                
+                if len(subjects) >= 3:
+                    # Create consolidated bullet
+                    consolidated = f"• The following were {attr_key}: {', '.join(subjects)}"
+                    consolidated_bullets.append(consolidated)
+                    processed_groups.add(attr_key)
+                    logger.info(f"✅ Consolidated {len(subjects)} '{attr_key}' bullets into one for {item.get('field')}")
+                else:
+                    # Not enough valid subjects, keep original bullets
+                    consolidated_bullets.extend(group_bullets)
+            else:
+                # Less than 3 bullets with this attribution - keep separate
+                consolidated_bullets.extend(group_bullets)
+        
+        # Add non-grouped bullets
+        consolidated_bullets.extend(non_grouped_bullets)
+        
+        # Only update if we actually consolidated something
+        if processed_groups:
+            item['expanded'] = '\n'.join(consolidated_bullets)
     
     return structured_summary
