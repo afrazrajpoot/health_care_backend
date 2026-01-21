@@ -242,7 +242,7 @@ class DocumentAnalysis(BaseModel):
     ai_outcome: str = Field(..., description="AI-generated key outcome prediction keywords/phrases")
     document_type: str = Field(..., description="Type of document")
     summary_points: List[str] = Field(..., description="3-5 key points, each 2-3 words")
-    brief_summary: str = Field(..., description="Concise 2-3 sentence professional summary focusing on diagnosis, key findings, treatments, and recommendations")
+    brief_summary: Any = Field(..., description="Concise 2-3 sentence professional summary focusing on diagnosis, key findings, treatments, and recommendations. Can be string or structured object.")
     date_reasoning: Optional[DateReasoning] = Field(None, description="Reasoning behind date assignments")
     is_task_needed: bool = Field(default=False, description="If analysis determines any tasks are needed based on pending actions")
     
@@ -267,7 +267,7 @@ class DocumentAnalysis(BaseModel):
     verification_notes: List[str] = Field(default=[], description="Any issues found during verification")
     
     # 🆕 FORMATTED SUMMARY FOR BOTH MODES
-    formatted_summary: Optional[str] = Field(None, description="Formatted one-line summary appropriate for the mode")
+    formatted_summary: Optional[Any] = Field(None, description="Formatted one-line summary appropriate for the mode. Can be string or structured object.")
 
 class BriefSummary(BaseModel):
     """Structured brief summary of the report"""

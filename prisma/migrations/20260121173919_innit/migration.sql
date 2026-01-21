@@ -73,6 +73,7 @@ CREATE TABLE "documents" (
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
     "ur_denial_reason" TEXT,
+    "aiSummarizerText" TEXT,
     "userId" TEXT,
 
     CONSTRAINT "documents_pkey" PRIMARY KEY ("id")
@@ -219,7 +220,8 @@ CREATE TABLE "fail_docs" (
     "fileName" TEXT,
     "gcsFileLink" TEXT,
     "dob" TEXT,
-    "summary" TEXT,
+    "author" TEXT,
+    "aiSummarizerText" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -331,6 +333,7 @@ CREATE TABLE "patient_intake_updates" (
     "keyFindings" TEXT,
     "adlEffectPoints" TEXT[] DEFAULT ARRAY[]::TEXT[],
     "intakePatientPoints" TEXT[] DEFAULT ARRAY[]::TEXT[],
+    "generatedPoints" TEXT[] DEFAULT ARRAY[]::TEXT[],
     "medRefillsRequested" TEXT,
     "newAppointments" TEXT,
     "adlChanges" TEXT,
@@ -424,9 +427,6 @@ CREATE INDEX "treatment_histories_patientName_dob_claimNumber_idx" ON "treatment
 
 -- CreateIndex
 CREATE INDEX "treatment_histories_physicianId_idx" ON "treatment_histories"("physicianId");
-
--- CreateIndex
-CREATE UNIQUE INDEX "treatment_histories_patientName_dob_claimNumber_physicianId_key" ON "treatment_histories"("patientName", "dob", "claimNumber", "physicianId");
 
 -- AddForeignKey
 ALTER TABLE "accounts" ADD CONSTRAINT "accounts_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;

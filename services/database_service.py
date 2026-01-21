@@ -379,26 +379,27 @@ class DatabaseService:
         patient_name: str,
         physicianId: Optional[str] = None,
         dob: Optional[str] = None,
-        claim_number: Optional[str] = None
+        doi: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Retrieve ALL matching documents for a patient using comprehensive matching rules.
+        Uses DOI (Date of Injury) to differentiate between different cases for the same patient.
         
         🔥 MATCHING RULES IMPLEMENTED:
-        - Rule 1: Different claims → DIFFERENT PATIENT
-        - Rule 2: Same claim → SAME PATIENT (highest priority)
-        - Rule 3: Both claims None → Use name + DOB logic
+        - Rule 1: Different DOI → DIFFERENT CASE (different injury for same patient)
+        - Rule 2: Same DOI → SAME CASE (highest priority)
+        - Rule 3: Both DOI None → Use name + DOB logic
         
-        Returns: Aggregated response with ALL matching documents and merged patient details.
+        Returns: Aggregated response with ALL matching documents for the specific case (DOI).
         """
         try:
-            # Normalize search inputs for claim and DOB only (name uses flexible matching)
-            normalized_input_claim = normalize_claim(claim_number)
+            # Normalize search inputs for DOI and DOB only (name uses flexible matching)
+            normalized_input_doi = normalize_dob(doi)  # Reuse normalize_dob for DOI
             normalized_input_dob = normalize_dob(dob)
             
-            logger.info(f"🔍 Searching for patient:")
-            logger.info(f"  Input: name='{patient_name}', dob='{dob}', claim='{claim_number}'")
-            logger.info(f"  Normalized: dob='{normalized_input_dob}', claim='{normalized_input_claim}'")
+            logger.info(f"🔍 Searching for patient case:")
+            logger.info(f"  Input: name='{patient_name}', dob='{dob}', doi='{doi}'")
+            logger.info(f"  Normalized: dob='{normalized_input_dob}', doi='{normalized_input_doi}'")
             
             # Fetch ALL documents for physician (broad query)
             where_clause = {}
@@ -424,33 +425,33 @@ class DatabaseService:
             for i, doc in enumerate(documents):
                 # 🆕 CRITICAL: Pass ORIGINAL names (not normalized) to is_same_patient()
                 # is_same_patient() will generate all name variations internally
-                db_claim = normalize_claim(doc.claimNumber)
+                db_doi = normalize_dob(doc.doi)  # Normalize DOI for comparison
                 db_dob = normalize_dob(doc.dob)
                 
-                logger.info(f"📋 Checking Doc {i+1}/{len(documents)}: Name='{doc.patientName}', DOB='{doc.dob}'→'{db_dob}', Claim='{doc.claimNumber}'→'{db_claim}'")
+                logger.info(f"📋 Checking Doc {i+1}/{len(documents)}: Name='{doc.patientName}', DOB='{doc.dob}'→'{db_dob}', DOI='{doc.doi}'→'{db_doi}'")
                 
                 if is_same_patient(
-                    patient_name, normalized_input_dob, normalized_input_claim,
-                    doc.patientName, db_dob, db_claim
+                    patient_name, normalized_input_dob, normalized_input_doi,
+                    doc.patientName, db_dob, db_doi
                 ):
                     logger.info(f"✅ MATCH! Adding document {doc.id[:12]}...")
                     matched_docs.append(doc)
                 else:
                     logger.debug(f"❌ NO MATCH for document {doc.id[:12]}...")
             
-            logger.info(f"🎯 Found {len(matched_docs)} matching documents")
+            logger.info(f"🎯 Found {len(matched_docs)} matching documents for this case")
             
             # Merge patient details from all matched documents
             # Priority: Use most complete/recent data
             merged_patient_name = patient_name
             merged_dob = dob
-            merged_claim = claim_number
+            merged_doi = doi
             
             for doc in matched_docs:
-                # Use first non-empty claim number found
-                if not merged_claim or str(merged_claim).lower() in ["not specified", "unknown"]:
-                    if doc.claimNumber and str(doc.claimNumber).lower() not in ["not specified", "unknown"]:
-                        merged_claim = doc.claimNumber
+                # Use first non-empty DOI found
+                if not merged_doi or str(merged_doi).lower() in ["not specified", "unknown"]:
+                    if doc.doi and str(doc.doi).lower() not in ["not specified", "unknown"]:
+                        merged_doi = doc.doi
                 
                 # Use first non-empty DOB found
                 if not merged_dob or str(merged_dob).lower() in ["not specified", "unknown"]:
@@ -461,12 +462,13 @@ class DatabaseService:
                 if len(str(doc.patientName)) > len(str(merged_patient_name)):
                     merged_patient_name = doc.patientName
             
-            logger.info(f"📝 Merged patient details: name='{merged_patient_name}', dob='{merged_dob}', claim='{merged_claim}'")
+            logger.info(f"📝 Merged patient details: name='{merged_patient_name}', dob='{merged_dob}', doi='{merged_doi}'")
             
             response = {
                 "patient_name": merged_patient_name,
                 "dob": merged_dob,
-                "claim_number": merged_claim,
+                "doi": merged_doi,
+                "claim_number": None,  # Keep for backward compatibility
                 "total_documents": len(matched_docs),
                 "documents": []
             }
@@ -485,7 +487,8 @@ class DatabaseService:
             return {
                 "patient_name": patient_name,
                 "dob": dob,
-                "claim_number": claim_number,
+                "doi": doi,
+                "claim_number": None,
                 "total_documents": 0,
                 "documents": []
             }
@@ -519,12 +522,13 @@ class DatabaseService:
         self, 
         patient_name: str, 
         dob: Optional[str] = None, 
-        claim_number: Optional[str] = None, 
+        doi: Optional[str] = None, 
         physician_id: Optional[str] = None
     ) -> List[Dict]:
         """
-        Fetch all tasks (with quickNotes and description) by patient details (name, dob, claim_number),
+        Fetch all tasks (with quickNotes and description) by patient details (name, dob, doi),
         optionally filtered by physician_id. Includes all statuses (not just Pending).
+        Uses DOI to identify the specific case/injury.
         """
         # await self.initialize_db()  # This initializes DocumentAggregationService's db_service
 
@@ -543,12 +547,12 @@ class DatabaseService:
                     except ValueError:
                         dob_value = dob  # keep string if parsing fails
 
-        # ✅ Fetch related documents first
+        # ✅ Fetch related documents first using DOI-based matching
         document_data = await self.get_document_by_patient_details(
             patient_name=patient_name,
             physicianId=physician_id,
             dob=dob_value,
-            claim_number=claim_number
+            doi=doi
         )
 
         # ✅ If no documents found, return empty list
@@ -679,19 +683,19 @@ class DatabaseService:
         patient_name: str,
         dob: str,
         physician_id: str,
-        claim_number: str,
-        doi: Optional[str] = None,
+        doi: str,
+        claim_number: Optional[str] = None,
     ) -> int:
-        print(patient_name, physician_id, claim_number, dob, 'patient data for update')
+        print(patient_name, physician_id, doi, dob, 'patient data for update')
         
-        # 🚨 CRITICAL FIX: Use STRICT patient matching criteria
-        # Only update documents that definitely belong to the SAME patient
+        # 🚨 CRITICAL FIX: Use STRICT patient matching criteria with DOI as primary identifier
+        # Only update documents that definitely belong to the SAME case (same patient + DOI)
         
         or_conditions = []
         
-        # Condition 1: Exact claim number match (strongest identifier)
-        if claim_number and claim_number.lower() != "not specified":
-            or_conditions.append({"claimNumber": claim_number})
+        # Condition 1: Exact DOI match (strongest identifier for same case/injury)
+        if doi and doi.lower() != "not specified":
+            or_conditions.append({"doi": doi})
         
         # Condition 2: Patient name + DOB match (strong identifier)
         if (patient_name and patient_name.lower() != "not specified" and 
@@ -703,13 +707,13 @@ class DatabaseService:
                 ]
             })
         
-        # Condition 3: If we have DOI + patient name match
-        if (doi and doi.lower() != "not specified" and 
+        # Condition 3: If we have claim_number + patient name match (backward compatibility)
+        if (claim_number and claim_number.lower() != "not specified" and 
             patient_name and patient_name.lower() != "not specified"):
             or_conditions.append({
                 "AND": [
                     {"patientName": patient_name},
-                    {"doi": doi}
+                    {"claimNumber": claim_number}
                 ]
             })
         
@@ -728,7 +732,7 @@ class DatabaseService:
             where=fetch_where,
         )
         
-        logger.info(f"🔍 Found {len(documents_to_update)} documents for SAME PATIENT (physician '{physician_id}')")
+        logger.info(f"🔍 Found {len(documents_to_update)} documents for SAME CASE (physician '{physician_id}')")
         logger.info(f"   Matching criteria: {or_conditions}")
         
         updated_count = 0
@@ -748,13 +752,13 @@ class DatabaseService:
                 update_data["dob"] = dob
                 logger.debug(f"  - Will update dob for doc {doc.id}: '{doc.dob}' -> '{dob}'")
             
-            # Update claimNumber if missing
-            if not doc.claimNumber or str(doc.claimNumber).lower() == "not specified":
-                update_data["claimNumber"] = claim_number
-                logger.debug(f"  - Will update claimNumber for doc {doc.id}: '{doc.claimNumber}' -> '{claim_number}'")
+            # Update doi if missing (primary identifier for case)
+            if not doc.doi or str(doc.doi).lower() == "not specified":
+                update_data["doi"] = doi
+                logger.debug(f"  - Will update doi for doc {doc.id}: '{doc.doi}' -> '{doi}'")
             
-            # Update doi if provided and missing or doesn't match
-            if doi and str(doi).lower() != "not specified":
+            # Update claimNumber if provided and missing or doesn't match
+            if claim_number and str(claim_number).lower() != "not specified":
                 if (not doc.doi or str(doc.doi).lower() == "not specified" or
                     str(doc.doi) != doi):
                     update_data["doi"] = doi
@@ -780,14 +784,14 @@ class DatabaseService:
         patient_name: Optional[str] = None,
         physicianId: Optional[str] = None,
         dob: Optional[any] = None,  # 🆕 Change to 'any' to accept both string and datetime
-        claim_number: Optional[str] = None,
+        doi: Optional[str] = None,  # 🆕 Use DOI instead of claim_number
     ) -> Dict[str, Any]:
         try:
             logger.info(f"🎯 DEBUG - get_patient_claim_numbers CALLED WITH:")
             logger.info(f"  - patient_name: '{patient_name}'")
             logger.info(f"  - physicianId: '{physicianId}'")
             logger.info(f"  - dob: '{dob}' (type: {type(dob)})")  # 🆕 Log the type
-            logger.info(f"  - claim_number: '{claim_number}'")
+            logger.info(f"  - doi: '{doi}'")
             
             # 🆕 ENHANCED: Build multiple WHERE clauses for better matching
             where_conditions = []
@@ -812,39 +816,39 @@ class DatabaseService:
             
             formatted_dob = format_dob_for_query(dob)
             
-            # 🆕 MULTI-FIELD MATCHING: Try different combinations
-            if claim_number and patient_name and formatted_dob:
+            # 🆕 MULTI-FIELD MATCHING: Try different combinations using DOI
+            if doi and patient_name and formatted_dob:
                 # Case 1: All three fields provided - strongest match
                 where_conditions.append({
                     "OR": [
-                        {"claimNumber": claim_number},
+                        {"doi": doi},
                         {"AND": [
                             {"patientName": patient_name},
                             {"dob": formatted_dob}  # 🆕 Use formatted_dob
                         ]}
                     ]
                 })
-                logger.info(f"🔍 Using multi-field match: claim_number + patient_name + dob")
+                logger.info(f"🔍 Using multi-field match: doi + patient_name + dob")
             
-            elif claim_number and patient_name:
-                # Case 2: Claim number + patient name
+            elif doi and patient_name:
+                # Case 2: DOI + patient name
                 where_conditions.append({
                     "OR": [
-                        {"claimNumber": claim_number},
+                        {"doi": doi},
                         {"patientName": patient_name}
                     ]
                 })
-                logger.info(f"🔍 Using dual-field match: claim_number + patient_name")
+                logger.info(f"🔍 Using dual-field match: doi + patient_name")
             
-            elif claim_number and formatted_dob:
-                # Case 3: Claim number + DOB
+            elif doi and formatted_dob:
+                # Case 3: DOI + DOB
                 where_conditions.append({
                     "OR": [
-                        {"claimNumber": claim_number},
+                        {"doi": doi},
                         {"dob": formatted_dob}  # 🆕 Use formatted_dob
                     ]
                 })
-                logger.info(f"🔍 Using dual-field match: claim_number + dob")
+                logger.info(f"🔍 Using dual-field match: doi + dob")
             
             elif patient_name and formatted_dob:
                 # Case 4: Patient name + DOB
@@ -856,10 +860,10 @@ class DatabaseService:
                 })
                 logger.info(f"🔍 Using dual-field match: patient_name + dob")
             
-            elif claim_number:
-                # Case 5: Only claim number
-                where_conditions.append({"claimNumber": claim_number})
-                logger.info(f"🔍 Using single-field match: claim_number")
+            elif doi:
+                # Case 5: Only DOI
+                where_conditions.append({"doi": doi})
+                logger.info(f"🔍 Using single-field match: doi")
             
             elif patient_name:
                 # Case 6: Only patient name
@@ -886,7 +890,7 @@ class DatabaseService:
             
             logger.info(f"🎯 DEBUG - RAW DOCUMENTS FOUND: {len(documents)}")
             for i, doc in enumerate(documents):
-                logger.info(f"  Doc {i+1}: patientName='{getattr(doc, 'patientName', None)}', dob='{getattr(doc, 'dob', None)}', claimNumber='{getattr(doc, 'claimNumber', None)}', physicianId='{getattr(doc, 'physicianId', None)}'")
+                logger.info(f"  Doc {i+1}: patientName='{getattr(doc, 'patientName', None)}', dob='{getattr(doc, 'dob', None)}', doi='{getattr(doc, 'doi', None)}', claimNumber='{getattr(doc, 'claimNumber', None)}', physicianId='{getattr(doc, 'physicianId', None)}'")
             
             # Extract fields from documents
             claim_numbers = [
@@ -918,11 +922,11 @@ class DatabaseService:
             primary_doi = get_primary_value(dois)
             primary_claim_number = get_primary_value(claim_numbers)
 
-            # Detect conflicting claim numbers
-            valid_claims_set = set([c for c in claim_numbers if c and str(c).lower() != 'not specified'])
-            has_conflicting_claims = len(valid_claims_set) > 1
+            # Detect conflicting DOIs (different cases for same patient)
+            valid_dois_set = set([d for d in dois if d and str(d).lower() != 'not specified'])
+            has_conflicting_cases = len(valid_dois_set) > 1
 
-            logger.info(f"✅ Found {len(documents)} documents for lookup: patient_name={primary_patient_name}, dob={primary_dob}, doi={primary_doi}, claim={primary_claim_number}, conflicting_claims={has_conflicting_claims}")
+            logger.info(f"✅ Found {len(documents)} documents for lookup: patient_name={primary_patient_name}, dob={primary_dob}, doi={primary_doi}, claim={primary_claim_number}, conflicting_cases={has_conflicting_cases}")
             
             return {
                 "patient_name": primary_patient_name,
@@ -930,8 +934,8 @@ class DatabaseService:
                 "doi": primary_doi,
                 "claim_number": primary_claim_number,
                 "total_documents": len(documents),
-                "has_conflicting_claims": has_conflicting_claims,
-                "unique_valid_claims": list(valid_claims_set),
+                "has_conflicting_cases": has_conflicting_cases,
+                "unique_valid_dois": list(valid_dois_set),
                 "documents": [
                     {
                         "patientName": doc.patientName,
@@ -998,7 +1002,7 @@ class DatabaseService:
             doi: str,
             rd: datetime,
             status: str,
-            brief_summary: str,
+            brief_summary: Any, # Changed to Any to support JSON summary
             summary_snapshots: List[Dict[str, Any]],
             whats_new: Dict[str, Any],
             adl_data: Dict[str, Any],
@@ -1028,8 +1032,14 @@ class DatabaseService:
                 if "createdAt" in document_summary and "date" not in document_summary:
                     document_summary["date"] = document_summary["createdAt"]
 
-                # ✅ Step 2: Handle whatsNew as JSON string (for scalar Json field)
+                # ✅ Step 2: Handle whatsNew and briefSummary as JSON strings if needed
                 whats_new_json = json.dumps(whats_new) if whats_new else None
+
+                # Serialize brief_summary if it's a dict/list (for Prisma String field compatibility)
+                if isinstance(brief_summary, (dict, list)):
+                    brief_summary_val = json.dumps(brief_summary)
+                else:
+                    brief_summary_val = brief_summary
 
                 # ✅ Step 3: Use the FIRST snapshot as primary summarySnapshot (for backward compatibility)
                 primary_snapshot = summary_snapshots[0] if summary_snapshots else {}
@@ -1042,7 +1052,7 @@ class DatabaseService:
                     "doi": doi,
                     "status": status,
                     "gcsFileLink": gcs_file_link,
-                    "briefSummary": brief_summary,
+                    "briefSummary": brief_summary_val,
                     "whatsNew": whats_new_json,
                     "physicianId": physician_id,
                     "reportDate": rd,  # Use actual report date only, None if not found (do NOT fallback to current date)
@@ -1198,11 +1208,15 @@ class DatabaseService:
                 }
 
                 # ✅ Step 10: Document Summary
+                doc_summary_val = document_summary.get("summary", "")
+                if isinstance(doc_summary_val, (dict, list)):
+                    doc_summary_val = json.dumps(doc_summary_val)
+
                 document_data["documentSummary"] = {
                     "create": {
                         "type": document_summary.get("type", ""),
                         "date": rd if rd else datetime.now(),
-                        "summary": document_summary.get("summary", "")
+                        "summary": doc_summary_val
                     }
                 }
 

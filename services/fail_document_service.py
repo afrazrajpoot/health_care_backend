@@ -3,8 +3,9 @@ Fail Document Update Service - Handles updating and reprocessing failed document
 Extracted from webhook_service.py for better modularity
 """
 from datetime import datetime
-from typing import Any, List
+from typing import Any, List, Optional, Dict
 from fastapi import HTTPException
+from pydantic import BaseModel, Field
 from models.data_models import DocumentAnalysis
 from services.report_analyzer import ReportAnalyzer
 from utils.logger import logger
@@ -13,11 +14,172 @@ import asyncio
 import json
 import re
 
+# --- Report Field Matrix: Defines allowed fields per document type ---
+REPORT_FIELD_MATRIX: Dict[str, Dict] = {
+    # Med-Legal Reports (QME family)
+    "QME": {
+        "allowed": {
+            "mechanism_of_injury",
+            "findings",
+            "physical_exam",
+            "medications",
+            "recommendations",
+            "rationale",
+            "mmi_status",
+            "work_status"
+        }
+    },
+    "AME": {"inherit": "QME"},
+    "PQME": {"inherit": "QME"},
+    "IME": {"inherit": "QME"},
 
-async def generate_concise_brief_summary(raw_summary_text: str, document_type: str = "Medical Document", llm_executor=None) -> str:
+    # Consult / Clinical Reports
+    "CONSULT": {
+        "allowed": {
+            "mechanism_of_injury",
+            "findings",
+            "physical_exam",
+            "medications",
+            "recommendations"
+        }
+    },
+    "PAIN MANAGEMENT": {"inherit": "CONSULT"},
+    "PROGRESS NOTE": {"inherit": "CONSULT"},
+    "OFFICE VISIT": {"inherit": "CONSULT"},
+    "CLINIC NOTE": {"inherit": "CONSULT"},
+
+    # Imaging Reports
+    "MRI": {
+        "allowed": {"findings", "impressions"}
+    },
+    "CT": {"inherit": "MRI"},
+    "X-RAY": {"inherit": "MRI"},
+    "XRAY": {"inherit": "MRI"},
+    "ULTRASOUND": {"inherit": "MRI"},
+    "EMG": {"inherit": "MRI"},
+    "PET SCAN": {"inherit": "MRI"},
+    "BONE SCAN": {"inherit": "MRI"},
+    "DEXA SCAN": {"inherit": "MRI"},
+
+    # Utilization Review
+    "UR": {
+        "allowed": {"recommendations", "rationale"}
+    },
+    "IMR": {"inherit": "UR"},
+    "PEER REVIEW": {"inherit": "UR"},
+
+    # Therapy Reports
+    "PHYSICAL THERAPY": {
+        "allowed": {
+            "mechanism_of_injury",
+            "findings",
+            "recommendations"
+        }
+    },
+    "THERAPY NOTE": {"inherit": "PHYSICAL THERAPY"},
+    "OCCUPATIONAL THERAPY": {"inherit": "PHYSICAL THERAPY"},
+    "CHIROPRACTIC": {"inherit": "PHYSICAL THERAPY"},
+
+    # Surgical / Operative Reports
+    "SURGERY REPORT": {
+        "allowed": {"findings"}
+    },
+    "OPERATIVE NOTE": {"inherit": "SURGERY REPORT"},
+    "POST-OP": {"inherit": "SURGERY REPORT"},
+
+    # PR-2 Reports
+    "PR-2": {
+        "allowed": {
+            "mechanism_of_injury",
+            "findings",
+            "physical_exam",
+            "medications",
+            "recommendations",
+            "work_status"
+        }
+    },
+    "PR2": {"inherit": "PR-2"},
+
+    # Labs & Diagnostics
+    "LABS": {
+        "allowed": {"findings"}
+    },
+    "PATHOLOGY": {"inherit": "LABS"},
+
+    # Legal / Administrative Reports
+    "ATTORNEY QUESTIONS": {
+        "allowed": {"questions", "mmi_status", "work_status"}
+    },
+    "ADJUSTER QUESTIONS": {"inherit": "ATTORNEY QUESTIONS"},
+    "NURSE CASE MANAGER": {"inherit": "ATTORNEY QUESTIONS"},
+
+    # Default fallback
+    "DEFAULT": {
+        "allowed": {"findings", "recommendations"}
+    }
+}
+
+# --- Pydantic Models for Structured Summary ---
+
+class DocumentMetadata(BaseModel):
+    document_type: str = Field(description="Type of the document extracted from context", default="Unknown")
+
+class MedicationItem(BaseModel):
+    name: str = Field(description="Exact medication name")
+    dosage: str = Field(description="Exact dosage")
+    frequency: Optional[str] = Field(description="Frequency if specified")
+    status: Optional[str] = Field(description="prescribed/continued/discontinued")
+    unclear_requires_verification: Optional[bool] = Field(description="Set to true only if details are unclear")
+
+class TestResultItem(BaseModel):
+    test_name: str = Field(description="Exact test name")
+    result: str = Field(description="Exact result value")
+    date: Optional[str] = Field(description="Date of test if mentioned")
+    interpretation: Optional[str] = Field(description="Interpretation only if explicitly stated")
+
+class FollowUpItem(BaseModel):
+    plan: Optional[str] = Field(description="Exact follow-up plan")
+    timeframe: Optional[str] = Field(description="Timeframe if mentioned")
+
+class AuthorizationStatusItem(BaseModel):
+    status: Optional[str] = Field(description="approved/denied/modified/pending")
+    details: Optional[str] = Field(description="Specific details")
+    conditions: List[str] = Field(default_factory=list, description="Any conditions mentioned")
+
+class VitalSignsItem(BaseModel):
+    parameter: str = Field(description="Name of the vital sign")
+    value: str = Field(description="Value of the vital sign with units")
+
+class StructuredSummaryResponse(BaseModel):
+    # Standard Output Fields (Global Schema) - shown first when relevant
+    document_metadata: DocumentMetadata
+    primary_diagnosis: Optional[List[str]] = Field(default=None, description="Exact diagnoses as stated")
+    clinical_findings: Optional[List[str]] = Field(default=None, description="Specific findings mentioned")
+    medications: Optional[List[MedicationItem]] = Field(default=None)
+    procedures: Optional[List[str]] = Field(default=None, description="Exact procedures mentioned")
+    test_results: Optional[List[TestResultItem]] = Field(default=None)
+    recommendations: Optional[List[str]] = Field(default=None, description="Exact recommendations")
+    follow_up: Optional[FollowUpItem] = Field(default=None, description="Follow up plan details")
+    authorization_status: Optional[AuthorizationStatusItem] = Field(default=None, description="Authorization status details")
+    allergies: Optional[List[str]] = Field(default=None, description="Exact allergies listed")
+    vital_signs: Optional[Dict[str, str]] = Field(default=None, description="Key value pairs of vital signs (e.g., 'BP': '120/80')")
+    unclear_items: Optional[List[str]] = Field(default=None, description="Any information that requires verification")
+    additional_notes: Optional[List[str]] = Field(default=None, description="Any other relevant information not fitting above categories")
+    
+    # Report Type-Specific Fields (from REPORT_FIELD_MATRIX)
+    mechanism_of_injury: Optional[str] = Field(default=None, description="Exact mechanism of injury as stated")
+    # findings: Optional[List[str]] = Field(default=None, description="Specific findings from the report")
+    physical_exam: Optional[Dict[str, str]] = Field(default=None, description="Physical examination findings")
+    rationale: Optional[str] = Field(default=None, description="Rationale for decision or recommendation")
+    mmi_status: Optional[str] = Field(default=None, description="Maximum Medical Improvement status")
+    work_status: Optional[str] = Field(default=None, description="Work restrictions or status")
+    impressions: Optional[List[str]] = Field(default=None, description="Impressions from imaging or diagnostic reports")
+    questions: Optional[List[Dict[str, str]]] = Field(default=None, description="Questions and answers from legal/administrative documents")
+
+async def generate_concise_brief_summary(raw_summary_text: str, document_type: str = "Medical Document", llm_executor=None) -> dict:
     """
-    Uses LLM to transform the raw summarizer output into a concise, accurate professional summary.
-    Focuses on factual extraction without adding interpretations or missing critical details.
+    Uses LLM to transform the raw summarizer output into a structured JSON format.
+    Extracts ONLY explicitly stated information without fabrication or interpretation.
     
     Args:
         raw_summary_text: The raw summary text to process
@@ -25,17 +187,20 @@ async def generate_concise_brief_summary(raw_summary_text: str, document_type: s
         llm_executor: ThreadPoolExecutor for running LLM operations
         
     Returns:
-        Concise brief summary string
+        Dictionary with structured summary data
     """
     if not raw_summary_text or len(raw_summary_text) < 10:
-        return "Summary not available"
+        return {"status": "unavailable", "message": "Summary not available"}
 
     try:
-        logger.info("🤖 Generating concise brief summary using LLM...")
+        logger.info("🤖 Generating structured JSON summary using LLM and PydanticOutputParser...")
         
         from langchain_core.prompts import ChatPromptTemplate
         from langchain_openai import AzureChatOpenAI
+        from langchain_core.output_parsers import PydanticOutputParser
         from config.settings import CONFIG
+
+        parser = PydanticOutputParser(pydantic_object=StructuredSummaryResponse)
 
         llm = AzureChatOpenAI(
             azure_endpoint=CONFIG.get("azure_openai_endpoint"),
@@ -43,48 +208,66 @@ async def generate_concise_brief_summary(raw_summary_text: str, document_type: s
             deployment_name=CONFIG.get("azure_openai_deployment"),
             api_version=CONFIG.get("azure_openai_api_version"),
             temperature=0.0,  # Zero temperature for maximum factual accuracy
-            timeout=30
+            timeout=30,
+            model_kwargs={"response_format": {"type": "json_object"}} 
         )
 
-        system_template = """You are a medical documentation assistant specialized in accurate information extraction.
+        system_template = """You are a medical documentation assistant that extracts information into structured JSON format.
 
-CRITICAL RULES:
-1. Extract ONLY information explicitly stated in the raw summary - DO NOT infer, assume, or add any details
-2. If critical information is present, include it even if it makes the summary longer
-3. Preserve ALL specific medical details: diagnoses, medications (with dosages), test results, dates, measurements
-4. Use the EXACT medical terminology from the source - do not paraphrase medical terms
-5. If information is uncertain or not clearly stated, omit it rather than guessing
-6. Do not include generic statements like "patient was treated" without specifying what treatment
+CRITICAL EXTRACTION RULES:
 
-STRUCTURE (only include sections with available information):
-- Primary diagnosis/condition with any relevant clinical findings
-- Key interventions, procedures, or medications (include specific names and dosages if mentioned)
-- Critical test results or measurements if present
-- Current status, follow-up plan, or next steps
+1. **No Fabrication**: Extract ONLY information explicitly stated in the raw summary - ZERO fabrication or inference
+2. **Exact Wording**: Use EXACT wording from source - do not paraphrase medical terms or values
+3. **No Assumptions**: Do not generate or infer any information not present in the document
+4. **Field Selection**: Only return fields that:
+   - Are allowed for the detected report type (per REPORT_FIELD_MATRIX), AND
+   - Actually have data present in the source document
+5. **Omit Empty Fields**: DO NOT include any field if that information is not present in the source
+   - Use `null` for optional fields with no data, or omit them entirely
+6. **No Duplication**: Do not return the same information in multiple fields
+   - For example, do not return recommendations in both matrix fields and global fields
+7. **Standard Fields First**: Use standard global fields when they apply:
+   - primary_diagnosis, clinical_findings, medications, procedures, test_results
+   - recommendations, follow_up, authorization_status, vital_signs, allergies
+   - unclear_items, additional_notes
+8. **Matrix Fields**: Use report-type-specific fields only when allowed for this document type:
+   - mechanism_of_injury, findings, physical_exam, rationale, mmi_status
+   - work_status, impressions, questions
+9. **Unknown Information**: If new information doesn't match any defined field, place it in additional_notes
+10. **Data Integrity**: This is a pure extraction system, not generative:
+    - Use only existing content from the report
+    - No hallucinations, no AI-created data
+    - Structure and filter strictly using the schema
 
-OUTPUT FORMAT:
-- Write in clear, concise paragraphs (NOT bullet points)
-- No headers, no "Here is the summary" preamble
-- Aim for 3-5 sentences, but extend if necessary to capture all critical information
-- Prioritize completeness and accuracy over brevity
-
-If the raw summary lacks substantive medical information, state "Limited clinical information available in source document" rather than fabricating content."""
+{format_instructions}
+"""
 
         user_template = f"""Document Type: {document_type}
 
 Raw Summary Input:
 {raw_summary_text}
 
-Extract and present the concise summary following the rules above:"""
+**IMPORTANT**: Based on the document type "{document_type}", only extract fields that are:
+1. Allowed for this report type according to REPORT_FIELD_MATRIX
+2. Actually present in the raw summary above
+
+Do not include fields with no data. Do not fabricate or infer information.
+
+Extract into structured JSON following all rules above."""
         
         prompt = ChatPromptTemplate.from_messages([
             ("system", system_template),
             ("user", user_template)
         ])
         
-        chain = prompt | llm
+        # Inject format instructions
+        prompt_with_instructions = prompt.partial(format_instructions=parser.get_format_instructions())
+        
+        # Chain now includes parser
+        chain = prompt_with_instructions | llm | parser
         
         # Run in executor to avoid blocking
+        # Note: parser is synchronous, but the whole chain execution via invoke can be wrapped
         if llm_executor:
             response = await asyncio.get_event_loop().run_in_executor(
                 llm_executor, 
@@ -93,32 +276,77 @@ Extract and present the concise summary following the rules above:"""
         else:
             response = await asyncio.to_thread(lambda: chain.invoke({}))
         
-        clean_summary = response.content.strip()
+        # Response is already a Pydantic object
+        structured_summary = response.model_dump()
         
-        # Validation: Check if summary is suspiciously short given substantial input
-        if len(raw_summary_text) > 200 and len(clean_summary) < 50:
-            logger.warning("⚠️ Generated summary may be incomplete - falling back to raw summary")
-            return (raw_summary_text[:500] + "...") if len(raw_summary_text) > 500 else raw_summary_text
+        # Validation: Check if summary extracted meaningful data
+        meaningful_keys = [k for k in structured_summary.keys() 
+                          if k not in ['document_metadata'] 
+                          and structured_summary[k]]
         
-        # Validation: Check for generic/hallucinated content patterns
-        hallucination_indicators = [
-            "patient was seen",
-            "routine care provided",
-            "standard treatment given",
-            "typical findings noted"
-        ]
-        if any(indicator in clean_summary.lower() for indicator in hallucination_indicators):
-            if not any(indicator in raw_summary_text.lower() for indicator in hallucination_indicators):
-                logger.warning("⚠️ Detected potentially fabricated generic content - using raw summary")
-                return (raw_summary_text[:500] + "...") if len(raw_summary_text) > 500 else raw_summary_text
+        if len(meaningful_keys) == 0 and len(raw_summary_text) > 200:
+            logger.warning("⚠️ No meaningful data extracted from substantial input - using fallback")
+            return {
+                "status": "extraction_incomplete",
+                "raw_content": raw_summary_text,
+                "message": "Automated extraction incomplete, raw content preserved"
+            }
         
-        logger.info(f"✅ Generated concise summary ({len(clean_summary)} chars)")
-        return clean_summary
+        # Validation: Check for fabricated generic content
+        def contains_fabricated_content(data, source_text):
+            """Recursively check if any values contain fabricated generic phrases"""
+            generic_phrases = [
+                "patient was seen",
+                "routine care provided", 
+                "standard treatment given",
+                "typical findings noted",
+                "normal results",
+                "as expected"
+            ]
+            
+            source_lower = source_text.lower()
+            
+            def check_value(val):
+                if isinstance(val, str):
+                    val_lower = val.lower()
+                    for phrase in generic_phrases:
+                        if phrase in val_lower and phrase not in source_lower:
+                            return True
+                elif isinstance(val, (list, tuple)):
+                    return any(check_value(v) for v in val)
+                elif isinstance(val, dict):
+                    return any(check_value(v) for v in val.values())
+                return False
+            
+            return check_value(data)
+        
+        if contains_fabricated_content(structured_summary, raw_summary_text):
+            logger.warning("⚠️ Detected potentially fabricated content - using raw summary")
+            return {
+                "status": "fabrication_detected",
+                "raw_content": raw_summary_text,
+                "message": "Potential fabricated content detected, raw content provided for verification"
+            }
+        
+        # Add extraction metadata
+        structured_summary["_extraction_metadata"] = {
+            "source_length": len(raw_summary_text),
+            "extracted_keys": list(structured_summary.keys()),
+            "extraction_timestamp": datetime.now().isoformat()
+        }
+        
+        logger.info(f"✅ Generated structured summary with {len(meaningful_keys)} data sections")
+        return structured_summary
 
     except Exception as e:
-        logger.error(f"❌ Failed to generate concise brief summary: {e}")
-        # Fallback: Return truncated original text with better length handling
-        return (raw_summary_text[:500] + "...") if len(raw_summary_text) > 500 else raw_summary_text
+        logger.error(f"❌ Failed to generate structured summary: {e}")
+        # Fallback: Return raw text in error structure
+        return {
+            "status": "error",
+            "error_message": str(e),
+            "raw_content": raw_summary_text,
+            "message": "Error during extraction, raw content preserved"
+        }
 
 
 async def update_fail_document(
@@ -319,7 +547,15 @@ async def update_fail_document(
         da_claim_number = claim_number or "Not specified"
         da_dob = dob_str or "0000-00-00" 
         da_doi = doi or "0000-00-00"
-        da_author = author or "Not specified"
+        
+        # For task-only documents (not valid for summary card), we bypass author/clinic member checks
+        # by treating the consulting_doctor as Not specified, ensuring the flow continues for task generation
+        if is_valid_for_summary_card:
+            da_author = author or "Not specified"
+        else:
+            da_author = "Not specified"
+            if author:
+                logger.info(f"ℹ️ Task-only document: Skipping consulting_doctor assignment for author '{author}' to allow processing")
         
         # Manually construct DocumentAnalysis
         document_analysis = DocumentAnalysis(
@@ -374,7 +610,8 @@ async def update_fail_document(
             logger.info(f"✅ Overridden claim_number: {updated_fields['claim_number']}")
         
         # ✅ Override consulting_doctor (author) if provided by user
-        if author and str(author).strip().lower() not in ["not specified", "unknown", "none", ""]:
+        # Only override if document is valid for summary card (medical document)
+        if is_valid_for_summary_card and author and str(author).strip().lower() not in ["not specified", "unknown", "none", ""]:
             document_analysis.consulting_doctor = author.strip()
             logger.info(f"✅ Overridden consulting_doctor (author): {author}")
 

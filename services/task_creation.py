@@ -31,6 +31,8 @@ class AITask(BaseModel):
 class TaskCreationResult(BaseModel):
     internal_tasks: List[AITask] = Field(default_factory=list, description="Tasks for internal clinic operations")
 
+
+
 # ------------------ TASK CREATOR ------------------
 class TaskCreator:
     """Universal AI task generator that separates internal and external tasks."""
@@ -53,8 +55,17 @@ Generate internal_tasks array:
 1. **internal_tasks**: Tasks for OUR clinic's workflow
 
 Generate ALL relevant tasks for this category. The system will handle these workflows.
+First understand the document deeply, then create tasks based on the principles below.
+**⚠️ CRITICAL: Temporal Context Awareness**
+* Documents often contain HISTORICAL information (past denials, previous authorizations, prior treatments, past appeals, completed procedures)
+* You must DISTINGUISH between:
+  - ✅ CURRENT/FUTURE actions needed NOW (create tasks for these)
+  - ❌ PAST events that already happened (DO NOT create tasks for these)
+* Look for temporal indicators:
+  - Historical sections: "Treatment History", "Prior Authorizations", "Previous Appeals", "Past Denials"
+* **ONLY create tasks for CURRENT recommendations and PRESENT/FUTURE actions needed**
+* If unsure about timing, look for dates, context clues, and the document's primary purpose
 
----
 
 ## 📋 TASK GENERATION PRINCIPLES
 

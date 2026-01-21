@@ -306,11 +306,12 @@ async def get_document(
     patient_name: str,
     dob: Optional[str] = None,
     physicianId: Optional[str] = None,
-    claim_number: Optional[str] = None
+    doi: Optional[str] = None
 ):
     """
-    Get aggregated document for a patient
-    Returns a single aggregated document from all patient documents
+    Get aggregated document for a patient's specific case (identified by DOI).
+    Returns a single aggregated document from all patient documents for the case.
+    If DOI is not provided, returns documents based on patient name and DOB.
     """
     try:
         service = DocumentAggregationService()
@@ -318,7 +319,7 @@ async def get_document(
             patient_name=patient_name,
             dob=dob,
             physician_id=physicianId,
-            claim_number=claim_number
+            doi=doi
         )
         return response
 

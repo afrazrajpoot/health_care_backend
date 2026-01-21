@@ -29,7 +29,7 @@ async def save_document(
     Returns:
         dict with status, document_id, parse_count_decremented, filename, cache_success
     """
-    # ✅ Check if both DOB and claim number are not specified
+    # ✅ Check if both DOB and DOI are not specified
     document_analysis = processed_data["document_analysis"]
     dob_not_specified = (
         not hasattr(document_analysis, 'dob') or 
@@ -37,13 +37,13 @@ async def save_document(
         str(document_analysis.dob).lower() in ["not specified", "none", ""]
     )
     
-    claim_not_specified = (
-        not lookup_result.get("claim_to_save") or 
-        str(lookup_result["claim_to_save"]).lower() in ["not specified", "none", ""]
+    doi_not_specified = (
+        not lookup_result.get("doi_to_save") or 
+        str(lookup_result["doi_to_save"]).lower() in ["not specified", "none", ""]
     )
     
-    # If both DOB and claim number are not specified, save as fail document
-    if dob_not_specified and claim_not_specified:
+    # If both DOB and DOI are not specified, save as fail document
+    if dob_not_specified and doi_not_specified:
         # ✅ Get the actual parsed text from the result data
         parsed_text = processed_data["result_data"].get("text", "")
         
@@ -54,9 +54,9 @@ async def save_document(
         full_document_text = f"ORIGINAL TEXT:\n{parsed_text}\n\nSUMMARY:\n{brief_summary}"
         
         fail_doc_id = await db_service.save_fail_doc(
-            reason="Both DOB and claim number are not specified",
+            reason="Both DOB and DOI are not specified",
             db=document_analysis.dob if hasattr(document_analysis, 'dob') else None,
-            claim_number=lookup_result.get("claim_to_save"),
+            claim_number=document_analysis.claim_number if hasattr(document_analysis, 'claim_number') and document_analysis.claim_number else "Not specified",
             patient_name=lookup_result.get("patient_name_to_use"),
             physician_id=processed_data.get("physician_id"),
             gcs_file_link=processed_data.get("gcs_url"),
@@ -66,7 +66,7 @@ async def save_document(
             mode=processed_data.get("mode"),
             # ✅ SAVE THE PARSED TEXT AND SUMMARY
             document_text=full_document_text,
-            doi=document_analysis.doi if hasattr(document_analysis, 'doi') else None,
+            doi=lookup_result.get("doi_to_save"),
             ai_summarizer_text=brief_summary
         )
 
@@ -80,7 +80,7 @@ async def save_document(
             "parse_count_decremented": parse_decremented,
             "filename": processed_data["filename"],
             "cache_success": False,
-            "failure_reason": "Both DOB and claim number are not specified"
+            "failure_reason": "Both DOB and DOI are not specified"
         }
     
     # Continue with normal document saving process...
@@ -235,9 +235,9 @@ async def save_document(
         file_hash=processed_data["file_hash"],
         gcs_file_link=processed_data["gcs_url"],
         patient_name=lookup_result["patient_name_to_use"],
-        claim_number=lookup_result["claim_to_save"],
+        claim_number=document_analysis.claim_number if hasattr(document_analysis, 'claim_number') and document_analysis.claim_number else "Not specified",  # Required field with default
         dob=document_analysis.dob if hasattr(document_analysis, 'dob') else None,
-        doi=document_analysis.doi if hasattr(document_analysis, 'doi') else None,
+        doi=lookup_result["doi_to_save"],
         status=lookup_result["document_status"],
         brief_summary=processed_data["brief_summary"],
         physician_id=processed_data["physician_id"],
@@ -258,9 +258,9 @@ async def save_document(
         # Prepare data for caching
         cache_data = {
             "patient_name": lookup_result["patient_name_to_use"],
-            "claim_number": lookup_result["claim_to_save"],
+            "claim_number": document_analysis.claim_number if hasattr(document_analysis, 'claim_number') and document_analysis.claim_number else "Not specified",
             "dob": document_analysis.dob if hasattr(document_analysis, 'dob') else None,
-            "doi": document_analysis.doi if hasattr(document_analysis, 'doi') else None,
+            "doi": lookup_result["doi_to_save"],
             "physician_id": processed_data["physician_id"],
             "status": lookup_result["document_status"],
             "mode": processed_data["mode"],

@@ -281,9 +281,10 @@ class EnhancedPatientLookup:
             logger.error(f"❌ Redis connection failed: {e}")
             return False
     
-    async def _get_cached_patient_lookup(self, physician_id: str, patient_name: str, claim_number: str, dob: str, db_service):
+    async def _get_cached_patient_lookup(self, physician_id: str, patient_name: str, doi: str, dob: str, db_service):
         """
         Get patient lookup data from cache or database with fuzzy matching support.
+        Uses DOI to identify specific case/injury for the patient.
         This method uses the webhook service's caching implementation for consistency.
         """
         # For now, directly fetch from database
@@ -293,7 +294,7 @@ class EnhancedPatientLookup:
             patient_name=patient_name,
             physicianId=physician_id,
             dob=dob,
-            claim_number=claim_number
+            doi=doi
         )
         
         # Add search criteria for validation
@@ -301,38 +302,39 @@ class EnhancedPatientLookup:
             lookup_data["_search_criteria"] = {
                 "patient_name": patient_name,
                 "dob": dob,
-                "claim_number": claim_number
+                "doi": doi
             }
         
         return lookup_data
     
     async def perform_patient_lookup(self, db_service, processed_data: dict) -> dict:
         """
-        Enhanced patient lookup with fuzzy matching and field normalization
+        Enhanced patient lookup with fuzzy matching and field normalization.
+        Uses DOI (Date of Injury) to identify specific case/injury for the patient.
         """
         physician_id = processed_data["physician_id"]
         patient_name = processed_data["patient_name"]
-        claim_number = processed_data["claim_number"]
+        doi = processed_data.get("doi")  # DOI is the new primary identifier
         document_analysis = processed_data["document_analysis"]
         
         logger.info(f"🔍 Performing enhanced patient lookup for physician: {physician_id}")
         
-        # 🚨 CRITICAL: Check if patient name, DOB, and claim number are not specified
+        # 🚨 CRITICAL: Check if patient name, DOB, and DOI are not specified
         patient_name_not_specified = self.is_bad_field(patient_name)
         dob_not_specified = self.is_bad_field(processed_data["dob"])
-        claim_not_specified = self.is_bad_field(claim_number)
+        doi_not_specified = self.is_bad_field(doi)
         
-        # Only skip lookup if ALL identifying fields are missing (name, DOB, and claim)
+        # Only skip lookup if ALL identifying fields are missing (name, DOB, and DOI)
         # If patient name is available, we can still try to lookup/match
-        if patient_name_not_specified and dob_not_specified and claim_not_specified:
-            logger.warning("🚨 SKIPPING PATIENT LOOKUP: Patient name, DOB, and claim number are all not specified")
+        if patient_name_not_specified and dob_not_specified and doi_not_specified:
+            logger.warning("🚨 SKIPPING PATIENT LOOKUP: Patient name, DOB, and DOI are all not specified")
             
             return {
                 "lookup_data": None,
                 "document_status": "failed",
-                "pending_reason": "Missing patient name, DOB, and claim number - cannot identify patient",
+                "pending_reason": "Missing patient name, DOB, and DOI - cannot identify patient case",
                 "patient_name_to_use": patient_name or "Not specified",
-                "claim_to_save": claim_number or "Not specified", 
+                "doi_to_save": doi or "Not specified", 
                 "document_analysis": document_analysis,
                 "field_updates": [],
                 "previous_docs_updated": 0,
@@ -345,8 +347,8 @@ class EnhancedPatientLookup:
             available_fields.append(f"name='{patient_name}'")
         if not dob_not_specified:
             available_fields.append(f"dob='{processed_data['dob']}'")
-        if not claim_not_specified:
-            available_fields.append(f"claim='{claim_number}'")
+        if not doi_not_specified:
+            available_fields.append(f"doi='{doi}'")
         logger.info(f"📋 Patient lookup with available fields: {', '.join(available_fields)}")
         
         # ✅ Continue with enhanced patient lookup
@@ -356,7 +358,7 @@ class EnhancedPatientLookup:
         
         # Get patient lookup data
         lookup_data = await self._get_cached_patient_lookup(
-            physician_id, patient_name, claim_number, 
+            physician_id, patient_name, doi, 
             processed_data["dob"], db_service
         )
         
@@ -365,10 +367,9 @@ class EnhancedPatientLookup:
         match_info = {
             "name_match": False,
             "dob_match": False,
-            "claim_match": False,
             "doi_match": False,
             "name_similarity": 0.0,
-            "claim_similarity": 0.0
+            "doi_similarity": 0.0
         }
         
         if lookup_data and lookup_data.get("total_documents", 0) > 0:
@@ -377,17 +378,15 @@ class EnhancedPatientLookup:
             # Get fields from lookup data
             fetched_patient_name = lookup_data.get("patient_name")
             fetched_dob = lookup_data.get("dob")
-            fetched_claim_number = lookup_data.get("claim_number")
             fetched_doi = lookup_data.get("doi")
             
             # Get current document field values
             current_patient_name = document_analysis.patient_name
             current_dob = getattr(document_analysis, 'dob', None)
-            current_claim_number = document_analysis.claim_number
             current_doi = getattr(document_analysis, 'doi', None)
             
-            logger.info(f"🔍 CURRENT DOC - Name: '{current_patient_name}', DOB: '{current_dob}', Claim: '{current_claim_number}'")
-            logger.info(f"🔍 FETCHED DATA - Name: '{fetched_patient_name}', DOB: '{fetched_dob}', Claim: '{fetched_claim_number}'")
+            logger.info(f"🔍 CURRENT DOC - Name: '{current_patient_name}', DOB: '{current_dob}', DOI: '{current_doi}'")
+            logger.info(f"🔍 FETCHED DATA - Name: '{fetched_patient_name}', DOB: '{fetched_dob}', DOI: '{fetched_doi}'")
             
             # === NAME MATCHING (Fuzzy) ===
             if not self.is_bad_field(current_patient_name) and not self.is_bad_field(fetched_patient_name):
@@ -411,72 +410,56 @@ class EnhancedPatientLookup:
                 else:
                     logger.info(f"❌ DOB MISMATCH: '{current_dob}' != '{fetched_dob}'")
             
-            # === CLAIM NUMBER MATCHING (Enhanced with relationship detection) ===
-            if not self.is_bad_field(current_claim_number) and not self.is_bad_field(fetched_claim_number):
-                are_related, rel_type = self.are_claims_related(current_claim_number, fetched_claim_number)
-                claim_similarity = self.calculate_claim_similarity(current_claim_number, fetched_claim_number)
-                match_info["claim_similarity"] = claim_similarity
-                
-                if are_related:
-                    match_info["claim_match"] = True
-                    logger.info(f"✅ CLAIM MATCH (type: {rel_type}, similarity: {claim_similarity:.2f})")
-                    logger.info(f"   '{current_claim_number}' ≈ '{fetched_claim_number}'")
-                    
-                    # Log specific relationship details
-                    if rel_type == "base_match":
-                        logger.info(f"   → Claims share same base number (likely same patient with document variants)")
-                    elif rel_type == "contains":
-                        logger.info(f"   → One claim contains the other (likely related claims)")
-                    elif rel_type == "similar":
-                        logger.info(f"   → High similarity detected (likely same claim with minor variation)")
-                else:
-                    logger.info(f"❌ Claims NOT related (type: {rel_type}, similarity: {claim_similarity:.2f})")
-                    logger.info(f"   '{current_claim_number}' vs '{fetched_claim_number}'")
-            elif not self.is_bad_field(current_claim_number) or not self.is_bad_field(fetched_claim_number):
-                # One claim is good, consider it a potential match if other fields match strongly
-                logger.info(f"⚠️ Claim comparison incomplete (one value missing)")
-                match_info["claim_match"] = False
-            
-            # === DOI MATCHING (Exact) ===
+            # === DOI MATCHING (Exact - primary case identifier) ===
             if not self.is_bad_field(current_doi) and not self.is_bad_field(fetched_doi):
-                if self.normalize_dob(current_doi) == self.normalize_dob(fetched_doi):
+                norm_current_doi = self.normalize_dob(current_doi)  # Reuse normalize_dob for DOI
+                norm_fetched_doi = self.normalize_dob(fetched_doi)
+                
+                if norm_current_doi == norm_fetched_doi:
                     match_info["doi_match"] = True
-                    logger.info(f"✅ DOI MATCH: '{current_doi}' == '{fetched_doi}'")
+                    match_info["doi_similarity"] = 1.0
+                    logger.info(f"✅ DOI MATCH (same case): '{current_doi}' == '{fetched_doi}'")
+                else:
+                    logger.info(f"❌ DOI MISMATCH (different case/injury): '{current_doi}' != '{fetched_doi}'")
+                    logger.info(f"   → This represents a DIFFERENT injury for the same patient")
+            elif not self.is_bad_field(current_doi) or not self.is_bad_field(fetched_doi):
+                # One DOI is good, consider it a potential match if other fields match strongly
+                logger.info(f"⚠️ DOI comparison incomplete (one value missing) - treating as same case if name/DOB match")
+                match_info["doi_match"] = False
             
             # Count matching fields
             matching_fields = sum([
                 match_info["name_match"],
                 match_info["dob_match"],
-                match_info["claim_match"],
                 match_info["doi_match"]
             ])
             
-            logger.info(f"🔢 Total matching fields: {matching_fields}/4")
+            logger.info(f"🔢 Total matching fields: {matching_fields}/3")
             
             # ℹ️ NOTE: We do NOT update the current document with database values
-            # Real-world scenario: A patient may have multiple documents with same DOB/claim
-            # (e.g., Left Foot MRI and Right Foot MRI - both for same patient)
-            # Each document is UNIQUE and should keep its own extracted data
+            # Real-world scenario: A patient may have multiple cases with different DOIs
+            # (e.g., 2023 injury and 2024 injury - both for same patient but different cases)
+            # Each case is UNIQUE and should keep its own extracted DOI
             # We only use the lookup to verify patient exists and validate matching
             
-            logger.info(f"ℹ️ Patient lookup complete - found {lookup_data.get('total_documents', 0)} existing documents")
+            logger.info(f"ℹ️ Patient lookup complete - found {lookup_data.get('total_documents', 0)} existing documents for this case")
             logger.info(f"ℹ️ Current document will be saved as a NEW separate document (no field updates)")
         
         # Update processed_data with final values
         processed_data["patient_name"] = document_analysis.patient_name
-        processed_data["claim_number"] = document_analysis.claim_number
+        processed_data["doi"] = getattr(document_analysis, 'doi', None)
         processed_data["has_patient_name"] = not self.is_bad_field(document_analysis.patient_name)
-        processed_data["has_claim_number"] = not self.is_bad_field(document_analysis.claim_number)
+        processed_data["has_doi"] = not self.is_bad_field(getattr(document_analysis, 'doi', None))
         
         # Determine document status
         base_status = document_analysis.status
         
-        if not processed_data["has_patient_name"] and not processed_data["has_claim_number"]:
+        if not processed_data["has_patient_name"] and not processed_data["has_doi"]:
             document_status = "failed"
-            pending_reason = "Missing patient name and claim number"
-        elif lookup_data and lookup_data.get("has_conflicting_claims", False):
+            pending_reason = "Missing patient name and DOI"
+        elif lookup_data and lookup_data.get("has_conflicting_cases", False):
             document_status = "failed"
-            pending_reason = "Conflicting claim numbers found"
+            pending_reason = "Conflicting DOI found for same patient"
         else:
             document_status = base_status
             pending_reason = None
@@ -486,7 +469,7 @@ class EnhancedPatientLookup:
             "document_status": document_status,
             "pending_reason": pending_reason,
             "patient_name_to_use": processed_data["patient_name"] or "Not specified",
-            "claim_to_save": processed_data["claim_number"] or "Not specified",
+            "doi_to_save": processed_data.get("doi") or "Not specified",
             "document_analysis": document_analysis,
             "field_updates": field_updates,
             "match_info": match_info,

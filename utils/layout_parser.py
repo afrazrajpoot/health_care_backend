@@ -46,11 +46,23 @@ def extract_fields_from_blocks(blocks: List[Dict], field_keywords: List[str] = N
     if field_keywords is None:
         field_keywords = MEDICAL_FIELD_KEYWORDS
     
+    # Validate that blocks is actually a list
+    if not isinstance(blocks, list):
+        logger.warning(f"⚠️ Blocks is not a list (type: {type(blocks).__name__})")
+        return ""
+    
     formatted_lines = []
     i = 0
     
     while i < len(blocks):
         current_block = blocks[i]
+        
+        # Ensure current_block is a dictionary
+        if not isinstance(current_block, dict):
+            logger.warning(f"⚠️ Block at index {i} is not a dict (type: {type(current_block).__name__})")
+            i += 1
+            continue
+        
         current_text = current_block.get("text", "").strip()
         
         if not current_text:
@@ -64,6 +76,13 @@ def extract_fields_from_blocks(blocks: List[Dict], field_keywords: List[str] = N
             # Look for value in next block (field: value pattern)
             if i + 1 < len(blocks):
                 next_block = blocks[i + 1]
+                
+                # Ensure next_block is also a dictionary
+                if not isinstance(next_block, dict):
+                    formatted_lines.append(current_text)
+                    i += 1
+                    continue
+                
                 next_text = next_block.get("text", "").strip()
                 
                 # Check if they're on same page and close by block ID
@@ -80,6 +99,13 @@ def extract_fields_from_blocks(blocks: List[Dict], field_keywords: List[str] = N
             # Check if next block is a field keyword (value field pattern)
             if i + 1 < len(blocks):
                 next_block = blocks[i + 1]
+                
+                # Ensure next_block is a dictionary
+                if not isinstance(next_block, dict):
+                    formatted_lines.append(current_text)
+                    i += 1
+                    continue
+                
                 next_text = next_block.get("text", "").strip()
                 next_is_field = any(keyword in next_text.lower() for keyword in field_keywords)
                 
@@ -195,18 +221,39 @@ class LayoutParser:
             
             if document_dict.get('document_layout') and document_dict['document_layout'].get('blocks'):
                 blocks = document_dict['document_layout']['blocks']
-                formatted_text = extract_fields_from_blocks(blocks)
                 logger.info(f"✅ Layout Parser extracted {len(blocks)} blocks from document_layout")
+                
+                # Validate block structure
+                if blocks and len(blocks) > 0:
+                    first_block_type = type(blocks[0]).__name__
+                    if first_block_type != 'dict':
+                        logger.warning(f"⚠️ Blocks contain {first_block_type} instead of dict - blocks may not be properly structured")
+                        # Try to extract text directly if blocks are strings
+                        if isinstance(blocks[0], str):
+                            formatted_text = "\n".join(str(b) for b in blocks if b)
+                        else:
+                            formatted_text = ""
+                    else:
+                        formatted_text = extract_fields_from_blocks(blocks)
+                else:
+                    formatted_text = ""
             else:
                 logger.warning(f"⚠️ No document_layout blocks found in response")
-                if document_dict.get('pages'):
-                    total_blocks = sum(len(page.get('blocks', [])) for page in document_dict['pages'])
-                    logger.info(f"📄 Found {total_blocks} blocks in pages structure")
             
             # Log document structure for debugging
             logger.info(f"📊 Document structure keys: {list(document_dict.keys())}")
             if 'pages' in document_dict:
-                logger.info(f"📄 Total pages in layout result: {len(document_dict['pages'])}")
+                pages = document_dict['pages']
+                # Handle case where pages might be a string or other non-list type
+                if isinstance(pages, list):
+                    logger.info(f"📄 Total pages in layout result: {len(pages)}")
+                    # Count total blocks in pages if available
+                    if not blocks:  # Only if we didn't get blocks from document_layout
+                        total_blocks = sum(len(page.get('blocks', [])) for page in pages if isinstance(page, dict))
+                        if total_blocks > 0:
+                            logger.info(f"📄 Found {total_blocks} blocks in pages structure")
+                else:
+                    logger.warning(f"⚠️ 'pages' is not a list (type: {type(pages).__name__})")
             
             return {
                 "document_dict": document_dict,

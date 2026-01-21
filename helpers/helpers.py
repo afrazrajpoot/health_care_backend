@@ -291,39 +291,45 @@ def normalize_dob(dob: Optional[Any]) -> Optional[str]:
     # Return as-is if parsing fails (for manual review)
     return dob_str if dob else None
 
-def is_same_patient(name1: str, dob1: Optional[str], claim1: Optional[str],
-                   name2: str, dob2: Optional[str], claim2: Optional[str]) -> bool:
+def is_same_patient(name1: str, dob1: Optional[str], doi1: Optional[str],
+                   name2: str, dob2: Optional[str], doi2: Optional[str]) -> bool:
     """
     Implements comprehensive patient matching rules with flexible name matching.
+    Uses DOI (Date of Injury) to differentiate between different cases for the same patient.
     
     🔥 MATCHING RULES:
-    Rule 1: BOTH have claims AND they're different → DIFFERENT PATIENT
-    Rule 2: BOTH have same claim → SAME PATIENT (highest priority)
-    Rule 3: At least ONE claim is None → Use name + DOB logic:
-      3A: Names match (any variation) AND DOBs match → SAME
-      3B: Names match (any variation) AND both DOBs None → SAME
-      3C: Names match (any variation) AND one DOB None → SAME
+    Rule 1: BOTH have DOI AND they're different → DIFFERENT CASE (different injury/claim)
+    Rule 2: BOTH have same DOI → SAME CASE (highest priority)
+    Rule 3: At least ONE DOI is None → Use name + DOB logic:
+      3A: Names match (any variation) AND DOBs match → SAME PATIENT/CASE
+      3B: Names match (any variation) AND both DOBs None → SAME PATIENT/CASE
+      3C: Names match (any variation) AND one DOB None → SAME PATIENT/CASE
     
     Name matching tries all possible orderings:
     - "John Smith" matches "Smith John"
     - "Jason Nasr" matches "Nasr Jason"
+    
+    Example scenarios:
+    - Patient A: DOI=2023-01-15, then Patient A: DOI=None → SAME CASE (no different DOI)
+    - Patient A: DOI=2023-01-15, then Patient A: DOI=2024-05-20 → DIFFERENT CASE (different injury)
     """
     import logging
     logger = logging.getLogger(__name__)
     
-    # Rule 1: If BOTH have claim & different → NOT same
-    # KEY FIX: Only reject if BOTH claims exist and are different
-    if claim1 and claim2 and claim1 != claim2:
-        logger.debug(f"❌ Rule 1: Different claims '{claim1}' vs '{claim2}' - NOT same patient")
+    # Rule 1: If BOTH have DOI & different → NOT same case (different injury)
+    # KEY: Only reject if BOTH DOIs exist and are different
+    if doi1 and doi2 and doi1 != doi2:
+        logger.debug(f"❌ Rule 1: Different DOI '{doi1}' vs '{doi2}' - DIFFERENT CASE (different injury)")
         return False
     
-    # Rule 2: If BOTH have same claim → same patient (highest priority)
-    if claim1 and claim2 and claim1 == claim2:
-        logger.debug(f"✅ Rule 2: Same claim '{claim1}' - SAME patient")
+    # Rule 2: If BOTH have same DOI → same case (highest priority)
+    if doi1 and doi2 and doi1 == doi2:
+        logger.debug(f"✅ Rule 2: Same DOI '{doi1}' - SAME CASE")
         return True
     
-    # Rule 3: At least ONE claim is None - rely on name + DOB
-    # This includes: (claim1 and not claim2) OR (not claim1 and claim2) OR (not claim1 and not claim2)
+    # Rule 3: At least ONE DOI is None - rely on name + DOB
+    # This includes: (doi1 and not doi2) OR (not doi1 and doi2) OR (not doi1 and not doi2)
+    # This allows same patient with missing DOI to be treated as same case UNLESS different DOI appears
     
     # 🆕 ENHANCED: Check if names match using ANY possible variation
     name1_variations = get_name_variations(name1)
@@ -339,24 +345,24 @@ def is_same_patient(name1: str, dob1: Optional[str], claim1: Optional[str],
         
         # 3A: Both DOB provided & match
         if dob1 and dob2 and dob1 == dob2:
-            logger.debug(f"✅ Rule 3A: Both DOB match '{dob1}' - SAME patient (one or both claims None)")
+            logger.debug(f"✅ Rule 3A: Both DOB match '{dob1}' - SAME PATIENT/CASE (one or both DOI None)")
             return True
         
         # 3B: Both missing DOB
         if not dob1 and not dob2:
-            logger.debug(f"✅ Rule 3B: Both DOB missing - SAME patient (one or both claims None)")
+            logger.debug(f"✅ Rule 3B: Both DOB missing - SAME PATIENT/CASE (one or both DOI None)")
             return True
         
         # 3C: One missing DOB, still same
         if (dob1 and not dob2) or (dob2 and not dob1):
-            logger.debug(f"✅ Rule 3C: One DOB missing - SAME patient (one or both claims None)")
+            logger.debug(f"✅ Rule 3C: One DOB missing - SAME PATIENT/CASE (one or both DOI None)")
             return True
     else:
         logger.debug(f"❌ Names don't match (any variation): '{name1}' vs '{name2}'")
         logger.debug(f"   Search variations: {name1_variations} | DB variations: {name2_variations}")
     
     # Otherwise not same
-    logger.debug(f"❌ No matching rules - NOT same patient")
+    logger.debug(f"❌ No matching rules - NOT same patient/case")
     return False
     
 

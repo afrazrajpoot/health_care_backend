@@ -63,7 +63,7 @@ class FileService:
         
         return content
     
-    def save_to_gcs(self, content: bytes, filename: str, content_type: str = 'application/octet-stream', folder: str = "uploads") -> Tuple[str, str]:
+    def save_to_gcs(self, content: bytes, filename: str, content_type: str = 'application/octet-stream', folder: str = "test") -> Tuple[str, str]:
         """Upload file content to Google Cloud Storage and return the signed URL and blob path"""
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")

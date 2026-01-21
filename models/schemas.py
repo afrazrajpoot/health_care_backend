@@ -131,7 +131,7 @@ class ExtractionResult(BaseModel):
     success: bool = False
     gcs_file_link: str = ""
     fileInfo: Dict[str, Any] = Field(default_factory=dict)
-    summary: str = ""
+    summary: Any = ""  # Changed from str to Any to support structured summaries
     comprehensive_analysis: Optional[ComprehensiveAnalysis] = None
     document_id: str = ""
     error: Optional[str] = None

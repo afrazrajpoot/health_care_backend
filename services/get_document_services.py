@@ -26,30 +26,37 @@ class DocumentAggregationService:
         patient_name: str,
         dob: Optional[str] = None,
         physician_id: Optional[str] = None,
-        claim_number: Optional[str] = None
+        doi: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Fetch and aggregate documents for a patient.
-        Returns a formatted aggregated response.
+        Fetch and aggregate documents for a patient's specific case (identified by DOI).
+        Returns a formatted aggregated response for the specific case only.
+        
+        If DOI is provided: Returns only documents matching that specific DOI (case/injury)
+        If DOI is None: Returns all documents for the patient (based on name + DOB)
         """
         await self.initialize_db()
-        logger.info(f"📄 Fetching aggregated document for patient: {patient_name}")
+        logger.info(f"📄 Fetching aggregated document for patient: {patient_name}, DOI: {doi if doi else 'All cases'}")
 
         # Parse date strings using helper
         dob_date = self._parse_date(dob, "Date of Birth") if dob else None
 
-        # Get all documents (includes bodyPartSnapshots via relation, matched by patient details)
+        # Get all documents for this specific case (matched by patient details + DOI)
+        # If DOI is None, it will match all documents for the patient
         document_data = await self.db_service.get_document_by_patient_details(
             patient_name=patient_name,
             physicianId=physician_id,
             dob=dob_date,
-            claim_number=claim_number
+            doi=doi
         )
 
         if not document_data or document_data.get("total_documents") == 0:
+            error_detail = f"No documents found for patient: {patient_name}"
+            if doi:
+                error_detail += f" with DOI: {doi}"
             raise HTTPException(
                 status_code=404,
-                detail=f"No documents found for patient: {patient_name}"
+                detail=error_detail
             )
 
         # Fetch tasks for the document IDs, filtered by physicianId if provided
@@ -58,7 +65,7 @@ class DocumentAggregationService:
         tasks = await self.db_service.get_tasks_by_patient_details(
             patient_name=patient_name,
             dob=dob_date,
-            claim_number=claim_number,
+            doi=doi,
             physician_id=physician_id
         )
      
@@ -70,26 +77,27 @@ class DocumentAggregationService:
                 tasks_dict[doc_id] = []
             tasks_dict[doc_id].append(task)
 
-        # 🆕 Fetch treatment history for the patient
-        treatment_history = await self._get_treatment_history(
-            patient_name=patient_name,
-            dob=dob,
-            claim_number=claim_number,
-            physician_id=physician_id
-        )
+        # # 🆕 Fetch treatment history for the patient
+        # treatment_history = await self._get_treatment_history(
+        #     patient_name=patient_name,
+        #     dob=dob,
+        #     doi=doi,
+        #     physician_id=physician_id
+        # )
 
         response = await self._format_aggregated_document_response(
             all_documents_data=document_data,
             tasks_dict=tasks_dict,
-            treatment_history=treatment_history  # Pass treatment history to formatter
+            # treatment_history=treatment_history  # Pass treatment history to formatter
         )
         
         # 🆕 Use merged patient details from database service
         response["patient_name"] = document_data.get("patient_name", patient_name)
         response["dob"] = document_data.get("dob", dob)
-        response["claim_number"] = document_data.get("claim_number", claim_number)
+        response["doi"] = document_data.get("doi", doi)
+        response["claim_number"] = document_data.get("claim_number")  # Keep for backward compatibility
 
-        logger.info(f"✅ Returned aggregated document for: {response['patient_name']}")
+        logger.info(f"✅ Returned aggregated document for: {response['patient_name']}, case DOI: {response['doi'] if response['doi'] else 'All cases'}")
         return response
 
     def _parse_date(self, date_str: str, field_name: str) -> Optional[datetime]:
