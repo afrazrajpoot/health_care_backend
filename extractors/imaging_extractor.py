@@ -26,6 +26,7 @@ from models.long_summary_models import (
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 from helpers.short_summary_generator import generate_structured_short_summary
+from helpers.long_summary_generator import format_bullet_summary_to_json, format_long_summary_to_text
 
 logger = logging.getLogger("document_ai")
 
@@ -90,19 +91,20 @@ class ImagingExtractorChained:
         start_time = time.time()
         
         try:
-            # Step 1: Directly generate long summary with DUAL-CONTEXT (raw_text PRIMARY + text SUPPLEMENTARY)
-            long_summary = self._generate_long_summary_direct(
-                text=text,
-                raw_text=raw_text,
-                doc_type=doc_type,
-                fallback_date=fallback_date
+            # Step 1: Format the summarizer output (raw_text) into structured long summary
+            # This is a FORMATTING task only - no new content generation
+            formatted_json = format_bullet_summary_to_json(
+                bullet_summary=raw_text,
+                llm=self.llm,
+                document_type=doc_type
             )
+            long_summary = format_long_summary_to_text(formatted_json)
             
             # Step 1.5: Clean the long summary - remove empty fields, placeholders, and instruction text
             long_summary = clean_long_summary(long_summary)
             
             # Step 2: Generate short summary from long summary (like QME extractor)
-            short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type, long_summary)
+            short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type)
             
             elapsed_time = time.time() - start_time
             logger.info(f"⚡ Full-context imaging extraction completed in {elapsed_time:.2f}s")
@@ -419,12 +421,12 @@ class ImagingExtractorChained:
         logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
         return cleaned_summary
     
-    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str, long_summary: str) -> dict:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
         """
         Generate a structured short summary using the centralized helper function.
         Returns a dictionary with header, content, and UI-ready items.
         """
-        return generate_structured_short_summary(self.llm, raw_text, doc_type, long_summary)
+        return generate_structured_short_summary(self.llm, raw_text, doc_type)
   
     def _create_comprehensive_fallback_summary(self, long_summary: str) -> str:
         """Create comprehensive fallback short summary directly from long summary"""

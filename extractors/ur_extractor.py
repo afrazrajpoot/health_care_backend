@@ -21,6 +21,7 @@ from models.long_summary_models import (
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 from helpers.short_summary_generator import generate_structured_short_summary
+from helpers.long_summary_generator import format_bullet_summary_to_json, format_long_summary_to_text
 
 logger = logging.getLogger("document_ai")
 
@@ -115,14 +116,14 @@ class DecisionDocumentExtractor:
         potential_signatures = self._pre_extract_signatures(text)
         logger.info(f"🔍 Pre-extracted potential signatures: {potential_signatures}")
         
-        # Stage 1: Generate long summary with dual-context approach (raw_text + text)
-        long_summary = self._generate_long_summary_direct(
-            text=text,
-            raw_text=raw_text,
-            doc_type=doc_type,
-            fallback_date=fallback_date,
-            potential_signatures=potential_signatures
+        # Stage 1: Format the summarizer output (raw_text) into structured long summary
+        # This is a FORMATTING task only - no new content generation
+        formatted_json = format_bullet_summary_to_json(
+            bullet_summary=raw_text,
+            llm=self.llm,
+            document_type=doc_type
         )
+        long_summary = format_long_summary_to_text(formatted_json)
         
         # ENHANCED: Verify and inject author into long summary if needed
         verified_author = self._verify_and_extract_author(long_summary, text, potential_signatures)
@@ -132,7 +133,7 @@ class DecisionDocumentExtractor:
         long_summary = clean_long_summary(long_summary)
 
         # Stage 2: Generate short summary from long summary
-        short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type, long_summary)
+        short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type)
 
         logger.info("=" * 80)
         logger.info("✅ DECISION DOCUMENT EXTRACTION COMPLETE (2 LLM CALLS ONLY)")
@@ -670,7 +671,7 @@ Timeframe for Response: [extracted]
             fallback = create_fallback_ur_summary(doc_type, fallback_date)
             return format_ur_long_summary(fallback)
 
-    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str, long_summary: str) -> dict:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
         """
         Generate a structured, UI-ready summary from raw_text (Document AI summarizer output).
         Delegates to the reusable helper function.
@@ -683,7 +684,7 @@ Timeframe for Response: [extracted]
         Returns:
             dict: Structured summary with header and UI-ready items
         """
-        return generate_structured_short_summary(self.llm, raw_text, doc_type, long_summary)
+        return generate_structured_short_summary(self.llm, raw_text, doc_type)
    
     def _get_word_count_feedback_prompt(self, actual_word_count: int, doc_type: str) -> SystemMessagePromptTemplate:
         """Get feedback prompt for word count adjustment for decision documents"""

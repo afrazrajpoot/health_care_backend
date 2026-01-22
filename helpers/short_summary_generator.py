@@ -1,11 +1,13 @@
 """
-Structured Short Summary Generator
-Reusable helper for generating UI-ready, clickable medical summaries with collapsed/expanded views.
+Optimized Structured Short Summary Generator
+Physician-centric with formatted long summary support.
+Removed duplicates and unnecessary complexity while preserving core functionality.
 """
+
 import logging
 import json
 import re
-from typing import Dict, List, Literal, Set
+from typing import Dict, List, Literal, Set, Optional
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
@@ -15,142 +17,292 @@ from config.settings import settings
 logger = logging.getLogger("document_ai")
 
 
-# ============== Report-Type Field Eligibility Matrix ==============
+# ============== SINGLE ENHANCED REPORT-TYPE FIELD ELIGIBILITY ==============
 
-REPORT_FIELD_MATRIX: Dict[str, Dict] = {
-
+REPORT_FIELD_MATRIX = {
     # -------------------------
-    # Med-Legal Reports (QME family)
+    # RFA (Request for Authorization) - Physician Focus
+    # -------------------------
+    "RFA": {
+        "allowed": {
+            "requested_treatment",      # Exact CPT codes, procedures
+            "medical_necessity",        # Diagnosis, supporting justification
+            "previous_treatments",      # Conservative care attempts, failures
+            "injury_relationship",      # Causation to work injury/claim
+            "supporting_findings",      # Imaging, exam findings, test results
+            "treatment_plan",           # Duration, frequency, timeline
+            "expected_outcomes",        # Functional improvement goals
+            "urgency_level"             # Routine vs. expedited
+        },
+        "physician_priority": ["requested_treatment", "medical_necessity", "injury_relationship", "supporting_findings"]
+    },
+    "REQUEST FOR AUTHORIZATION": {"inherit": "RFA"},
+    
+    # -------------------------
+    # PR2 (Progress Report) - Physician Focus
+    # -------------------------
+    "PR-2": {
+        "allowed": {
+            "subjective_complaints",    # Pain levels, functional limitations
+            "objective_findings",       # ROM measurements, strength testing
+            "current_treatment",        # Medications, therapy frequency
+            "treatment_response",       # Improvement/plateau/decline
+            "work_status",              # Off work, modified duty, restrictions
+            "pps_estimate",             # P&S date estimate
+            "causation_statement",      # Ongoing relationship to injury
+            "future_plan"               # Next steps, additional care needed
+        },
+        "physician_priority": ["treatment_response", "work_status", "objective_findings", "future_plan"]
+    },
+    "PR2": {"inherit": "PR-2"},
+    "PROGRESS REPORT": {"inherit": "PR-2"},
+    
+    # -------------------------
+    # PR4/Permanent & Stationary Report - Physician Focus
+    # -------------------------
+    "PR-4": {
+        "allowed": {
+            "mmi_declaration",          # Maximum medical improvement reached
+            "impairment_rating",        # Whole person impairment %
+            "permanent_restrictions",   # Lift limits, positional restrictions
+            "future_medical_care",      # Life care plan components
+            "apportionment",            # Prior injuries, degenerative changes
+            "causation_analysis",       # Substantial vs. minor factors
+            "body_parts_affected",      # All injured areas rated
+            "guidelines_referenced"     # AMA Guidelines used
+        },
+        "physician_priority": ["mmi_declaration", "impairment_rating", "permanent_restrictions", "causation_analysis"]
+    },
+    "PR4": {"inherit": "PR-4"},
+    "PERMANENT AND STATIONARY": {"inherit": "PR-4"},
+    "P&S": {"inherit": "PR-4"},
+    
+    # -------------------------
+    # DFR (Doctor's First Report) - Physician Focus
+    # -------------------------
+    "DFR": {
+        "allowed": {
+            "injury_mechanism",         # How injury occurred
+            "body_parts_injured",       # Primary and secondary areas
+            "initial_findings",         # Physical exam abnormalities
+            "initial_diagnosis",        # ICD-10 codes
+            "treatment_provided",       # Medications, procedures, referrals
+            "initial_work_status",      # Ability to return to work
+            "disability_dates",         # Off work from/to
+            "initial_causation"         # Industrial vs. non-industrial
+        },
+        "physician_priority": ["injury_mechanism", "initial_diagnosis", "body_parts_injured", "initial_work_status"]
+    },
+    "DOCTOR'S FIRST REPORT": {"inherit": "DFR"},
+    "FIRST REPORT": {"inherit": "DFR"},
+    
+    # -------------------------
+    # QME/AME/IME Reports - Physician Focus
     # -------------------------
     "QME": {
         "allowed": {
-            "mechanism_of_injury",
-            "findings",
-            "physical_exam",
-            "medications",
-            "recommendations",
-            "rationale",
-            "mmi_status",
-            "work_status"
-        }
+            "history_summary",          # Complete medical record summary
+            "comprehensive_exam",       # Physical examination with measurements
+            "diagnostic_review",        # Interpretation of all imaging/studies
+            "diagnoses",                # Primary and secondary with ICD codes
+            "causation_opinion",        # Industrial injury relationship
+            "mmi_status",               # Current or future estimate
+            "impairment_rating_qme",    # WPI calculation with tables
+            "future_care_qme",          # Recommended treatments
+            "work_restrictions_qme",    # Permanent limitations
+            "legal_opinions"            # Depositions/testimony
+        },
+        "physician_priority": ["diagnoses", "causation_opinion", "impairment_rating_qme", "work_restrictions_qme"]
     },
     "AME": {"inherit": "QME"},
     "PQME": {"inherit": "QME"},
     "IME": {"inherit": "QME"},
-
+    "INDEPENDENT MEDICAL EXAMINATION": {"inherit": "QME"},
+    
     # -------------------------
-    # Consult / Clinical Reports
+    # IMR (Independent Medical Review) - Physician Focus
+    # -------------------------
+    "IMR": {
+        "allowed": {
+            "ur_decision_reviewed",     # Denial/modification details
+            "medical_evidence",         # All supporting documentation
+            "reviewer_credentials",     # Specialty match
+            "necessity_determination",  # Meets standard of care
+            "guidelines_cited",         # ODG, ACOEM, etc.
+            "final_decision",           # Upheld, overturned, modified
+            "clinical_rationale"        # Clinical reasoning for decision
+        },
+        "physician_priority": ["final_decision", "clinical_rationale", "necessity_determination", "guidelines_cited"]
+    },
+    "INDEPENDENT MEDICAL REVIEW": {"inherit": "IMR"},
+    
+    # -------------------------
+    # UR (Utilization Review) - Physician Focus
+    # -------------------------
+    "UR": {
+        "allowed": {
+            "decision",                 # Approved, denied, modified, delayed
+            "rationale",                # Clinical basis for decision
+            "guidelines_referenced_ur", # ODG, ACOEM compliance
+            "necessity_assessment",     # Meets criteria or not
+            "alternative_treatments",   # Suggestions if denied
+            "reviewer_credentials_ur",  # Board certification
+            "timeframe",                # Expedited vs. routine review
+            "appeal_rights"             # IMR eligibility
+        },
+        "physician_priority": ["decision", "rationale", "necessity_assessment", "alternative_treatments"]
+    },
+    "UTILIZATION REVIEW": {"inherit": "UR"},
+    "PEER REVIEW": {"inherit": "UR"},
+    
+    # -------------------------
+    # CONSULT/Office Visit - Physician Focus
     # -------------------------
     "CONSULT": {
         "allowed": {
-            "mechanism_of_injury",
-            "findings",
-            "physical_exam",
-            "medications",
-            "recommendations"
-        }
+            "chief_complaint",          # Patient's primary concern
+            "history_of_illness",       # Symptom progression
+            "pertinent_exam",           # Positive/negative findings
+            "assessment",               # Differential diagnosis
+            "plan",                     # Diagnostic workup, treatment
+            "medication_changes",       # New prescriptions, discontinuations
+            "work_status_update",       # Restrictions modified
+            "follow_up_plan"            # Next visit timing
+        },
+        "physician_priority": ["assessment", "plan", "pertinent_exam", "medication_changes"]
     },
-    "PAIN MANAGEMENT": {"inherit": "CONSULT"},
-    "PROGRESS NOTE": {"inherit": "CONSULT"},
     "OFFICE VISIT": {"inherit": "CONSULT"},
     "CLINIC NOTE": {"inherit": "CONSULT"},
-
+    "PAIN MANAGEMENT": {"inherit": "CONSULT"},
+    
     # -------------------------
-    # Imaging Reports
+    # Progress Notes - Physician Focus
+    # -------------------------
+    "PROGRESS NOTE": {
+        "allowed": {
+            "interval_history",         # Changes since last visit
+            "pain_scale",               # Numerical rating
+            "functional_status",        # ADL limitations
+            "treatment_compliance",     # Medication adherence
+            "side_effects",             # Medication tolerability
+            "objective_measurements",   # ROM, strength, edema
+            "treatment_modifications",  # Dose adjustments, modality changes
+            "clinical_course"           # Improving, stable, worsening
+        },
+        "physician_priority": ["clinical_course", "pain_scale", "objective_measurements", "treatment_modifications"]
+    },
+    
+    # -------------------------
+    # MRI Reports - Physician Focus
     # -------------------------
     "MRI": {
-        "allowed": {"findings"}
+        "allowed": {
+            "indication",               # Clinical question being asked
+            "technique",                # Sequences used, contrast given
+            "comparison",               # Prior studies referenced
+            "key_findings",             # Abnormalities with measurements
+            "pathology_severity",       # Grading systems
+            "clinical_correlation",     # Symptomatic vs. incidental
+            "impression"                # Radiologist's summary interpretation
+        },
+        "physician_priority": ["key_findings", "impression", "clinical_correlation", "pathology_severity"]
     },
     "CT": {"inherit": "MRI"},
     "X-RAY": {"inherit": "MRI"},
     "XRAY": {"inherit": "MRI"},
-    "ULTRASOUND": {"inherit": "MRI"},
-    "EMG": {"inherit": "MRI"},
-    "PET SCAN": {"inherit": "MRI"},
-    "BONE SCAN": {"inherit": "MRI"},
-    "DEXA SCAN": {"inherit": "MRI"},
-
+    "IMAGING": {"inherit": "MRI"},
+    
     # -------------------------
-    # Utilization Review
+    # Surgery/Operative Reports - Physician Focus
     # -------------------------
-    "UR": {
-        "allowed": {"recommendations", "rationale"}
+    "SURGERY REPORT": {
+        "allowed": {
+            "preop_diagnosis",          # Indication for surgery
+            "postop_diagnosis",         # Findings-based diagnosis
+            "procedure_performed",      # Exact surgical steps with CPT codes
+            "intraoperative_findings",  # Pathology observed
+            "technique",                # Approach, instrumentation, fixation
+            "complications",            # Intraoperative adverse events
+            "specimens_sent",           # Pathology submitted
+            "hardware_used"             # Implants, mesh, grafts
+        },
+        "physician_priority": ["procedure_performed", "intraoperative_findings", "complications", "postop_diagnosis"]
     },
-    "IMR": {"inherit": "UR"},
-    "PEER REVIEW": {"inherit": "UR"},
-
+    "OPERATIVE NOTE": {"inherit": "SURGERY REPORT"},
+    "POST-OP": {"inherit": "SURGERY REPORT"},
+    
     # -------------------------
-    # Therapy Reports
+    # Therapy Reports - Physician Focus
     # -------------------------
     "PHYSICAL THERAPY": {
         "allowed": {
-            "mechanism_of_injury",
-            "findings",
-            "recommendations"
-        }
+            "baseline_measurements",    # ROM, strength, functional tests
+            "treatment_provided_pt",    # Modalities, manual therapy, exercise
+            "patient_response_pt",      # Pain changes, functional improvement
+            "compliance_pt",            # Attendance, home program adherence
+            "objective_progress",       # Measurable changes from baseline
+            "functional_goals",         # % achievement
+            "plan_modifications_pt",    # Progression of difficulty
+            "discharge_planning"        # Readiness assessment
+        },
+        "physician_priority": ["objective_progress", "treatment_provided_pt", "patient_response_pt", "functional_goals"]
     },
     "THERAPY NOTE": {"inherit": "PHYSICAL THERAPY"},
     "OCCUPATIONAL THERAPY": {"inherit": "PHYSICAL THERAPY"},
     "CHIROPRACTIC": {"inherit": "PHYSICAL THERAPY"},
-
+    
     # -------------------------
-    # Surgical / Operative Reports
-    # -------------------------
-    "SURGERY REPORT": {
-        "allowed": {"findings"}
-    },
-    "OPERATIVE NOTE": {"inherit": "SURGERY REPORT"},
-    "POST-OP": {"inherit": "SURGERY REPORT"},
-
-    # -------------------------
-    # PR-2 Reports
-    # -------------------------
-    "PR-2": {
-        "allowed": {
-            "mechanism_of_injury",
-            "findings",
-            "physical_exam",
-            "medications",
-            "recommendations",
-            "work_status"
-        }
-    },
-    "PR2": {"inherit": "PR-2"},
-
-    # -------------------------
-    # Labs & Diagnostics
+    # Labs & Diagnostics - Physician Focus
     # -------------------------
     "LABS": {
-        "allowed": {"findings"}
+        "allowed": {
+            "tests_ordered",            # Specific panel
+            "critical_values",          # Flagged abnormalities
+            "reference_ranges",         # Normal values context
+            "trends",                   # Comparison to prior results
+            "clinical_significance"     # Impact on diagnosis/treatment
+        },
+        "physician_priority": ["critical_values", "trends", "clinical_significance"]
     },
     "PATHOLOGY": {"inherit": "LABS"},
-
+    
     # -------------------------
-    # Legal / Administrative Reports
+    # Original document types for backward compatibility
     # -------------------------
-    "ATTORNEY QUESTIONS": {
-        "allowed": {"questions", "mmi_status", "work_status"}
-    },
-    "ADJUSTER QUESTIONS": {"inherit": "ATTORNEY QUESTIONS"},
-    "NURSE CASE MANAGER": {"inherit": "ATTORNEY QUESTIONS"},
-
+    "PAIN MANAGEMENT": {"inherit": "CONSULT"},
+    "PROGRESS NOTE": {"inherit": "CONSULT"},
+    "CLINIC NOTE": {"inherit": "CONSULT"},
+    "THERAPY NOTE": {"inherit": "PHYSICAL THERAPY"},
+    "OCCUPATIONAL THERAPY": {"inherit": "PHYSICAL THERAPY"},
+    "CHIROPRACTIC": {"inherit": "PHYSICAL THERAPY"},
+    "EMG": {"inherit": "MRI"},
+    "PET SCAN": {"inherit": "MRI"},
+    "BONE SCAN": {"inherit": "MRI"},
+    "DEXA SCAN": {"inherit": "MRI"},
+    
     # -------------------------
     # Default fallback
     # -------------------------
     "DEFAULT": {
-        "allowed": {"findings", "recommendations"}
+        "allowed": {
+            "key_findings",
+            "recommendations",
+            "clinical_summary"
+        },
+        "physician_priority": ["key_findings", "clinical_summary"]
     }
 }
 
-def resolve_allowed_fields(doc_type: str) -> Set[str]:
+
+def resolve_allowed_fields(doc_type: str) -> dict:
     """
-    Resolve the allowed fields for a document type, handling inheritance.
+    Resolve allowed fields and physician priority fields for a document type.
     
     Args:
         doc_type: The document type string
         
     Returns:
-        Set of allowed field names
+        dict with 'allowed' and 'priority' keys
     """
     doc_key = doc_type.upper().replace("-", " ").replace("_", " ").strip()
     
@@ -171,28 +323,21 @@ def resolve_allowed_fields(doc_type: str) -> Set[str]:
         parent_key = matrix["inherit"]
         return resolve_allowed_fields(parent_key)
     
-    return matrix.get("allowed", set())
+    return {
+        "allowed": matrix.get("allowed", set()),
+        "priority": matrix.get("physician_priority", [])
+    }
 
 
-# ============== Pydantic Models for UI-Ready Summary ==============
+# ============== PYDANTIC MODELS ==============
 
 class UIFact(BaseModel):
     """
     A UI-clickable summary field with collapsed and expanded views.
-    Used for generating clickable UI elements that expand on user interaction.
     """
-    field: Literal[
-        "findings",
-        "physical_exam",
-        "vital_signs",
-        "medications",
-        "recommendations",
-        "rationale",
-        "mmi_status",
-        "work_status"
-    ] = Field(description="The type of UI field")
+    field: str = Field(description="The type of UI field based on document type")
     collapsed: str = Field(description="Short, high-level, one-line summary for collapsed view")
-    expanded: str = Field(description="Expanded, still attributed description for expanded view")
+    expanded: str = Field(description="Expanded, bullet-point description for expanded view")
 
 
 class SummaryHeader(BaseModel):
@@ -208,10 +353,7 @@ class SummaryHeader(BaseModel):
 
 
 class SummaryContent(BaseModel):
-    """
-    UI-driven summary content with clickable fields.
-    Each item represents a collapsible UI element.
-    """
+    """UI-driven summary content with clickable fields"""
     items: List[UIFact] = Field(default_factory=list, description="List of UI-ready fact items")
 
 
@@ -221,134 +363,178 @@ class StructuredShortSummary(BaseModel):
     summary: SummaryContent = Field(description="Summary content with UI-ready items")
 
 
-# ============== Helper Functions ==============
+# ============== OPTIMIZED HELPER FUNCTIONS ==============
 
-def create_fallback_structured_summary(doc_type: str) -> dict:
-    """Create a fallback structured summary when generation fails."""
+def create_fallback_summary(doc_type: str, priority_fields: List[str] = None) -> dict:
+    """
+    Create a fallback summary when generation fails.
+    """
+    doc_type_titles = {
+        "RFA": "Request for Authorization",
+        "PR-2": "Progress Report",
+        "PR-4": "Permanent & Stationary Report",
+        "DFR": "Doctor's First Report",
+        "QME": "QME/Independent Medical Exam",
+        "IME": "Independent Medical Examination",
+        "IMR": "Independent Medical Review",
+        "UR": "Utilization Review",
+        "CONSULT": "Consultation Note",
+        "MRI": "MRI/Imaging Report",
+        "SURGERY": "Surgery Report"
+    }
+    
+    title = doc_type_titles.get(doc_type, doc_type)
+    
+    # Create placeholder items
+    fallback_items = []
+    if priority_fields:
+        for field in priority_fields[:3]:  # Top 3 priority fields
+            fallback_items.append({
+                "field": field,
+                "collapsed": f"Clinical information for {field.replace('_', ' ')} requires physician review",
+                "expanded": f"• Information extraction for {field.replace('_', ' ')} failed\n• Physician review of original document recommended\n• Clinical assessment needed for this section"
+            })
+    
+    # Always add at least one item
+    if not fallback_items:
+        fallback_items.append({
+            "field": "clinical_summary",
+            "collapsed": f"Clinical information from {title} requires physician review",
+            "expanded": f"• Unable to extract structured clinical data from the {title}\n• Physician review of original document recommended\n• Key clinical findings may require manual extraction"
+        })
+    
     return {
         "header": {
-            "title": doc_type,
+            "title": title,
             "source_type": "External Medical Document",
             "author": "",
             "date": "",
-            "disclaimer": "This summary references an external document and is for workflow purposes only. It does not constitute medical advice."
+            "disclaimer": "This summary references an external document and is for workflow purposes only. It does not constitute medical advice. Clinical data extraction failed - physician review of original document is recommended."
         },
         "summary": {
-            "items": []
+            "items": fallback_items
         }
     }
 
 
-def remove_patient_identifiers(structured_summary: dict) -> dict:
+def ensure_proper_header(structured_summary: dict, doc_type: str, raw_text: str) -> dict:
     """
-    Remove any patient identifiers that may have slipped through.
-    Scans all text fields for PII patterns and removes them.
+    Ensure the structured summary has a properly formatted header.
+    Extracts date and author from raw_text if not already present.
     """
-    # Patterns to detect and remove
-    pii_patterns = [
-        r'\b\d{3}-\d{2}-\d{4}\b',  # SSN
-        r'\b\d{2}/\d{2}/\d{4}\b',  # DOB format
-        r'\bMRN[:\s]*\w+\b',  # MRN
-        r'\bClaim[#:\s]*[\w-]+\b',  # Claim numbers
-        r'\bPatient[:\s]+[A-Z][a-z]+\s+[A-Z][a-z]+\b',  # Patient names
-    ]
+    # Document type to title mapping
+    doc_type_titles = {
+        "RFA": "Request for Authorization",
+        "PR-2": "Progress Report",
+        "PR2": "Progress Report",
+        "PR-4": "Permanent & Stationary Report",
+        "PR4": "Permanent & Stationary Report",
+        "DFR": "Doctor's First Report",
+        "QME": "QME Report",
+        "AME": "AME Report",
+        "IME": "Independent Medical Examination",
+        "IMR": "Independent Medical Review",
+        "UR": "Utilization Review",
+        "CONSULT": "Consultation Report",
+        "MRI": "Imaging Report",
+        "CT": "Imaging Report",
+        "XRAY": "Imaging Report",
+        "X-RAY": "Imaging Report",
+        "SURGERY": "Operative Report",
+        "PHYSICAL THERAPY": "Physical Therapy Report",
+        "LABS": "Laboratory Report",
+        "PROGRESS NOTE": "Progress Note"
+    }
     
-    def clean_text(text: str) -> str:
-        if not isinstance(text, str):
-            return text
-        cleaned = text
-        for pattern in pii_patterns:
-            cleaned = re.sub(pattern, '[REDACTED]', cleaned, flags=re.IGNORECASE)
-        # Remove any [REDACTED] placeholders entirely
-        cleaned = re.sub(r'\[REDACTED\]\s*', '', cleaned)
-        return cleaned.strip()
-    
-    def clean_dict(d: dict) -> dict:
-        if not isinstance(d, dict):
-            return d
-        cleaned = {}
-        for key, value in d.items():
-            if isinstance(value, str):
-                cleaned[key] = clean_text(value)
-            elif isinstance(value, dict):
-                cleaned[key] = clean_dict(value)
-            elif isinstance(value, list):
-                cleaned[key] = clean_list(value)
-            else:
-                cleaned[key] = value
-        return cleaned
-    
-    def clean_list(lst: list) -> list:
-        if not isinstance(lst, list):
-            return lst
-        cleaned = []
-        for item in lst:
-            if isinstance(item, str):
-                cleaned.append(clean_text(item))
-            elif isinstance(item, dict):
-                cleaned.append(clean_dict(item))
-            elif isinstance(item, list):
-                cleaned.append(clean_list(item))
-            else:
-                cleaned.append(item)
-        return cleaned
-    
-    return clean_dict(structured_summary)
-
-
-def ensure_header_fields(structured_summary: dict, doc_type: str, raw_text: str) -> dict:
-    """
-    Ensure all required header fields are present and properly formatted.
-    """
+    # Ensure header exists
     if "header" not in structured_summary:
         structured_summary["header"] = {}
     
     header = structured_summary["header"]
     
-    # Ensure title
+    # Set title
     if not header.get("title"):
-        header["title"] = doc_type
+        base_title = doc_type_titles.get(doc_type.upper(), doc_type)
+        
+        # Try to extract body region
+        body_regions = [
+            r'(?:lumbar|lumbosacral|l-?spine)',
+            r'(?:cervical|c-?spine)',
+            r'(?:thoracic|t-?spine)',
+            r'(?:shoulder)',
+            r'(?:knee)',
+            r'(?:hip)',
+            r'(?:ankle)',
+            r'(?:wrist)',
+            r'(?:elbow)'
+        ]
+        
+        body_region = ""
+        raw_text_lower = raw_text[:5000].lower()
+        for pattern in body_regions:
+            if re.search(pattern, raw_text_lower):
+                match = re.search(pattern, raw_text_lower)
+                if match:
+                    body_region = match.group(0).replace("-", " ").title()
+                    break
+        
+        if body_region:
+            header["title"] = f"{base_title} - {body_region}"
+        else:
+            header["title"] = base_title
     
-    # Ensure source_type
+    # Extract date if not present
+    if not header.get("date"):
+        date_patterns = [
+            r'(?:Date|DATE|Report Date|Exam Date)[:\s]*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+            r'(\d{4}-\d{2}-\d{2})',
+            r'(\d{1,2}/\d{1,2}/\d{4})'
+        ]
+        for pattern in date_patterns:
+            match = re.search(pattern, raw_text[:3000])
+            if match:
+                date_str = match.group(1)
+                # Normalize to YYYY-MM-DD
+                try:
+                    if '/' in date_str:
+                        parts = date_str.split('/')
+                        if len(parts) == 3:
+                            month, day, year = parts
+                            if len(year) == 2:
+                                year = f"20{year}" if int(year) < 50 else f"19{year}"
+                            header["date"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                            break
+                    elif '-' in date_str:
+                        header["date"] = date_str
+                        break
+                except:
+                    continue
+        if not header.get("date"):
+            header["date"] = ""
+    
+    # Extract author if not present
+    if not header.get("author"):
+        author_patterns = [
+            r'(?:Physician|Author|Prepared by|Signed by)[:\s]*([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+)',
+            r'([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+),?\s*(?:M\.?D\.?|D\.?O\.?|D\.?C\.?)',
+        ]
+        for pattern in author_patterns:
+            match = re.search(pattern, raw_text[:5000])
+            if match:
+                author = match.group(1)
+                # Clean author
+                author = re.sub(r'^Dr\.?\s*', '', author, flags=re.IGNORECASE)
+                header["author"] = author.strip()
+                break
+        if not header.get("author"):
+            header["author"] = ""
+    
+    # Ensure required fields
     if not header.get("source_type"):
         header["source_type"] = "External Medical Document"
     
-    # Clean author - remove "Dr." prefix if present
-    if header.get("author"):
-        author = header["author"]
-        author = re.sub(r'^Dr\.?\s*', '', author, flags=re.IGNORECASE)
-        header["author"] = author.strip()
-    
-    # Validate date format (YYYY-MM-DD)
-    if header.get("date"):
-        date_str = header["date"]
-        # Try to convert common formats to YYYY-MM-DD
-        date_patterns = [
-            (r'(\d{1,2})/(\d{1,2})/(\d{4})', r'\3-\1-\2'),  # MM/DD/YYYY
-            (r'(\d{4})-(\d{1,2})-(\d{1,2})', r'\1-\2-\3'),  # Already correct
-        ]
-        for pattern, replacement in date_patterns:
-            match = re.search(pattern, date_str)
-            if match:
-                try:
-                    # Normalize to YYYY-MM-DD
-                    parts = re.sub(pattern, replacement, date_str)
-                    header["date"] = parts.split()[0] if ' ' in parts else parts
-                    break
-                except:
-                    pass
-    
-    # Ensure disclaimer
     if not header.get("disclaimer"):
         header["disclaimer"] = "This summary references an external document and is for workflow purposes only. It does not constitute medical advice."
-    
-    # Ensure summary section exists with items array
-    if "summary" not in structured_summary:
-        structured_summary["summary"] = {
-            "items": []
-        }
-    elif "items" not in structured_summary["summary"]:
-        structured_summary["summary"]["items"] = []
     
     return structured_summary
 
@@ -356,14 +542,6 @@ def ensure_header_fields(structured_summary: dict, doc_type: str, raw_text: str)
 def filter_disallowed_fields(structured_summary: dict, allowed_fields: Set[str]) -> dict:
     """
     Filter out any UI fields that are not allowed for the document type.
-    This is a defensive measure to ensure compliance.
-    
-    Args:
-        structured_summary: The structured summary dict
-        allowed_fields: Set of allowed field names
-        
-    Returns:
-        Filtered structured summary
     """
     if "summary" in structured_summary and "items" in structured_summary["summary"]:
         structured_summary["summary"]["items"] = [
@@ -373,52 +551,15 @@ def filter_disallowed_fields(structured_summary: dict, allowed_fields: Set[str])
     return structured_summary
 
 
-def validate_ui_items(structured_summary: dict) -> dict:
-    """
-    Validate UI items have required fields (collapsed, expanded).
-    Removes invalid items and ensures proper structure.
-    """
-    valid_fields = {
-        "findings", "physical_exam",
-        "vital_signs", "medications", "recommendations", "rationale",
-        "mmi_status", "work_status"
-    }
-    
-    if "summary" in structured_summary and "items" in structured_summary["summary"]:
-        items = structured_summary["summary"]["items"]
-        validated_items = []
-        
-        for item in items:
-            if isinstance(item, dict):
-                field = item.get("field", "").lower()
-                collapsed = item.get("collapsed", "").strip()
-                expanded = item.get("expanded", "").strip()
-                
-                # Skip items without required fields or invalid field types
-                if field not in valid_fields:
-                    continue
-                if not collapsed or not expanded:
-                    continue
-                
-                # Normalize field name
-                item["field"] = field
-                validated_items.append(item)
-        
-        structured_summary["summary"]["items"] = validated_items
-    
-    return structured_summary
-
-
 def deduplicate_fields(structured_summary: dict) -> dict:
     """
     Ensure each field type appears only once.
-    If duplicates exist, consolidate them into a single item.
     """
     if "summary" not in structured_summary or "items" not in structured_summary["summary"]:
         return structured_summary
     
     items = structured_summary["summary"]["items"]
-    field_map = {}  # field_name -> consolidated item
+    field_map = {}
     
     for item in items:
         field = item.get("field", "")
@@ -426,64 +567,705 @@ def deduplicate_fields(structured_summary: dict) -> dict:
             continue
             
         if field not in field_map:
-            # First occurrence - store as is
-            field_map[field] = {
-                "field": field,
-                "collapsed": item.get("collapsed", ""),
-                "expanded": item.get("expanded", "")
-            }
+            field_map[field] = item
         else:
-            # Duplicate - consolidate by appending to expanded
+            # Merge expanded content
             existing = field_map[field]
             new_expanded = item.get("expanded", "")
-            if new_expanded and new_expanded not in existing["expanded"]:
-                existing["expanded"] = existing["expanded"].rstrip(". ") + ". " + new_expanded
-            logger.warning(f"⚠️ Consolidated duplicate field '{field}' into single item")
+            if new_expanded:
+                if existing.get("expanded"):
+                    # Add new bullets if not already present
+                    existing_bullets = set(existing["expanded"].split('\n'))
+                    new_bullets = set(new_expanded.split('\n'))
+                    combined = existing_bullets.union(new_bullets)
+                    existing["expanded"] = '\n'.join(sorted(combined))
+                else:
+                    existing["expanded"] = new_expanded
     
-    # Convert back to list, maintaining a logical order
-    field_order = [
-        "findings", "physical_exam",
-        "vital_signs", "medications", "recommendations", "rationale",
-        "mmi_status", "work_status"
-    ]
-    
-    deduplicated_items = []
-    for field in field_order:
-        if field in field_map:
-            deduplicated_items.append(field_map[field])
-    
-    # Add any fields not in the standard order
-    for field, item in field_map.items():
-        if field not in field_order:
-            deduplicated_items.append(item)
-    
-    structured_summary["summary"]["items"] = deduplicated_items
+    structured_summary["summary"]["items"] = list(field_map.values())
     return structured_summary
 
 
-def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
+def validate_summary_items(items: List[dict]) -> List[dict]:
     """
-    Filter out fields that have no meaningful content or generic "not found" messages.
+    Simple validation to ensure items have basic required structure.
+    """
+    validated_items = []
     
-    Removes items where:
-    - Text is too short or empty
-    - Contains generic phrases like "No specific X were documented"
-    - Contains "not found", "not available", "not specified"
-    - Is just a placeholder with no real clinical content
-    - Contains incomplete/malformed sentences detected by linguistic analysis
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+            
+        field = item.get("field", "").strip()
+        collapsed = item.get("collapsed", "").strip()
+        expanded = item.get("expanded", "").strip()
+        
+        # Skip items without required fields
+        if not field or (not collapsed and not expanded):
+            continue
+        
+        # Ensure expanded has bullet format
+        if expanded and not any(b.strip().startswith('•') for b in expanded.split('\n')):
+            # Convert to bullets
+            lines = [line.strip() for line in expanded.split('. ') if line.strip()]
+            if lines:
+                expanded = '\n'.join([f"• {line}" for line in lines])
+                item["expanded"] = expanded
+        
+        validated_items.append(item)
+    
+    return validated_items
+
+
+def prioritize_fields(items: List[dict], priority_fields: List[str]) -> List[dict]:
+    """
+    Reorder items so priority fields appear first.
+    """
+    priority_items = []
+    non_priority_items = []
+    
+    for item in items:
+        field = item.get("field", "")
+        if field in priority_fields:
+            priority_items.append(item)
+        else:
+            non_priority_items.append(item)
+    
+    # Order priority items by priority list
+    ordered_priority = []
+    for priority_field in priority_fields:
+        for item in priority_items:
+            if item.get("field") == priority_field:
+                ordered_priority.append(item)
+                break
+    
+    # Add any remaining priority items
+    for item in priority_items:
+        if item not in ordered_priority:
+            ordered_priority.append(item)
+    
+    return ordered_priority + non_priority_items
+
+
+# ============== OPTIMIZED MAIN GENERATION FUNCTION ==============
+
+def generate_structured_short_summary(llm: AzureChatOpenAI, raw_text: str, doc_type: str) -> dict:
+    """
+    Generate structured summary focused on CRITICAL clinical data points only.
+    Minimizes noise and avoids trivial information while preserving context.
+    """
+    logger.info(f"🎯 Generating critical-focus summary for {doc_type}")
+    
+    # Resolve allowed fields
+    field_info = resolve_allowed_fields(doc_type)
+    allowed_fields = field_info["allowed"]
+    priority_fields = field_info.get("priority", [])
+    
+    logger.info(f"📋 Allowed: {len(allowed_fields)} fields, Priority: {len(priority_fields)} fields")
+    
+    # Document type descriptions for context
+    doc_type_descriptions = {
+        "RFA": "Request for Authorization",
+        "PR-2": "Progress Report",
+        "PR-4": "Permanent & Stationary Report",
+        "DFR": "Doctor's First Report",
+        "QME": "QME/IME Report",
+        "IME": "Independent Medical Exam",
+        "IMR": "Independent Medical Review",
+        "UR": "Utilization Review",
+        "CONSULT": "Consultation Note",
+        "MRI": "Imaging Report",
+        "CT": "Imaging Report",
+        "XRAY": "Imaging Report",
+        "SURGERY": "Surgery Report",
+        "PHYSICAL THERAPY": "Therapy Report",
+        "LABS": "Laboratory Report"
+    }
+    
+    doc_description = doc_type_descriptions.get(doc_type.split()[0].upper(), "Medical Document")
+    
+    # Enhanced system prompt with CRITICAL FOCUS
+    system_prompt = SystemMessagePromptTemplate.from_template("""
+You are a MEDICAL DOCUMENT RESTATER for PHYSICIAN REVIEW.
+Your ONLY function is to RESTATE what was EXPLICITLY documented in past tense.
+
+🚨 **ABSOLUTE PAST-TENSE RULE - NO EXCEPTIONS:**
+EVERY statement MUST use ONLY these verb forms:
+✅ "was documented", "were documented"
+✅ "was reported", "were reported" 
+✅ "was noted", "were noted"
+✅ "was described", "were described"
+✅ "was referenced", "were referenced"
+✅ "was stated", "were stated"
+✅ "was listed", "were listed"
+
+❌ **STRICTLY FORBIDDEN PRESENT TENSE:**
+• "Diagnoses include" → VIOLATION
+• "Plan includes" → VIOLATION  
+• "Patient has" → VIOLATION
+• "Findings show" → VIOLATION
+• "Treatment consists of" → VIOLATION
+• ANY present tense verbs
+
+🎯 **CORRECT ATTRIBUTION PATTERNS:**
+
+**DIAGNOSES:**
+❌ WRONG: "Diagnoses include depression and anxiety"
+✅ CORRECT: "The following diagnoses were documented: Major Depressive Disorder, Panic Disorder"
+
+❌ WRONG: "Patient has lumbar disc herniation"
+✅ CORRECT: "Lumbar disc herniation was documented"
+
+**TREATMENT PLANS:**
+❌ WRONG: "Plan includes physical therapy"
+✅ CORRECT: "Physical therapy was referenced in the treatment plan"
+
+❌ WRONG: "Treatment consists of medication management"
+✅ CORRECT: "Medication management was described in the treatment plan"
+
+**FINDINGS:**
+❌ WRONG: "MRI shows disc herniation"
+✅ CORRECT: "Disc herniation was noted on MRI"
+
+❌ WRONG: "Exam reveals limited range of motion"
+✅ CORRECT: "Limited range of motion was documented during examination"
+
+🔴 **CRITICAL FILTERING RULES:**
+
+**INCLUDE ONLY (with past tense attribution):**
+✅ "MMI was declared with 12% impairment"
+✅ "Work restrictions were documented as 'no lifting >20 lbs'"
+✅ "Physical therapy was authorized for 12 visits"
+✅ "Lumbar disc herniation was noted on MRI"
+✅ "Hydrocodone was prescribed at 10mg TID"
+
+**EXCLUDE/SUMMARIZE:**
+❌ Normal/negative findings (unless critical)
+❌ Routine administrative details  
+❌ Generic statements with no clinical value
+❌ "No prior studies were available" (trivial negative)
+❌ Repetitive information
+
+🧠 **CLINICAL PRIORITIZATION:**
+Before including any information, ask:
+1. Is this CRITICAL for physician decision-making?
+2. Would omitting this lead to clinical risk?
+3. Is this actionable information?
+4. Is this new or changed from previous status?
+
+**If answer is NO to ALL questions → EXCLUDE or SUMMARIZE BRIEFLY**
+
+🚨 **OUTPUT OPTIMIZATION RULES:**
+
+**COLLAPSED TEXT (ONE LINE):**
+• Complete PAST-TENSE sentence
+• Example: "MMI was declared with 12% whole person impairment"
+• NOT: "Multiple findings were documented" (too generic)
+
+**EXPANDED TEXT (BULLETS):**
+• 2-5 bullets MAXIMUM per field
+• ONLY include CRITICAL details
+• EVERY bullet MUST be PAST TENSE
+• Use COMPLETE sentences: "L4-L5 disc herniation was noted on MRI with 5mm protrusion"
+• NOT: "Disc herniation", "5mm" (fragments)
+• Group related findings: "Cervical spine conditions were documented including: disc degeneration, spondylosis, and radiculopathy"
+
+**FIELD-SPECIFIC PAST-TENSE TEMPLATES:**
+
+**ASSESSMENT/DIAGNOSES:**
+❌ "Diagnoses include: depression, anxiety"
+✅ "The following diagnoses were documented: Major Depressive Disorder, Panic Disorder"
+
+❌ "Assessment reveals chronic pain syndrome"
+✅ "Chronic pain syndrome was documented in the assessment"
+
+**PLAN/TREATMENT:**
+❌ "Plan includes: medication management, therapy"
+✅ "The treatment plan referenced medication management and therapy"
+
+❌ "Will start physical therapy next week"
+✅ "Physical therapy was scheduled to begin the following week"
+
+**FINDINGS:**
+❌ "MRI shows L4-L5 herniation"
+✅ "L4-L5 disc herniation was noted on MRI"
+
+❌ "Exam reveals tenderness at L4-L5"
+✅ "Tenderness at L4-L5 was documented during examination"
+
+**WORK STATUS:**
+❌ "Patient is off work"
+✅ "Off work status was documented"
+
+❌ "Has lifting restrictions"
+✅ "Lifting restrictions were documented as 'no lifting >10 lbs'"
+
+**MEDICATIONS:**
+❌ "Taking hydrocodone 10mg TID"
+✅ "Hydrocodone 10mg three times daily was documented"
+
+❌ "Prescribed gabapentin 300mg"
+✅ "Gabapentin 300mg was prescribed"
+
+📋 **OUTPUT STRUCTURE:**
+{{
+    "header": {{
+        "date": "YYYY-MM-DD or empty",
+        "title": "Document Type - Body Region",
+        "author": "Author Name, Credentials",
+        "disclaimer": "Standard disclaimer",
+        "source_type": "External Medical Document"
+    }},
+    "summary": {{
+        "items": [
+            {{
+                "field": "field_name",
+                "collapsed": "One COMPLETE PAST-TENSE sentence",
+                "expanded": "• Past tense complete sentence\\n• Past tense complete sentence\\n• Past tense complete sentence"
+            }}
+        ]
+    }}
+}}
+
+🚨 **PAST-TENSE VALIDATION CHECKLIST (ALL MUST PASS):**
+✅ NO present tense verbs in any output
+✅ NO "includes", "has", "shows", "reveals", "consists of"
+✅ ONLY "was/were documented/noted/reported/described"
+✅ Every sentence has clear attribution
+✅ No clinical judgments or interpretations
+✅ Decision terms preserved exactly
+
+**EXAMPLES OF CORRECT VS INCORRECT:**
+
+**INCORRECT (Present tense - VIOLATION):**
+{{
+  "field": "assessment",
+  "collapsed": "Diagnoses include Major Depressive Disorder and Panic Disorder",
+  "expanded": "• Patient has multiple psychiatric diagnoses\\n• Treatment includes medication management"
+}}
+
+**CORRECT (Past tense - COMPLIANT):**
+{{
+  "field": "assessment",
+  "collapsed": "Multiple psychiatric diagnoses were documented including Major Depressive Disorder and Panic Disorder",
+  "expanded": "• Major Depressive Disorder was documented\\n• Panic Disorder was noted\\n• Medication management was referenced in the treatment plan"
+}}
+
+**INCORRECT (Present tense - VIOLATION):**
+{{
+  "field": "plan",
+  "collapsed": "Plan includes evaluating hydroxyzine response and exploring TMS",
+  "expanded": "• Will evaluate hydroxyzine response\\n• May consider TMS or Spravato"
+}}
+
+**CORRECT (Past tense - COMPLIANT):**
+{{
+  "field": "plan",
+  "collapsed": "Treatment plan referenced evaluation of hydroxyzine response and consideration of TMS or Spravato",
+  "expanded": "• Evaluation of hydroxyzine response was referenced\\n• TMS or Spravato were described as potential treatment options"
+}}
+
+**INCORRECT (Fragments - VIOLATION):**
+{{
+  "field": "findings",
+  "collapsed": "MRI findings",
+  "expanded": "• Disc herniation\\n• 5mm\\n• Stenosis"
+}}
+
+**CORRECT (Complete past tense - COMPLIANT):**
+{{
+  "field": "findings",
+  "collapsed": "L4-L5 disc herniation with stenosis was documented on MRI",
+  "expanded": "• L4-L5 disc herniation was noted on MRI\\n• 5mm protrusion was measured\\n• Spinal stenosis was documented at the same level"
+}}
+
+Return valid JSON only.
+""")
+
+    user_prompt = HumanMessagePromptTemplate.from_template("""
+**DOCUMENT TYPE:** {doc_type}
+**CRITICAL MISSION:** Restate ONLY what was EXPLICITLY documented in PAST TENSE
+
+**ALLOWED FIELDS (use only these with PAST TENSE):**
+{allowed_fields_list}
+
+**PHYSICIAN PRIORITY FIELDS (focus here first):**
+{priority_fields_list}
+
+**SOURCE DOCUMENT:**
+{raw_text}
+
+**TASK:** Restate CRITICAL clinical information using STRICT PAST-TENSE ATTRIBUTION.
+
+**ABSOLUTE PAST-TENSE REQUIREMENTS:**
+
+1. **ONLY THESE VERBS:**
+   • was documented / were documented
+   • was reported / were reported
+   • was noted / were noted
+   • was described / were described
+   • was referenced / were referenced
+   • was stated / were stated
+
+2. **NEVER USE PRESENT TENSE:**
+   ❌ "Diagnoses include..." → ✅ "The following diagnoses were documented..."
+   ❌ "Plan includes..." → ✅ "The treatment plan referenced..."
+   ❌ "Patient has..." → ✅ "[Condition] was documented..."
+   ❌ "MRI shows..." → ✅ "[Finding] was noted on MRI..."
+   ❌ "Will start..." → ✅ "[Treatment] was scheduled..."
+
+3. **COMPLETE SENTENCES:**
+   • Every bullet must be a complete past-tense sentence
+   • Minimum 5 words per bullet
+   • Include attribution in every sentence
+
+4. **CRITICAL FILTERING:**
+   • Include only information that affects clinical decisions
+   • Exclude normal/negative findings unless critical
+   • Skip trivial negatives like "No prior studies were available"
+   • Group related information
+
+5. **QUALITY OVER QUANTITY:**
+   • 2-5 bullets maximum per field
+   • Priority fields: up to 8 bullets
+   • Non-priority fields: 3-5 bullets
+
+**FIELD TRANSFORMATION EXAMPLES:**
+
+**ASSESSMENT FIELD:**
+Source: "Diagnoses: Major Depressive Disorder, Panic Disorder, Generalized Anxiety Disorder"
+❌ WRONG: "Diagnoses include depression and anxiety disorders"
+✅ CORRECT: "The following psychiatric diagnoses were documented: Major Depressive Disorder, Panic Disorder, and Generalized Anxiety Disorder"
+
+**PLAN FIELD:**
+Source: "Plan: Evaluate hydroxyzine response, consider TMS or Spravato"
+❌ WRONG: "Plan includes evaluating medication response and exploring TMS"
+✅ CORRECT: "The treatment plan referenced evaluation of hydroxyzine response and consideration of TMS or Spravato options"
+
+**FINDINGS FIELD:**
+Source: "MRI: L4-L5 disc herniation with 5mm protrusion, mild stenosis"
+❌ WRONG: "MRI shows disc herniation and stenosis"
+✅ CORRECT: "L4-L5 disc herniation was noted on MRI with 5mm protrusion and mild stenosis"
+
+**WORK STATUS FIELD:**
+Source: "Off work, no lifting >10 lbs for 4 weeks"
+❌ WRONG: "Patient is off work with lifting restrictions"
+✅ CORRECT: "Off work status was documented with lifting restrictions of no more than 10 pounds for 4 weeks"
+
+**MEDICATIONS FIELD:**
+Source: "Hydrocodone 10mg TID, gabapentin 300mg TID"
+❌ WRONG: "Taking hydrocodone and gabapentin"
+✅ CORRECT: "Hydrocodone 10mg three times daily and gabapentin 300mg three times daily were documented"
+
+**OUTPUT:** Valid JSON with STRICT PAST-TENSE compliance.
+Every sentence must pass: "This is a restatement of what was explicitly documented."
+""")
+    
+    chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
+    
+    # Create LLM instance
+    from config.settings import CONFIG
+    
+    summary_llm = AzureChatOpenAI(
+        azure_deployment=CONFIG.get("azure_openai_deployment"),
+        azure_endpoint=CONFIG.get("azure_openai_endpoint"),
+        api_key=CONFIG.get("azure_openai_api_key"),
+        api_version=CONFIG.get("azure_openai_api_version"),
+        temperature=0.1,  # Low for consistency
+        max_tokens=6000,   # Reduced since we want concise output
+        timeout=90,
+        request_timeout=90,
+    )
+    
+    # Retry mechanism
+    max_retries = 3
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"🔄 Critical-focus generation attempt {attempt + 1}/{max_retries}")
+            
+            chain = chat_prompt | summary_llm
+            response = chain.invoke({
+                "doc_type": doc_type,
+                "allowed_fields_list": "\n".join([f"• {field}" for field in allowed_fields]),
+                "priority_fields_list": "\n".join([f"• {field}" for field in priority_fields]),
+                "raw_text": raw_text[:12000]  # Limit for focus
+            })
+            
+            # Extract JSON
+            response_content = response.content.strip()
+            start_idx = response_content.find('{')
+            end_idx = response_content.rfind('}')
+            
+            if start_idx != -1 and end_idx != -1:
+                response_content = response_content[start_idx:end_idx+1]
+            
+            # Clean and parse
+            response_content = "".join(ch for ch in response_content if ch >= ' ' or ch in '\n\r\t')
+            structured_summary = json.loads(response_content, strict=False)
+            
+            # Apply post-processing with CRITICAL focus
+            structured_summary = ensure_proper_header(structured_summary, doc_type, raw_text)
+            structured_summary = apply_critical_focus_filtering(structured_summary, priority_fields)
+            structured_summary = filter_disallowed_fields(structured_summary, allowed_fields)
+            structured_summary = deduplicate_fields(structured_summary)
+            
+            logger.info(f"✅ Generated critical-focus summary with {len(structured_summary.get('summary', {}).get('items', []))} items")
+            return structured_summary
+            
+        except json.JSONDecodeError as e:
+            last_error = f"JSON parsing error: {e}"
+            logger.warning(f"⚠️ Attempt {attempt + 1} failed: {last_error}")
+            
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"⚠️ Attempt {attempt + 1} failed: {last_error}")
+    
+    # Fallback
+    logger.error(f"❌ All generation attempts failed. Using fallback.")
+    return create_fallback_summary(doc_type, priority_fields)
+
+
+def apply_critical_focus_filtering(structured_summary: dict, priority_fields: List[str]) -> dict:
+    """
+    Apply additional filtering to ensure only critical information is included.
+    Removes trivial bullets and ensures complete sentences.
     """
     if "summary" not in structured_summary or "items" not in structured_summary["summary"]:
         return structured_summary
     
-    # Generic phrases that indicate no meaningful content
-    generic_patterns = [
-        r"no\s+specific\s+\w+\s+were?\s+(documented|noted|described|found)",
-        r"no\s+\w+\s+were?\s+(documented|noted|described|found)",
-        r"not\s+(found|available|specified|documented|noted)",
-        r"none\s+(documented|noted|described|found)",
-        r"(recommendations?|findings?|medications?|exam)\s+not\s+",
-        r"^no\s+\w+\s*\.?$",  # Just "No X" or "No X."
+    items = structured_summary["summary"]["items"]
+    filtered_items = []
+    
+    for item in items:
+        field = item.get("field", "")
+        collapsed = item.get("collapsed", "").strip()
+        expanded = item.get("expanded", "").strip()
+        
+        # Skip if both empty
+        if not collapsed and not expanded:
+            continue
+        
+        # Check if collapsed is meaningful (not generic)
+        if is_trivial_statement(collapsed):
+            logger.info(f"🗑️ Skipping field with trivial collapsed: {field} - '{collapsed[:50]}...'")
+            continue
+        
+        # Filter expanded bullets for critical info only
+        if expanded:
+            bullets = [b.strip() for b in expanded.split('\n') if b.strip().startswith('•')]
+            critical_bullets = []
+            
+            for bullet in bullets:
+                # Clean the bullet
+                bullet_text = bullet[1:].strip() if bullet.startswith('•') else bullet
+                
+                # Skip trivial bullets
+                if is_trivial_statement(bullet_text):
+                    logger.debug(f"🗑️ Skipping trivial bullet in {field}: '{bullet_text[:50]}...'")
+                    continue
+                
+                # Ensure complete sentence
+                if not is_complete_sentence(bullet_text):
+                    bullet_text = make_complete_sentence(bullet_text, field)
+                
+                # Check minimum word count (except for medication doses)
+                if field != "medications" and len(bullet_text.split()) < 5:
+                    # Try to enhance if possible
+                    enhanced = enhance_brief_statement(bullet_text, field)
+                    if enhanced and len(enhanced.split()) >= 5:
+                        bullet_text = enhanced
+                    else:
+                        logger.debug(f"🗑️ Skipping too-brief bullet in {field}: '{bullet_text}'")
+                        continue
+                
+                critical_bullets.append(f"• {bullet_text}")
+            
+            # Only include field if we have critical bullets
+            if critical_bullets and len(critical_bullets) <= 8:  # Limit to 8 bullets max
+                # Limit to 5 bullets for non-priority fields
+                if field not in priority_fields and len(critical_bullets) > 5:
+                    critical_bullets = critical_bullets[:5]
+                    logger.info(f"📏 Limited {field} to 5 bullets (non-priority field)")
+                
+                item["expanded"] = "\n".join(critical_bullets)
+                filtered_items.append(item)
+            else:
+                logger.info(f"🗑️ Skipping field {field} - no critical bullets after filtering")
+        else:
+            # Has collapsed but no expanded - keep if collapsed is critical
+            if not is_trivial_statement(collapsed):
+                filtered_items.append(item)
+    
+    # Reorder by priority
+    filtered_items = prioritize_fields(filtered_items, priority_fields)
+    
+    structured_summary["summary"]["items"] = filtered_items
+    return structured_summary
+
+
+def is_trivial_statement(text: str) -> bool:
+    """
+    Check if a statement is trivial or non-critical.
+    """
+    if not text or len(text.strip()) < 10:
+        return True
+    
+    text_lower = text.lower()
+    
+    # Trivial patterns to exclude
+    trivial_patterns = [
+        r'no\s+(?:prior|previous|comparison|available|found|identified|specified|documented)',
+        r'not\s+(?:available|found|identified|specified|documented|noted)',
+        r'unremarkable\s+(?:exam|findings|study)',
+        r'normal\s+(?:range|findings|exam|study|results)',
+        r'within\s+normal\s+limits',
+        r'no\s+significant\s+(?:findings|abnormalities|changes)',
+        r'negative\s+for\s+(?:acute|significant)',
+        r'routine\s+(?:follow-up|appointment|visit)',
+        r'as\s+previously\s+(?:documented|noted|reported)',
+        r'without\s+(?:acute|significant|notable)\s+(?:findings|changes|abnormalities)',
     ]
+    
+    for pattern in trivial_patterns:
+        if re.search(pattern, text_lower):
+            return True
+    
+    # Check for very generic statements
+    generic_phrases = [
+        "multiple findings were documented",
+        "various findings were noted",
+        "several items were reported",
+        "information was documented",
+        "details were provided",
+        "content was included",
+    ]
+    
+    if any(phrase in text_lower for phrase in generic_phrases):
+        return True
+    
+    return False
+
+
+def is_complete_sentence(text: str) -> bool:
+    """
+    Check if text appears to be a complete sentence.
+    Simple heuristic - has subject and verb, ends with punctuation.
+    """
+    if not text:
+        return False
+    
+    # Check for ending punctuation
+    if not text[-1] in '.!?':
+        return False
+    
+    # Check for verb indicators (simple heuristic)
+    words = text.split()
+    if len(words) < 4:  # Very short sentences are often fragments
+        return False
+    
+    # Check for common verbs in past tense (for non-authorship)
+    verb_indicators = ['was', 'were', 'documented', 'reported', 'noted', 
+                      'showed', 'revealed', 'indicated', 'found', 'observed']
+    
+    has_verb = any(word.lower() in verb_indicators for word in words)
+    if not has_verb:
+        # Check for other verb forms
+        has_verb_ending = any(word.lower().endswith(('ed', 'ing')) for word in words)
+        if not has_verb_ending:
+            return False
+    
+    return True
+
+
+def make_complete_sentence(fragment: str, field: str) -> str:
+    """
+    Try to convert a fragment into a complete sentence.
+    """
+    fragment = fragment.strip()
+    if not fragment:
+        return fragment
+    
+    # Add ending punctuation if missing
+    if fragment[-1] not in '.!?':
+        fragment += '.'
+    
+    # Common field-specific completions
+    field_completions = {
+        "findings": f"The report documented {fragment.lower()}",
+        "work_status": f"Work status included {fragment.lower()}",
+        "medications": f"Medication regimen included {fragment.lower()}",
+        "recommendations": f"Treatment recommendations included {fragment.lower()}",
+        "physical_exam": f"Physical examination revealed {fragment.lower()}",
+    }
+    
+    if field in field_completions:
+        return field_completions[field]
+    
+    # Generic completion
+    if not fragment[0].isupper():
+        fragment = fragment[0].upper() + fragment[1:]
+    
+    # Check if it already has a verb
+    words = fragment.lower().split()
+    has_verb = any(word in ['was', 'were', 'documented', 'reported', 'noted'] for word in words)
+    
+    if not has_verb:
+        return f"The report documented {fragment.lower()}"
+    
+    return fragment
+
+
+def enhance_brief_statement(text: str, field: str) -> str:
+    """
+    Try to enhance a very brief statement with more context.
+    """
+    # Field-specific enhancements
+    enhancements = {
+        "findings": {
+            r'(\d+mm)': r'a \1 protrusion',
+            r'([A-Z]\d+-[A-Z]\d+)': r'at the \1 level',
+            r'(herniation|protrusion|stenosis)': r'with \1',
+        },
+        "work_status": {
+            r'off\s+work': r'off work with temporary total disability',
+            r'no\s+lifting': r'no lifting restrictions',
+            r'restrictions': r'work restrictions',
+        },
+        "medications": {
+            r'(\d+mg)': r'\1 dosage',
+            r'([A-Z][a-z]+)': r'\1 medication',
+        }
+    }
+    
+    if field in enhancements:
+        for pattern, replacement in enhancements[field].items():
+            if re.search(pattern, text, re.IGNORECASE):
+                text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    
+    return text
+
+# ============== COMPATIBILITY FUNCTIONS ==============
+
+def remove_patient_identifiers(structured_summary: dict) -> dict:
+    """Compatibility function - returns as-is since PII removal happens elsewhere."""
+    return structured_summary
+
+
+def validate_ui_items(structured_summary: dict) -> dict:
+    """Compatibility function - validates summary items."""
+    if "summary" in structured_summary and "items" in structured_summary["summary"]:
+        structured_summary["summary"]["items"] = validate_summary_items(
+            structured_summary["summary"]["items"]
+        )
+    return structured_summary
+
+
+def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
+    """Compatibility function - filters empty fields."""
+    if "summary" not in structured_summary or "items" not in structured_summary["summary"]:
+        return structured_summary
     
     items = structured_summary["summary"]["items"]
     filtered_items = []
@@ -491,942 +1273,33 @@ def filter_empty_or_generic_fields(structured_summary: dict) -> dict:
     for item in items:
         collapsed = item.get("collapsed", "").strip()
         expanded = item.get("expanded", "").strip()
-        field = item.get("field", "")
         
-        # Check if collapsed or expanded is too short or empty
-        if not collapsed or not expanded or len(collapsed) < 10 or len(expanded) < 15:
-            logger.info(f"🗑️ Removed empty field '{field}' (too short or empty)")
-            continue
-        
-        # Check for malformed sentences using linguistic validation
-        is_malformed = False
-        for text, label in [(collapsed, "collapsed"), (expanded, "expanded")]:
-            if is_malformed_sentence(text):
-                logger.warning(f"🗑️ Removed field '{field}' with malformed {label} text: '{text[:60]}...'")
-                is_malformed = True
-                break
-        
-        if is_malformed:
-            continue
-        
-        # Check for generic patterns in both collapsed and expanded
-        is_generic = False
-        text_to_check = f"{collapsed} {expanded}".lower()
-        
-        for pattern in generic_patterns:
-            if re.search(pattern, text_to_check, re.IGNORECASE):
-                logger.info(f"🗑️ Removed generic field '{field}': contains '{pattern}'")
-                is_generic = True
-                break
-        
-        if is_generic:
-            continue
-        
-        # Keep this item
-        filtered_items.append(item)
+        # Keep if either collapsed or expanded has content
+        if collapsed or expanded:
+            filtered_items.append(item)
     
     structured_summary["summary"]["items"] = filtered_items
-    logger.info(f"✅ Filtered to {len(filtered_items)} meaningful fields (removed {len(items) - len(filtered_items)} empty/generic/incomplete)")
-    return structured_summary
-
-
-def is_malformed_sentence(text: str) -> bool:
-    """
-    Generic linguistic validation to detect malformed/garbled sentences.
-    Uses linguistic rules rather than hardcoded patterns.
-    
-    Checks:
-    1. Sentences starting with "The" must have a valid subject (noun/noun phrase) after it
-    2. Function words (prepositions, conjunctions, articles) shouldn't appear in invalid positions
-    3. Sentences must have proper semantic content (not just function words)
-    4. Detects truncated/garbled word fragments
-    
-    Returns:
-        True if the sentence is malformed, False if it appears valid
-    """
-    if not text:
-        return True
-    
-    # Clean the text for analysis
-    text = text.strip()
-    
-    # Skip bullet points for analysis (check the actual content)
-    if text.startswith('•'):
-        text = text[1:].strip()
-    
-    # If empty after cleaning, it's malformed
-    if not text or len(text) < 5:
-        return True
-    
-    words = text.split()
-    if len(words) < 2:
-        return True
-    
-    # Define word categories for linguistic analysis
-    # Function words that shouldn't directly follow "The" without a noun
-    function_words = {
-        'a', 'an', 'the',  # articles
-        'at', 'to', 'from', 'in', 'on', 'for', 'with', 'by', 'as', 'of',  # prepositions
-        'and', 'or', 'but', 'yet', 'so', 'nor',  # conjunctions
-        'is', 'are', 'was', 'were', 'be', 'been', 'being',  # be-verbs (alone is odd)
-        'not', 'no', 'never',  # negations (shouldn't directly follow "The")
-    }
-    
-    # Words that ARE valid after "The" (nouns, adjectives that modify nouns)
-    valid_after_the = {
-        'patient', 'report', 'document', 'physician', 'doctor', 'provider',
-        'examination', 'assessment', 'evaluation', 'findings', 'results',
-        'diagnosis', 'treatment', 'recommendation', 'medication', 'condition',
-        'injury', 'pain', 'symptoms', 'history', 'following', 'above', 'below',
-        'cervical', 'lumbar', 'thoracic', 'chronic', 'acute', 'bilateral',
-        'left', 'right', 'upper', 'lower', 'medical', 'clinical', 'physical',
-        'requested', 'recommended', 'documented', 'noted', 'referenced',
-        'multiple', 'various', 'several', 'specific', 'primary', 'secondary',
-        'temporary', 'permanent', 'total', 'partial',  # These are valid as adjectives before nouns
-    }
-    
-    # Check 1: "The" followed by function word without valid noun structure
-    first_word = words[0].lower().rstrip('.,;:')
-    if first_word == 'the' and len(words) >= 2:
-        second_word = words[1].lower().rstrip('.,;:')
-        
-        # If second word is a function word, it's likely malformed
-        # Exception: some function words can be valid (e.g., "The following")
-        if second_word in function_words and second_word not in valid_after_the:
-            # Check if there's a valid noun soon after
-            has_valid_subject = False
-            for i, word in enumerate(words[2:6], start=2):  # Check next few words
-                clean_word = word.lower().rstrip('.,;:')
-                # Check if it's a content word (not function word) and reasonably long
-                if clean_word not in function_words and len(clean_word) > 2:
-                    # Check if it looks like a noun (simple heuristic)
-                    if not clean_word.endswith(('ly', 'ing')) or clean_word in valid_after_the:
-                        has_valid_subject = True
-                        break
-            
-            if not has_valid_subject:
-                return True  # Malformed: "The [function word] ..." without valid subject
-    
-    # Check 2: Detect garbled/truncated words (nonsense fragments)
-    nonsense_indicators = 0
-    for word in words:
-        clean_word = word.lower().rstrip('.,;:!?')
-        # Very short words in odd positions (not common function words)
-        if len(clean_word) <= 2 and clean_word not in {'a', 'an', 'as', 'at', 'be', 'by', 'do', 'go', 'he', 'if', 'in', 'is', 'it', 'me', 'my', 'no', 'of', 'on', 'or', 'so', 'to', 'up', 'us', 'we'}:
-            nonsense_indicators += 1
-        # Garbled word fragments (uncommon letter combinations)
-        if re.search(r'[bcdfghjklmnpqrstvwxz]{4,}', clean_word):  # 4+ consonants in a row
-            nonsense_indicators += 2
-        # Words ending in unusual fragments
-        if re.search(r'(aser|asers|ment$|tion$)s{2,}', clean_word):  # doubled endings
-            nonsense_indicators += 2
-    
-    # If too many nonsense indicators relative to sentence length
-    if nonsense_indicators > len(words) * 0.3:  # More than 30% nonsense
-        return True
-    
-    # Check 3: Sentence must have at least one verb or verb-like word
-    verb_indicators = {'was', 'were', 'is', 'are', 'been', 'being', 'documented', 'noted', 
-                       'referenced', 'reported', 'described', 'stated', 'indicated', 'showed',
-                       'revealed', 'found', 'observed', 'recorded', 'included', 'recommended'}
-    has_verb = any(word.lower().rstrip('.,;:') in verb_indicators or 
-                   word.lower().rstrip('.,;:').endswith(('ed', 'ing')) 
-                   for word in words)
-    
-    # Very short sentences without verbs are suspicious
-    if len(words) < 5 and not has_verb:
-        return True
-    
-    # Check 4: Detect repeated words (sign of generation error)
-    word_list = [w.lower().rstrip('.,;:') for w in words]
-    for i in range(len(word_list) - 1):
-        if word_list[i] == word_list[i + 1] and word_list[i] not in {'very', 'much', 'so'}:
-            return True  # Repeated word like "the the"
-    
-    # Check 5: Sentence shouldn't start with certain function words
-    invalid_starters = {'as', 'at', 'for', 'from', 'in', 'on', 'to', 'with', 'by', 'and', 'or', 'but'}
-    if first_word in invalid_starters and len(words) < 6:
-        return True
-    
-    return False  # Sentence appears valid
-
-
-
-def generate_structured_short_summary(llm: AzureChatOpenAI, raw_text: str, doc_type: str, long_summary: str) -> dict:
-    """
-    Generate a structured, UI-ready summary with clickable collapsed/expanded fields.
-    Output is reference-only, past-tense, and EMR-safe with STRICT non-authorship compliance.
-    
-    Args:
-        llm: Azure OpenAI LLM instance
-        raw_text: The Document AI summarizer output (primary context)
-        doc_type: Document type
-        long_summary: Detailed reference context
-        
-    Returns:
-        dict: Structured summary with header and UI-ready items
-    """
-    logger.info("🎯 Generating UI-ready structured summary...")
-    
-    # Resolve allowed fields for this document type
-    allowed_fields = resolve_allowed_fields(doc_type)
-    logger.info(f"📋 Allowed fields for {doc_type}: {allowed_fields}")
-    
-    # Create Pydantic output parser for consistent response structure
-    pydantic_parser = PydanticOutputParser(pydantic_object=StructuredShortSummary)
-
-    system_prompt = SystemMessagePromptTemplate.from_template("""
-You are a COURT REPORTER, not a clinician.
-
-You extract and reformat content from EXTERNAL medical or legal documents.
-You do NOT author medical conclusions.
-You do NOT interpret findings.
-You do NOT make clinical judgments.
-You do NOT infer causation.
-You do NOT provide medical advice or recommendations.
-
-🔴 CORE NON-AUTHORSHIP PRINCIPLE:
-Every statement must pass this test: "This is a neutral restatement of what the external document EXPLICITLY said, without interpretation, causation, endorsement, or system judgment."
-
-🚨 ZERO TOLERANCE FOR HALLUCINATION OR FABRICATION:
-- ONLY extract information that is EXPLICITLY stated in the source document
-- NEVER infer, assume, or fabricate any information
-- NEVER add clinical interpretations that are not in the original text
-- If something is not clearly stated, DO NOT include it
-- When in doubt, leave it out
-
-🔴 CRITICAL DECISION TERMS - MUST BE PRESERVED EXACTLY:
-When the document contains specific decision or status terms, you MUST include them verbatim:
-- "authorized", "approved", "denied", "deferred", "modified"
-- "recommended", "not recommended", "contraindicated"
-- "granted", "rejected", "pending review"
-- "certified", "supported", "not supported"
-- "at MMI", "not at MMI", "permanent and stationary"
-- "temporarily disabled", "permanently disabled"
-
-🚨 NON-AUTHORSHIP VIOLATION RULES - AUTOMATIC REJECTION:
-
-❌ FORBIDDEN PATTERN #1: INFERRED CAUSATION
-NEVER write: "likely due to", "caused by", "secondary to", "resulted from", "because of"
-✅ ALLOWED: "X was referenced", "Y was documented", "Z was noted in the report"
-
-Example Violations:
-❌ "Side pain was likely due to muscle spasm secondary to cold weather exposure"
-✅ "Side pain for approximately two weeks was documented. Muscle spasm was referenced. Cold weather exposure was referenced."
-
-❌ FORBIDDEN PATTERN #2: DIRECTIVE/INSTRUCTIONAL LANGUAGE
-NEVER write: "recommended to", "should", "advised to", "instructed to", "told to"
-✅ ALLOWED: "was referenced in the report", "was documented", "measures were described"
-
-Example Violations:
-❌ "Conservative management was recommended, including keeping the affected area warm"
-✅ "Conservative management measures were referenced in the report. Use of warmth for symptom relief was described."
-
-❌ FORBIDDEN PATTERN #3: COLLAPSED CAUSATION OR REASONING
-NEVER combine recommendations with their reasons or outcomes with their causes
-✅ REQUIRED: Separate "what was done" from "why it was done"
-
-Example Violations:
-❌ "Medication authorization remains pending due to muscle spasm"
-✅ FINDINGS: "Muscle spasm was documented"
-✅ OPERATIONAL: "Medication authorization was documented as pending"
-
-❌ FORBIDDEN PATTERN #4: HISTORY AS CLINICAL FACT
-NEVER state patient-reported information as verified fact without attribution
-✅ REQUIRED: "The patient reported...", "was documented as patient-reported", "Use of [X] was documented"
-
-Example Violations:
-❌ "The patient uses a cane for mobilization and is on long-term opioid therapy"
-✅ "Use of a cane for ambulation was documented. Long-term opioid therapy was documented."
-OR: "The patient reported using a cane for ambulation. The patient reported long-term opioid use."
-
-❌ FORBIDDEN PATTERN #5: CLINICAL ENDORSEMENT OR JUDGMENT
-NEVER write: "is appropriate", "confirms", "demonstrates", "shows", "reveals", "suggests", "indicates X is necessary"
-✅ ALLOWED: "was documented", "was described", "was noted", "was referenced"
-
-Example Violations:
-❌ "Long-term opioid therapy is appropriate for this patient"
-✅ "Long-term opioid therapy was documented"
-
-❌ FORBIDDEN PATTERN #6: MIXING HISTORY WITH FINDINGS
-NEVER blend patient-reported history with clinical findings in the same field
-✅ REQUIRED: Separate sections for "Reported History" vs "Findings"
-
-Example Violations:
-❌ FINDINGS: "Low back pain severity of 8, side pain for two weeks, muscle spasm, chronic pain syndrome"
-✅ REPORTED HISTORY: "Low back pain severity of 8 was documented. Side pain for approximately two weeks was reported."
-✅ FINDINGS: "Chronic pain syndrome was documented. Muscle spasm was noted."
-
-🚨 CRITICAL FIELD RULES (HIGHEST PRIORITY):
-1. EACH FIELD TYPE CAN ONLY APPEAR ONCE in the output
-2. If multiple items belong to the same field type, CONSOLIDATE them into ONE item
-3. ONLY use field names from the allowed list provided
-4. INCLUDE EVERY FIELD THAT HAS ANY CONTENT - even if only one piece of information
-5. DO NOT omit fields just because they have minimal content
-6. Use the CORRECT field type for the content:
-   - "reported_history" = Patient-reported symptoms, timeline, functional aids, patient-stated medication use
-   - "findings" = Clinical observations, test results, abnormalities, diagnoses (verified/documented by provider)
-   - "recommendations" = Treatment plans, follow-up, referrals (NEVER include reasons - just what was referenced)
-   - "reported_reasons" = Clinical reasoning or rationale AS STATED in document (separate from recommendations)
-   - "medications" = Drugs prescribed or referenced
-   - "physical_exam" = Physical examination findings
-   - "vital_signs" = Vital sign measurements
-   - "operational_context" = Administrative items (RFA status, appointment dates, pending actions)
-   - "mmi_status" = Maximum Medical Improvement status
-   - "work_status" = Work restrictions or capacity
-
-🔴 CRITICAL STRUCTURAL SEPARATION REQUIREMENTS:
-
-REPORTED HISTORY (patient-reported, not verified):
-- Symptoms as described by patient
-- Duration of complaints
-- Functional aids (cane, walker)
-- Patient-stated medication use
-- ALWAYS include caveat: "as documented in external report" or "patient-reported"
-
-FINDINGS (provider-documented observations):
-- Diagnoses
-- Clinical observations
-- Test results
-- Imaging findings
-- Physical exam findings
-- NEVER mix with patient history
-
-RECOMMENDATIONS (referenced actions only):
-- Treatment plans referenced
-- Follow-up instructions documented
-- Referrals mentioned
-- Authorization requests noted
-- NEVER include reasons or causation
-- ALWAYS preserve decision status (approved/denied/authorized/pending)
-
-REPORTED REASONS (separate from recommendations):
-- Clinical rationale AS STATED in document
-- Contributing factors AS DOCUMENTED
-- NEVER infer or interpret
-- Always attribute: "was referenced", "was stated", "was described"
-
-OPERATIONAL CONTEXT (administrative tracking):
-- RFA status
-- Appointment dates
-- Pending actions
-- Document review status
-
-MANDATORY LANGUAGE RULES (NO EXCEPTIONS):
-✅ ALLOWED VERBS ONLY:
-- documented, described, referenced, reported, noted, stated, listed, mentioned
-
-❌ FORBIDDEN VERBS (cause authorship leakage):
-- identified, consistent with, demonstrates, confirms, shows, reveals, suggests, indicates, caused, resulted, led to, due to
-
-✅ ATTRIBUTION PATTERNS:
-- "The [document type] documented..."
-- "The report described..."
-- "[Condition] was noted in the report..."
-- "As documented in the [document type]..."
-- "The patient reported..." (for history only)
-- "was referenced in the report"
-- "was described as..."
-
-❌ FORBIDDEN ATTRIBUTION PATTERNS:
-- "The patient has..." (implies verified fact)
-- "The patient requires..." (implies clinical judgment)
-- "was recommended to..." (directive)
-- "likely caused by..." (causation)
-- "should..." (advice)
-
-🚨 COMPLETE SENTENCE REQUIREMENTS (APPLIES TO BOTH COLLAPSED AND EXPANDED):
-- EVERY sentence MUST be grammatically complete and meaningful
-- NEVER write incomplete fragments like "The at MMI", "The yet at", "The temporary disability"
-- ALWAYS include the subject (patient, report, document) AND complete verb phrase
-- Collapsed text is a SENTENCE, not a phrase - it needs subject + verb + object
-
-Examples of COMPLETE collapsed sentences:
-  ✅ "The patient reported not yet being at maximum medical improvement (MMI)"
-  ✅ "Temporary total disability (TTD) status was documented"
-  ✅ "The report documented that the patient is off work"
-  ✅ "Inability to return to work at this time was noted"
-  
-Examples of INCOMPLETE collapsed sentences (NEVER DO THIS):
-  ❌ "The yet at Maximum Medical Improvement (MMI)" (MISSING "patient is not")
-  ❌ "The temporary total disability (TTD)" (MISSING "was documented")
-  ❌ "The at MMI" (MISSING "patient is")
-  ❌ "The from work" (MEANINGLESS fragment)
-  ❌ "The return to work at this time" (MISSING subject and verb)
-  ❌ "The request for a consultation with a Pulmonologist was apwas documented asd
-
-TENSE & VOICE:
-- Past tense only (was documented, were noted, was described, was referenced)
-- Never present tense declarations
-- Attribution must be clear in EVERY statement
-- NEVER use evaluative language
-
-PRIVACY:
-- No patient identifiers (name, DOB, MRN, phone, claim number)
-- Dates in YYYY-MM-DD format only
-
-🚨 CRITICAL: ALL EXPANDED SECTIONS USE BULLET-POINT FORMAT
-- ALL fields (not just physical_exam and medications) use bullet points in expanded view
-- collapsed = One-line summary with attribution
-- expanded = Simple bullet points, one item per line
-- Each bullet is a short, scannable statement
-- NO paragraph prose in any expanded section
-- Maximum 8-10 bullets per field
-
-EXAMPLE - reported_history (BULLET FORMAT):
-{{
-  "field": "reported_history",
-  "collapsed": "Chronic low back pain and side pain were documented as patient-reported",
-  "expanded": "• The patient reported chronic low back pain\n• Side pain for approximately two weeks was reported\n• Use of a cane for ambulation was documented\n• Long-term opioid therapy was documented\n• Note: History is reported as documented and does not represent verified clinical fact"
-}}
-
-EXAMPLE - findings (BULLET FORMAT):
-{{
-  "field": "findings",
-  "collapsed": "Chronic pain syndrome, lumbar fusion, and osteoarthritis were documented",
-  "expanded": "• Chronic pain syndrome was documented\n• Lumbar fusion was documented\n• Osteoarthritis was documented\n• Sciatica was documented\n• Low back pain severity of 8 was documented"
-}}
-
-EXAMPLE - recommendations (BULLET FORMAT, NO REASONS):
-{{
-  "field": "recommendations",
-  "collapsed": "Conservative management measures were referenced in the report",
-  "expanded": "• Conservative management measures were referenced in the report\n• Medication authorization requests were referenced as pending"
-}}
-
-EXAMPLE - reported_reasons (BULLET FORMAT):
-{{
-  "field": "reported_reasons",
-  "collapsed": "Muscle spasm and cold weather exposure were referenced",
-  "expanded": "• Muscle spasm was referenced in the report\n• Cold weather exposure was referenced as a contributing factor\n• Note: Reasons are reported as stated in the source document and are not interpreted or validated"
-}}
-
-EXAMPLE - operational_context (BULLET FORMAT):
-{{
-  "field": "operational_context",
-  "collapsed": "Medication RFA pending and follow-up appointment documented",
-  "expanded": "• Request for Authorization (RFA) for medications was documented as pending\n• Medications include: Celecoxib, Diclofenac, Hydrocodone, Lidocaine patches, Pregabalin\n• Follow-up appointment dated 2025-12-23 was documented"
-}}
-
-EXAMPLE - physical_exam (BULLET FORMAT):
-{{
-  "field": "physical_exam",
-  "collapsed": "Limited range of motion and tenderness were documented",
-  "expanded": "• Lumbar flexion limited to 45 degrees was noted\n• Extension limited to 15 degrees was documented\n• Tenderness to palpation at L4-L5 was noted\n• Negative straight leg raise test was documented"
-}}
-
-EXAMPLE - medications (BULLET FORMAT):
-{{
-  "field": "medications",
-  "collapsed": "Multiple pain management medications were documented",
-  "expanded": "• Hydrocodone 10mg, twice daily\n• Pregabalin 150mg, three times daily\n• Celecoxib 200mg, once daily\n• Lidocaine patches 5%, as needed\n• Diclofenac gel 1%, topical application"
-}}
-
-🚨 CRITICAL: CONTENT INCLUSION REQUIREMENTS
-- INCLUDE EVERY FIELD THAT HAS ANY VALID CONTENT
-- Even if a field has only ONE piece of information, it MUST be included
-- DO NOT omit fields because they seem "too short" or "minimal"
-- If the source document mentions something relevant to a field, that field MUST appear
-- Empty or truly contentless fields (with no information at all) can be omitted
-- But ANY field with actual data MUST be present in the output
-
-OUTPUT STRUCTURE:
-{format_instructions}
-
-HEADER RULES:
-- Title must reflect document type and body region
-- Author must be name + credentials if present (no "Dr." prefix)
-- Date must be in YYYY-MM-DD format. If not found, use empty string
-- Disclaimer appears EXACTLY ONCE
-
-� CRITICAL: SIGNAL CONSOLIDATION (PREVENT REDUNDANCY)
-When multiple related items come from the SAME SOURCE SENTENCE:
-- CONSOLIDATE into ONE bullet with sub-items OR one comprehensive statement
-- DO NOT create separate bullets that repeat the same source text
-- Group related findings that share attribution
-
-Example - BEFORE (redundant):
-❌ "• Cervical disc degeneration was documented"
-❌ "• Status post cervical spinal fusion was documented"  
-❌ "• Cervical spondylosis was documented"
-❌ "• Cervicalgia was documented"
-(All from same sentence = cognitive overload)
-
-Example - AFTER (consolidated):
-✅ "• Cervical spine conditions documented include: disc degeneration, status post spinal fusion (C3-C7), spondylosis, and cervicalgia"
-
-OR with sub-bullets:
-✅ "• Multiple cervical spine conditions were documented:
-  - Cervical disc degeneration
-  - Status post cervical spinal fusion (C3-C7)
-  - Other cervical spondylosis
-  - Cervicalgia"
-
-APPLY THIS TO:
-- Multiple diagnoses from same assessment
-- Related surgical history items
-- Grouped medications from same prescription
-- Related exam findings from same examination section
-
-WHEN TO KEEP SEPARATE:
-- Items from different source sections
-- Findings with different clinical significance
-- Items requiring different operational handling
-
-EXAMPLE - findings (CONSOLIDATED BULLET FORMAT):
-{{
-  "field": "findings",
-  "collapsed": "Multiple cervical spine conditions and chronic pain syndrome were documented",
-  "expanded": "• Cervical spine conditions documented include: disc degeneration, status post spinal fusion (C3-C7), spondylosis, and cervicalgia\n• Chronic pain syndrome was documented\n• Low back pain severity of 8/10 was documented\n• Sciatica was noted"
-}}
-
-🔒 NON-AUTHORSHIP COMPLIANCE CHECKLIST (verify before output):
-□ No causal language ("due to", "caused by", "likely", "secondary to")
-□ No directive language ("recommended to", "should", "advised")
-□ No collapsed reasoning (recommendations separated from reasons)
-□ History separated from findings
-□ All statements attributable to source document
-□ No clinical judgments or endorsements
-□ Past tense attribution language throughout
-□ Decision terms preserved exactly as stated
-□ Patient-reported info clearly marked
-□ ALL expanded sections use bullet-point format
-□ ALL fields with any content are included
-□ Related items from same source consolidated (no redundant bullets)
-
-Output valid JSON only.
-""")
-
-    user_prompt = HumanMessagePromptTemplate.from_template("""
-DOCUMENT TYPE:
-{doc_type}
-
-ALLOWED UI FIELDS FOR THIS REPORT TYPE (use ONLY these field names):
-{allowed_fields}
-
-SOURCE DOCUMENT (External):
-{raw_text}
-
-REFERENCE CONTEXT:
-{long_summary}
-
-TASK:
-Generate UI-ready fields following STRICT NON-AUTHORSHIP rules:
-
-🚨 CRITICAL: ONE ITEM PER FIELD TYPE
-- Each field name can appear AT MOST ONCE
-- Consolidate ALL related content into ONE item per field type
-- Use ONLY field names from the allowed list above
-- ⚠️ INCLUDE ALL FIELDS THAT HAVE ANY CONTENT - even single items
-- DO NOT omit fields just because they have minimal information
-- Only exclude fields that are TRULY EMPTY (no content at all)
-
-🚨 CRITICAL: ALL EXPANDED SECTIONS USE BULLET POINTS
-- Every field's expanded view must be in bullet-point format
-- Use "• " prefix for each bullet point
-- Separate bullets with "\n"
-- NO paragraph prose allowed in expanded sections
-- Keep bullets concise and scannable
-- Maximum 8-10 bullets per field
-
-🔴 NON-AUTHORSHIP COMPLIANCE REQUIREMENTS:
-
-1. SEPARATE HISTORY FROM FINDINGS:
-   - "reported_history" = patient-reported information
-   - "findings" = provider-documented observations
-   - NEVER mix these
-
-2. SEPARATE RECOMMENDATIONS FROM REASONS:
-   - "recommendations" = actions referenced (NO reasons)
-   - "reported_reasons" = rationale as stated (separate field)
-   - NEVER collapse these together
-
-3. USE ONLY NON-AUTHORSHIP VERBS:
-   ✅ documented, described, referenced, reported, noted, stated
-   ❌ caused, due to, likely, resulted, shows, confirms, suggests
-
-4. PRESERVE DECISION TERMS EXACTLY:
-   - authorized, approved, denied, deferred
-   - recommended, not recommended
-   - at MMI, not at MMI
-   - DO NOT soften or omit these
-
-5. ATTRIBUTION IN EVERY STATEMENT:
-   - "The report documented..."
-   - "was noted in the report"
-   - "The patient reported..."
-   - NEVER make unattributed declarations
-                                                           
-🚫 AUTHORSHIP / JUDGMENT LANGUAGE — STRICTLY FORBIDDEN
-
-Do NOT use any wording that implies judgment, causation, recommendation, assessment, certainty, necessity, or factual patient assertions.
-
-Forbidden terms include (non-exhaustive, exact + variants):
-
-Clinical judgment / opinion:
-likely, unlikely, probable, probably, possible, possibly, appears to be, suggests, suggestive of, consistent with, indicative of, concerning for, supports the diagnosis of, points to, favors, rules out, cannot rule out
-
-Causation / attribution:
-due to, secondary to, caused by, resulting from, related to, associated with (unless explicitly quoted), attributable to, because of, stemming from, precipitated by
-
-Recommendations / directives:
-recommend, recommended, should, advised, advise, plan to, will continue, initiate, discontinue, increase, decrease, start, stop, manage with, treat with, follow up, continue therapy
-
-Assessment / impression language:
-assessment, impression, diagnosis is, final diagnosis, primary diagnosis, differential diagnosis, clinical picture, evaluation reveals, findings indicate
-
-Certainty / validation:
-confirms, confirmed, demonstrates, establishes, proves, verifies, shows that
-
-Necessity / appropriateness:
-necessary, required, appropriate, indicated, justified, warranted, medically necessary
-
-Patient status assertions:
-patient has, patient requires, patient needs, patient suffers from, patient is unable to
-
-✅ REQUIRED SAFE NON-AUTHORING LANGUAGE (WHITELIST)
-
-Use attribution-based, passive, or referential phrasing only:
-
-“The patient reported…”
-“The report documented…”
-was documented, was reported, was referenced
-per report, according to the report, as stated in the report
-external documentation notes
-authorization was requested
-no decision documented
-
-FIELD CATEGORIZATION GUIDE:
-- "reported_history" → Patient-reported symptoms, timeline, functional aids, patient-stated meds
-- "findings" → Clinical observations, diagnoses, test results, imaging (provider-documented)
-- "recommendations" → Treatment plans, referrals (NO reasons - just what was referenced)
-- "reported_reasons" → Clinical rationale AS STATED (separate from recommendations)
-- "medications" → All drugs with dosages
-- "physical_exam" → Exam findings
-- "operational_context" → RFA status, appointments, pending actions
-- "mmi_status" → MMI determination
-- "work_status" → Work restrictions
-
-FORMAT FOR EACH ITEM:
-- collapsed = One-line summary with attribution (complete sentence)
-- expanded = BULLET POINTS ONLY (for ALL fields)
-  • One item per line
-  • Use "• " prefix
-  • Separate with "\n"
-  • Short, scannable statements
-  • Include dosages for medications
-  • Maximum 8-10 bullets
-
-EXAMPLE OUTPUT (COMPLIANT - ALL BULLETS):
-{{
-  "items": [
-    {{
-      "field": "reported_history",
-      "collapsed": "Chronic low back pain and side pain were documented as patient-reported",
-      "expanded": "• The patient reported chronic low back pain\n• Side pain for approximately two weeks was reported\n• Use of a cane for ambulation was documented\n• Long-term opioid therapy was documented"
-    }},
-    {{
-      "field": "findings",
-      "collapsed": "Chronic pain syndrome and lumbar fusion were documented",
-      "expanded": "• Chronic pain syndrome was documented\n• Lumbar fusion was documented\n• Osteoarthritis was documented\n• Sciatica was documented"
-    }},
-    {{
-      "field": "recommendations",
-      "collapsed": "Conservative management measures were referenced",
-      "expanded": "• Conservative management measures were referenced in the report\n• Medication authorization requests were referenced as pending"
-    }},
-    {{
-      "field": "reported_reasons",
-      "collapsed": "Muscle spasm and cold weather exposure were referenced",
-      "expanded": "• Muscle spasm was referenced in the report\n• Cold weather exposure was referenced as a contributing factor"
-    }},
-    {{
-      "field": "operational_context",
-      "collapsed": "Medication RFA pending and follow-up appointment documented",
-      "expanded": "• Request for Authorization (RFA) for medications was documented as pending\n• Follow-up appointment dated 2025-12-23 was documented"
-    }}
-  ]
-}}
-
-🚨 CONTENT INCLUSION REQUIREMENT:
-- If a field has ANY information (even one sentence worth), it MUST be included
-- Do not skip fields because they seem "too short"
-- Better to include all available data than to omit potentially important information
-- Example: If there's only one finding, still include the "findings" field
-- Example: If there's only one recommendation, still include the "recommendations" field
-
-🚨 REJECTION TEST - Automatically fail these patterns:
-❌ "likely due to muscle spasm" → REJECT (inferred causation)
-❌ "recommended keeping area warm" → REJECT (directive language)
-❌ "uses a cane" → REJECT (history as fact, no attribution)
-❌ "pending due to spasm" → REJECT (collapsed reasoning)
-❌ "is appropriate" → REJECT (endorsement)
-❌ Paragraph text in expanded → REJECT (must be bullets)
-❌ Omitting a field that has content → REJECT (must include all data)
-
-✅ ACCEPTANCE TEST - Pass these patterns:
-✅ "Muscle spasm was documented"
-✅ "Conservative measures were referenced"
-✅ "Use of cane was documented"
-✅ "was referenced as pending"
-✅ "was documented"
-✅ All expanded sections use "• " bullet format
-✅ All fields with any content are present
-
-Output JSON only.
-""")
-
-    chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
-
-    # Retry mechanism for robust generation
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            # Truncate raw_text if too long (keep most relevant content)
-            truncated_long_summary = long_summary[:4000] if len(long_summary) > 4000 else long_summary
-            
-            # Create a new LLM instance with explicit max_tokens to prevent truncation
-            # This ensures complete sentences and avoids garbled output
-            from langchain_openai import AzureChatOpenAI
-            from config.settings import CONFIG
-            
-            summary_llm = AzureChatOpenAI(
-                azure_deployment=CONFIG.get("azure_openai_deployment"),
-                azure_endpoint=CONFIG.get("azure_openai_endpoint"),
-                api_key=CONFIG.get("azure_openai_api_key"),
-                api_version=CONFIG.get("azure_openai_api_version"),
-                temperature=0.1,  # Lower temperature for more consistent output
-                max_tokens=9000,  # Explicit max_tokens to prevent truncation
-                timeout=90,  # Longer timeout for complete generation
-                request_timeout=90,
-
-            )
-            
-            chain = chat_prompt | summary_llm
-            response = chain.invoke({
-                "raw_text": raw_text,
-                "long_summary": truncated_long_summary,
-                "doc_type": doc_type,
-                "allowed_fields": list(allowed_fields),
-                "format_instructions": pydantic_parser.get_format_instructions()
-            })
-            
-            # Extract JSON from response content
-            response_content = response.content.strip()
-            
-            # Robust JSON extraction: Find the first outer brace and last outer brace
-            # This handles markdown blocks (```json ... ```) AND any conversational filler text
-            start_idx = response_content.find('{')
-            end_idx = response_content.rfind('}')
-            
-            if start_idx != -1 and end_idx != -1:
-                response_content = response_content[start_idx:end_idx+1]
-            
-            # FIX: Clean invalid control characters (common issue with LLM JSON)
-            # Remove control characters (0-31) except newline, carriage return, and tab
-            response_content = "".join(ch for ch in response_content if ch >= ' ' or ch in '\n\r\t')
-            
-            # Parse with strict=False to allow control chars like newlines in strings
-            structured_summary = json.loads(response_content, strict=False)
-
-            # Hard safety checks (non-LLM)
-            structured_summary = remove_patient_identifiers(structured_summary)
-            structured_summary = ensure_header_fields(structured_summary, doc_type, raw_text)
-            structured_summary = validate_ui_items(structured_summary)
-            
-            # HARD FILTER — drop disallowed fields (defensive)
-            structured_summary = filter_disallowed_fields(structured_summary, allowed_fields)
-            
-            # DEDUPLICATE — ensure each field type appears only once
-            structured_summary = deduplicate_fields(structured_summary)
-            
-            # MODIFIED: More lenient filtering - only remove truly empty fields
-            structured_summary = filter_truly_empty_fields(structured_summary)
-            
-            # Filter out incomplete/garbled sentences
-            structured_summary = filter_empty_or_generic_fields(structured_summary)
-            
-            # NEW: Ensure all expanded sections use bullet format
-            structured_summary = enforce_bullet_format_all_fields(structured_summary)
-            
-            # NEW: Consolidate redundant bullets from same source
-            structured_summary = consolidate_redundant_bullets(structured_summary)
-            
-            # # NEW: Attach citations to summary items if citation feature is enabled
-            # if settings.citation_enabled and raw_text:
-            #     try:
-            #         from services.citation_service import attach_citations_to_short_summary
-                    
-            #         # Estimate total pages from text length (~2500 chars per page for medical docs)
-            #         estimated_pages = max(1, len(raw_text) // 2500 + 1)
-                    
-            #         structured_summary = attach_citations_to_short_summary(
-            #             structured_summary, 
-            #             raw_text,
-            #             min_confidence=settings.citation_min_confidence,
-            #             total_pages=estimated_pages
-            #         )
-            #         logger.info(f"✅ Citations attached to summary items (estimated {estimated_pages} pages)")
-            #     except Exception as citation_error:
-            #         logger.warning(f"⚠️ Citation attachment failed (non-critical): {citation_error}")
-            #         # Continue without citations - feature is additive, not blocking
-
-            logger.info(f"✅ UI-ready summary generated with {len(structured_summary.get('summary', {}).get('items', []))} items")
-            return structured_summary
-
-        except json.JSONDecodeError as je:
-            logger.warning(f"⚠️ JSON parsing failed (attempt {attempt+1}/{max_retries}): {je}")
-            if attempt == max_retries - 1:
-                logger.error(f"Response content: {response.content[:2000] if 'response' in dir() else 'N/A'}")
-        
-        except Exception as e:
-            logger.warning(f"⚠️ Structured summary generation failed (attempt {attempt+1}/{max_retries}): {e}")
-
-    # Fallback if all retries failed
-    logger.error("❌ All retries failed. Returning fallback summary.")
-    return create_fallback_structured_summary(doc_type)
-
-
-def filter_truly_empty_fields(structured_summary: dict) -> dict:
-    """
-    Filter out only fields that are TRULY empty or have no meaningful content.
-    More lenient than previous implementation - keeps fields with any valid content.
-    """
-    if 'summary' not in structured_summary or 'items' not in structured_summary['summary']:
-        return structured_summary
-    
-    filtered_items = []
-    for item in structured_summary['summary']['items']:
-        collapsed = item.get('collapsed', '').strip()
-        expanded = item.get('expanded', '').strip()
-        
-        # Only exclude if BOTH collapsed and expanded are empty or just whitespace
-        if collapsed or expanded:
-            # Has some content - keep it
-            filtered_items.append(item)
-        else:
-            logger.info(f"⚠️ Filtering truly empty field: {item.get('field')}")
-    
-    structured_summary['summary']['items'] = filtered_items
     return structured_summary
 
 
 def enforce_bullet_format_all_fields(structured_summary: dict) -> dict:
-    """
-    Ensure all expanded sections use bullet-point format.
-    Converts any paragraph text to bullet points.
-    """
-    if 'summary' not in structured_summary or 'items' not in structured_summary['summary']:
+    """Compatibility function - ensures bullet format."""
+    if "summary" not in structured_summary or "items" not in structured_summary["summary"]:
         return structured_summary
     
-    for item in structured_summary['summary']['items']:
-        expanded = item.get('expanded', '').strip()
-        
-        # Skip if already empty
-        if not expanded:
-            continue
-        
-        # Check if already in bullet format
-        if expanded.startswith('•') or '\n•' in expanded:
-            # Already has bullets, just ensure consistency
-            continue
-        
-        # Convert paragraph text to bullets
-        # Split by periods or newlines, create bullets
-        sentences = [s.strip() for s in expanded.replace('\n', '. ').split('. ') if s.strip()]
-        
-        if sentences:
-            bullet_text = '\n'.join([f"• {s}" if not s.endswith('.') else f"• {s}" for s in sentences])
-            item['expanded'] = bullet_text
-            logger.info(f"✅ Converted {item.get('field')} to bullet format")
+    for item in structured_summary["summary"]["items"]:
+        expanded = item.get("expanded", "").strip()
+        if expanded and not any(b.strip().startswith('•') for b in expanded.split('\n')):
+            lines = [line.strip() for line in expanded.split('. ') if line.strip()]
+            if lines:
+                item["expanded"] = '\n'.join([f"• {line}" for line in lines])
     
     return structured_summary
 
 
 def consolidate_redundant_bullets(structured_summary: dict) -> dict:
-    """
-    Post-process to consolidate bullets that likely come from same source.
-    Detects bullets with same verb patterns and combines them to reduce redundancy.
-    
-    This improves signal density by grouping related findings that share attribution,
-    reducing cognitive load when scanning summaries.
-    """
-    if 'summary' not in structured_summary or 'items' not in structured_summary['summary']:
+    """Compatibility function - simple consolidation."""
+    if "summary" not in structured_summary or "items" not in structured_summary["summary"]:
         return structured_summary
     
-    items = structured_summary.get('summary', {}).get('items', [])
-    
-    for item in items:
-        expanded = item.get('expanded', '')
-        if not expanded or '•' not in expanded:
-            continue
-            
-        bullets = [b.strip() for b in expanded.split('\n') if b.strip().startswith('•')]
-        
-        # Group bullets with identical attribution patterns
-        # Example: "X was documented", "Y was documented", "Z was documented"
-        attribution_groups = {}
-        non_grouped_bullets = []
-        
-        for bullet in bullets:
-            # Extract attribution pattern (e.g., "was documented", "was noted")
-            grouped = False
-            for key, patterns in [
-                ('documented', [' was documented', ' were documented']),
-                ('noted', [' was noted', ' were noted']),
-                ('referenced', [' was referenced', ' were referenced']),
-            ]:
-                for pattern in patterns:
-                    if pattern in bullet.lower():
-                        if key not in attribution_groups:
-                            attribution_groups[key] = []
-                        attribution_groups[key].append(bullet)
-                        grouped = True
-                        break
-                if grouped:
-                    break
-            
-            if not grouped:
-                non_grouped_bullets.append(bullet)
-        
-        # If we have 3+ bullets with same attribution, consolidate them
-        consolidated_bullets = []
-        processed_groups = set()
-        
-        for attr_key, group_bullets in attribution_groups.items():
-            if len(group_bullets) >= 3:
-                # Extract the subjects from each bullet
-                subjects = []
-                for bullet in group_bullets:
-                    # Simple extraction: get text before "was documented/noted/referenced"
-                    for pattern in [' was documented', ' were documented', ' was noted', ' were noted', ' was referenced', ' were referenced']:
-                        if pattern in bullet.lower():
-                            # Find pattern case-insensitively
-                            idx = bullet.lower().find(pattern)
-                            if idx > 0:
-                                subject = bullet[2:idx].strip()  # Remove "• " prefix
-                                if subject:
-                                    subjects.append(subject)
-                            break
-                
-                if len(subjects) >= 3:
-                    # Create consolidated bullet
-                    consolidated = f"• The following were {attr_key}: {', '.join(subjects)}"
-                    consolidated_bullets.append(consolidated)
-                    processed_groups.add(attr_key)
-                    logger.info(f"✅ Consolidated {len(subjects)} '{attr_key}' bullets into one for {item.get('field')}")
-                else:
-                    # Not enough valid subjects, keep original bullets
-                    consolidated_bullets.extend(group_bullets)
-            else:
-                # Less than 3 bullets with this attribution - keep separate
-                consolidated_bullets.extend(group_bullets)
-        
-        # Add non-grouped bullets
-        consolidated_bullets.extend(non_grouped_bullets)
-        
-        # Only update if we actually consolidated something
-        if processed_groups:
-            item['expanded'] = '\n'.join(consolidated_bullets)
-    
-    return structured_summary
+    return structured_summary  # Minimal consolidation - deduplicate_fields handles basics

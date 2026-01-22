@@ -19,7 +19,6 @@ from concurrent.futures import ThreadPoolExecutor
 import asyncio
 import re
 import json
-from .treatment_history_generator import TreatmentHistoryGenerator
 # Import refactored service functions
 from services.document_save_service import save_document as save_document_external
 from services.fail_document_service import update_fail_document as update_fail_doc_service, update_multiple_fail_documents, generate_concise_brief_summary
@@ -103,12 +102,12 @@ class WebhookService:
         
         return new_filename
     
-    async def _generate_concise_brief_summary(self, raw_summary_text: str, document_type: str = "Medical Document") -> str:
+    async def _generate_concise_brief_summary(self, structured_short_summary: Dict[str, Any], document_type: str = "Medical Document") -> Dict[str, List[str]]:
         """
-        Uses LLM to transform the raw summarizer output into a concise, accurate professional summary.
+        Uses the reducer to filter and prioritize the structured short summary.
         Wrapper for external service function.
         """
-        return await generate_concise_brief_summary(raw_summary_text, document_type, LLM_EXECUTOR)
+        return await generate_concise_brief_summary(structured_short_summary, document_type, LLM_EXECUTOR)
     
     async def process_document_data(self, data: dict) -> dict:
         logger.info(f"📥 Processing document: {data.get('document_id', 'unknown')}")
@@ -312,15 +311,18 @@ class WebhookService:
             # For task-only documents, use a simple description
             raw_brief_summary_text = f"{detected_doc_type} - Administrative document for staff action"
         
-        # ✅ Process the raw summary through the AI Condenser (only if we have a real summary)
-        if is_valid_for_summary_card and raw_brief_summary_text != "Summary not available":
+        # ✅ Process the structured summary through the reducer (only for summary card eligible docs)
+        if is_valid_for_summary_card and isinstance(short_summary, dict) and short_summary.get('summary', {}).get('items'):
             brief_summary_text = await self._generate_concise_brief_summary(
-                raw_brief_summary_text, 
+                short_summary,  # Pass the structured summary directly
                 detected_doc_type
             )
+        elif is_valid_for_summary_card and raw_brief_summary_text != "Summary not available":
+            # Fallback: create minimal structure from raw text
+            brief_summary_text = {"Summary": [raw_brief_summary_text]} if raw_brief_summary_text else {}
         else:
-            # Skip AI condenser for task-only docs
-            brief_summary_text = raw_brief_summary_text
+            # Skip reducer for task-only docs
+            brief_summary_text = {"Summary": [raw_brief_summary_text]} if raw_brief_summary_text else {}
 
         document_analysis = DocumentAnalysis(
             patient_name=patient_name_val,

@@ -15,6 +15,7 @@ from langchain_openai import AzureChatOpenAI
 from utils.extraction_verifier import ExtractionVerifier
 from utils.summary_helpers import ensure_date_and_author, clean_long_summary
 from helpers.short_summary_generator import generate_structured_short_summary
+from helpers.long_summary_generator import format_bullet_summary_to_json, format_long_summary_to_text
 from models.long_summary_models import (
     PR2LongSummary,
     DoctorInfo,
@@ -85,19 +86,20 @@ class PR2ExtractorChained:
                 logger.warning(f"⚠️ Document very large ({token_estimate:,} tokens)")
                 logger.warning("⚠️ May exceed GPT-4o context window (128K tokens)")
             
-            # Stage 1: Generate long summary with dual-context approach (raw_text + text)
-            long_summary = self._generate_long_summary_direct(
-                text=text,
-                raw_text=raw_text,
-                doc_type=doc_type,
-                fallback_date=fallback_date
+            # Stage 1: Format the summarizer output (raw_text) into structured long summary
+            # This is a FORMATTING task only - no new content generation
+            formatted_json = format_bullet_summary_to_json(
+                bullet_summary=raw_text,
+                llm=self.llm,
+                document_type=doc_type
             )
+            long_summary = format_long_summary_to_text(formatted_json)
             
             # Stage 1.5: Clean the long summary - remove empty fields, placeholders, and instruction text
             long_summary = clean_long_summary(long_summary)
             
             # Stage 2: Generate short summary from long summary (like QME extractor)
-            short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type, long_summary)
+            short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type)
             
             elapsed_time = time.time() - start_time
             logger.info(f"⚡ Full-context PR-2 extraction completed in {elapsed_time:.2f}s")
@@ -500,7 +502,7 @@ You MUST output your response as a valid JSON object following this exact schema
         logger.info(f"🔧 Pipe cleaning: {len(parts)} parts -> {len(cleaned_parts)} meaningful parts")
         return cleaned_summary
     
-    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str, long_summary: str) -> dict:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
         """
         Generate a structured, UI-ready summary from raw_text (Document AI summarizer output).
         Delegates to the reusable helper function.
@@ -513,7 +515,7 @@ You MUST output your response as a valid JSON object following this exact schema
         Returns:
             dict: Structured summary with header and UI-ready items
         """
-        return generate_structured_short_summary(self.llm, raw_text, doc_type, long_summary)
+        return generate_structured_short_summary(self.llm, raw_text, doc_type)
    
 
     def _create_comprehensive_fallback_summary(self, long_summary: str) -> str:

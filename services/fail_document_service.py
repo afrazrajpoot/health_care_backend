@@ -1,352 +1,701 @@
 """
-Fail Document Update Service - Handles updating and reprocessing failed documents
-Extracted from webhook_service.py for better modularity
+Fail Document Update Service - Optimized for Critical Point Extraction
+Takes structured short summary as input and extracts only critical points for physicians.
 """
-from datetime import datetime
-from typing import Any, List, Optional, Dict
-from fastapi import HTTPException
+
+from typing import Any, List, Dict, Optional
 from pydantic import BaseModel, Field
-from models.data_models import DocumentAnalysis
-from services.report_analyzer import ReportAnalyzer
-from utils.logger import logger
-from utils.document_detector import detect_document_type
-import asyncio
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain_openai import AzureChatOpenAI
 import json
 import re
+import asyncio
+from utils.logger import logger
+from config.settings import CONFIG
 
-# --- Report Field Matrix: Defines allowed fields per document type ---
-REPORT_FIELD_MATRIX: Dict[str, Dict] = {
-    # Med-Legal Reports (QME family)
-    "QME": {
-        "allowed": {
-            "mechanism_of_injury",
-            "findings",
-            "physical_exam",
-            "medications",
-            "recommendations",
-            "rationale",
-            "mmi_status",
-            "work_status"
-        }
-    },
-    "AME": {"inherit": "QME"},
-    "PQME": {"inherit": "QME"},
-    "IME": {"inherit": "QME"},
 
-    # Consult / Clinical Reports
-    "CONSULT": {
-        "allowed": {
-            "mechanism_of_injury",
-            "findings",
-            "physical_exam",
-            "medications",
-            "recommendations"
-        }
-    },
-    "PAIN MANAGEMENT": {"inherit": "CONSULT"},
-    "PROGRESS NOTE": {"inherit": "CONSULT"},
-    "OFFICE VISIT": {"inherit": "CONSULT"},
-    "CLINIC NOTE": {"inherit": "CONSULT"},
+# ============== Pydantic Models for Critical Summary ==============
 
-    # Imaging Reports
-    "MRI": {
-        "allowed": {"findings", "impressions"}
-    },
-    "CT": {"inherit": "MRI"},
-    "X-RAY": {"inherit": "MRI"},
-    "XRAY": {"inherit": "MRI"},
-    "ULTRASOUND": {"inherit": "MRI"},
-    "EMG": {"inherit": "MRI"},
-    "PET SCAN": {"inherit": "MRI"},
-    "BONE SCAN": {"inherit": "MRI"},
-    "DEXA SCAN": {"inherit": "MRI"},
+class CriticalSummaryItem(BaseModel):
+    """A critical summary item with field and prioritized content"""
+    field: str = Field(description="Field name from the structured summary")
+    critical_points: List[str] = Field(
+        description="List of the MOST critical points from this field (2-4 items max), as complete sentences"
+    )
+    priority: int = Field(
+        description="Priority level: 1=Critical, 2=Important, 3=Supporting",
+        ge=1,
+        le=3
+    )
 
-    # Utilization Review
-    "UR": {
-        "allowed": {"recommendations", "rationale"}
-    },
-    "IMR": {"inherit": "UR"},
-    "PEER REVIEW": {"inherit": "UR"},
 
-    # Therapy Reports
-    "PHYSICAL THERAPY": {
-        "allowed": {
-            "mechanism_of_injury",
-            "findings",
-            "recommendations"
-        }
-    },
-    "THERAPY NOTE": {"inherit": "PHYSICAL THERAPY"},
-    "OCCUPATIONAL THERAPY": {"inherit": "PHYSICAL THERAPY"},
-    "CHIROPRACTIC": {"inherit": "PHYSICAL THERAPY"},
+class CriticalClinicalSummary(BaseModel):
+    """Critical summary extracted from structured short summary"""
+    items: List[CriticalSummaryItem] = Field(
+        description="List of critical summary items, ordered by priority"
+    )
 
-    # Surgical / Operative Reports
-    "SURGERY REPORT": {
-        "allowed": {"findings"}
-    },
-    "OPERATIVE NOTE": {"inherit": "SURGERY REPORT"},
-    "POST-OP": {"inherit": "SURGERY REPORT"},
 
-    # PR-2 Reports
-    "PR-2": {
-        "allowed": {
-            "mechanism_of_injury",
-            "findings",
-            "physical_exam",
-            "medications",
-            "recommendations",
-            "work_status"
-        }
-    },
-    "PR2": {"inherit": "PR-2"},
+# ============== Critical Field Priority Mapping ==============
 
-    # Labs & Diagnostics
-    "LABS": {
-        "allowed": {"findings"}
-    },
-    "PATHOLOGY": {"inherit": "LABS"},
-
-    # Legal / Administrative Reports
-    "ATTORNEY QUESTIONS": {
-        "allowed": {"questions", "mmi_status", "work_status"}
-    },
-    "ADJUSTER QUESTIONS": {"inherit": "ATTORNEY QUESTIONS"},
-    "NURSE CASE MANAGER": {"inherit": "ATTORNEY QUESTIONS"},
-
-    # Default fallback
-    "DEFAULT": {
-        "allowed": {"findings", "recommendations"}
-    }
+CRITICAL_FIELD_PRIORITIES = {
+    # Highest Priority (1) - Critical for clinical decisions
+    "mmi_declaration": 1,
+    "mmi_status": 1,
+    "impairment_rating": 1,
+    "permanent_restrictions": 1,
+    "work_status": 1,
+    "work_restrictions": 1,
+    "disability_status": 1,
+    "causation_opinion": 1,
+    "causation_analysis": 1,
+    "final_decision": 1,
+    "decision": 1,
+    "authorization_status": 1,
+    "treatment_authorization": 1,
+    "critical_findings": 1,
+    "urgent_findings": 1,
+    "complications": 1,
+    
+    # High Priority (2) - Important for treatment
+    "diagnoses": 2,
+    "assessment": 2,
+    "key_findings": 2,
+    "significant_findings": 2,
+    "treatment_plan": 2,
+    "recommendations": 2,
+    "treatment_response": 2,
+    "medication_changes": 2,
+    "new_medications": 2,
+    "surgical_procedures": 2,
+    "procedure_performed": 2,
+    "follow_up_plan": 2,
+    
+    # Medium Priority (3) - Supporting information
+    "findings": 3,
+    "physical_exam": 3,
+    "objective_findings": 3,
+    "subjective_complaints": 3,
+    "reported_history": 3,
+    "current_treatment": 3,
+    "medications": 3,
+    "vital_signs": 3,
+    "clinical_course": 3,
+    "historical_context": 3,
 }
 
-# --- Pydantic Models for Structured Summary ---
 
-class DocumentMetadata(BaseModel):
-    document_type: str = Field(description="Type of the document extracted from context", default="Unknown")
-
-class MedicationItem(BaseModel):
-    name: str = Field(description="Exact medication name")
-    dosage: str = Field(description="Exact dosage")
-    frequency: Optional[str] = Field(description="Frequency if specified")
-    status: Optional[str] = Field(description="prescribed/continued/discontinued")
-    unclear_requires_verification: Optional[bool] = Field(description="Set to true only if details are unclear")
-
-class TestResultItem(BaseModel):
-    test_name: str = Field(description="Exact test name")
-    result: str = Field(description="Exact result value")
-    date: Optional[str] = Field(description="Date of test if mentioned")
-    interpretation: Optional[str] = Field(description="Interpretation only if explicitly stated")
-
-class FollowUpItem(BaseModel):
-    plan: Optional[str] = Field(description="Exact follow-up plan")
-    timeframe: Optional[str] = Field(description="Timeframe if mentioned")
-
-class AuthorizationStatusItem(BaseModel):
-    status: Optional[str] = Field(description="approved/denied/modified/pending")
-    details: Optional[str] = Field(description="Specific details")
-    conditions: List[str] = Field(default_factory=list, description="Any conditions mentioned")
-
-class VitalSignsItem(BaseModel):
-    parameter: str = Field(description="Name of the vital sign")
-    value: str = Field(description="Value of the vital sign with units")
-
-class StructuredSummaryResponse(BaseModel):
-    # Standard Output Fields (Global Schema) - shown first when relevant
-    document_metadata: DocumentMetadata
-    primary_diagnosis: Optional[List[str]] = Field(default=None, description="Exact diagnoses as stated")
-    clinical_findings: Optional[List[str]] = Field(default=None, description="Specific findings mentioned")
-    medications: Optional[List[MedicationItem]] = Field(default=None)
-    procedures: Optional[List[str]] = Field(default=None, description="Exact procedures mentioned")
-    test_results: Optional[List[TestResultItem]] = Field(default=None)
-    recommendations: Optional[List[str]] = Field(default=None, description="Exact recommendations")
-    follow_up: Optional[FollowUpItem] = Field(default=None, description="Follow up plan details")
-    authorization_status: Optional[AuthorizationStatusItem] = Field(default=None, description="Authorization status details")
-    allergies: Optional[List[str]] = Field(default=None, description="Exact allergies listed")
-    vital_signs: Optional[Dict[str, str]] = Field(default=None, description="Key value pairs of vital signs (e.g., 'BP': '120/80')")
-    unclear_items: Optional[List[str]] = Field(default=None, description="Any information that requires verification")
-    additional_notes: Optional[List[str]] = Field(default=None, description="Any other relevant information not fitting above categories")
-    
-    # Report Type-Specific Fields (from REPORT_FIELD_MATRIX)
-    mechanism_of_injury: Optional[str] = Field(default=None, description="Exact mechanism of injury as stated")
-    # findings: Optional[List[str]] = Field(default=None, description="Specific findings from the report")
-    physical_exam: Optional[Dict[str, str]] = Field(default=None, description="Physical examination findings")
-    rationale: Optional[str] = Field(default=None, description="Rationale for decision or recommendation")
-    mmi_status: Optional[str] = Field(default=None, description="Maximum Medical Improvement status")
-    work_status: Optional[str] = Field(default=None, description="Work restrictions or status")
-    impressions: Optional[List[str]] = Field(default=None, description="Impressions from imaging or diagnostic reports")
-    questions: Optional[List[Dict[str, str]]] = Field(default=None, description="Questions and answers from legal/administrative documents")
-
-async def generate_concise_brief_summary(raw_summary_text: str, document_type: str = "Medical Document", llm_executor=None) -> dict:
+def get_field_priority(field_name: str) -> int:
     """
-    Uses LLM to transform the raw summarizer output into a structured JSON format.
-    Extracts ONLY explicitly stated information without fabrication or interpretation.
+    Get priority level for a field name.
+    """
+    field_lower = field_name.lower().replace(" ", "_")
+    
+    # Check exact match
+    if field_lower in CRITICAL_FIELD_PRIORITIES:
+        return CRITICAL_FIELD_PRIORITIES[field_lower]
+    
+    # Check partial matches
+    for critical_field, priority in CRITICAL_FIELD_PRIORITIES.items():
+        if critical_field in field_lower or field_lower in critical_field:
+            return priority
+    
+    # Default priority for unknown fields
+    return 3
+
+
+# ============== Main Critical Summary Generator ==============
+
+async def generate_critical_summary(
+    structured_short_summary: Dict[str, Any],
+    document_type: str,
+    llm: Optional[AzureChatOpenAI] = None
+) -> Dict[str, Any]:
+    """
+    Generate a critical-focused summary from structured short summary.
+    Uses AI to extract ONLY the most critical points for physicians.
     
     Args:
-        raw_summary_text: The raw summary text to process
-        document_type: Type of document for context
-        llm_executor: ThreadPoolExecutor for running LLM operations
+        structured_short_summary: Output from generate_structured_short_summary
+            Format: {"summary": {"items": [{"field": "...", "collapsed": "...", "expanded": "..."}]}}
+        document_type: Document type for context
+        llm: Optional AzureChatOpenAI instance
         
     Returns:
-        Dictionary with structured summary data
+        Dict matching CriticalClinicalSummary structure
     """
-    if not raw_summary_text or len(raw_summary_text) < 10:
-        return {"status": "unavailable", "message": "Summary not available"}
+    logger.info(f"🎯 Generating critical summary from structured summary for {document_type}")
+    
+    # Validate input
+    if not structured_short_summary:
+        return create_critical_fallback_summary(document_type)
+    
+    summary_items = structured_short_summary.get("summary", {}).get("items", [])
+    
+    if not summary_items:
+        logger.warning("⚠️ No summary items found in structured summary")
+        return create_critical_fallback_summary(document_type)
+    
+    logger.info(f"📊 Processing {len(summary_items)} fields from structured summary")
+    
+    # Create LLM if not provided
+    if llm is None:
+        try:
+            llm = AzureChatOpenAI(
+                azure_deployment=CONFIG.get("azure_openai_deployment"),
+                azure_endpoint=CONFIG.get("azure_openai_endpoint"),
+                api_key=CONFIG.get("azure_openai_api_key"),
+                api_version=CONFIG.get("azure_openai_api_version"),
+                temperature=0.1,
+                max_tokens=4000,
+                timeout=60,
+                request_timeout=60,
+            )
+        except Exception as e:
+            logger.error(f"❌ Failed to create LLM: {e}")
+            return generate_critical_summary_without_llm(structured_short_summary, document_type)
+    
+    # Convert structured summary to text for LLM processing
+    summary_text = format_summary_for_llm(structured_short_summary, document_type)
+    
+    # Create Pydantic parser
+    parser = PydanticOutputParser(pydantic_object=CriticalClinicalSummary)
+    
+    system_prompt = SystemMessagePromptTemplate.from_template("""
+You are a PHYSICIAN'S CRITICAL POINT EXTRACTOR.
 
-    try:
-        logger.info("🤖 Generating structured JSON summary using LLM and PydanticOutputParser...")
-        
-        from langchain_core.prompts import ChatPromptTemplate
-        from langchain_openai import AzureChatOpenAI
-        from langchain_core.output_parsers import PydanticOutputParser
-        from config.settings import CONFIG
+Your SOLE TASK: From a detailed medical summary, extract ONLY the MOST CRITICAL points that physicians need for immediate clinical decisions.
 
-        parser = PydanticOutputParser(pydantic_object=StructuredSummaryResponse)
+🔴 **CRITICAL FILTERING RULES:**
 
-        llm = AzureChatOpenAI(
-            azure_endpoint=CONFIG.get("azure_openai_endpoint"),
-            api_key=CONFIG.get("azure_openai_api_key"),
-            deployment_name=CONFIG.get("azure_openai_deployment"),
-            api_version=CONFIG.get("azure_openai_api_version"),
-            temperature=0.0,  # Zero temperature for maximum factual accuracy
-            timeout=30,
-            model_kwargs={"response_format": {"type": "json_object"}} 
-        )
+**EXTRACT ONLY:**
+✅ MMI status and impairment ratings
+✅ Work restrictions/disability status
+✅ Treatment authorization decisions (approved/denied)
+✅ New or changed diagnoses
+✅ Significant abnormal findings
+✅ Surgical procedures performed
+✅ Critical medication changes
+✅ Urgent follow-up needs
 
-        system_template = """You are a medical documentation assistant that extracts information into structured JSON format.
+**FILTER OUT:**
+❌ Normal/negative findings (unless they negate something critical)
+❌ Routine administrative details
+❌ Generic statements without specifics
+❌ Historical information without current relevance
+❌ Minor variations or measurements without clinical impact
 
-CRITICAL EXTRACTION RULES:
+🧠 **CLINICAL PRIORITIZATION:**
+For each field, ask: "Is this information CRITICAL for physician decision-making RIGHT NOW?"
+If NO → Exclude or summarize to most critical 1-2 points.
 
-1. **No Fabrication**: Extract ONLY information explicitly stated in the raw summary - ZERO fabrication or inference
-2. **Exact Wording**: Use EXACT wording from source - do not paraphrase medical terms or values
-3. **No Assumptions**: Do not generate or infer any information not present in the document
-4. **Field Selection**: Only return fields that:
-   - Are allowed for the detected report type (per REPORT_FIELD_MATRIX), AND
-   - Actually have data present in the source document
-5. **Omit Empty Fields**: DO NOT include any field if that information is not present in the source
-   - Use `null` for optional fields with no data, or omit them entirely
-6. **No Duplication**: Do not return the same information in multiple fields
-   - For example, do not return recommendations in both matrix fields and global fields
-7. **Standard Fields First**: Use standard global fields when they apply:
-   - primary_diagnosis, clinical_findings, medications, procedures, test_results
-   - recommendations, follow_up, authorization_status, vital_signs, allergies
-   - unclear_items, additional_notes
-8. **Matrix Fields**: Use report-type-specific fields only when allowed for this document type:
-   - mechanism_of_injury, findings, physical_exam, rationale, mmi_status
-   - work_status, impressions, questions
-9. **Unknown Information**: If new information doesn't match any defined field, place it in additional_notes
-10. **Data Integrity**: This is a pure extraction system, not generative:
-    - Use only existing content from the report
-    - No hallucinations, no AI-created data
-    - Structure and filter strictly using the schema
+📋 **OUTPUT REQUIREMENTS:**
+
+1. **FIELD PRIORITIZATION:**
+   - Priority 1: MMI, work status, authorization decisions, critical findings
+   - Priority 2: Diagnoses, treatment plans, key recommendations
+   - Priority 3: Supporting findings, exam details, historical context
+
+2. **CONTENT EXTRACTION:**
+   - 2-4 critical points MAX per field
+   - Each point must be a COMPLETE sentence
+   - Focus on ACTIONABLE information
+   - Preserve exact medical terminology
+   - Maintain past-tense attribution
+
+3. **QUALITY OVER QUANTITY:**
+   - Better to have 2 critical points than 10 trivial ones
+   - No bullet fragments (e.g., "5mm" → "5mm disc protrusion was documented")
+   - Group related critical findings
+
+**EXAMPLES OF GOOD EXTRACTION:**
+
+Input field "findings" with many bullet points:
+• L4-L5 disc herniation was noted
+• 5mm central protrusion was measured
+• Mild spinal stenosis was documented
+• No significant degenerative changes
+• Normal alignment
+• No prior studies available
+
+Critical extraction (Priority 2):
+• L4-L5 disc herniation with 5mm central protrusion was documented
+• Mild spinal stenosis was noted at the same level
+
+Input field "work_status" with various details:
+• Off work status was documented
+• No lifting greater than 10 pounds for 4 weeks
+• Sedentary work only
+• Follow-up in 2 weeks
+
+Critical extraction (Priority 1):
+• Off work with temporary total disability status was documented
+• No lifting greater than 10 pounds for 4 weeks was specified
+
+** Important: Do not return duplicate or overlapping information across fields. **
+like this: as both are some with only key name changed
+FOLLOW UP PLAN
+• Resubmission of the injection request was documented as a follow-up action.
+PLAN
+• Resubmission of the request for a T10-T11 injection was referenced in the treatment plan.
+
+**DOCUMENT TYPE CONTEXT:** {document_type}
 
 {format_instructions}
-"""
 
-        user_template = f"""Document Type: {document_type}
+Output ONLY the JSON object.
+""")
 
-Raw Summary Input:
-{raw_summary_text}
+    user_prompt = HumanMessagePromptTemplate.from_template("""
+**DOCUMENT TYPE:** {document_type}
 
-**IMPORTANT**: Based on the document type "{document_type}", only extract fields that are:
-1. Allowed for this report type according to REPORT_FIELD_MATRIX
-2. Actually present in the raw summary above
+**STRUCTURED SUMMARY TO FILTER:**
+{summary_text}
 
-Do not include fields with no data. Do not fabricate or infer information.
+**TASK:** Extract ONLY the most critical points for physician review.
 
-Extract into structured JSON following all rules above."""
+**FIELD-BY-FIELD EXTRACTION GUIDANCE:**
+
+1. **FOR EACH FIELD IN THE SUMMARY:**
+   - Identify the 2-4 MOST critical points
+   - Exclude routine/normal information
+   - Focus on what would change clinical decisions
+
+2. **CRITICALITY ASSESSMENT:**
+   - Priority 1: Immediate action needed (MMI, work status, authorizations)
+   - Priority 2: Important for treatment planning (diagnoses, key findings)
+   - Priority 3: Supporting context (exam details, history)
+
+3. **SENTENCE QUALITY:**
+   - Complete sentences only
+   - Past-tense attribution maintained
+   - Clear, specific clinical information
+
+4. **MEDICATION SPECIAL CASE:**
+   - For medications: Include only NEW prescriptions or DOSE CHANGES
+   - Format: "Medication [dose] [frequency] was prescribed/started/changed"
+   - Exclude stable chronic medications
+
+**OUTPUT:** JSON with critical summary items, ordered by priority.
+""")
+
+    chat_prompt = ChatPromptTemplate.from_messages([system_prompt, user_prompt])
+    
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"🔄 Critical extraction attempt {attempt + 1}/{max_retries}")
+            
+            chain = chat_prompt | llm
+            response = chain.invoke({
+                "document_type": document_type,
+                "summary_text": summary_text,
+                "format_instructions": parser.get_format_instructions()
+            })
+            
+            # Extract JSON
+            response_content = response.content.strip()
+            start_idx = response_content.find('{')
+            end_idx = response_content.rfind('}')
+            
+            if start_idx != -1 and end_idx != -1:
+                response_content = response_content[start_idx:end_idx+1]
+            
+            # Clean and parse
+            response_content = "".join(ch for ch in response_content if ch >= ' ' or ch in '\n\r\t')
+            
+            # Parse with Pydantic
+            critical_summary = parser.parse(response_content)
+            
+            # Post-process: Ensure items are ordered by priority
+            critical_summary.items.sort(key=lambda x: (x.priority, x.field))
+            
+            logger.info(f"✅ Generated critical summary with {len(critical_summary.items)} prioritized items")
+            return critical_summary.model_dump()
+            
+        except json.JSONDecodeError as e:
+            logger.warning(f"⚠️ JSON parsing failed (attempt {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                continue
+            else:
+                logger.error("❌ All parsing attempts failed, using fallback")
+                return generate_critical_summary_without_llm(structured_short_summary, document_type)
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Critical extraction failed (attempt {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                continue
+            else:
+                logger.error("❌ All extraction attempts failed, using fallback")
+                return generate_critical_summary_without_llm(structured_short_summary, document_type)
+    
+    return generate_critical_summary_without_llm(structured_short_summary, document_type)
+
+
+def format_summary_for_llm(structured_summary: Dict[str, Any], doc_type: str) -> str:
+    """
+    Format structured summary into text for LLM processing.
+    """
+    summary_items = structured_summary.get("summary", {}).get("items", [])
+    
+    if not summary_items:
+        return "No summary items available."
+    
+    formatted_sections = []
+    
+    for item in summary_items:
+        field = item.get("field", "Unknown")
+        collapsed = item.get("collapsed", "").strip()
+        expanded = item.get("expanded", "").strip()
         
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_template),
-            ("user", user_template)
-        ])
+        # Format this field's content
+        field_text = f"FIELD: {field.upper()}"
         
-        # Inject format instructions
-        prompt_with_instructions = prompt.partial(format_instructions=parser.get_format_instructions())
+        if collapsed:
+            field_text += f"\nSummary: {collapsed}"
         
-        # Chain now includes parser
-        chain = prompt_with_instructions | llm | parser
+        if expanded:
+            # Clean and format bullets
+            bullets = []
+            for line in expanded.split('\n'):
+                line = line.strip()
+                if line.startswith(('•', '-', '*')):
+                    bullet_text = line[1:].strip()
+                    if bullet_text:
+                        bullets.append(bullet_text)
+                elif line and len(line.split()) >= 3:
+                    bullets.append(line)
+            
+            if bullets:
+                field_text += f"\nDetails ({len(bullets)} items):"
+                for i, bullet in enumerate(bullets[:15], 1):  # Limit to 15 bullets per field
+                    field_text += f"\n  {i}. {bullet}"
+                if len(bullets) > 15:
+                    field_text += f"\n  ... and {len(bullets) - 15} more items"
         
-        # Run in executor to avoid blocking
-        # Note: parser is synchronous, but the whole chain execution via invoke can be wrapped
-        if llm_executor:
-            response = await asyncio.get_event_loop().run_in_executor(
-                llm_executor, 
-                lambda: chain.invoke({})
-            )
+        formatted_sections.append(field_text)
+    
+    # Add document type context
+    header = f"DOCUMENT TYPE: {doc_type}\nTOTAL FIELDS: {len(summary_items)}\n\n"
+    
+    return header + "\n\n".join(formatted_sections)
+
+
+def generate_critical_summary_without_llm(
+    structured_summary: Dict[str, Any],
+    doc_type: str
+) -> Dict[str, Any]:
+    """
+    Fallback critical summary generation without LLM.
+    Uses rule-based extraction of critical points.
+    """
+    logger.info("🔄 Using rule-based critical extraction (LLM fallback)")
+    
+    summary_items = structured_summary.get("summary", {}).get("items", [])
+    
+    if not summary_items:
+        return create_critical_fallback_summary(doc_type)
+    
+    critical_items = []
+    
+    # Keywords that indicate critical content
+    critical_keywords = {
+        "high": ["mmi", "permanent", "impairment", "disability", "denied", "authorized", 
+                "approved", "restriction", "severe", "acute", "critical", "urgent",
+                "complication", "surgery", "procedure", "operation", "cancer", "fracture",
+                "infection", "bleeding", "emergency", "admit", "hospitalize"],
+        "medium": ["diagnosis", "finding", "abnormal", "positive", "elevated", "decreased",
+                  "changed", "new", "started", "increased", "decreased", "stopped",
+                  "recommend", "refer", "follow-up", "appointment", "test", "scan"],
+    }
+    
+    for item in summary_items:
+        field = item.get("field", "")
+        collapsed = item.get("collapsed", "").lower()
+        expanded = item.get("expanded", "").lower()
+        
+        if not field:
+            continue
+        
+        # Get field priority
+        priority = get_field_priority(field)
+        
+        # Extract critical points from expanded content
+        critical_points = extract_critical_points_from_text(item, critical_keywords, priority)
+        
+        if critical_points:
+            critical_items.append({
+                "field": field,
+                "critical_points": critical_points,
+                "priority": priority
+            })
+    
+    # Sort by priority
+    critical_items.sort(key=lambda x: (x["priority"], x["field"]))
+    
+    # Limit to top items
+    if len(critical_items) > 10:
+        critical_items = critical_items[:10]
+        logger.info(f"📏 Limited to top 10 critical items")
+    
+    return {
+        "items": critical_items
+    }
+
+
+def extract_critical_points_from_text(
+    item: Dict[str, str],
+    critical_keywords: Dict[str, List[str]],
+    field_priority: int
+) -> List[str]:
+    """
+    Extract critical points from summary item using keyword matching.
+    """
+    field = item.get("field", "")
+    expanded = item.get("expanded", "")
+    
+    if not expanded:
+        # Use collapsed text if no expanded
+        collapsed = item.get("collapsed", "")
+        if collapsed and len(collapsed.split()) >= 4:
+            return [ensure_complete_sentence(collapsed)]
+        return []
+    
+    # Parse bullet points
+    bullets = []
+    for line in expanded.split('\n'):
+        line = line.strip()
+        if line.startswith(('•', '-', '*')):
+            bullet_text = line[1:].strip()
+            if bullet_text:
+                bullets.append(bullet_text)
+    
+    if not bullets:
+        return []
+    
+    # Score bullets based on critical keywords
+    scored_bullets = []
+    for bullet in bullets:
+        bullet_lower = bullet.lower()
+        
+        # Calculate criticality score
+        score = 0
+        
+        # High-priority keywords
+        for keyword in critical_keywords["high"]:
+            if keyword in bullet_lower:
+                score += 3
+                break
+        
+        # Medium-priority keywords
+        for keyword in critical_keywords["medium"]:
+            if keyword in bullet_lower:
+                score += 1
+        
+        # Field priority bonus
+        score += (4 - field_priority)  # Higher priority fields get more weight
+        
+        # Length bonus (longer sentences often have more detail)
+        word_count = len(bullet.split())
+        if word_count >= 8:
+            score += 1
+        
+        scored_bullets.append((score, bullet))
+    
+    # Sort by score and take top 2-4
+    scored_bullets.sort(key=lambda x: x[0], reverse=True)
+    
+    # Determine how many to take based on field priority
+    max_points = 4 if field_priority == 1 else 3 if field_priority == 2 else 2
+    
+    critical_points = []
+    for score, bullet in scored_bullets[:max_points]:
+        if score > 0:  # Only include bullets with some critical content
+            # Ensure complete sentence
+            complete_bullet = ensure_complete_sentence(bullet)
+            if complete_bullet:
+                critical_points.append(complete_bullet)
+    
+    return critical_points
+
+
+def ensure_complete_sentence(text: str) -> str:
+    """
+    Ensure text is a complete sentence.
+    """
+    if not text:
+        return text
+    
+    text = text.strip()
+    
+    # Add period if missing
+    if text and text[-1] not in '.!?':
+        text += '.'
+    
+    # Capitalize first letter
+    if text and text[0].islower():
+        text = text[0].upper() + text[1:]
+    
+    # Check if it looks like a complete sentence
+    words = text.split()
+    if len(words) < 3:
+        return ""  # Too short to be meaningful
+    
+    # Check for verb-like words
+    has_verb = any(word.lower() in ['was', 'were', 'documented', 'noted', 'reported', 
+                                   'found', 'observed', 'measured', 'prescribed'] 
+                   for word in words)
+    
+    if not has_verb:
+        # Try to add attribution
+        if ":" in text:
+            # Likely a label: value format
+            return text
         else:
-            response = await asyncio.to_thread(lambda: chain.invoke({}))
-        
-        # Response is already a Pydantic object
-        structured_summary = response.model_dump()
-        
-        # Validation: Check if summary extracted meaningful data
-        meaningful_keys = [k for k in structured_summary.keys() 
-                          if k not in ['document_metadata'] 
-                          and structured_summary[k]]
-        
-        if len(meaningful_keys) == 0 and len(raw_summary_text) > 200:
-            logger.warning("⚠️ No meaningful data extracted from substantial input - using fallback")
-            return {
-                "status": "extraction_incomplete",
-                "raw_content": raw_summary_text,
-                "message": "Automated extraction incomplete, raw content preserved"
-            }
-        
-        # Validation: Check for fabricated generic content
-        def contains_fabricated_content(data, source_text):
-            """Recursively check if any values contain fabricated generic phrases"""
-            generic_phrases = [
-                "patient was seen",
-                "routine care provided", 
-                "standard treatment given",
-                "typical findings noted",
-                "normal results",
-                "as expected"
-            ]
-            
-            source_lower = source_text.lower()
-            
-            def check_value(val):
-                if isinstance(val, str):
-                    val_lower = val.lower()
-                    for phrase in generic_phrases:
-                        if phrase in val_lower and phrase not in source_lower:
-                            return True
-                elif isinstance(val, (list, tuple)):
-                    return any(check_value(v) for v in val)
-                elif isinstance(val, dict):
-                    return any(check_value(v) for v in val.values())
-                return False
-            
-            return check_value(data)
-        
-        if contains_fabricated_content(structured_summary, raw_summary_text):
-            logger.warning("⚠️ Detected potentially fabricated content - using raw summary")
-            return {
-                "status": "fabrication_detected",
-                "raw_content": raw_summary_text,
-                "message": "Potential fabricated content detected, raw content provided for verification"
-            }
-        
-        # Add extraction metadata
-        structured_summary["_extraction_metadata"] = {
-            "source_length": len(raw_summary_text),
-            "extracted_keys": list(structured_summary.keys()),
-            "extraction_timestamp": datetime.now().isoformat()
-        }
-        
-        logger.info(f"✅ Generated structured summary with {len(meaningful_keys)} data sections")
-        return structured_summary
+            # Add basic attribution
+            return f"The report documented {text.lower()}"
+    
+    return text
 
+
+def create_critical_fallback_summary(doc_type: str) -> Dict[str, Any]:
+    """
+    Create a fallback critical summary.
+    """
+    return {
+        "items": [
+            {
+                "field": "critical_summary",
+                "critical_points": [
+                    f"Critical information extraction from {doc_type} failed.",
+                    "Physician review of original document is recommended.",
+                    "Key clinical findings require manual assessment."
+                ],
+                "priority": 1
+            }
+        ]
+    }
+
+
+# ============== Integration with Existing Functions ==============
+
+async def generate_concise_brief_summary(
+    structured_short_summary: Dict[str, Any],
+    document_type: str = "Medical Document",
+    llm_executor=None  # Kept for backward compatibility but not used
+) -> Dict[str, Any]:
+    """
+    Main entry point - generates critical summary from structured short summary.
+    Maintains compatibility with existing code.
+    
+    Note: llm_executor parameter is kept for backward compatibility but is not used.
+    The generate_critical_summary function creates its own LLM instance.
+    """
+    logger.info(f"🚀 Generating concise brief summary for {document_type}")
+    
+    try:
+        # Generate critical summary - let it create its own LLM
+        critical_summary = await generate_critical_summary(
+            structured_short_summary=structured_short_summary,
+            document_type=document_type,
+            llm=None  # Let generate_critical_summary create its own LLM
+        )
+        
+        # Convert to simple key-value format if needed for compatibility
+        if "items" in critical_summary:
+            # Convert to simple dict format for backward compatibility
+            simple_dict = {}
+            for item in critical_summary["items"]:
+                field = item.get("field", "")
+                points = item.get("critical_points", [])
+                if field and points:
+                    simple_dict[field] = points
+            
+            # Add priority indicator
+            if simple_dict:
+                simple_dict["_metadata"] = {
+                    "type": "critical_summary",
+                    "document_type": document_type,
+                    "item_count": len(critical_summary["items"])
+                }
+            
+            logger.info(f"✅ Generated critical summary with {len(critical_summary['items'])} items")
+            return simple_dict
+        
+        return critical_summary
+        
     except Exception as e:
-        logger.error(f"❌ Failed to generate structured summary: {e}")
-        # Fallback: Return raw text in error structure
-        return {
-            "status": "error",
-            "error_message": str(e),
-            "raw_content": raw_summary_text,
-            "message": "Error during extraction, raw content preserved"
-        }
+        logger.error(f"❌ Critical summary generation failed: {e}")
+        return generate_critical_summary_without_llm(structured_short_summary, document_type)
+
+
+# ============== Quality Validation ==============
+
+def validate_critical_summary_quality(
+    critical_summary: Dict[str, Any],
+    structured_summary: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Validate that critical summary properly filters and prioritizes content.
+    """
+    validation = {
+        "passed": True,
+        "warnings": [],
+        "reduction_ratio": 0.0,
+        "critical_item_count": 0,
+        "total_item_count": 0
+    }
+    
+    # Get counts from structured summary
+    structured_items = structured_summary.get("summary", {}).get("items", [])
+    validation["total_item_count"] = len(structured_items)
+    
+    # Get counts from critical summary
+    if "items" in critical_summary:
+        critical_items = critical_summary["items"]
+        validation["critical_item_count"] = len(critical_items)
+        
+        # Count total points
+        total_points = sum(len(item.get("critical_points", [])) for item in critical_items)
+        
+        # Calculate reduction ratio
+        if validation["total_item_count"] > 0:
+            # Estimate original points (average 5 per field)
+            estimated_original_points = validation["total_item_count"] * 5
+            if estimated_original_points > 0:
+                validation["reduction_ratio"] = total_points / estimated_original_points
+        
+        # Check prioritization
+        priority_counts = {1: 0, 2: 0, 3: 0}
+        for item in critical_items:
+            priority = item.get("priority", 3)
+            if priority in priority_counts:
+                priority_counts[priority] += 1
+        
+        validation["priority_distribution"] = priority_counts
+        
+        # Check sentence completeness
+        incomplete_sentences = []
+        for item in critical_items:
+            for point in item.get("critical_points", []):
+                words = point.split()
+                if len(words) < 4:
+                    incomplete_sentences.append(point[:50] + "...")
+        
+        if incomplete_sentences:
+            validation["warnings"].append(f"Found {len(incomplete_sentences)} potentially incomplete sentences")
+    
+    # Check if summary is too sparse
+    if validation["critical_item_count"] == 0:
+        validation["passed"] = False
+        validation["warnings"].append("No critical items extracted")
+    
+    # Check if reduction is too aggressive
+    if validation["reduction_ratio"] < 0.1 and validation["total_item_count"] > 5:
+        validation["warnings"].append("Extremely aggressive filtering - may have lost important context")
+    
+    return validation
 
 
 async def update_fail_document(
@@ -532,15 +881,18 @@ async def update_fail_document(
             else:
                 raw_brief_summary_text = str(short_summary)
         
-        # ✅ Process the raw summary through the AI Condenser (only for summary card eligible docs)
-        if is_valid_for_summary_card and raw_brief_summary_text != "Summary not available":
+        # ✅ Process the structured summary through the reducer (only for summary card eligible docs)
+        if is_valid_for_summary_card and isinstance(short_summary, dict) and short_summary.get('summary', {}).get('items'):
             brief_summary_text = await generate_concise_brief_summary(
-                raw_brief_summary_text, 
+                short_summary,  # Pass the structured summary directly
                 detected_doc_type,
                 llm_executor
             )
+        elif is_valid_for_summary_card and raw_brief_summary_text != "Summary not available":
+            # Fallback: create minimal structure from raw text
+            brief_summary_text = {"Summary": [raw_brief_summary_text]} if raw_brief_summary_text else {}
         else:
-            brief_summary_text = raw_brief_summary_text
+            brief_summary_text = {"Summary": [raw_brief_summary_text]} if raw_brief_summary_text else {}
         
         # Prepare fields for DocumentAnalysis
         da_patient_name = patient_name or "Not specified"
@@ -767,4 +1119,3 @@ async def update_multiple_fail_documents(
             })
     
     return results
-
