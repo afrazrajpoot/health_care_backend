@@ -2,17 +2,21 @@
 Fail Document Update Service - Optimized for Critical Point Extraction
 Takes structured short summary as input and extracts only critical points for physicians.
 """
-
+from datetime import datetime
 from typing import Any, List, Dict, Optional
 from pydantic import BaseModel, Field
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_openai import AzureChatOpenAI
+from utils.document_detector import detect_document_type
 import json
 import re
 import asyncio
 from utils.logger import logger
 from config.settings import CONFIG
+from fastapi import HTTPException
+from models.data_models import DocumentAnalysis
+from services.report_analyzer import ReportAnalyzer
 
 
 # ============== Pydantic Models for Critical Summary ==============
