@@ -375,7 +375,9 @@ async def preview_file(blob_path: str = FastAPIPath(..., description="GCS blob p
     Preview any file from GCS inline in the browser.
     Converts non-renderable files (e.g., DOCX, TXT) to PDF for universal preview.
     """
-    if not blob_path.startswith('uploads/'):  # Basic security: only allow uploads folder
+    # Security: only allow specific folders (uploads, test, documents, etc.)
+    allowed_prefixes = ('uploads/', 'test/', 'documents/', 'files/')
+    if not any(blob_path.startswith(prefix) for prefix in allowed_prefixes):
         raise HTTPException(status_code=403, detail="Invalid path")
     
     file_service = FileService()
