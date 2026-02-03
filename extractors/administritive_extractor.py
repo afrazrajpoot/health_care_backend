@@ -158,7 +158,7 @@ class AdministrativeExtractor:
         long_summary = clean_long_summary(long_summary)
         
         # Stage 2: Generate short summary from long summary
-        short_summary = self._generate_short_summary_from_long_summary(raw_text, detected_type)
+        short_summary = self._generate_short_summary_from_long_summary(raw_text, detected_type, text)
         
         logger.info("=" * 80)
         logger.info("✅ ADMINISTRATIVE DOCUMENT EXTRACTION COMPLETE (DUAL-CONTEXT)")
@@ -579,7 +579,7 @@ class AdministrativeExtractor:
             fallback = create_fallback_admin_summary(doc_type, fallback_date)
             return format_admin_long_summary(fallback)
 
-    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str, text: str) -> dict:
         """
         Generate a structured, UI-ready summary from raw_text (Document AI summarizer output).
         Delegates to the reusable helper function.
@@ -588,11 +588,12 @@ class AdministrativeExtractor:
             raw_text: The Document AI summarizer output (primary context)
             doc_type: Document type
             long_summary: Detailed reference context
+            text: Original full text of the document
             
         Returns:
             dict: Structured summary with header and UI-ready items
         """
-        return generate_structured_short_summary(self.llm, raw_text, doc_type)
+        return generate_structured_short_summary(self.llm, raw_text, doc_type, text)
     
     def _create_admin_fallback_summary(self, long_summary: str, doc_type: str) -> str:
         """Create comprehensive fallback administrative summary directly from long summary"""

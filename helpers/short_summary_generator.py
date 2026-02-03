@@ -14,6 +14,9 @@ from langchain_openai import AzureChatOpenAI
 from pydantic import BaseModel, Field
 from config.settings import settings
 
+# Import context expansion service for semantic context enrichment
+from services.context_expansion_service import expand_summary_with_context, get_context_expansion_service
+
 logger = logging.getLogger("document_ai")
 
 
@@ -647,12 +650,68 @@ def prioritize_fields(items: List[dict], priority_fields: List[str]) -> List[dic
     return ordered_priority + non_priority_items
 
 
+# ============== CONTEXT EXPANSION INTEGRATION ==============
+
+def enrich_summary_with_context(structured_summary: dict, document_text: str) -> dict:
+    """
+    Enrich summary items with supporting context from the original document.
+    
+    Uses semantic similarity (embeddings + cosine similarity) to find the most
+    relevant passages from the source document for each bullet point.
+    
+    Args:
+        structured_summary: The structured short summary dict
+        document_text: The full original document text
+        
+    Returns:
+        Enhanced summary with 'context_expansion' field added to each item
+    """
+    if not structured_summary or not document_text:
+        return structured_summary
+    
+    items = structured_summary.get("summary", {}).get("items", [])
+    if not items:
+        return structured_summary
+    
+    try:
+        # Use the context expansion service
+        enhanced_items = expand_summary_with_context(items, document_text, min_relevance=0.65)
+        
+        if enhanced_items:
+            structured_summary["summary"]["items"] = enhanced_items
+            
+            # Add metadata about context expansion
+            total_expanded = sum(1 for item in enhanced_items if item.get("context_expansion"))
+            structured_summary["_context_expansion_metadata"] = {
+                "items_with_context": total_expanded,
+                "total_items": len(enhanced_items),
+                "expansion_enabled": True
+            }
+            
+            logger.info(f"✅ Context expansion complete: {total_expanded}/{len(enhanced_items)} items enriched")
+        
+        return structured_summary
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Context enrichment failed: {e}")
+        structured_summary["_context_expansion_metadata"] = {
+            "expansion_enabled": False,
+            "error": str(e)
+        }
+        return structured_summary
+
+
 # ============== OPTIMIZED MAIN GENERATION FUNCTION ==============
 
-def generate_structured_short_summary(llm: AzureChatOpenAI, raw_text: str, doc_type: str) -> dict:
+def generate_structured_short_summary(llm: AzureChatOpenAI, raw_text: str, doc_type: str, text: str) -> dict:
     """
     Generate structured summary focused on CRITICAL clinical data points only.
     Minimizes noise and avoids trivial information while preserving context.
+    Args:
+        llm: The AzureChatOpenAI instance
+        raw_text: The Document AI summarizer output (primary context)
+        doc_type: Document type
+        text: Original full text of the document
     """
     logger.info(f"🎯 Generating critical-focus summary for {doc_type}")
     
@@ -681,9 +740,7 @@ def generate_structured_short_summary(llm: AzureChatOpenAI, raw_text: str, doc_t
         "PHYSICAL THERAPY": "Therapy Report",
         "LABS": "Laboratory Report"
     }
-    
-    doc_description = doc_type_descriptions.get(doc_type.split()[0].upper(), "Medical Document")
-    
+        
     # Enhanced system prompt with CRITICAL FOCUS
     system_prompt = SystemMessagePromptTemplate.from_template("""
 You are a MEDICAL DOCUMENT RESTATER for PHYSICIAN REVIEW.
@@ -1011,6 +1068,16 @@ Every sentence must pass: "This is a restatement of what was explicitly document
             structured_summary = filter_disallowed_fields(structured_summary, allowed_fields)
             structured_summary = deduplicate_fields(structured_summary)
             
+            # Enrich with semantic context expansion from original document
+            # This attaches supporting context from the source document to each bullet point
+            if text and structured_summary.get("summary", {}).get("items"):
+                try:
+                    logger.info("🔍 Enriching summary with semantic context expansion...")
+                    structured_summary = enrich_summary_with_context(structured_summary, text)
+                except Exception as ctx_error:
+                    logger.warning(f"⚠️ Context expansion failed (non-critical): {ctx_error}")
+                    # Continue without context expansion - non-blocking error
+            
             logger.info(f"✅ Generated critical-focus summary with {len(structured_summary.get('summary', {}).get('items', []))} items")
             return structured_summary
             
@@ -1107,43 +1174,195 @@ def apply_critical_focus_filtering(structured_summary: dict, priority_fields: Li
 
 def is_trivial_statement(text: str) -> bool:
     """
-    Check if a statement is trivial or non-critical.
+    Check if a statement is trivial or non-critical for clinical decision-making.
+    
+    Clinical Signal Filter:
+    - EXCLUDE: Normal findings, expected baselines, negative results with no clinical value
+    - INCLUDE: Abnormal findings, new diagnoses, significant symptoms, risks, treatment changes
+    
+    This function acts as a clinical relevance gate - only actionable information passes through.
     """
     if not text or len(text.strip()) < 10:
         return True
     
     text_lower = text.lower()
     
-    # Trivial patterns to exclude
-    trivial_patterns = [
+    # ============== TRIVIAL PATTERN CATEGORIES ==============
+    
+    # 1. NEGATIVE/ABSENT FINDINGS (No clinical signal)
+    negative_findings_patterns = [
+        r'no\s+(?:signs?|evidence|indication|symptoms?)\s+(?:of|for)',  # "No signs of typhoid"
         r'no\s+(?:prior|previous|comparison|available|found|identified|specified|documented)',
-        r'not\s+(?:available|found|identified|specified|documented|noted)',
-        r'unremarkable\s+(?:exam|findings|study)',
-        r'normal\s+(?:range|findings|exam|study|results)',
-        r'within\s+normal\s+limits',
-        r'no\s+significant\s+(?:findings|abnormalities|changes)',
-        r'negative\s+for\s+(?:acute|significant)',
-        r'routine\s+(?:follow-up|appointment|visit)',
-        r'as\s+previously\s+(?:documented|noted|reported)',
-        r'without\s+(?:acute|significant|notable)\s+(?:findings|changes|abnormalities)',
+        r'not\s+(?:available|found|identified|specified|documented|noted|observed|seen|detected)',
+        r'(?:was|were)\s+(?:not\s+)?(?:negative|absent|unremarkable)',
+        r'negative\s+(?:for|finding|result|screen|test)',
+        r'(?:denies?|denied)\s+(?:any|all|having)',
+        r'no\s+(?:acute|significant|notable|abnormal|remarkable)\s+(?:findings?|changes?|abnormalit)',
+        r'absence\s+of\s+(?:any|significant|notable)',
+        r'without\s+(?:any|evidence|signs?|symptoms?)\s+of',
+        r'ruled\s+out',
+        r'excluded',
     ]
     
-    for pattern in trivial_patterns:
+    # 2. NORMAL/BASELINE FINDINGS (Expected, non-actionable)
+    normal_baseline_patterns = [
+        r'(?:within|in)\s+normal\s+(?:limits?|range|parameters?)',
+        r'normal\s+(?:range|findings?|exam|study|results?|appearance|anatomy|function)',
+        r'unremarkable\s+(?:exam|findings?|study|appearance|history)',
+        r'(?:grossly|essentially|otherwise)\s+(?:normal|unremarkable|intact)',
+        r'(?:appeared?|appears?|seems?)\s+(?:normal|unremarkable|stable)',
+        r'no\s+(?:obvious|apparent|visible|detectable)\s+(?:abnormalit|patholog|lesion|mass)',
+        r'preserved\s+(?:function|anatomy|structure|alignment)',
+        r'intact\s+(?:skin|sensation|reflexes?|motor|function)',
+        r'symmetrical?\s+(?:findings?|exam|appearance)',
+        r'age[\s-]?(?:appropriate|related|expected)',
+        r'expected\s+(?:for|given|based\s+on)',
+        r'consistent\s+with\s+(?:normal|age|baseline)',
+        r'benign\s+(?:finding|appearance|condition)',
+        r'stable\s+(?:appearance|finding|condition|from\s+prior)',
+        r'unchanged\s+(?:from|compared|since)',
+    ]
+    
+    # 3. NON-ACTIONABLE/ROUTINE STATEMENTS
+    routine_patterns = [
+        r'routine\s+(?:follow[\s-]?up|appointment|visit|exam|screening)',
+        r'as\s+(?:previously|already|earlier)\s+(?:documented|noted|reported|discussed|mentioned)',
+        r'(?:patient|pt)\s+(?:was|is)\s+(?:advised|counseled|educated|informed)',
+        r'(?:discussed|reviewed)\s+(?:with|options|plan)',
+        r'(?:will|to)\s+(?:continue|maintain|monitor|follow[\s-]?up)',
+        r'return\s+(?:as\s+needed|prn|if\s+(?:symptoms?|condition))',
+        r'no\s+(?:new|additional|further)\s+(?:complaints?|concerns?|issues?)',
+        r'(?:remains?|remained)\s+(?:stable|unchanged|the\s+same)',
+        r'tolerating\s+(?:well|medication|treatment)',
+        r'compliant\s+with\s+(?:medication|treatment|therapy)',
+        r'no\s+(?:side\s+effects?|adverse\s+(?:effects?|reactions?|events?))',
+        r'(?:good|fair|adequate)\s+(?:progress|response|compliance|tolerance)',
+    ]
+    
+    # 4. GENERIC/VAGUE STATEMENTS (No specific clinical value)
+    generic_patterns = [
+        r'multiple\s+(?:findings?|items?|things?)\s+were\s+(?:documented|noted|reported)',
+        r'various\s+(?:findings?|items?|aspects?)\s+were\s+(?:documented|noted|reported)',
+        r'several\s+(?:findings?|items?|points?)\s+were\s+(?:documented|noted|reported)',
+        r'information\s+was\s+(?:documented|provided|included|noted)',
+        r'details?\s+(?:was|were)\s+(?:provided|included|documented)',
+        r'content\s+was\s+(?:included|documented|reviewed)',
+        r'(?:the\s+)?(?:report|document|record)\s+(?:contained|included|documented)',
+        r'(?:some|certain)\s+(?:findings?|information)\s+(?:was|were)',
+        r'general\s+(?:findings?|information|overview)',
+        r'(?:standard|typical|usual)\s+(?:findings?|presentation|course)',
+    ]
+    
+    # 5. HEDGING/UNCERTAIN STATEMENTS (Low clinical confidence)
+    hedging_patterns = [
+        r'(?:may|might|could|possibly|potentially)\s+be\s+(?:normal|benign|insignificant)',
+        r'(?:unlikely|improbable)\s+(?:to\s+be|that)',
+        r'(?:cannot|can\s+not)\s+(?:exclude|rule\s+out)\s+(?:normal|benign)',
+        r'(?:no\s+definite|no\s+definitive|no\s+clear)\s+(?:evidence|finding|abnormality)',
+        r'(?:clinically|medically)\s+(?:insignificant|unimportant|irrelevant)',
+        r'of\s+(?:no|little|minimal)\s+(?:clinical|diagnostic)\s+(?:significance|importance|relevance)',
+        r'incidental\s+(?:finding|note|observation)',
+        r'artifact',
+    ]
+    
+    # 6. SPECIFIC NON-INFORMATIVE DISEASE EXCLUSIONS
+    # Statements that rule out conditions without adding diagnostic value
+    disease_exclusion_patterns = [
+        r'no\s+(?:signs?|evidence)\s+of\s+(?:\w+\s+){0,2}(?:were|was)\s+(?:noted|observed|found|seen)',
+        r'(?:typhoid|malaria|tuberculosis|tb|hiv|hepatitis|dengue|cholera)\s+(?:was|were)\s+(?:ruled\s+out|negative|not\s+(?:found|detected|present))',
+        r'(?:screening|test|tests?)\s+(?:for\s+)?(?:\w+\s+){0,2}(?:was|were)\s+negative',
+        r'no\s+(?:fracture|dislocation|subluxation|effusion|mass|lesion|tumor)\s+(?:was|were)\s+(?:identified|seen|noted|detected)',
+    ]
+    
+    # ============== PATTERN MATCHING ==============
+    
+    all_trivial_patterns = (
+        negative_findings_patterns +
+        normal_baseline_patterns +
+        routine_patterns +
+        generic_patterns +
+        hedging_patterns +
+        disease_exclusion_patterns
+    )
+    
+    for pattern in all_trivial_patterns:
         if re.search(pattern, text_lower):
             return True
     
-    # Check for very generic statements
-    generic_phrases = [
+    # ============== PHRASE-BASED DETECTION ==============
+    
+    trivial_phrases = [
+        # Generic statements
         "multiple findings were documented",
         "various findings were noted",
         "several items were reported",
         "information was documented",
         "details were provided",
         "content was included",
+        # Normal findings
+        "within normal limits",
+        "no abnormality",
+        "no abnormalities",
+        "grossly normal",
+        "essentially normal",
+        "appears normal",
+        "appeared normal",
+        "unremarkable",
+        # Negative findings
+        "no evidence of",
+        "no signs of",
+        "no indication of",
+        "was negative",
+        "were negative",
+        "not detected",
+        "not identified",
+        "not observed",
+        "not seen",
+        "not found",
+        "ruled out",
+        "was excluded",
+        # Routine/expected
+        "as expected",
+        "as anticipated",
+        "no change",
+        "no changes",
+        "remains stable",
+        "remained stable",
+        "unchanged from",
+        "no new findings",
+        "no acute findings",
+        "no significant change",
+        "stable condition",
+        "stable findings",
+        # Non-actionable
+        "will continue",
+        "will monitor",
+        "to follow up",
+        "return if",
+        "as needed",
+        "prn",
     ]
     
-    if any(phrase in text_lower for phrase in generic_phrases):
+    if any(phrase in text_lower for phrase in trivial_phrases):
         return True
+    
+    # ============== STRUCTURAL TRIVIALITY CHECK ==============
+    
+    # If statement is primarily about absence/negation without actionable context
+    negation_words = ['no', 'not', 'none', 'neither', 'never', 'without', 'absent', 'negative', 'denied', 'denies']
+    words = text_lower.split()
+    negation_count = sum(1 for word in words if word in negation_words)
+    
+    # If more than 30% of content words are negations, likely trivial
+    if len(words) > 5 and negation_count / len(words) > 0.3:
+        # But check if there's actionable content despite negations
+        actionable_indicators = [
+            'recommend', 'advised', 'prescribed', 'refer', 'urgent', 'emergent',
+            'critical', 'abnormal', 'elevated', 'decreased', 'significant',
+            'concern', 'risk', 'complication', 'diagnosis', 'treatment'
+        ]
+        if not any(indicator in text_lower for indicator in actionable_indicators):
+            return True
     
     return False
 

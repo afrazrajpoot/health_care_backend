@@ -56,30 +56,145 @@ Generate internal_tasks array:
 
 Generate ALL relevant tasks for this category. The system will handle these workflows.
 First understand the document deeply, then create tasks based on the principles below.
-**⚠️ CRITICAL: Temporal Context Awareness**
+
+---
+
+## 🧠 CRITICAL: CLINICAL CONTEXT UNDERSTANDING
+
+**Before creating ANY task, you MUST determine the STATUS of each action mentioned in the document.**
+
+### **STATUS DETECTION FRAMEWORK**
+
+For EVERY potential action in the document, classify its status:
+
+| Status | Indicators | Task Generation |
+|--------|------------|-----------------|
+| **COMPLETED** | "was performed", "has been done", "completed on [date]", "already submitted", "patient received", "treatment administered", "surgery performed", "injection given" | ❌ NO TASK |
+| **AUTHORIZED/APPROVED** | "authorization approved", "approved for", "certified for", "authorization number: XXX", "approved on [date]" | ❌ NO TASK (unless scheduling is explicitly needed) |
+| **SCHEDULED** | "scheduled for [date]", "appointment set", "booked for", "will be seen on" | ❌ NO TASK |
+| **DENIED** | "denied", "not approved", "authorization denied", "request rejected" | ⚠️ TASK ONLY if appeal is recommended or deadline exists |
+| **IN PROGRESS** | "pending review", "under consideration", "awaiting decision", "in process" | ❌ NO TASK (wait for outcome) |
+| **REQUESTED BY OTHERS** | "referring physician requests", "PCP ordered", "specialist recommended" | ❌ NO TASK (not our responsibility unless we must act) |
+| **PENDING/UNHANDLED** | "recommended", "should be considered", "is indicated", "would benefit from", "requires", "needs", "please [action]" | ✅ CREATE TASK |
+
+### **EXCLUSION RULES - DO NOT CREATE TASKS FOR:**
+
+❌ **Already Completed Actions:**
+- "MRI was performed on 01/15/2026" → NO task to schedule MRI
+- "Patient received epidural injection" → NO task for injection
+- "Physical therapy completed 12 sessions" → NO task for PT
+- "Surgery was performed successfully" → NO task for surgery
+
+❌ **Already Authorized/Approved:**
+- "Authorization #12345 approved for MRI" → NO task (already approved)
+- "PT approved for 12 visits" → NO task unless document says "schedule approved PT"
+- "Medication authorized" → NO task (pharmacy handles)
+
+❌ **Already Scheduled:**
+- "Follow-up scheduled for 02/15/2026" → NO task
+- "MRI appointment set for next week" → NO task
+- "Surgery date confirmed" → NO task
+
+❌ **Already Denied (without appeal request):**
+- "Authorization denied" with no appeal instruction → NO task
+- Historical denials mentioned as context → NO task
+
+❌ **Actions by External Parties:**
+- "Referring physician will order labs" → NO task (their responsibility)
+- "PCP to manage medications" → NO task (not our scope)
+- "Specialist will perform procedure" → NO task (external)
+
+❌ **Historical/Past Events:**
+- Treatment history sections → NO tasks
+- Prior authorization records → NO tasks  
+- Previous visits documented → NO tasks
+- Past denials mentioned for context → NO tasks
+
+### **INCLUSION RULES - CREATE TASKS ONLY WHEN:**
+
+✅ **Action is Recommended but NOT Done:**
+- "MRI is recommended" (no mention of scheduling/completion) → CREATE task
+- "Physical therapy would benefit the patient" (not yet authorized) → CREATE task
+- "Consider epidural injection" (not yet requested) → CREATE task
+
+✅ **Action is Explicitly Requested:**
+- "Please submit RFA for..." → CREATE task
+- "Authorization needed for..." → CREATE task
+- "Signature required" → CREATE task
+- "Please schedule..." → CREATE task
+
+✅ **Action is Pending OUR Response:**
+- "Denial received - appeal deadline 02/20/2026" → CREATE appeal task
+- "Please sign and return by [date]" → CREATE signature task
+- "Missing documentation needed" → CREATE task to obtain
+
+✅ **Action Has Unmet Clinical Need:**
+- Abnormal findings requiring follow-up (not yet addressed)
+- New diagnosis requiring treatment plan (not yet created)
+- Critical values requiring immediate action
+
+✅ **Approved Service Needing Scheduling:**
+- "Authorization approved - please schedule" → CREATE scheduling task
+- "Approved for surgery - coordinate with patient" → CREATE task
+
+---
+
+## ⚠️ CRITICAL: Temporal Context Awareness
+
 * Documents often contain HISTORICAL information (past denials, previous authorizations, prior treatments, past appeals, completed procedures)
 * You must DISTINGUISH between:
   - ✅ CURRENT/FUTURE actions needed NOW (create tasks for these)
   - ❌ PAST events that already happened (DO NOT create tasks for these)
 * Look for temporal indicators:
   - Historical sections: "Treatment History", "Prior Authorizations", "Previous Appeals", "Past Denials"
+  - Completed actions: "was performed", "has been completed", "received on [past date]"
+  - Future/pending: "is recommended", "should be considered", "please submit", "needs to be"
 * **ONLY create tasks for CURRENT recommendations and PRESENT/FUTURE actions needed**
 * If unsure about timing, look for dates, context clues, and the document's primary purpose
 
+---
+
+## 🔍 PRE-TASK GENERATION CHECKLIST
+
+**Before creating each task, answer these questions:**
+
+1. **Has this action already been completed?**
+   - If YES → DO NOT create task
+   
+2. **Has this action already been authorized/approved?**
+   - If YES and no explicit scheduling request → DO NOT create task
+   
+3. **Has this action already been scheduled?**
+   - If YES → DO NOT create task
+   
+4. **Is this someone else's responsibility?**
+   - If external provider/pharmacy/PCP handles it → DO NOT create task
+   
+5. **Is this a historical reference, not a current need?**
+   - If past event mentioned for context → DO NOT create task
+   
+6. **Does the document explicitly request this action from US?**
+   - If YES and not already done → CREATE task
+   
+7. **Is there an unmet clinical or operational need?**
+   - If YES and action is pending → CREATE task
+
+---
 
 ## 📋 TASK GENERATION PRINCIPLES
 
 ### **Critical Rules:**
 1. ✅ Generate tasks for internal actions when applicable
 2. ✅ Use plain, simple English - avoid medical jargon in descriptions
-3. ✅ Create only genuinely actionable tasks
+3. ✅ Create only genuinely actionable tasks that are NOT already handled
 4. ✅ Each task must be distinct - NO duplicates
 5. ❌ NEVER create EMR chart upload tasks
 6. ❌ NEVER create patient notification tasks
 7. ❌ NEVER create duplicate tasks with different wording
-8. ❌ NEVER create generic "Review [document type] report for [patient]" tasks when specific action tasks exist
-9. ✅ If document is unclear/incomplete, create a task to handle that issue
-10. ✅ ALWAYS create at least one task - but make it specific and actionable
+8. ❌ NEVER create tasks for actions already completed, authorized, scheduled, or handled
+9. ❌ NEVER create generic "Review [document type] report for [patient]" tasks when specific action tasks exist
+10. ✅ If document is unclear/incomplete, create a task to handle that issue
+11. ✅ ALWAYS create at least one task - but make it specific and actionable
 
 ### **When to Return Empty Arrays:**
 - NEVER return empty arrays - you must create at least one actionable task
@@ -87,11 +202,13 @@ First understand the document deeply, then create tasks based on the principles 
 ### **Redundant Tasks - DO NOT CREATE:**
 ❌ **NEVER** create "Review [Document Type] report for [Patient]" when you have already created specific action tasks
 ❌ **NEVER** create "Process [Document Type] for [Patient]" when you have already created specific action tasks
+❌ **NEVER** create tasks for actions the document indicates are already done
 
 **Examples of what NOT to do:**
 - ❌ Creating both "Submit authorization request for PT" AND "Review PR2 report for John" - just create the authorization task
 - ❌ Creating both "Sign settlement agreement" AND "Review QME report for Jane" - just create the sign task
-- ❌ Creating "Schedule MRI", "Review abnormal findings", AND "Review radiology report" - just create the first two specific tasks
+- ❌ Creating "Schedule MRI" when document says "MRI was performed on 01/15" - MRI is DONE
+- ❌ Creating "Submit RFA for injections" when document says "injection authorization approved" - already approved
 
 **Only create a generic review task if:**
 ✅ Document is purely informational with NO actionable items
@@ -100,7 +217,8 @@ First understand the document deeply, then create tasks based on the principles 
 
 ### **Understanding Before Creating:**
 Before generating tasks, analyze:
-- What actions does OUR clinic need to take? → internal_tasks
+- What is the STATUS of each action mentioned? (completed/pending/scheduled/denied)
+- What actions does OUR clinic STILL need to take? → internal_tasks
 - Are there missing/unclear items that need clarification? → Create clarification task
 - Is this task genuinely different from others, or a duplicate?
 
@@ -109,23 +227,23 @@ Before generating tasks, analyze:
 ## 🏢 INTERNAL TASKS (internal_tasks array)
 
 Generate when document requires OUR clinic to:
-- Schedule procedures/appointments in our facility (MRI, CT, therapy, injections, surgeries - NOT medications or DME)
-- Review clinical findings requiring our physician's decision
-- Submit authorization requests from our clinic
-- Handle denials/appeals for our services
+- Schedule procedures/appointments in our facility (MRI, CT, therapy, injections, surgeries - NOT medications or DME) **AND the service is not already scheduled**
+- Review clinical findings requiring our physician's decision **AND not already reviewed**
+- Submit authorization requests from our clinic **AND not already submitted/approved**
+- Handle denials/appeals for our services **AND appeal is indicated/deadline exists**
 - Sign documents (settlement agreements, QME attestations, authorization forms)
 - Track medication authorizations (administrative, not scheduling)
 - Track DME authorizations (administrative, not scheduling)
-- Follow up on our diagnostic studies
-- Complete administrative tasks in our workflow
+- Follow up on our diagnostic studies **that have pending results**
+- Complete administrative tasks in our workflow **that are not already done**
 
 **Examples:**
-- "Schedule MRI at our facility for John Smith" ✅ (imaging requires scheduling)
-- "Schedule physical therapy for Maria Garcia" ✅ (therapy requires scheduling)
-- "Review abnormal lab results for Maria Garcia"
-- "Submit authorization request for physical therapy"
-- "Sign settlement agreement for Robert Lee"
-- "Appeal denied authorization for our services"
+- "Schedule MRI at our facility for John Smith" ✅ (ONLY if MRI is recommended but not yet scheduled)
+- "Schedule physical therapy for Maria Garcia" ✅ (ONLY if PT approved but not yet scheduled)
+- "Review abnormal lab results for Maria Garcia" ✅ (ONLY if results are new and unreviewed)
+- "Submit authorization request for physical therapy" ✅ (ONLY if not already submitted/approved)
+- "Sign settlement agreement for Robert Lee" ✅ (Signature pending)
+- "Appeal denied authorization for our services" ✅ (ONLY if appeal is recommended and deadline exists)
 - "Process approved medication for John Smith" ✅ (medication = administrative, NOT schedule)
 - "Process approved TENS unit for Jane Doe" ✅ (DME = administrative, NOT schedule)
 
@@ -187,13 +305,18 @@ Generate when document requires OUR clinic to:
 - ❌ Wheelchairs, walkers, TENS units, braces, orthotics, oxygen equipment, hospital beds, CPAP machines
 - ✅ Instead, route DME approvals to "Administrative Tasks" for ordering/delivery coordination
 
+**Already Scheduled Services:**
+- ❌ DO NOT create scheduling task if document indicates already scheduled
+- ❌ "MRI scheduled for 02/15" → NO task needed
+- ❌ "Follow-up appointment set" → NO task needed
+
 **What DOES need scheduling (Approvals to Schedule):**
-- ✅ MRI, CT, X-ray, EMG, imaging studies
-- ✅ Physical therapy, occupational therapy sessions
-- ✅ Injections (epidural, facet, trigger point)
-- ✅ Surgical procedures
-- ✅ Specialist consultations
-- ✅ Follow-up appointments
+- ✅ MRI, CT, X-ray, EMG, imaging studies **(if approved but NOT yet scheduled)**
+- ✅ Physical therapy, occupational therapy sessions **(if approved but NOT yet scheduled)**
+- ✅ Injections (epidural, facet, trigger point) **(if approved but NOT yet scheduled)**
+- ✅ Surgical procedures **(if approved but NOT yet scheduled)**
+- ✅ Specialist consultations **(if approved but NOT yet scheduled)**
+- ✅ Follow-up appointments **(if indicated but NOT yet scheduled)**
 
 ---
 
@@ -251,6 +374,8 @@ Check each new task against existing tasks:
 4. ❌ "Call patient to inform them"
 5. ❌ "Update patient file in system"
 6. ❌ Tasks that are exact duplicates with different wording
+7. ❌ Tasks for actions already completed/authorized/scheduled/denied
+8. ❌ Tasks for actions handled by external parties
 
 **When Document is Unclear:**
 Instead of skipping, create a clarification task:
@@ -286,18 +411,20 @@ Instead of skipping, create a clarification task:
 ## 🎯 QUALITY CHECKLIST
 
 Before generating output, verify:
-1. ✅ Did I identify ALL distinct actions in the document?
-2. ✅ Are internal tasks correctly identified?
-3. ✅ Is each description in simple, plain English?
-4. ✅ Are there any duplicate tasks (same meaning, different words)?
-5. ✅ Did I avoid EMR upload and patient notification tasks?
-6. ✅ Are department assignments correct for each workflow?
-7. ✅ Are due dates appropriate for urgency?
-8. ✅ Do quick_notes explain WHY each task matters?
-9. ✅ If document is unclear, did I create clarification task?
-10. ✅ Can staff immediately understand what to do?
+1. ✅ Did I determine the STATUS of each action in the document?
+2. ✅ Am I creating tasks ONLY for pending/unhandled actions?
+3. ✅ Did I exclude tasks for completed/authorized/scheduled/denied actions?
+4. ✅ Are internal tasks correctly identified?
+5. ✅ Is each description in simple, plain English?
+6. ✅ Are there any duplicate tasks (same meaning, different words)?
+7. ✅ Did I avoid EMR upload and patient notification tasks?
+8. ✅ Are department assignments correct for each workflow?
+9. ✅ Are due dates appropriate for urgency?
+10. ✅ Do quick_notes explain WHY each task matters?
+11. ✅ If document is unclear, did I create clarification task?
+12. ✅ Can staff immediately understand what to do?
 
-**Remember:** Use O3 reasoning to deeply understand the document before creating tasks. Quality over quantity.
+**Remember:** Use O3 reasoning to deeply understand the document's clinical context and each action's status before creating tasks. Only create tasks for what STILL NEEDS TO BE DONE. Quality over quantity.
 """
     
     def create_prompt(self, patient_name: str) -> ChatPromptTemplate:
@@ -318,41 +445,65 @@ Using OpenAI O3 reasoning, analyze this document and generate TWO arrays:
 
 **Think through step-by-step:**
 
-**Step 1: Understand the Document**
+**Step 1: Understand the Document's Clinical Context**
 - What type of document is this?
 - What is the primary purpose?
-- What actions are explicitly requested?
-- What actions are implicitly needed?
+- What is the CURRENT clinical situation?
 
-**Step 2: Identify Internal Actions**
-- What must OUR clinic do directly?
-- What scheduling is needed at our facility?
-- What clinical reviews are required?
-- What authorizations must we submit?
+**Step 2: Identify ALL Actions Mentioned & Determine Their STATUS**
+For EACH action in the document, classify:
+| Action | Status | Task Needed? |
+|--------|--------|--------------|
+| [action] | Completed/Authorized/Scheduled/Denied/Pending | Yes/No |
+
+**Status Indicators:**
+- ✅ COMPLETED: "was performed", "has been done", "completed", "received", "administered"
+- ✅ AUTHORIZED: "approved", "authorization #XXX", "certified for"
+- ✅ SCHEDULED: "scheduled for [date]", "appointment set", "booked"
+- ✅ DENIED: "denied", "not approved", "rejected" (task ONLY if appeal indicated)
+- ✅ IN PROGRESS: "pending review", "awaiting", "under consideration"
+- ⚠️ PENDING/UNHANDLED: "recommended", "should be", "is indicated", "please", "needs"
+
+**Step 3: Filter - Create Tasks ONLY for PENDING/UNHANDLED Actions**
+- ❌ DO NOT create task if action is already COMPLETED
+- ❌ DO NOT create task if action is already AUTHORIZED (unless scheduling explicitly needed)
+- ❌ DO NOT create task if action is already SCHEDULED
+- ❌ DO NOT create task if action is DENIED (unless appeal is indicated with deadline)
+- ❌ DO NOT create task if action is handled by EXTERNAL party
+- ✅ CREATE task ONLY if action is PENDING and requires OUR action
+
+**Step 4: Identify Internal Actions (that are STILL PENDING)**
+- What must OUR clinic STILL do directly?
+- What scheduling is needed at our facility (for approved but unscheduled services)?
+- What clinical reviews are required (for new, unreviewed findings)?
+- What authorizations must we STILL submit (not already submitted/approved)?
 - What signatures are needed?
 - What administrative tasks are ours?
 
-
-**Step 4: Check for Issues**
+**Step 5: Check for Issues**
 - Is any information missing or unclear?
 - If yes, create clarification task
 
-**Step 5: Eliminate Duplicates**
+**Step 6: Eliminate Duplicates**
 - Review all tasks - any duplicates with different wording?
 - Combine similar tasks into single, clear action
 
-**Step 6: Validate Quality**
+**Step 7: Validate Quality**
 - Is each description in plain English?
 - Can staff understand immediately what to do?
 - Are departments correctly assigned?
 - Are due dates appropriate?
+- Is this task for something STILL PENDING (not already done)?
 
 **IMPORTANT:** NEVER return empty internal_tasks array. External documents ALWAYS need at least one task.
-- If document has SPECIFIC actions: Create ONLY those specific tasks (e.g., "Schedule MRI", "Sign agreement") - DO NOT also create a generic review task
-- If document is PURELY informational with NO specific actions: Create "Review [document type] for [patient]" task
+- If document has SPECIFIC PENDING actions: Create ONLY those specific tasks - DO NOT also create a generic review task
+- If document is PURELY informational with NO pending actions: Create "Review [document type] for [patient]" task
 - If document has issues/missing info: Create task like "Clarify missing authorization details in report"
 
-**CRITICAL:** Never create a generic "Review [document type] report for [patient]" task when you have already identified specific actionable tasks. The review task is ONLY for documents with no other actions.
+**CRITICAL REMINDERS:**
+- Never create a task for an action the document says is ALREADY DONE
+- Never create a generic "Review [document type] report for [patient]" task when you have already identified specific actionable tasks
+- Only create tasks for what STILL NEEDS TO BE DONE
 
 {{format_instructions}}
 """

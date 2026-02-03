@@ -96,7 +96,7 @@ class QMEExtractorChained:
         long_summary = clean_long_summary(long_summary)
 
         # 2. Generate short summary from raw_text using structured helper
-        short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type)
+        short_summary = self._generate_short_summary_from_long_summary(raw_text, doc_type, text)
 
         logger.info("=" * 80)
         logger.info("✅ QME EXTRACTION COMPLETE (2 LLM CALLS ONLY)")
@@ -438,12 +438,12 @@ class QMEExtractorChained:
             raise
 
 
-    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str) -> dict:
+    def _generate_short_summary_from_long_summary(self, raw_text: str, doc_type: str, text: str) -> dict:
             """
             Generate a structured short summary using the centralized helper function.
             Returns a dictionary with header, content, and UI-ready items.
             """
-            return generate_structured_short_summary(self.llm, raw_text, doc_type)
+            return generate_structured_short_summary(self.llm, raw_text, doc_type, text)
 
     def _get_fallback_summary(self, doc_type: str, fallback_date: str) -> str:
         """Fallback summary when processing fails"""
