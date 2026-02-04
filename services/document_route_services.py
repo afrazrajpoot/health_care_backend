@@ -395,7 +395,7 @@ class DocumentExtractorService:
             if upload_task_id and progress_service:
                 # Upload phase is 15-30%, so scale the progress
                 file_progress = (doc_index / len(documents))  # 0.0 to 1.0
-                progress_pct = int(15 + (file_progress * 15))  # 15% to 30%
+                progress_pct = int(5 + (file_progress * 15))  # 5% to 20%
                 progress_service.update_status(
                     upload_task_id, 
                     "processing", 
@@ -445,9 +445,9 @@ class DocumentExtractorService:
                         message=message
                     )
                     
-                    # Update overall progress based on files completed (scale to 15-30%)
+                    # Update overall progress based on files completed (scale to 5-20%)
                     file_progress = (doc_index / len(documents))  # 0.0 to 1.0
-                    overall_progress = int(15 + (file_progress * 15))  # 15% to 30%
+                    overall_progress = int(5 + (file_progress * 15))  # 5% to 20%
                     progress_service.update_status(
                         upload_task_id,
                         "processing",

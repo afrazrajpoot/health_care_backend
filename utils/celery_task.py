@@ -233,7 +233,7 @@ async def _async_update_file_progress(
 @celery_app.task(bind=True, name='process_batch_documents', max_retries=0)
 def process_batch_documents(self, payloads: list[dict]):
     """
-    FIXED: Master batch processing - ONLY callback can mark as 100% complete.
+    FIXED: Master batch processing - SEQUENTIAL execution for smooth "one by one" progress.
     """
     try:
         # Get batch task ID safely
@@ -253,7 +253,7 @@ def process_batch_documents(self, payloads: list[dict]):
                 queue_id = progress_service.initialize_queue_progress(user_id)
             logger.info(f"📊 Queue {queue_id} for user {user_id}")
         
-        logger.info(f"🚀 Batch start: {len(payloads)} files (task {batch_task_id})")
+        logger.info(f"🚀 Batch start: {len(payloads)} files (task {batch_task_id}) - Sequential Processing")
         
         # Initialize progress tracking
         progress_service.initialize_task_progress(
@@ -264,7 +264,7 @@ def process_batch_documents(self, payloads: list[dict]):
             queue_id=queue_id
         )
         
-        # ✅ Start AI processing at 30% (upload complete, now processing 30-100%)
+        # ✅ Start AI processing at 30%
         progress_service.update_status(
             task_id=batch_task_id,
             status='processing',
@@ -272,35 +272,40 @@ def process_batch_documents(self, payloads: list[dict]):
             progress=30
         )
         
-        # ===== PARALLEL PROCESSING =====
+        # ===== SEQUENTIAL PROCESSING =====
         serialized_payloads = [serialize_payload(p) for p in payloads]
+        final_results = []
         
-        # Use chord with callback
-        task_group = group(
-            finalize_document_task.s(payload, batch_task_id, i, queue_id)
-            for i, payload in enumerate(serialized_payloads)
-        )
+        # Run async loop synchronously
+        async def process_sequence():
+            seq_results = []
+            for i, payload in enumerate(serialized_payloads):
+                logger.info(f"👉 Processing file {i+1}/{len(serialized_payloads)}: {filenames[i]}")
+                try:
+                    # Execute worker directly (awaiting it)
+                    # Pass 'self' so it uses the batch_task_id
+                    res = await _async_finalize_document_worker(self, payload, batch_task_id, i, queue_id)
+                    seq_results.append(res)
+                except Exception as exc:
+                    logger.error(f"❌ Sequential step failed: {exc}")
+                    seq_results.append({
+                        "status": "failed",
+                        "error": str(exc),
+                        "filename": filenames[i],
+                        "file_index": i
+                    })
+            return seq_results
+
+        final_results = asyncio.run(process_sequence())
         
-        callback = _batch_complete_callback.s(batch_task_id, filenames, user_id, queue_id)
-        chord_result = chord(task_group)(callback)
-        
-        logger.info(f"✅ Dispatched {len(payloads)} tasks in parallel (non-blocking)")
-        
-        return {
-            "batch_task_id": batch_task_id,
-            "queue_id": queue_id,
-            "total_files": len(payloads),
-            "user_id": user_id,
-            "status": "dispatched",
-            "message": f"{len(payloads)} tasks dispatched for parallel processing",
-            "chord_id": chord_result.id if hasattr(chord_result, 'id') else None
-        }
+        # ===== COMPLETION =====
+        # Reuse the callback logic directly
+        return _batch_complete_callback(final_results, batch_task_id, filenames, user_id, queue_id)
         
     except Exception as e:
-        logger.error(f"❌ Batch task dispatch failed: {str(e)}")
+        logger.error(f"❌ Batch independent processing failed: {str(e)}")
         logger.debug(f"Traceback: {traceback.format_exc()}")
         
-        # Update progress to failed
         if 'batch_task_id' in locals():
             progress_service.update_status(
                 task_id=batch_task_id,
@@ -308,7 +313,6 @@ def process_batch_documents(self, payloads: list[dict]):
                 message=f"Batch failed: {str(e)}",
                 completed=True
             )
-        
         raise
 
 

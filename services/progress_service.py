@@ -510,10 +510,9 @@ class ProgressService:
         # Overall progress: weighted average scaled to 30-100% range (AI processing phase)
         total_files = progress_data['total_steps']
         if total_files > 0:
-            completed_weight = completed_files * 100
-            ongoing_files = [fp['progress'] for fp in progress_data['files_progress'] if fp and fp['progress'] < 100]
-            ongoing_weight = (sum(ongoing_files) / len(ongoing_files) if ongoing_files else 0) * (total_files - completed_files)
-            file_progress_raw = (completed_weight + ongoing_weight) / total_files  # 0-100
+            # Simple average of all files to prevent jumps
+            total_progress_sum = sum((fp['progress'] if fp and fp.get('progress') else 0) for fp in progress_data['files_progress'])
+            file_progress_raw = total_progress_sum / total_files
             
             # 🆕 Scale to 30-100% range (AI processing phase comes after 30% upload phase)
             progress_data['progress_percentage'] = min(30 + (file_progress_raw * 0.7), 99)  # 30 + (0-70) = 30-99%
