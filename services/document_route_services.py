@@ -46,7 +46,7 @@ class DocumentExtractorService:
         
         # OPTIMIZATION: Separate pools
         # io_executor: Parallel for I/O-bound (AI calls, GCS, DB)
-        self.io_executor = ThreadPoolExecutor(max_workers=10)
+        self.io_executor = ThreadPoolExecutor(max_workers=50)
         # convert_executor: Serialized (max_workers=1) for LibreOffice (thread-unsafe)
         self.convert_executor = ThreadPoolExecutor(max_workers=1)
         
@@ -380,106 +380,89 @@ class DocumentExtractorService:
         if physician_id:
             logger.info(f"👨⚕️ Physician ID: {physician_id}")
         
-        # OPTIMIZATION: Parallel processing in batches of 10
-        batch_size = 10
         all_payloads = []
         all_ignored = []
         
-        doc_index = 0
+        # 🚀 PARALLEL PROCESSING: Process ALL documents concurrently for maximum performance
+        logger.info(f"🔥 Parallel extraction started for {len(documents)} documents - Conversions serialized, rest parallel")
         
-        for i in range(0, len(documents), batch_size):
-            batch = documents[i:i + batch_size]
-            batch_num = i // batch_size + 1
+        # Create tasks for all documents
+        tasks = [
+            self.process_single_document(doc, physician_id, user_id, mode)
+            for doc in documents
+        ]
+        
+        # Execute ALL tasks concurrently
+        # Note: self.convert_executor (max_workers=1) still ensures LibreOffice safety
+        # while AI and GCS operations run in parallel in self.io_executor
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Collect results and update per-file progress
+        for idx, result in enumerate(results):
+            current_doc = documents[idx]
+            doc_index = idx + 1
             
-            # 🆕 Update progress before processing each batch (scale 15% → 30%)
+            # 🆕 Update per-file progress with overall percentage
             if upload_task_id and progress_service:
-                # Upload phase is 15-30%, so scale the progress
-                file_progress = (doc_index / len(documents))  # 0.0 to 1.0
-                progress_pct = int(5 + (file_progress * 15))  # 5% to 20%
+                # Mark file step as 100% complete even if failed, so progress bar advances
+                file_progress = 100
+                is_success = isinstance(result, dict) and result.get("success")
+                status = "completed" if is_success else "failed"
+                
+                # Determine message
+                message = "Processed"
+                if is_success:
+                     if result.get("payload", {}).get("result", {}).get("is_multiple_reports"):
+                         message = "Processed (Multiple Reports)"
+                elif isinstance(result, dict):
+                     message = result.get("reason") or result.get("error") or "Failed"
+                else:
+                     message = "System Error"
+
+                progress_service.update_file_progress_only(
+                    task_id=upload_task_id,
+                    file_index=idx,
+                    filename=current_doc.filename,
+                    status=status,
+                    file_progress=file_progress,
+                    message=message
+                )
+                
+                # Update overall progress based on files completed (scale to 5-20%)
+                overall_file_progress = (doc_index / len(documents))  # 0.0 to 1.0
+                overall_progress = int(5 + (overall_file_progress * 15))  # 5% to 20%
                 progress_service.update_status(
-                    upload_task_id, 
-                    "processing", 
-                    f"Processing batch {batch_num} ({doc_index}/{len(documents)} files)...",
-                    progress=progress_pct
+                    upload_task_id,
+                    "processing",
+                    f"Processed {doc_index}/{len(documents)} files",
+                    progress=overall_progress
                 )
             
-            logger.info(f"📦 Processing batch {batch_num} ({len(batch)} docs) - Conversions serialized, rest parallel")
-            
-            # FIXED: Submit all to parallel tasks (gather handles)
-            tasks = [
-                self.process_single_document(doc, physician_id, user_id, mode)
-                for doc in batch
-            ]
-            
-            # Execute all tasks concurrently (conversions auto-serialized via executor)
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Collect results and update per-file progress
-            for idx, result in enumerate(results):
-                doc_index += 1
-                current_doc = batch[idx]
-                
-                # 🆕 Update per-file progress with overall percentage
-                if upload_task_id and progress_service:
-                    # Mark file step as 100% complete even if failed, so progress bar advances
-                    file_progress = 100
-                    is_success = isinstance(result, dict) and result.get("success")
-                    status = "completed" if is_success else "failed"
-                    
-                    # Determine message
-                    message = "Processed"
-                    if is_success:
-                         if result.get("payload", {}).get("result", {}).get("is_multiple_reports"):
-                             message = "Processed (Multiple Reports)"
-                    elif isinstance(result, dict):
-                         message = result.get("reason") or result.get("error") or "Failed"
-                    else:
-                         message = "System Error"
-
-                    progress_service.update_file_progress_only(
-                        task_id=upload_task_id,
-                        file_index=doc_index - 1,
-                        filename=current_doc.filename,
-                        status=status,
-                        file_progress=file_progress,
-                        message=message
-                    )
-                    
-                    # Update overall progress based on files completed (scale to 5-20%)
-                    file_progress = (doc_index / len(documents))  # 0.0 to 1.0
-                    overall_progress = int(5 + (file_progress * 15))  # 5% to 20%
-                    progress_service.update_status(
-                        upload_task_id,
-                        "processing",
-                        f"Processed {doc_index}/{len(documents)} files",
-                        progress=overall_progress
-                    )
-                
-                if isinstance(result, Exception):
-                    logger.error(f"❌ Document failed with exception: {result}")
+            if isinstance(result, Exception):
+                logger.error(f"❌ Document failed with exception: {result}")
+                all_ignored.append({
+                    "filename": current_doc.filename,
+                    "reason": str(result),
+                    "system_error": str(result)
+                })
+            elif result["success"]:
+                all_payloads.append(result["payload"])
+            else:
+                # Handle duplicate files specially
+                if result.get("error") == "duplicate_file":
                     all_ignored.append({
-                        "filename": "unknown",
-                        "reason": str(result),
-                        "system_error": str(result)
+                        "filename": result["filename"],
+                        "reason": result.get("message", "Duplicate file"),
+                        "system_error": "duplicate_file_hash_match",
+                        "existing_file": result.get("existing_document", {}).get("fileName"),
+                        "document_id": result.get("existing_document", {}).get("id")
                     })
-                elif result["success"]:
-                    all_payloads.append(result["payload"])
                 else:
-                    # Handle duplicate files specially
-                    if result.get("error") == "duplicate_file":
-                        all_ignored.append({
-                            "filename": result["filename"],
-                            "reason": result.get("message", "Duplicate file"),
-                            "system_error": "duplicate_file_hash_match",
-                            "existing_file": result.get("existing_document", {}).get("fileName"),
-                            "document_id": result.get("existing_document", {}).get("id")
-                        })
-                    else:
-                        all_ignored.append({
-                            "filename": result["filename"],
-                            "reason": result.get("reason") or result.get("error", "Unknown error"),
-                            "system_error": result.get("system_error", result.get("error", "Check logs"))
-                        })
+                    all_ignored.append({
+                        "filename": result["filename"],
+                        "reason": result.get("reason") or result.get("error", "Unknown error"),
+                        "system_error": result.get("system_error", result.get("error", "Check logs"))
+                    })
         
         preprocess_msg = f"✅ BATCH complete: {len(all_payloads)} ready, {len(all_ignored)} ignored"
         logger.info(preprocess_msg)
@@ -518,47 +501,45 @@ class DocumentExtractorService:
         all_payloads = []
         all_ignored = []
         
-        for i in range(0, len(documents), batch_size):
-            batch = documents[i:i + batch_size]
-            batch_num = i // batch_size + 1
-            logger.info(f"📦 Processing batch {batch_num} ({len(batch)} docs) - Conversions serialized, rest parallel")
-            
-            # FIXED: Submit all to parallel tasks (gather handles)
-            tasks = [
-                self.process_single_document(doc, physician_id, user_id, mode)
-                for doc in batch
-            ]
-            
-            # Execute all tasks concurrently (conversions auto-serialized via executor)
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Collect results
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.error(f"❌ Document failed with exception: {result}")
+        # OPTIMIZATION: Process ALL documents concurrently for maximum performance
+        logger.info(f"🔥 Parallel extraction (batch path) started for {len(documents)} documents")
+        
+        # Submit all to parallel tasks
+        tasks = [
+            self.process_single_document(doc, physician_id, user_id, mode)
+            for doc in documents
+        ]
+        
+        # Execute all tasks concurrently (conversions auto-serialized via executor)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Collect results
+        for idx, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"❌ Document failed with exception: {result}")
+                all_ignored.append({
+                    "filename": documents[idx].filename if idx < len(documents) else "unknown",
+                    "reason": str(result),
+                    "system_error": str(result)
+                })
+            elif result["success"]:
+                all_payloads.append(result["payload"])
+            else:
+                # Handle duplicate files specially
+                if result.get("error") == "duplicate_file":
                     all_ignored.append({
-                        "filename": "unknown",
-                        "reason": str(result),
-                        "system_error": str(result)
+                        "filename": result["filename"],
+                        "reason": result.get("message", "Duplicate file"),
+                        "system_error": "duplicate_file_hash_match",
+                        "existing_file": result.get("existing_document", {}).get("fileName"),
+                        "document_id": result.get("existing_document", {}).get("id")
                     })
-                elif result["success"]:
-                    all_payloads.append(result["payload"])
                 else:
-                    # Handle duplicate files specially
-                    if result.get("error") == "duplicate_file":
-                        all_ignored.append({
-                            "filename": result["filename"],
-                            "reason": result.get("message", "Duplicate file"),
-                            "system_error": "duplicate_file_hash_match",
-                            "existing_file": result.get("existing_document", {}).get("fileName"),
-                            "document_id": result.get("existing_document", {}).get("id")
-                        })
-                    else:
-                        all_ignored.append({
-                            "filename": result["filename"],
-                            "reason": result.get("reason") or result.get("error", "Unknown error"),
-                            "system_error": result.get("system_error", result.get("error", "Check logs"))
-                        })
+                    all_ignored.append({
+                        "filename": result["filename"],
+                        "reason": result.get("reason") or result.get("error", "Unknown error"),
+                        "system_error": result.get("system_error", result.get("error", "Check logs"))
+                    })
         
         preprocess_msg = f"✅ OPTIMIZED batch complete: {len(all_payloads)} ready, {len(all_ignored)} ignored"
         logger.info(preprocess_msg)

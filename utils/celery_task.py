@@ -272,31 +272,38 @@ def process_batch_documents(self, payloads: list[dict]):
             progress=30
         )
         
-        # ===== SEQUENTIAL PROCESSING =====
+        # ===== PARALLEL PROCESSING =====
         serialized_payloads = [serialize_payload(p) for p in payloads]
-        final_results = []
         
-        # Run async loop synchronously
-        async def process_sequence():
-            seq_results = []
-            for i, payload in enumerate(serialized_payloads):
-                logger.info(f"👉 Processing file {i+1}/{len(serialized_payloads)}: {filenames[i]}")
-                try:
-                    # Execute worker directly (awaiting it)
-                    # Pass 'self' so it uses the batch_task_id
-                    res = await _async_finalize_document_worker(self, payload, batch_task_id, i, queue_id)
-                    seq_results.append(res)
-                except Exception as exc:
-                    logger.error(f"❌ Sequential step failed: {exc}")
-                    seq_results.append({
+        # Run async loop for parallel execution
+        async def process_parallel():
+            # Create tasks for all payloads to run concurrently
+            tasks = [
+                _async_finalize_document_worker(self, payload, batch_task_id, i, queue_id)
+                for i, payload in enumerate(serialized_payloads)
+            ]
+            
+            # Execute all tasks in parallel using gather
+            # return_exceptions=True ensures one failed task doesn't stop others
+            logger.info(f"🔥 Parallel execution started for {len(tasks)} documents")
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Handle any exceptions that occurred during gather
+            processed_results = []
+            for i, res in enumerate(results):
+                if isinstance(res, Exception):
+                    logger.error(f"❌ Parallel step {i} crashed: {res}")
+                    processed_results.append({
                         "status": "failed",
-                        "error": str(exc),
+                        "error": str(res),
                         "filename": filenames[i],
                         "file_index": i
                     })
-            return seq_results
+                else:
+                    processed_results.append(res)
+            return processed_results
 
-        final_results = asyncio.run(process_sequence())
+        final_results = asyncio.run(process_parallel())
         
         # ===== COMPLETION =====
         # Reuse the callback logic directly
